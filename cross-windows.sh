@@ -56,11 +56,19 @@ zig cc -target $ZIG_TARGET \
     -lopengl32 -lgdi32 -lwinmm -lws2_32 \
     -o build/windows/Soldut.exe
 
-(cd build/windows && zip -r Soldut-windows.zip Soldut.exe >/dev/null)
+if command -v zip >/dev/null 2>&1; then
+    (cd build/windows && zip -r Soldut-windows.zip Soldut.exe >/dev/null)
+fi
 echo "[cross-windows] -> build/windows/Soldut.exe"
 
-# Restore native raylib build (so subsequent `make` works on the host).
-echo "[cross-windows] restoring host-native raylib build..."
-make -C third_party/raylib/src clean >/dev/null
-make -C third_party/raylib/src PLATFORM=PLATFORM_DESKTOP RAYLIB_LIBTYPE=STATIC >/dev/null
-rm -f third_party/enet/*.o third_party/enet/libenet.a
+# Restore native raylib build so subsequent `make` works on the host.
+# Local-dev convenience only — skipped on CI, where the runner is
+# throwaway and the Windows-cross job doesn't install X11 dev headers
+# anyway (so the restoration would fail on rglfw.c).
+if [[ -z "${CI:-}" ]]; then
+    echo "[cross-windows] restoring host-native raylib build..."
+    make -C third_party/raylib/src clean >/dev/null
+    make -C third_party/raylib/src PLATFORM=PLATFORM_DESKTOP RAYLIB_LIBTYPE=STATIC \
+        CUSTOM_CFLAGS="-Wno-incompatible-function-pointer-types" >/dev/null
+    rm -f third_party/enet/*.o third_party/enet/libenet.a
+fi
