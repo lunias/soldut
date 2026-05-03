@@ -1,0 +1,18 @@
+# b1_release.shot — same fall, but release 'right' while still in the
+# air so the anim transitions to STAND on landing and the anchor fires.
+# If THIS settles cleanly while the previous test stays crumpled, the
+# bug is "anchor disabled during ANIM_RUN".
+
+window 1280 720
+seed   1 1
+out    build/shots/b1_release
+mouse  900 360
+
+at  20 shot pre_t020
+at  30 press right
+at  85 release right        # released while mid-air
+
+burst land from 90 to 130 every 1
+burst settled from 140 to 200 every 5
+
+at 220 end

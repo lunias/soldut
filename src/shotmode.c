@@ -1,0 +1,653 @@
+#include "shotmode.h"
+
+#include "decal.h"
+#include "game.h"
+#include "input.h"
+#include "level.h"
+#include "log.h"
+#include "mech.h"
+#include "platform.h"
+#include "physics.h"
+#include "render.h"
+#include "simulate.h"
+#include "version.h"
+
+#include "../third_party/raylib/src/raylib.h"
+
+#include <ctype.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+/* ---- Script representation ---------------------------------------- */
+
+typedef enum {
+    EV_PRESS = 0,
+    EV_RELEASE,
+    EV_TAP,
+    EV_AIM,
+    EV_MOUSE,
+    EV_SHOT,
+    EV_END,
+} EventKind;
+
+typedef struct {
+    int       tick;
+    EventKind kind;
+    uint16_t  button;       /* PRESS/RELEASE/TAP */
+    float     ax, ay;       /* AIM (world) or MOUSE (screen) */
+    char      name[64];     /* SHOT */
+} Event;
+
+typedef enum {
+    AIM_NONE = 0,
+    AIM_WORLD,
+    AIM_SCREEN,
+} AimMode;
+
+typedef struct {
+    int   t0, t1;            /* tick range, inclusive */
+    float to_x, to_y;        /* target screen coords at t1 */
+    float from_x, from_y;    /* runtime: snapshotted at t0 */
+    bool  snapshotted;
+} LerpSeg;
+
+typedef struct {
+    int      window_w, window_h;
+    bool     seed_override;
+    uint64_t seed_hi, seed_lo;
+    char     out_dir[256];
+
+    AimMode  initial_aim_mode;
+    float    initial_ax, initial_ay;
+
+    bool     have_spawn_at;
+    float    spawn_x, spawn_y;
+
+    Event   *events;
+    int      event_count, event_capacity;
+
+    LerpSeg *lerps;
+    int      lerp_count, lerp_capacity;
+
+    /* Contact sheet — composite all shots into one PNG at end of run. */
+    bool     make_contact;
+    char     contact_name[64];
+    int      contact_cols;
+    int      contact_cell_w, contact_cell_h;
+
+    int      end_tick;       /* -1 = derive from last event */
+} Script;
+
+static const struct { const char *name; uint16_t bit; } BUTTON_TABLE[] = {
+    {"left",   BTN_LEFT},   {"right",  BTN_RIGHT},
+    {"jump",   BTN_JUMP},   {"jet",    BTN_JET},
+    {"crouch", BTN_CROUCH}, {"prone",  BTN_PRONE},
+    {"fire",   BTN_FIRE},   {"reload", BTN_RELOAD},
+    {"melee",  BTN_MELEE},  {"use",    BTN_USE},
+    {"swap",   BTN_SWAP},   {"dash",   BTN_DASH},
+};
+
+static uint16_t button_bit(const char *s) {
+    for (size_t i = 0; i < sizeof(BUTTON_TABLE) / sizeof(BUTTON_TABLE[0]); ++i) {
+        if (strcmp(s, BUTTON_TABLE[i].name) == 0) return BUTTON_TABLE[i].bit;
+    }
+    return 0;
+}
+
+static int cmp_event(const void *pa, const void *pb) {
+    const Event *a = (const Event *)pa, *b = (const Event *)pb;
+    if (a->tick != b->tick) return a->tick - b->tick;
+    /* TAP unfolds into PRESS@N + RELEASE@N+1; ordering inside a tick
+     * doesn't otherwise matter since input is rebuilt fresh each tick. */
+    return (int)a->kind - (int)b->kind;
+}
+
+static void script_push(Script *s, Event ev) {
+    if (s->event_count == s->event_capacity) {
+        int cap = s->event_capacity ? s->event_capacity * 2 : 32;
+        s->events = (Event *)realloc(s->events, sizeof(Event) * (size_t)cap);
+        s->event_capacity = cap;
+    }
+    s->events[s->event_count++] = ev;
+}
+
+static char *trim(char *s) {
+    while (*s && isspace((unsigned char)*s)) ++s;
+    char *e = s + strlen(s);
+    while (e > s && isspace((unsigned char)e[-1])) *--e = 0;
+    return s;
+}
+
+static bool parse_script(const char *path, Script *out) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        LOG_E("shotmode: cannot open %s: %s", path, strerror(errno));
+        return false;
+    }
+
+    out->window_w = 1280; out->window_h = 720;
+    out->seed_override = false;
+    snprintf(out->out_dir, sizeof(out->out_dir), "build/shots");
+    out->end_tick = -1;
+
+    char line[512];
+    int lineno = 0;
+    bool ok = true;
+    while (fgets(line, sizeof(line), f)) {
+        lineno++;
+        char *p = trim(line);
+        if (!*p || *p == '#') continue;
+
+        char tok[64];
+        int n = 0;
+        if (sscanf(p, "%63s%n", tok, &n) != 1) continue;
+        char *rest = trim(p + n);
+
+        if (strcmp(tok, "window") == 0) {
+            if (sscanf(rest, "%d %d", &out->window_w, &out->window_h) != 2) {
+                LOG_E("shotmode: %s:%d bad 'window'", path, lineno); ok = false;
+            }
+        } else if (strcmp(tok, "seed") == 0) {
+            unsigned long long hi, lo;
+            if (sscanf(rest, "%llu %llu", &hi, &lo) != 2) {
+                LOG_E("shotmode: %s:%d bad 'seed'", path, lineno); ok = false;
+            } else {
+                out->seed_hi = (uint64_t)hi; out->seed_lo = (uint64_t)lo;
+                out->seed_override = true;
+            }
+        } else if (strcmp(tok, "out") == 0) {
+            snprintf(out->out_dir, sizeof(out->out_dir), "%s", rest);
+        } else if (strcmp(tok, "spawn_at") == 0) {
+            if (sscanf(rest, "%f %f", &out->spawn_x, &out->spawn_y) != 2) {
+                LOG_E("shotmode: %s:%d bad 'spawn_at'", path, lineno); ok = false;
+            } else {
+                out->have_spawn_at = true;
+            }
+        } else if (strcmp(tok, "aim") == 0) {
+            if (sscanf(rest, "%f %f", &out->initial_ax, &out->initial_ay) != 2) {
+                LOG_E("shotmode: %s:%d bad 'aim'", path, lineno); ok = false;
+            } else {
+                out->initial_aim_mode = AIM_WORLD;
+            }
+        } else if (strcmp(tok, "mouse") == 0) {
+            if (sscanf(rest, "%f %f", &out->initial_ax, &out->initial_ay) != 2) {
+                LOG_E("shotmode: %s:%d bad 'mouse'", path, lineno); ok = false;
+            } else {
+                out->initial_aim_mode = AIM_SCREEN;
+            }
+        } else if (strcmp(tok, "at") == 0) {
+            int tick;
+            char ev_kind[32];
+            int eaten = 0;
+            if (sscanf(rest, "%d %31s%n", &tick, ev_kind, &eaten) != 2) {
+                LOG_E("shotmode: %s:%d bad 'at'", path, lineno); ok = false;
+                continue;
+            }
+            char *args = trim(rest + eaten);
+
+            Event ev = {0};
+            ev.tick = tick;
+            if (strcmp(ev_kind, "press") == 0 || strcmp(ev_kind, "release") == 0
+                || strcmp(ev_kind, "tap") == 0) {
+                char btn[32];
+                if (sscanf(args, "%31s", btn) != 1 || !button_bit(btn)) {
+                    LOG_E("shotmode: %s:%d unknown button '%s'", path, lineno, args);
+                    ok = false; continue;
+                }
+                ev.button = button_bit(btn);
+                if (strcmp(ev_kind, "tap") == 0) {
+                    /* Lower into press@N + release@N+1. */
+                    ev.kind = EV_PRESS; script_push(out, ev);
+                    ev.kind = EV_RELEASE; ev.tick = tick + 1; script_push(out, ev);
+                    continue;
+                }
+                ev.kind = (strcmp(ev_kind, "press") == 0) ? EV_PRESS : EV_RELEASE;
+                script_push(out, ev);
+            } else if (strcmp(ev_kind, "aim") == 0) {
+                if (sscanf(args, "%f %f", &ev.ax, &ev.ay) != 2) {
+                    LOG_E("shotmode: %s:%d bad 'at .. aim'", path, lineno);
+                    ok = false; continue;
+                }
+                ev.kind = EV_AIM;
+                script_push(out, ev);
+            } else if (strcmp(ev_kind, "mouse") == 0) {
+                if (sscanf(args, "%f %f", &ev.ax, &ev.ay) != 2) {
+                    LOG_E("shotmode: %s:%d bad 'at .. mouse'", path, lineno);
+                    ok = false; continue;
+                }
+                ev.kind = EV_MOUSE;
+                script_push(out, ev);
+            } else if (strcmp(ev_kind, "shot") == 0) {
+                if (sscanf(args, "%63s", ev.name) != 1) {
+                    LOG_E("shotmode: %s:%d 'shot' needs a name", path, lineno);
+                    ok = false; continue;
+                }
+                ev.kind = EV_SHOT;
+                script_push(out, ev);
+            } else if (strcmp(ev_kind, "end") == 0) {
+                ev.kind = EV_END;
+                script_push(out, ev);
+                if (out->end_tick < 0 || tick < out->end_tick) out->end_tick = tick;
+            } else {
+                LOG_E("shotmode: %s:%d unknown event '%s'", path, lineno, ev_kind);
+                ok = false;
+            }
+        } else if (strcmp(tok, "mouse_lerp") == 0) {
+            float to_x, to_y;
+            char from_kw[8], to_kw[8];
+            int t0, t1;
+            if (sscanf(rest, "%f %f %7s %d %7s %d",
+                       &to_x, &to_y, from_kw, &t0, to_kw, &t1) != 6
+                || strcmp(from_kw, "from") != 0
+                || strcmp(to_kw,   "to"  ) != 0
+                || t1 <= t0) {
+                LOG_E("shotmode: %s:%d bad 'mouse_lerp' (expected: mouse_lerp "
+                      "<sx> <sy> from <t0> to <t1>)", path, lineno);
+                ok = false;
+                continue;
+            }
+            /* Lerp segments are stored separately and consulted each tick
+             * by the runner; we don't know the segment's start position
+             * at parse time (depends on whichever mouse state is live at
+             * t0), so the runner snapshots it on entry. */
+            if (out->lerp_count == out->lerp_capacity) {
+                int cap = out->lerp_capacity ? out->lerp_capacity * 2 : 4;
+                out->lerps = (LerpSeg *)realloc(out->lerps, sizeof(LerpSeg) * (size_t)cap);
+                out->lerp_capacity = cap;
+            }
+            out->lerps[out->lerp_count++] = (LerpSeg){
+                .t0 = t0, .t1 = t1, .to_x = to_x, .to_y = to_y,
+            };
+        } else if (strcmp(tok, "contact_sheet") == 0) {
+            char name[64] = {0};
+            int cols = 4, cw = 320, ch = 180;
+            /* Parse name then optional 'cols N' and 'cell W H' in any order. */
+            int eaten = 0;
+            if (sscanf(rest, "%63s%n", name, &eaten) != 1) {
+                LOG_E("shotmode: %s:%d 'contact_sheet' needs a name", path, lineno);
+                ok = false; continue;
+            }
+            char *q = trim(rest + eaten);
+            while (*q) {
+                char kw[16];
+                int k_eaten = 0;
+                if (sscanf(q, "%15s%n", kw, &k_eaten) != 1) break;
+                q = trim(q + k_eaten);
+                if (strcmp(kw, "cols") == 0) {
+                    if (sscanf(q, "%d%n", &cols, &k_eaten) != 1 || cols <= 0) {
+                        LOG_E("shotmode: %s:%d 'cols' needs a positive int", path, lineno);
+                        ok = false; break;
+                    }
+                    q = trim(q + k_eaten);
+                } else if (strcmp(kw, "cell") == 0) {
+                    if (sscanf(q, "%d %d%n", &cw, &ch, &k_eaten) != 2 || cw <= 0 || ch <= 0) {
+                        LOG_E("shotmode: %s:%d 'cell' needs W H", path, lineno);
+                        ok = false; break;
+                    }
+                    q = trim(q + k_eaten);
+                } else {
+                    LOG_E("shotmode: %s:%d unknown contact_sheet option '%s'", path, lineno, kw);
+                    ok = false; break;
+                }
+            }
+            out->make_contact = true;
+            snprintf(out->contact_name, sizeof(out->contact_name), "%s", name);
+            out->contact_cols   = cols;
+            out->contact_cell_w = cw;
+            out->contact_cell_h = ch;
+        } else if (strcmp(tok, "burst") == 0) {
+            char prefix[48], from_kw[8], to_kw[8], every_kw[8];
+            int t0, t1, k;
+            if (sscanf(rest, "%47s %7s %d %7s %d %7s %d",
+                       prefix, from_kw, &t0, to_kw, &t1, every_kw, &k) != 7
+                || strcmp(from_kw, "from") != 0
+                || strcmp(to_kw,   "to"  ) != 0
+                || strcmp(every_kw,"every") != 0
+                || k <= 0 || t1 < t0) {
+                LOG_E("shotmode: %s:%d bad 'burst' (expected: burst <prefix> "
+                      "from <t0> to <t1> every <k>)", path, lineno);
+                ok = false;
+                continue;
+            }
+            for (int t = t0; t <= t1; t += k) {
+                Event ev = { .tick = t, .kind = EV_SHOT };
+                snprintf(ev.name, sizeof(ev.name), "%s_t%03d", prefix, t);
+                script_push(out, ev);
+            }
+        } else {
+            LOG_E("shotmode: %s:%d unknown directive '%s'", path, lineno, tok);
+            ok = false;
+        }
+    }
+    fclose(f);
+
+    if (out->event_count) {
+        qsort(out->events, (size_t)out->event_count, sizeof(Event), cmp_event);
+    }
+    if (out->end_tick < 0 && out->event_count) {
+        out->end_tick = out->events[out->event_count - 1].tick + 60;
+    }
+    if (out->end_tick < 0) out->end_tick = 60;
+
+    return ok;
+}
+
+/* ---- Output dir: mkdir -p style ------------------------------------ */
+static void mkdir_p(const char *path) {
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s", path);
+    for (char *p = buf + 1; *p; ++p) {
+        if (*p == '/') {
+            *p = 0;
+            mkdir(buf, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(buf, 0755);
+}
+
+/* ---- Spawn — mirror of main.c::seed_world. Kept inline so this module
+ * stays self-contained and main.c isn't refactored just for shot mode. */
+static void seed_world(Game *g) {
+    World *w = &g->world;
+    level_build_tutorial(&w->level, &g->level_arena);
+    decal_init((int)level_width_px(&w->level), (int)level_height_px(&w->level));
+
+    const float feet_below_pelvis = 36.0f;
+    const float foot_clearance    = 4.0f;
+    Vec2 player_spawn = { 16.0f * 32.0f + 8.0f,
+                          30.0f * 32.0f - feet_below_pelvis - foot_clearance };
+    w->local_mech_id = mech_create(w, CHASSIS_TROOPER, player_spawn,
+                                   /*team*/ 1, /*is_dummy*/ false);
+
+    Vec2 dummy_spawn = { 75.0f * 32.0f,
+                         32.0f * 32.0f - feet_below_pelvis - foot_clearance };
+    w->dummy_mech_id = mech_create(w, CHASSIS_TROOPER, dummy_spawn,
+                                   /*team*/ 2, /*is_dummy*/ true);
+
+    w->camera_target = player_spawn;
+    w->camera_smooth = player_spawn;
+    w->camera_zoom   = 1.4f;
+}
+
+/* ---- Contact sheet composer ---------------------------------------- */
+
+/* Compose every PNG produced by the run into a single grid image.
+ * Cells are scaled-down screenshots; a thin label strip beneath each
+ * shows the shot name + tick so a reviewer can locate any cell back
+ * in the per-shot output. */
+static void build_contact_sheet(const Script *s) {
+    int label_h = 14;
+    int cell_w  = s->contact_cell_w;
+    int cell_h  = s->contact_cell_h;
+    int img_h   = cell_h - label_h;
+    if (img_h < 16) img_h = 16;
+    int cols    = s->contact_cols;
+
+    /* Count actual shot events. */
+    int n = 0;
+    for (int i = 0; i < s->event_count; ++i)
+        if (s->events[i].kind == EV_SHOT) n++;
+    if (n == 0) return;
+
+    int rows = (n + cols - 1) / cols;
+    Image sheet = GenImageColor(cols * cell_w, rows * cell_h,
+                                (Color){12, 14, 18, 255});
+
+    int idx = 0;
+    for (int i = 0; i < s->event_count; ++i) {
+        if (s->events[i].kind != EV_SHOT) continue;
+        int col = idx % cols;
+        int row = idx / cols;
+        int dx  = col * cell_w;
+        int dy  = row * cell_h;
+
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s.png", s->out_dir, s->events[i].name);
+        Image cell = LoadImage(path);
+        if (cell.data) {
+            ImageResize(&cell, cell_w, img_h);
+            ImageDraw(&sheet, cell,
+                      (Rectangle){0, 0, (float)cell_w, (float)img_h},
+                      (Rectangle){(float)dx, (float)dy,
+                                  (float)cell_w, (float)img_h},
+                      WHITE);
+            UnloadImage(cell);
+        } else {
+            ImageDrawRectangle(&sheet, dx, dy, cell_w, img_h,
+                               (Color){50, 20, 20, 255});
+        }
+
+        char label[80];
+        snprintf(label, sizeof(label), "%s @t%d",
+                 s->events[i].name, s->events[i].tick);
+        ImageDrawRectangle(&sheet, dx, dy + img_h, cell_w, label_h,
+                           (Color){0, 0, 0, 220});
+        ImageDrawText(&sheet, label, dx + 4, dy + img_h, 10,
+                      (Color){200, 210, 220, 255});
+
+        idx++;
+    }
+
+    char out_path[512];
+    snprintf(out_path, sizeof(out_path), "%s/%s.png", s->out_dir, s->contact_name);
+    if (ExportImage(sheet, out_path)) {
+        LOG_I("shotmode: contact sheet → %s (%dx%d, %d cells)",
+              out_path, sheet.width, sheet.height, n);
+    } else {
+        LOG_E("shotmode: ExportImage failed for %s", out_path);
+    }
+    UnloadImage(sheet);
+}
+
+/* ---- The runner ---------------------------------------------------- */
+
+int shotmode_run(const char *script_path) {
+    Script s = {0};
+    if (!parse_script(script_path, &s)) {
+        free(s.events);
+        free(s.lerps);
+        return EXIT_FAILURE;
+    }
+    LOG_I("shotmode: script=%s window=%dx%d events=%d end_tick=%d",
+          script_path, s.window_w, s.window_h, s.event_count, s.end_tick);
+
+    mkdir_p(s.out_dir);
+
+    Game game;
+    if (!game_init(&game)) { free(s.events); free(s.lerps); return EXIT_FAILURE; }
+    if (s.seed_override) pcg32_seed(&game.rng, s.seed_hi, s.seed_lo);
+
+    PlatformConfig pcfg = {
+        .window_w = s.window_w, .window_h = s.window_h,
+        .vsync = false, .fullscreen = false,
+        .title = "Soldut " SOLDUT_VERSION_STRING " — shot mode",
+    };
+    if (!platform_init(&pcfg)) {
+        game_shutdown(&game); free(s.events); free(s.lerps);
+        return EXIT_FAILURE;
+    }
+
+    seed_world(&game);
+
+    /* Optional one-shot teleport — moves every body particle by the
+     * delta from current pelvis to the requested spawn point so the
+     * skeleton arrives at the new location intact and at rest. */
+    if (s.have_spawn_at && game.world.local_mech_id >= 0) {
+        Mech *pm = &game.world.mechs[game.world.local_mech_id];
+        ParticlePool *pp = &game.world.particles;
+        int b = pm->particle_base;
+        float cur_x = pp->pos_x[b + PART_PELVIS];
+        float cur_y = pp->pos_y[b + PART_PELVIS];
+        float dx = s.spawn_x - cur_x;
+        float dy = s.spawn_y - cur_y;
+        for (int i = 0; i < PART_COUNT; ++i) {
+            physics_translate_kinematic(pp, b + i, dx, dy);
+        }
+        game.world.camera_target = (Vec2){ s.spawn_x, s.spawn_y };
+        game.world.camera_smooth = (Vec2){ s.spawn_x, s.spawn_y };
+        LOG_I("shotmode: spawn_at %.1f %.1f", s.spawn_x, s.spawn_y);
+    }
+
+    Renderer rd;
+    renderer_init(&rd,
+        GetScreenWidth(), GetScreenHeight(),
+        mech_chest_pos(&game.world, game.world.local_mech_id));
+    /* Pin camera smoothing to the simulation rate. In shot mode each
+     * draw is wall-clock-fast (~1 ms), so the default GetFrameTime()
+     * path would barely advance the camera per tick and the player
+     * would visibly run off-screen. */
+    rd.cam_dt_override = 1.0f / 60.0f;
+
+    /* Persistent input state across ticks — held buttons, current aim. */
+    uint16_t held_buttons = 0;
+    AimMode  aim_mode = s.initial_aim_mode;
+
+    /* World-space aim target (used when aim_mode == AIM_WORLD). */
+    float aim_world_x = 0.0f, aim_world_y = 0.0f;
+
+    /* Screen-space cursor (used when aim_mode == AIM_SCREEN); converted
+     * to world each tick via the live camera, exactly like main.c. */
+    float mouse_x = (float)s.window_w * 0.5f, mouse_y = (float)s.window_h * 0.5f;
+
+    if (s.initial_aim_mode == AIM_WORLD) {
+        aim_world_x = s.initial_ax; aim_world_y = s.initial_ay;
+    } else if (s.initial_aim_mode == AIM_SCREEN) {
+        mouse_x = s.initial_ax; mouse_y = s.initial_ay;
+    } else {
+        /* No aim/mouse specified: aim slightly to the right of the
+         * player so the mech faces and renders predictably. */
+        Vec2 cp = mech_chest_pos(&game.world, game.world.local_mech_id);
+        aim_world_x = cp.x + 200.0f;
+        aim_world_y = cp.y;
+        aim_mode = AIM_WORLD;
+    }
+
+    const float TICK_DT = 1.0f / 60.0f;
+    int ev_idx = 0;
+    bool ended = false;
+    int shots_taken = 0;
+
+    for (int tick = 0; tick <= s.end_tick && !ended; ++tick) {
+        if (WindowShouldClose()) { LOG_W("shotmode: window closed early"); break; }
+
+        /* (1) Apply press/release/aim/mouse events scheduled for this tick. */
+        while (ev_idx < s.event_count && s.events[ev_idx].tick == tick) {
+            const Event *ev = &s.events[ev_idx];
+            switch (ev->kind) {
+            case EV_PRESS:   held_buttons |= ev->button; break;
+            case EV_RELEASE: held_buttons &= (uint16_t)~ev->button; break;
+            case EV_AIM:
+                aim_world_x = ev->ax; aim_world_y = ev->ay;
+                aim_mode = AIM_WORLD;
+                break;
+            case EV_MOUSE:
+                mouse_x = ev->ax; mouse_y = ev->ay;
+                aim_mode = AIM_SCREEN;
+                break;
+            case EV_SHOT:    /* handled after render, see below */         break;
+            case EV_END:     ended = true; break;
+            case EV_TAP:     break; /* lowered at parse time */
+            }
+            ev_idx++;
+        }
+
+        /* (1b) Apply any active mouse_lerp segment. Sweeps the cursor in
+         *      screen space — switches us to AIM_SCREEN mode and forces a
+         *      camera-relative conversion each tick, matching real play. */
+        for (int li = 0; li < s.lerp_count; ++li) {
+            LerpSeg *L = &s.lerps[li];
+            if (tick < L->t0 || tick > L->t1) continue;
+            if (!L->snapshotted) {
+                L->from_x = mouse_x;
+                L->from_y = mouse_y;
+                L->snapshotted = true;
+            }
+            float u = (float)(tick - L->t0) / (float)(L->t1 - L->t0);
+            mouse_x = L->from_x + (L->to_x - L->from_x) * u;
+            mouse_y = L->from_y + (L->to_y - L->from_y) * u;
+            aim_mode = AIM_SCREEN;
+        }
+
+        /* (2) Build ClientInput for this tick. We always pass the
+         *     current cursor in screen space through ClientInput.aim_x/y
+         *     (matters for the renderer's cursor overlay even though
+         *     we don't draw it in shot mode); aim_world on the mech is
+         *     either the world-space value directly, or the screen
+         *     cursor converted via the renderer's current camera —
+         *     same path main.c uses. */
+        float screen_x, screen_y;
+        Vec2 world_aim;
+        if (aim_mode == AIM_SCREEN) {
+            screen_x = mouse_x; screen_y = mouse_y;
+            world_aim = renderer_screen_to_world(&rd, (Vec2){ mouse_x, mouse_y });
+        } else {
+            screen_x = (float)s.window_w * 0.5f;
+            screen_y = (float)s.window_h * 0.5f;
+            world_aim = (Vec2){ aim_world_x, aim_world_y };
+        }
+
+        ClientInput in = {
+            .buttons = held_buttons,
+            .seq = (uint16_t)(game.world.tick + 1),
+            .aim_x = screen_x,
+            .aim_y = screen_y,
+            .dt = TICK_DT,
+        };
+        if (game.world.local_mech_id >= 0) {
+            game.world.mechs[game.world.local_mech_id].aim_world = world_aim;
+        }
+
+        simulate(&game.world, in, TICK_DT);
+        game.input = in;
+
+        /* (3) Render the tick we just simulated. We render every tick so
+         *     camera smoothing, FX particles, and decals all evolve as
+         *     they would in interactive play. */
+        renderer_draw_frame(&rd, &game.world,
+                            GetScreenWidth(), GetScreenHeight(),
+                            /*alpha*/ 0.0f,
+                            (Vec2){ in.aim_x, in.aim_y },
+                            /*overlay*/ NULL, NULL);
+
+        /* (4) Any 'shot' events scheduled for this tick fire after the
+         *     draw — TakeScreenshot grabs the framebuffer that was just
+         *     presented. We rewind ev_idx briefly to find them. */
+        /* TakeScreenshot strips directories and writes to the working
+         * dir; LoadImageFromScreen + ExportImage honor full paths. */
+        bool grabbed = false;
+        Image shot = {0};
+        for (int j = 0; j < s.event_count; ++j) {
+            if (s.events[j].tick != tick) continue;
+            if (s.events[j].kind != EV_SHOT) continue;
+            if (!grabbed) { shot = LoadImageFromScreen(); grabbed = true; }
+            char path[512];
+            snprintf(path, sizeof(path), "%s/%s.png", s.out_dir, s.events[j].name);
+            if (ExportImage(shot, path)) {
+                LOG_I("shotmode: tick %d → %s", tick, path);
+                shots_taken++;
+            } else {
+                LOG_E("shotmode: ExportImage failed for %s", path);
+            }
+        }
+        if (grabbed) UnloadImage(shot);
+    }
+
+    LOG_I("shotmode: done. ticks=%llu shots=%d",
+          (unsigned long long)game.world.tick, shots_taken);
+
+    if (s.make_contact && shots_taken > 0) {
+        build_contact_sheet(&s);
+    }
+
+    decal_shutdown();
+    platform_shutdown();
+    game_shutdown(&game);
+    free(s.events);
+    free(s.lerps);
+    return EXIT_SUCCESS;
+}

@@ -1,0 +1,23 @@
+# b4_ceiling.shot — sustained jet to the world's y=0 boundary.
+#
+# fuel_max is 1.0 s; full-throttle jet for 100 ticks rises ~1500 px,
+# more than the world height (1280 px) so the player crashes into the
+# top boundary. We capture the climb tick-by-tick around the ceiling
+# impact so we can see whether out-of-bounds-as-solid mangles the
+# constraint solver.
+
+window 1280 720
+seed   1 1
+out    build/shots/b4
+mouse  900 360
+contact_sheet sheet cols 4 cell 480 270
+
+at  10 shot stand_t010
+
+at  30 press jet
+burst climb from 50 to 130 every 10
+at 130 release jet
+
+burst fall from 140 to 240 every 15
+
+at 280 end

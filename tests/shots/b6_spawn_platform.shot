@@ -1,0 +1,28 @@
+# b6_spawn_platform.shot — sustained jet under the spawn platform.
+#
+# Spawn platform is at cols 12-21, row 30 (top y=960, bottom y=992).
+# Floor top y=1152. Spawn the player on the floor under it, jet up,
+# and watch whether the head tunnels through with sustained thrust.
+
+window 1280 720
+seed   1 1
+out    build/shots/b6sp
+contact_sheet sheet cols 4 cell 480 270
+
+# Pelvis at (520, 1112) → feet at (520, 1148), under the platform.
+spawn_at 520 1112
+mouse    900 360
+
+at  10 shot stand_t010
+
+# Sustained jet — long enough to build full velocity.
+at  30 press jet
+burst climb from 35 to 130 every 5
+at 130 release jet
+
+# Did it punch through? Move the cursor to see if "any movement" causes
+# sliding the user mentioned.
+mouse_lerp 200 360 from 140 to 180
+burst slide from 145 to 200 every 5
+
+at 220 end

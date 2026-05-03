@@ -52,6 +52,15 @@ static inline void physics_translate_kinematic(ParticlePool *p, int i, float dx,
     p->prev_x[i] += dx; p->prev_y[i] += dy;
 }
 
+/* Same as physics_translate_kinematic but clamps the move so the
+ * particle doesn't pass through a solid tile. Pose drive can pull a
+ * head 30+ px upward in one tick (strength 0.7 across a 50-px gap),
+ * which tunnels through a 1-tile-thick platform if applied raw — the
+ * subsequent collision pass sees only the post-teleport position and
+ * has no opportunity to push the particle back. */
+void physics_translate_kinematic_swept(ParticlePool *p, const Level *L,
+                                       int i, float dx, float dy);
+
 /* Set the per-tick velocity directly via prev. Useful for input-driven
  * movement: pressing right should *be* a horizontal velocity, not an
  * accumulating force. (Vertical velocity is preserved by setting only

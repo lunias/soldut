@@ -1,0 +1,25 @@
+# b3_arm_clip.shot — reproduce the rifle-arm-through-thin-solid bug.
+#
+# Player walks up to the col-55 wall (x=1760-1792, 5 tiles tall),
+# aims past it (cursor on the far side), and the rifle arm reaches
+# toward the cursor — straight into the wall. We expect the arm to
+# either be pushed out by collision or stop at the wall surface;
+# pre-fix it draws inside the tiles.
+
+window 1280 720
+seed   1 1
+out    build/shots/b3
+mouse  1100 360                 # cursor on the right; aim will be world-converted
+contact_sheet sheet cols 4 cell 480 270
+
+at  20 shot start
+
+# Walk to the wall.
+at  30 press right
+burst walk from 80 to 320 every 40
+
+# Should be against or near the wall by now. Hold the cursor over to
+# the right (already set) so the rifle arm extends into/past the wall.
+burst against from 330 to 380 every 5
+
+at 420 end

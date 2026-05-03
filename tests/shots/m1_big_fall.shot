@@ -1,0 +1,29 @@
+# m1_big_fall.shot — large drop, look for leg-into-ground.
+#
+# Jet up until fuel is spent (~1.67 s of full thrust), release, free-fall
+# back to the floor. Bursts shots through the impact tick by tick so we
+# can see if the foot/knee particles end up below the tile surface or
+# oscillate after settling.
+
+window 1280 720
+seed   1 1
+out    build/shots/fall
+aim    520 200
+
+at 10 shot stand_t010
+
+# Climb. fuel_max is 1.0, drains 0.6/sec → ~100 ticks of jet available.
+at 30 press jet
+burst climb from 50 to 130 every 20
+at 130 release jet
+
+# Free fall — capture the descent.
+burst air from 140 to 240 every 15
+
+# Impact window — sample every 5 ticks to see clipping/oscillation.
+burst impact from 245 to 320 every 5
+
+# Settled (or still bouncing).
+burst settle from 330 to 500 every 25
+
+at 540 end

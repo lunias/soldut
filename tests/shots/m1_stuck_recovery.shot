@@ -1,0 +1,33 @@
+# m1_stuck_recovery.shot — fall hard, then try to escape with jet.
+#
+# Repeats m1_big_fall up to impact, then immediately fires jet to see
+# whether the user-reported "I can sometimes escape via jet/jump" path
+# works. Mostly looking for: does the body recover, or does it stay
+# clipped through the floor while the jet thrust does nothing?
+
+window 1280 720
+seed   1 1
+out    build/shots/recover
+aim    520 920
+
+at 10 shot stand_t010
+
+# Climb.
+at 30 press jet
+at 130 release jet
+
+# Fall.
+burst falling from 140 to 240 every 20
+
+# Impact frames.
+burst impact from 245 to 295 every 5
+
+# Try to escape via jet — fuel will partially refill on ground contact.
+at 305 press jet
+burst escape from 310 to 380 every 10
+at 380 release jet
+
+# Did we get back up? Did legs come unstuck?
+burst settle from 385 to 500 every 20
+
+at 540 end

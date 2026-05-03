@@ -277,7 +277,10 @@ static void apply_pose_to_particles(World *w, Mech *m) {
         int idx = m->particle_base + i;
         float dx = (m->pose_target[i].x - p->pos_x[idx]) * s;
         float dy = (m->pose_target[i].y - p->pos_y[idx]) * s;
-        physics_translate_kinematic(p, idx, dx, dy);
+        /* Swept kinematic translate so a strong pose pull (e.g. 0.7 *
+         * a 50-px gap to standing-height head target) can't teleport a
+         * particle through a 1-tile-thick platform in one tick. */
+        physics_translate_kinematic_swept(p, &w->level, idx, dx, dy);
     }
 }
 
@@ -369,26 +372,71 @@ static void build_pose(const Chassis *ch, World *w, Mech *m, float dt) {
 
     switch ((AnimId)m->anim_id) {
         case ANIM_RUN: {
-            /* Walking cycle: feet swing in opposition. */
+            /* Procedural walk cycle. Each foot alternates between
+             * STANCE (foot on the ground, moving backward in
+             * body-frame at exactly the run velocity, so its world
+             * position is stationary — the body pivots over it) and
+             * SWING (foot lifts off and arcs forward to the next
+             * plant point). The previous sinusoidal swing dragged
+             * planted feet through the ground because no point on
+             * the sin curve had body-frame velocity equal to
+             * -RUN_SPEED, so feet skittered.
+             *
+             * cycle_freq is tuned so STANCE_DURATION × RUN_SPEED ==
+             * STRIDE: the body covers exactly one stride length while
+             * one foot is planted, which keeps that foot stationary
+             * in world space. Stride and lift are static and
+             * generous enough to look like a confident walk; on
+             * varying-speed locomotion (air control, slowed by
+             * obstacles) the planted foot will skitter slightly,
+             * which is acceptable. */
             m->anim_time += dt;
-            float t = m->anim_time * 9.0f;       /* speed of cycle */
-            float dir = m->facing_left ? -1.0f : 1.0f;
-            float swing = 14.0f;
-            float lift  = 8.0f;
+            const float stride     = 28.0f;        /* peak-to-peak */
+            const float lift_h     = 9.0f;
+            const float run_v      = RUN_SPEED_PXS * ch->run_mult;
+            float       cycle_freq = run_v / (2.0f * stride); /* 5 Hz @ 280 */
 
-            float l_fx = lhip.x + sinf(t)         * swing * dir;
-            float l_fy = lhip.y + ch->bone_thigh + ch->bone_shin
-                                  - fmaxf(0.0f, sinf(t)) * lift;
-            float r_fx = rhip.x + sinf(t + PI)    * swing * dir;
-            float r_fy = rhip.y + ch->bone_thigh + ch->bone_shin
-                                  - fmaxf(0.0f, sinf(t + PI)) * lift;
+            float dir   = m->facing_left ? -1.0f : 1.0f;
+            float front = stride * 0.5f * dir;     /* signed plant point ahead */
+            float back  = -stride * 0.5f * dir;    /* signed plant point behind */
+            float foot_y_ground = lhip.y + ch->bone_thigh + ch->bone_shin;
 
+            /* phase ∈ [0,1): 0..0.5 is stance, 0.5..1 is swing.
+             * Right foot is offset by 0.5 so the two are out of phase. */
+            float p_l = m->anim_time * cycle_freq;
+            p_l -= floorf(p_l);
+            float p_r = p_l + 0.5f;
+            if (p_r >= 1.0f) p_r -= 1.0f;
+
+            float l_fx, l_fy, r_fx, r_fy;
+            if (p_l < 0.5f) {
+                float u = p_l * 2.0f;       /* stance: front → back */
+                l_fx = lhip.x + front + (back - front) * u;
+                l_fy = foot_y_ground;
+            } else {
+                float u = (p_l - 0.5f) * 2.0f;     /* swing: back → front + arc */
+                l_fx = lhip.x + back + (front - back) * u;
+                l_fy = foot_y_ground - lift_h * sinf(u * PI);
+            }
+            if (p_r < 0.5f) {
+                float u = p_r * 2.0f;
+                r_fx = rhip.x + front + (back - front) * u;
+                r_fy = foot_y_ground;
+            } else {
+                float u = (p_r - 0.5f) * 2.0f;
+                r_fx = rhip.x + back + (front - back) * u;
+                r_fy = foot_y_ground - lift_h * sinf(u * PI);
+            }
+
+            /* Knee tracks toward the midpoint of hip and foot, with a
+             * small forward bias on the swing leg so the leg actually
+             * bends forward instead of buckling. */
+            float l_knee_y = lhip.y + ch->bone_thigh - 2;
+            float r_knee_y = rhip.y + ch->bone_thigh - 2;
             pose_set(m, PART_L_KNEE,
-                     (Vec2){ (lhip.x + l_fx) * 0.5f, lhip.y + ch->bone_thigh - 2 },
-                     0.4f);
+                     (Vec2){ (lhip.x + l_fx) * 0.5f, l_knee_y }, 0.4f);
             pose_set(m, PART_R_KNEE,
-                     (Vec2){ (rhip.x + r_fx) * 0.5f, rhip.y + ch->bone_thigh - 2 },
-                     0.4f);
+                     (Vec2){ (rhip.x + r_fx) * 0.5f, r_knee_y }, 0.4f);
             pose_set(m, PART_L_FOOT, (Vec2){ l_fx, l_fy }, leg_strength);
             pose_set(m, PART_R_FOOT, (Vec2){ r_fx, r_fy }, leg_strength);
             break;
@@ -464,10 +512,29 @@ static void apply_jump(World *w, const Mech *m, float jump_pxs, float dt) {
 
 /* Jet: continuous upward acceleration applied uniformly to every body
  * particle. Gravity and jet are both whole-body accelerations; applying
- * jet only to the torso would tilt the body forward as the legs lag. */
+ * jet only to the torso would tilt the body forward as the legs lag.
+ *
+ * We cut the thrust as the body approaches the world's y=0 boundary.
+ * Without this guard, sustained thrust crams every particle against
+ * the out-of-bounds-as-solid ceiling and the constraint solver tangles
+ * the skeleton trying to keep bones rigid against the wedge. The taper
+ * starts one chain-length below the ceiling (so the head doesn't quite
+ * reach it) and goes to zero at half that distance. */
+#define JET_CEILING_TAPER_BEGIN  64.0f   /* px below y=0 where thrust starts to fade */
+#define JET_CEILING_TAPER_END    24.0f   /* px below y=0 where thrust hits zero */
+
 static void apply_jet_force(World *w, const Mech *m, float thrust_pxs2, float dt) {
     ParticlePool *p = &w->particles;
-    float dy = -thrust_pxs2 * dt * dt;
+    int b = m->particle_base;
+    float head_y = p->pos_y[b + PART_HEAD];
+    float scale  = 1.0f;
+    if (head_y < JET_CEILING_TAPER_BEGIN) {
+        if (head_y <= JET_CEILING_TAPER_END) scale = 0.0f;
+        else scale = (head_y - JET_CEILING_TAPER_END) /
+                     (JET_CEILING_TAPER_BEGIN - JET_CEILING_TAPER_END);
+    }
+    if (scale <= 0.0f) return;
+    float dy = -thrust_pxs2 * scale * dt * dt;
     for (int part = 0; part < PART_COUNT; ++part) {
         int idx = m->particle_base + part;
         p->pos_y[idx] += dy;
@@ -562,9 +629,14 @@ void mech_post_physics_anchor(World *w, int mid) {
         (p->flags[b + PART_R_FOOT] & PARTICLE_FLAG_GROUNDED);
     m->grounded = grounded;
     if (!grounded) return;
-    /* Only anchor for the static stand pose. During run/jump/jet/death
-     * the legs need to move freely — anchoring would lock them. */
-    if (m->anim_id != ANIM_STAND) return;
+    /* Anchor for any grounded, alive bipedal pose: the upper body wants
+     * to sit at standing height regardless of whether the legs are
+     * static (STAND) or striding (RUN). Skipping the anchor in RUN
+     * caused a "crumpled landing" bug where the body landed mid-stride,
+     * pelvis sagged below standing height, and the run pose alone
+     * couldn't pull it back up. JET/FALL/DEATH don't enter here:
+     * grounded is false during them (or m->alive is false for death). */
+    if (m->anim_id != ANIM_STAND && m->anim_id != ANIM_RUN) return;
 
     const Chassis *ch = mech_chassis((ChassisId)m->chassis_id);
     float foot_y = (p->pos_y[b + PART_L_FOOT] + p->pos_y[b + PART_R_FOOT]) * 0.5f;
@@ -579,14 +651,21 @@ void mech_post_physics_anchor(World *w, int mid) {
     /* Only lift, never push down (push-down would prevent jumps). */
     if (dy_pelvis >= -0.1f) return;
 
-    /* Lift pelvis, hips, and the entire upper body together, then zero
-     * Y-velocity by collapsing prev_y onto pos_y. The kinematic lift
-     * alone would preserve the (gravity-accumulated) Y-velocity, which
-     * grows toward terminal velocity over many idle ticks; that stored
-     * velocity then erupts the moment the mech loses ground contact.
-     * We keep X velocity intact so run/jump motion works. */
+    /* Lift pelvis, hips, knees, and the entire upper body together, then
+     * zero Y-velocity by collapsing prev_y onto pos_y. The kinematic
+     * lift alone would preserve the (gravity-accumulated) Y-velocity,
+     * which grows toward terminal velocity over many idle ticks; that
+     * stored velocity then erupts the moment the mech loses ground
+     * contact. We keep X velocity intact so run/jump motion works.
+     *
+     * Knees are translated by the same dy_pelvis as the hips so the
+     * thigh constraint stays at rest length. The shin (knee→foot) gets
+     * stretched by dy_pelvis instead — the constraint solver resolves
+     * it on the next tick. This is preferable to fighting the run
+     * pose's lateral knee swing by snapping knees to mid-chain. */
     int up_with_pelvis[] = {
         PART_PELVIS, PART_L_HIP, PART_R_HIP,
+        PART_L_KNEE, PART_R_KNEE,
         PART_CHEST, PART_NECK, PART_HEAD,
         PART_L_SHOULDER, PART_R_SHOULDER,
         PART_L_ELBOW, PART_R_ELBOW,
@@ -599,16 +678,18 @@ void mech_post_physics_anchor(World *w, int mid) {
         p->prev_y[idx] = p->pos_y[idx];   /* zero Y velocity */
     }
 
-    /* Knees: snap each to mid-chain so the leg is straight after the
-     * lift. If we left them where physics put them, the now-lifted hip
-     * would stretch the thigh constraint enormously. Same Y-velocity
-     * zeroing as the upper body. */
-    float dy_knee_l = knee_y_target - p->pos_y[b + PART_L_KNEE];
-    float dy_knee_r = knee_y_target - p->pos_y[b + PART_R_KNEE];
-    physics_translate_kinematic(p, b + PART_L_KNEE, 0.0f, dy_knee_l);
-    physics_translate_kinematic(p, b + PART_R_KNEE, 0.0f, dy_knee_r);
-    p->prev_y[b + PART_L_KNEE] = p->pos_y[b + PART_L_KNEE];
-    p->prev_y[b + PART_R_KNEE] = p->pos_y[b + PART_R_KNEE];
+    /* In STAND, the legs are static, so finish straightening them by
+     * snapping each knee to mid-chain Y. (Same X is left to layout from
+     * the pose pass next tick.) Skipping this in RUN lets the stride
+     * cycle drive knee swing naturally. */
+    if (m->anim_id == ANIM_STAND) {
+        float dy_knee_l = knee_y_target - p->pos_y[b + PART_L_KNEE];
+        float dy_knee_r = knee_y_target - p->pos_y[b + PART_R_KNEE];
+        physics_translate_kinematic(p, b + PART_L_KNEE, 0.0f, dy_knee_l);
+        physics_translate_kinematic(p, b + PART_R_KNEE, 0.0f, dy_knee_r);
+        p->prev_y[b + PART_L_KNEE] = p->pos_y[b + PART_L_KNEE];
+        p->prev_y[b + PART_R_KNEE] = p->pos_y[b + PART_R_KNEE];
+    }
 }
 
 bool mech_try_fire(World *w, int mid, ClientInput in) {
@@ -691,8 +772,16 @@ void mech_kill(World *w, int mid, int killshot_part, Vec2 dir, float impulse) {
      * coherent; gravity now owns the trajectory. */
     clear_pose(m);
 
-    /* Killshot impulse to the hit part, ripples through constraints. */
-    int idx = m->particle_base + killshot_part;
+    /* Killshot impulse to the pelvis, not the hit part. The pelvis is
+     * always connected to the rest of the body via active constraints,
+     * so the impulse propagates through the skeleton and the body
+     * ragdolls as a unit. Putting it on the hit part would let a
+     * dismembered limb (e.g. L_ELBOW after a left-arm tear) take the
+     * full kick by itself; with no body mass to absorb it the limb
+     * flies clear across the level and pins against the world wall —
+     * visually a long bone-shaped line from the corpse to the wall. */
+    (void)killshot_part;
+    int idx = m->particle_base + PART_PELVIS;
     physics_apply_impulse(&w->particles, idx,
         (Vec2){ dir.x * impulse, dir.y * impulse });
 
@@ -701,7 +790,8 @@ void mech_kill(World *w, int mid, int killshot_part, Vec2 dir, float impulse) {
     w->last_event_time = 0.0f;
     w->hit_pause_ticks = 5;       /* ~83 ms at 60 Hz */
     w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.6f);
-    LOG_I("mech_kill: id=%d (part=%d, impulse=%.1f)", mid, killshot_part, impulse);
+    LOG_I("mech_kill: id=%d (part=%d, impulse=%.1f, mask=0x%02x)",
+          mid, killshot_part, impulse, m->dismember_mask);
 }
 
 bool mech_apply_damage(World *w, int mid, int part, float dmg, Vec2 dir) {

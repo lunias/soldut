@@ -5,6 +5,7 @@
 #include "mech.h"
 #include "platform.h"
 #include "render.h"
+#include "shotmode.h"
 #include "simulate.h"
 #include "version.h"
 #include "weapons.h"
@@ -13,6 +14,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 /*
  * M1 entry point.
@@ -78,9 +81,18 @@ static void draw_diag(void *user, int sw, int sh) {
 }
 
 int main(int argc, char **argv) {
-    (void)argc; (void)argv;
     log_init("soldut.log");
     LOG_I("soldut " SOLDUT_VERSION_STRING " (M1) starting");
+
+    /* Shot mode: render a scripted scene to PNGs and exit. The script
+     * format and runner live in src/shotmode.{h,c}. */
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) {
+            int rc = shotmode_run(argv[i + 1]);
+            log_shutdown();
+            return rc;
+        }
+    }
 
     Game game;
     if (!game_init(&game)) { log_shutdown(); return EXIT_FAILURE; }
@@ -145,9 +157,15 @@ int main(int argc, char **argv) {
 
     LOG_I("soldut shutting down (ran %llu sim ticks)",
           (unsigned long long)game.world.tick);
-    decal_shutdown();
-    platform_shutdown();
-    game_shutdown(&game);
+
+    /* Fast exit: only flush the log file, then hand the rest back to
+     * the OS. raylib's CloseAudioDevice (miniaudio teardown) and
+     * CloseWindow (glfwTerminate / Wayland connection close) can each
+     * stall the process for a noticeable beat on WSLg/Linux; arena
+     * destroys would also free ~60 MB. None of that is necessary —
+     * the kernel reclaims memory, GL context, and audio device when
+     * the process exits. We only flush our own log so the last lines
+     * survive. */
     log_shutdown();
-    return EXIT_SUCCESS;
+    _exit(EXIT_SUCCESS);
 }

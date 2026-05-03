@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics
+.PHONY: all clean distclean raylib enet windows macos help test-physics shot
 
 all: $(BIN)
 
@@ -62,6 +62,13 @@ $(BUILD_DIR)/headless_sim: tests/headless_sim.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(
 
 test-physics: $(BUILD_DIR)/headless_sim
 	./$(BUILD_DIR)/headless_sim
+
+# Shot mode — drive a scripted scene through the real renderer and
+# write PNGs. Handy for visual diffs without filming. Override SCRIPT
+# to point at a different .shot file.
+SCRIPT ?= tests/shots/walk_right.shot
+shot: $(BIN)
+	./$(BIN) --shot $(SCRIPT)
 
 $(BIN): $(OBJ) $(RAYLIB_LIB) $(ENET_LIB)
 	$(CC) $(OBJ) $(LDFLAGS) $(LIBS) -o $@
@@ -115,5 +122,7 @@ help:
 	@echo "  make macos       cross-compile to macOS via zig cc"
 	@echo "  make clean       remove our build artifacts"
 	@echo "  make distclean   also rebuild third_party libs"
+	@echo "  make shot        run scripted scene → build/shots/*.png"
+	@echo "                   override script: make shot SCRIPT=path/to/x.shot"
 
 -include $(DEP)

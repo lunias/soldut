@@ -34,6 +34,18 @@ void physics_integrate(World *w, float dt) {
     ParticlePool *p = &w->particles;
     const float damp = PHYSICS_VELOCITY_DAMP;
 
+    /* Swept collision against tiles. The discrete inside-tile escape
+     * in collide_map_one_pass only fires if the post-integrate center
+     * lands inside a solid tile. With sustained jet from below, a
+     * particle can build up enough velocity to skip clear over a
+     * 1-tile-thick platform in one tick (it's below the platform
+     * before integrate, above the platform after — never inside).
+     * Ray-cast from prev to the integrated pos and clamp the move at
+     * the first solid we hit so the post-integrate pos always lies
+     * just shy of the tile we'd otherwise have tunneled through. */
+    const Level *L = &w->level;
+    const float r  = PHYSICS_PARTICLE_RADIUS;
+
     for (int i = 0; i < p->count; ++i) {
         if (!(p->flags[i] & PARTICLE_FLAG_ACTIVE)) continue;
         if (p->inv_mass[i] <= 0.0f) continue;
@@ -44,6 +56,27 @@ void physics_integrate(World *w, float dt) {
         /* x_{n+1} = x_n + (x_n - x_{n-1}) * damp  (forces already added) */
         float nx = px + (px - qx) * damp;
         float ny = py + (py - qy) * damp;
+
+        /* Sweep from start-of-tick prev to the integrated pos. We
+         * sweep from prev (not from px, the post-force pre-integrate
+         * pos) because forces alone can also push a particle through
+         * a tile in one tick. If the path hits a solid before the
+         * end, pull back the move to land r pixels short of the
+         * crossing on the side we came from. */
+        float dx = nx - qx;
+        float dy = ny - qy;
+        float seg2 = dx * dx + dy * dy;
+        if (seg2 > 1.0f) {
+            float t = 1.0f;
+            if (level_ray_hits(L, (Vec2){qx, qy}, (Vec2){nx, ny}, &t)) {
+                float seg_len = sqrtf(seg2);
+                /* Stop r+epsilon px before the tile boundary. */
+                float t_clamped = t - (r + 0.5f) / seg_len;
+                if (t_clamped < 0.0f) t_clamped = 0.0f;
+                nx = qx + dx * t_clamped;
+                ny = qy + dy * t_clamped;
+            }
+        }
 
         p->prev_x[i] = px;
         p->prev_y[i] = py;
@@ -241,19 +274,57 @@ static void collide_map_one_pass(World *w, bool finalize_velocity) {
                     float d = sqrtf(d2);
                     nx = ddx / d; ny = ddy / d;
                     amount = r - d;
+                    /* If the particle ends up on the opposite side
+                     * of the tile from where it came (e.g., constraint
+                     * relaxation flicked a body part through a 1-tile
+                     * platform), push it back toward the side it
+                     * came from instead of further out the wrong side. */
+                    float ppx = p->prev_x[i];
+                    float ppy = p->prev_y[i];
+                    if (ppy > maxy && py < miny) {
+                        nx = 0; ny = 1; amount = (maxy - py) + r;
+                    } else if (ppy < miny && py > maxy) {
+                        nx = 0; ny = -1; amount = (py - miny) + r;
+                    } else if (ppx > maxx && px < minx) {
+                        nx = 1; ny = 0; amount = (maxx - px) + r;
+                    } else if (ppx < minx && px > maxx) {
+                        nx = -1; ny = 0; amount = (px - minx) + r;
+                    }
                 } else {
-                    /* Center inside the tile. Choose the exit direction
-                     * by checking which neighbouring tile is empty
-                     * (priority: up, left, right, down). The "shortest
-                     * axis" heuristic ping-pongs between adjacent solid
-                     * tiles when a foot has sunk into a flat floor;
-                     * this neighbour-aware version always picks the
-                     * available escape route. */
+                    /* Center inside the tile. Pick the exit by where the
+                     * particle came from (its prev position is stable
+                     * across iteration pushes, since position-only
+                     * contacts don't update prev), and only fall back to
+                     * a neighbour-priority heuristic when prev was also
+                     * inside the tile.
+                     *
+                     * Without the came-from check, a jet that drives a
+                     * particle up into a 1-tile-thick platform from
+                     * below gets pushed UP through to the top (open-up
+                     * was first in priority), tunneling the body
+                     * through the platform and adding to its upward
+                     * speed in the process. */
                     bool open_up    = (level_tile_at(L, cx, cy - 1) != TILE_SOLID);
                     bool open_down  = (level_tile_at(L, cx, cy + 1) != TILE_SOLID);
                     bool open_left  = (level_tile_at(L, cx - 1, cy) != TILE_SOLID);
                     bool open_right = (level_tile_at(L, cx + 1, cy) != TILE_SOLID);
-                    if (open_up) {
+
+                    float ppx = p->prev_x[i];
+                    float ppy = p->prev_y[i];
+                    bool from_above = ppy < miny;   /* moving down into tile */
+                    bool from_below = ppy > maxy;   /* moving up into tile */
+                    bool from_left  = ppx < minx;
+                    bool from_right = ppx > maxx;
+
+                    if (from_below && open_down) {
+                        nx = 0; ny = 1; amount = (maxy - py) + r;
+                    } else if (from_above && open_up) {
+                        nx = 0; ny = -1; amount = (py - miny) + r;
+                    } else if (from_left && open_left) {
+                        nx = -1; ny = 0; amount = (px - minx) + r;
+                    } else if (from_right && open_right) {
+                        nx = 1; ny = 0; amount = (maxx - px) + r;
+                    } else if (open_up) {
                         nx = 0; ny = -1; amount = (py - miny) + r;
                     } else if (open_left) {
                         nx = -1; ny = 0; amount = (px - minx) + r;
@@ -302,6 +373,27 @@ void physics_constrain_and_collide(World *w) {
         solve_constraints_one_pass(w);
         collide_map_one_pass(w, /*finalize_velocity*/ last);
     }
+}
+
+void physics_translate_kinematic_swept(ParticlePool *p, const Level *L,
+                                       int i, float dx, float dy) {
+    float qx = p->pos_x[i];
+    float qy = p->pos_y[i];
+    float nx = qx + dx;
+    float ny = qy + dy;
+    float seg2 = dx * dx + dy * dy;
+    if (seg2 > 1.0f) {
+        float t = 1.0f;
+        if (level_ray_hits(L, (Vec2){qx, qy}, (Vec2){nx, ny}, &t)) {
+            float seg_len = sqrtf(seg2);
+            float t_clamped = t - (PHYSICS_PARTICLE_RADIUS + 0.5f) / seg_len;
+            if (t_clamped < 0.0f) t_clamped = 0.0f;
+            dx *= t_clamped;
+            dy *= t_clamped;
+        }
+    }
+    p->pos_x[i]  += dx; p->pos_y[i]  += dy;
+    p->prev_x[i] += dx; p->prev_y[i] += dy;
 }
 
 void physics_apply_impulse(ParticlePool *p, int idx, Vec2 imp) {

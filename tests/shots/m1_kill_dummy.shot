@@ -1,0 +1,45 @@
+# m1_kill_dummy.shot — full M1 happy-path loop.
+#
+# Player spawns at (~520, 920) on a small platform.
+# Mid-map wall column at x=1760-1792, height ~160px above floor.
+# Dummy stands at (2400, 984). Pulse Rifle range 2400px, 18 dmg, 110ms cycle.
+# Dummy is 150 HP, so ~9 hits to kill.
+#
+# Verifies: stand → run → fall off platform → continue on floor → jet
+# over wall → fire-and-kill → ragdoll. Bursts the death sequence to
+# catch the dummy-glitches-on-kill behavior.
+
+window 1280 720
+seed   1 1
+out    build/shots/kill
+aim    900 920
+
+# Idle.
+at  20 shot stand_t020
+
+# Run right; we walk off the spawn platform around tick 70-80.
+at  30 press right
+burst run from 60 to 220 every 20
+
+# Continue across the floor toward the wall column.
+burst approach from 240 to 280 every 20
+
+# Jet to clear the 5-tile wall at col 55.
+at 290 press jet
+burst jet from 295 to 335 every 10
+at 335 release jet
+
+# Past the wall — keep running until we're roughly under the dummy's view.
+burst past from 350 to 480 every 20
+
+# Stop, aim at the dummy, hold fire long enough to drop it.
+at 490 release right
+at 490 aim 2400 984
+at 500 press fire
+burst fire from 510 to 620 every 10
+at 620 release fire
+
+# Watch the ragdoll/death state.
+burst death from 625 to 740 every 15
+
+at 760 end

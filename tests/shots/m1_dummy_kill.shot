@@ -1,0 +1,29 @@
+# m1_dummy_kill.shot — verify the kill-and-ragdoll path with the
+# player parked on the dummy platform.
+#
+# Layout reminder: dummy platform top y=1024 (cols 70-79, x=2240-2560),
+# dummy spawn (2400, 984). We spawn the player ~6 tiles to the dummy's
+# left so the rifle has a clear shot.
+
+window 1280 720
+seed   1 1
+out    build/shots/dummy
+contact_sheet sheet cols 4 cell 480 270
+
+# Pelvis at (2240, 984) → feet sit on the platform top (y=1020),
+# 4 px above the surface (y=1024). Same offset as the original spawn.
+spawn_at 2240 984
+mouse    1100 360                 # cursor right of player → rifle aims right
+
+at  20 shot stand_t020
+at  40 shot stand_t040            # let things settle
+
+at  60 press fire
+burst fire from 65 to 200 every 10
+at 200 release fire
+
+# Death and ragdoll — Pulse Rifle is 18 dmg @ 110 ms → ~9 hits ≈ 60
+# ticks of fire. We give 140 ticks to be sure the dummy drops.
+burst death from 210 to 360 every 15
+
+at 380 end

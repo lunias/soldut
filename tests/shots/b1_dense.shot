@@ -1,0 +1,18 @@
+# b1_dense.shot — every-tick screenshot through a normal platform fall.
+# If the legs bounce in-and-out of the ground at 1-tick frequency, we'll
+# catch it here. If they settle stable, the user's report points elsewhere.
+
+window 1280 720
+seed   1 1
+out    build/shots/b1
+mouse  900 360
+contact_sheet sheet cols 8 cell 256 144
+
+at  20 shot pre_t020
+at  30 press right
+
+# Walk off the spawn platform; landing should happen around tick 80-95.
+burst land from 80 to 130 every 1
+burst settled from 140 to 200 every 5
+
+at 220 end

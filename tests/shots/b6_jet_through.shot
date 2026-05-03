@@ -1,0 +1,24 @@
+# b6_jet_through.shot — reproduce the jet-through-platform clip.
+#
+# Spawn under the dummy platform (cols 70-79, row 32, top y=1024,
+# bottom y=1056), feet on the floor at y=1148. Press jet and watch
+# whether the body stays under the platform, gets pinned to the
+# platform underside, or punches through it.
+
+window 1280 720
+seed   1 1
+out    build/shots/b6
+contact_sheet sheet cols 4 cell 480 270
+
+# Pelvis at (2300, 1112) puts feet at (2300, 1148) — under the
+# left half of the dummy platform, on the floor.
+spawn_at 2300 1112
+mouse    900 360
+
+at  10 shot stand_t010
+at  30 press jet
+burst climb from 35 to 90 every 5
+at  90 release jet
+burst fall from 100 to 200 every 15
+
+at 220 end

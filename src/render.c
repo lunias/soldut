@@ -16,6 +16,7 @@ void renderer_init(Renderer *r, int sw, int sh, Vec2 follow) {
     r->shake_phase     = 0.0f;
     r->last_cursor_screen = (Vec2){ sw * 0.5f, sh * 0.5f };
     r->last_cursor_world  = follow;
+    r->cam_dt_override    = 0.0f;
 }
 
 Vec2 renderer_screen_to_world(const Renderer *r, Vec2 screen) {
@@ -94,10 +95,59 @@ static void draw_bone(const ParticlePool *p, int a, int b, float thick, Color c)
     DrawLineEx(va, vb, thick, c);
 }
 
+/* True if a CSTR_DISTANCE constraint between particles a and b is
+ * present and still active in the pool. After a limb gets dismembered,
+ * the relevant distance constraints are flagged inactive; the bones
+ * connecting those particles must not be rendered or the corpse will
+ * trail a stretched bone-shaped line across the level as the dead body
+ * separates from the orphaned limb. */
+static bool bone_constraint_active(const ConstraintPool *cp, int a, int b) {
+    for (int i = 0; i < cp->count; ++i) {
+        const Constraint *c = &cp->items[i];
+        if (c->kind != CSTR_DISTANCE) continue;
+        if ((c->a == a && c->b == b) || (c->a == b && c->b == a)) {
+            return c->active != 0;
+        }
+    }
+    /* No constraint found between this pair — render normally. The hip
+     * plate, shoulder plate, etc. are constraints; the cross-body
+     * bones we draw all have one. If a future bone has none, this
+     * keeps it visible. */
+    return true;
+}
+
+static void draw_bone_chk(const ParticlePool *p, const ConstraintPool *cp,
+                          int a, int b, float thick, Color c) {
+    if (!bone_constraint_active(cp, a, b)) return;
+    draw_bone(p, a, b, thick, c);
+}
+
+/* Bone draw that stops at the first solid tile. Used for the rifle
+ * barrel and for arm bones that occasionally cross a thin solid when
+ * the aim direction points into one — physics has already pushed each
+ * particle out, but the line connecting two outside points can still
+ * graze a tile corner or a 1-tile-wide pillar. */
+static void draw_bone_clamped(const Level *L, Vec2 a, Vec2 b, float thick, Color c) {
+    float t = 1.0f;
+    Vec2  end = b;
+    if (level_ray_hits(L, a, b, &t)) {
+        /* Pull back a hair so we don't draw on the tile edge. */
+        if (t > 0.02f) t -= 0.02f; else t = 0.0f;
+        end = (Vec2){ a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t };
+    }
+    DrawLineEx((Vector2){a.x, a.y}, (Vector2){end.x, end.y}, thick, c);
+}
+
 /* Polygonal mech rendering — flat-shaded plates per
  * [06-rendering-audio.md]. M1 uses thick capsule lines as plates;
- * baked sprites land at M5 (asset pass). */
-static void draw_mech(const ParticlePool *p, const Mech *m) {
+ * baked sprites land at M5 (asset pass). The Level pointer is only
+ * used to clamp arm/rifle bones that would otherwise visibly cross a
+ * thin solid (e.g., aiming through the col-55 wall). The
+ * ConstraintPool lets us skip drawing bones whose distance constraint
+ * has been deactivated by dismemberment so the corpse doesn't trail a
+ * stretched bone across the level. */
+static void draw_mech(const ParticlePool *p, const ConstraintPool *cp,
+                      const Mech *m, const Level *L) {
     int b = m->particle_base;
     int idx_head    = b + PART_HEAD;
     int idx_neck    = b + PART_NECK;
@@ -121,20 +171,20 @@ static void draw_mech(const ParticlePool *p, const Mech *m) {
     int front_leg_knee = m->facing_left ? PART_L_KNEE  : PART_R_KNEE;
     int front_leg_foot = m->facing_left ? PART_L_FOOT  : PART_R_FOOT;
 
-    draw_bone(p, b + back_leg_hip,   b + back_leg_knee,  6.0f, leg_back);
-    draw_bone(p, b + back_leg_knee,  b + back_leg_foot,  5.5f, leg_back);
+    draw_bone_chk(p, cp, b + back_leg_hip,  b + back_leg_knee, 6.0f, leg_back);
+    draw_bone_chk(p, cp, b + back_leg_knee, b + back_leg_foot, 5.5f, leg_back);
 
     /* Torso — chest to pelvis as a thick beam plus shoulder span. */
-    draw_bone(p, idx_chest, idx_pelvis, 13.0f, body);
+    draw_bone_chk(p, cp, idx_chest, idx_pelvis, 13.0f, body);
     DrawCircleV((Vector2){ p->pos_x[idx_pelvis], p->pos_y[idx_pelvis] }, 6.0f, body);
     /* Hip plate. */
-    draw_bone(p, b + PART_L_HIP, b + PART_R_HIP, 10.0f, body);
+    draw_bone_chk(p, cp, b + PART_L_HIP, b + PART_R_HIP, 10.0f, body);
     /* Shoulder plate. */
-    draw_bone(p, b + PART_L_SHOULDER, b + PART_R_SHOULDER, 10.0f, body);
+    draw_bone_chk(p, cp, b + PART_L_SHOULDER, b + PART_R_SHOULDER, 10.0f, body);
 
     /* Front leg. */
-    draw_bone(p, b + front_leg_hip,  b + front_leg_knee,  6.5f, leg_front);
-    draw_bone(p, b + front_leg_knee, b + front_leg_foot,  6.0f, leg_front);
+    draw_bone_chk(p, cp, b + front_leg_hip,  b + front_leg_knee, 6.5f, leg_front);
+    draw_bone_chk(p, cp, b + front_leg_knee, b + front_leg_foot, 6.0f, leg_front);
 
     /* Back arm (the off-hand). */
     int back_sho = m->facing_left ? PART_R_SHOULDER : PART_L_SHOULDER;
@@ -144,34 +194,43 @@ static void draw_mech(const ParticlePool *p, const Mech *m) {
     int frnt_elb = m->facing_left ? PART_L_ELBOW    : PART_R_ELBOW;
     int frnt_hnd = m->facing_left ? PART_L_HAND     : PART_R_HAND;
 
-    /* Skip rendering bones whose distance constraints are gone — that's
-     * how a dismembered limb appears: the upstream constraint is dead
-     * but the limb particles continue to integrate freely. We render
-     * them anyway (the limb is still in the world); the visual cue is
-     * that they no longer track the body. */
+    /* Arm bones are gated by their distance constraints — when a limb
+     * is dismembered, both the upper-arm and forearm distance
+     * constraints get deactivated and the bones disappear. The arm
+     * particles keep integrating; they're just no longer drawn. */
     Color arm_back = (Color){body.r - 30, body.g - 30, body.b - 30, 255};
-    draw_bone(p, b + back_sho, b + back_elb, 5.0f, arm_back);
-    draw_bone(p, b + back_elb, b + back_hnd, 4.5f, arm_back);
+    draw_bone_chk(p, cp, b + back_sho, b + back_elb, 5.0f, arm_back);
+    if (bone_constraint_active(cp, b + back_elb, b + back_hnd)) {
+        Vec2 a = particle_pos(p, b + back_elb);
+        Vec2 c = particle_pos(p, b + back_hnd);
+        draw_bone_clamped(L, a, c, 4.5f, arm_back);
+    }
 
     /* Head + neck. */
-    draw_bone(p, idx_chest, idx_neck, 7.0f, body);
+    draw_bone_chk(p, cp, idx_chest, idx_neck, 7.0f, body);
     DrawCircleV((Vector2){ p->pos_x[idx_head], p->pos_y[idx_head] }, 9.0f, body);
     DrawCircleLines((int)p->pos_x[idx_head], (int)p->pos_y[idx_head], 9.0f, edge);
 
-    /* Front (rifle) arm. */
+    /* Front (rifle) arm — forearm and rifle clamped against the level
+     * because aim points often lie behind a thin solid. */
     Color arm_front = body;
-    draw_bone(p, b + frnt_sho, b + frnt_elb, 5.5f, arm_front);
-    draw_bone(p, b + frnt_elb, b + frnt_hnd, 5.0f, arm_front);
+    draw_bone_chk(p, cp, b + frnt_sho, b + frnt_elb, 5.5f, arm_front);
+    if (bone_constraint_active(cp, b + frnt_elb, b + frnt_hnd)) {
+        Vec2 a = particle_pos(p, b + frnt_elb);
+        Vec2 c = particle_pos(p, b + frnt_hnd);
+        draw_bone_clamped(L, a, c, 5.0f, arm_front);
+    }
 
-    /* Rifle: a small line from R_HAND in aim direction. */
+    /* Rifle: a small line from R_HAND in aim direction, stopped at
+     * the first solid tile so the barrel doesn't draw through walls. */
     if (m->alive) {
-        Vector2 rh = { p->pos_x[b + PART_R_HAND], p->pos_y[b + PART_R_HAND] };
-        Vector2 sh = { p->pos_x[b + PART_R_SHOULDER], p->pos_y[b + PART_R_SHOULDER] };
-        Vector2 d = { rh.x - sh.x, rh.y - sh.y };
-        float L = sqrtf(d.x * d.x + d.y * d.y);
-        if (L > 1.0f) { d.x /= L; d.y /= L; }
-        Vector2 muzzle = { rh.x + d.x * 22.0f, rh.y + d.y * 22.0f };
-        DrawLineEx(rh, muzzle, 3.0f, (Color){50, 60, 80, 255});
+        Vec2 rh = particle_pos(p, b + PART_R_HAND);
+        Vec2 sh = particle_pos(p, b + PART_R_SHOULDER);
+        float dx = rh.x - sh.x, dy = rh.y - sh.y;
+        float dl = sqrtf(dx * dx + dy * dy);
+        if (dl > 1.0f) { dx /= dl; dy /= dl; }
+        Vec2 muzzle = { rh.x + dx * 22.0f, rh.y + dy * 22.0f };
+        draw_bone_clamped(L, rh, muzzle, 3.0f, (Color){50, 60, 80, 255});
     }
 }
 
@@ -181,7 +240,10 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
                          float alpha, Vec2 cursor_screen,
                          RendererOverlayFn overlay_cb, void *overlay_user) {
     (void)alpha;
-    update_camera(r, w, sw, sh, GetFrameTime() > 0 ? GetFrameTime() : 1.0f / 60.0f);
+    float cam_dt = (r->cam_dt_override > 0.0f)
+                   ? r->cam_dt_override
+                   : (GetFrameTime() > 0 ? GetFrameTime() : 1.0f / 60.0f);
+    update_camera(r, w, sw, sh, cam_dt);
 
     /* Cache cursor positions for hud + camera lookahead. */
     r->last_cursor_screen = cursor_screen;
@@ -199,7 +261,8 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
             draw_level(&w->level);
             decal_draw_layer();
             for (int i = 0; i < w->mech_count; ++i) {
-                draw_mech(&w->particles, &w->mechs[i]);
+                draw_mech(&w->particles, &w->constraints,
+                          &w->mechs[i], &w->level);
             }
             fx_draw(&w->fx);
         EndMode2D();

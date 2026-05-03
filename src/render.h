@@ -12,6 +12,12 @@ typedef struct {
     float    shake_phase;
     Vec2     last_cursor_screen;
     Vec2     last_cursor_world;
+
+    /* When > 0, update_camera() uses this instead of GetFrameTime().
+     * Shot mode sets it to 1/60 so camera smoothing moves at the same
+     * rate it would in interactive play, regardless of how fast we
+     * render frames (tens of ms each, vs. wall-clock 16 ms). */
+    float    cam_dt_override;
 } Renderer;
 
 void renderer_init(Renderer *r, int screen_w, int screen_h, Vec2 follow);

@@ -144,10 +144,15 @@ void weapons_fire_hitscan(World *w, int mid) {
     Vec2 final_end;
     if (hit_t >= 0.0f) {
         final_end = (Vec2){ origin.x + dir.x * hit_t, origin.y + dir.y * hit_t };
-        /* Damage + impulse. The impulse rides on the bullet direction. */
-        float impulse_px = wpn->recoil_impulse * 4.0f;
-        mech_apply_damage(w, hit_mech, hit_part, wpn->damage,
-                          (Vec2){ dir.x * impulse_px, dir.y * impulse_px });
+        /* Damage. dir is a unit vector and is forwarded as-is —
+         * mech_apply_damage uses it only for blood-spray angle and to
+         * pass through to mech_kill, which scales by its own kill
+         * impulse. The previous "impulse_px" pre-scaling here got
+         * compounded with the kill scaling and produced a 432-px
+         * displacement on death (an L_ELBOW killshot left the elbow
+         * stuck ~430 px right of the shoulder, drawn as a long red
+         * line in the ragdoll). */
+        mech_apply_damage(w, hit_mech, hit_part, wpn->damage, dir);
     } else {
         final_end = (Vec2){ origin.x + dir.x * t_max, origin.y + dir.y * t_max };
         /* Sparks if it hit a wall. */

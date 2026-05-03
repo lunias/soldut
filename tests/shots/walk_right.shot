@@ -1,0 +1,28 @@
+# Walk-right + fire scene.
+#
+# Player spawns near (520, 920); the dummy stands at ~(2400, 984).
+# Aim is in world coordinates. Output goes to build/shots/<name>.png.
+
+window 1280 720
+seed   1 1
+out    build/shots
+aim    900 920
+
+# Idle: let the camera settle and the body stand up.
+at  30 shot idle_t030
+
+# Run right.
+at  60 press right
+at  90 shot run_t090
+at 120 shot run_t120
+at 150 release right
+at 180 shot stopped_t180
+
+# Aim at the dummy and fire a burst.
+at 200 aim 2400 984
+at 200 press fire
+at 230 shot fire_t230
+at 240 release fire
+at 280 shot after_t280
+
+at 320 end

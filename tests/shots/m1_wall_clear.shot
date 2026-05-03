@@ -1,0 +1,27 @@
+# m1_wall_clear.shot — try to land on top of the mid-map wall column.
+#
+# The wall is at col 55 (x=1760-1792), 5 tiles tall (top at y=992,
+# floor at y=1152). With air control 35% (98 px/s lateral) and jet
+# thrust 2200 px/s², we *should* be able to jet up over it if we time
+# the jet to start near the wall and hold right.
+
+window 1280 720
+seed   1 1
+out    build/shots/wallclear
+aim    2400 700
+
+at  10 shot stand_t010
+at  30 press right
+burst run from 60 to 280 every 40
+
+# Approach the wall — by tick 280 player is at x~1640 on the floor.
+# Jet just before contact and hold right through the climb + arc.
+at 280 press jet
+burst lift from 285 to 360 every 5
+at 360 release jet
+burst arc from 365 to 440 every 10
+
+# Check landing.
+burst land from 450 to 540 every 15
+
+at 560 end

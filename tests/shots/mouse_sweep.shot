@@ -1,0 +1,22 @@
+# mouse_sweep.shot — verify the new mouse + mouse_lerp directives.
+#
+# Stand still, sweep the cursor across the screen. The rifle arm should
+# track the screen cursor through the camera transform, exactly like
+# moving the mouse during real play. Aim points are screen-space.
+
+window 1280 720
+seed   1 1
+out    build/shots/mouse
+mouse  900 360            # cursor right of player at start
+
+at  20 shot start_t020
+mouse_lerp 200 360 from 30 to 90      # sweep cursor left
+at  60 shot midleft_t060
+at  90 shot left_t090
+mouse_lerp 1100 200 from 100 to 180   # sweep cursor up-right
+at 140 shot midup_t140
+at 180 shot upright_t180
+mouse_lerp 900 600 from 190 to 260    # sweep cursor down
+at 260 shot down_t260
+
+at 280 end
