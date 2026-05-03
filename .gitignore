@@ -1,0 +1,24 @@
+# Claude Code local state
+.claude/
+
+# Build artifacts
+build/
+*.o
+*.a
+*.exe
+*.dll
+*.dylib
+*.so
+soldut
+soldut_editor
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
+
+# Logs
+*.log
