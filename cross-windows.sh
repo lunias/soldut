@@ -23,10 +23,19 @@ ZIG_TARGET=x86_64-windows-gnu
 
 echo "[cross-windows] building raylib for $ZIG_TARGET..."
 make -C third_party/raylib/src clean >/dev/null
+# Two raylib-meets-zig-cc issues to paper over:
+#   1. clang 16+ (which `zig cc` ships) makes
+#      -Wincompatible-function-pointer-types a default error; raylib 5.x
+#      has a stale ReleaseFileGLTFCallback signature that doesn't match
+#      its vendored cgltf's file.release field. Suppress the warning.
+#   2. With a Windows target, `zig cc` defaults to writing *.obj, but
+#      raylib's Makefile passes a *.o OBJS list to `ar`. The wrapper
+#      tools/zigcc-objout injects `-o <name>.o` for compile-only invocations.
 make -C third_party/raylib/src PLATFORM=PLATFORM_DESKTOP RAYLIB_LIBTYPE=STATIC \
-     CC="zig cc -target $ZIG_TARGET" \
+     CC="$PWD/tools/zigcc-objout -target $ZIG_TARGET" \
      AR="zig ar" \
-     OS=Windows_NT
+     OS=Windows_NT \
+     CUSTOM_CFLAGS="-Wno-incompatible-function-pointer-types"
 
 echo "[cross-windows] building enet for $ZIG_TARGET..."
 rm -f third_party/enet/*.o third_party/enet/libenet.a

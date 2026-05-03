@@ -39,9 +39,14 @@ build_arch() {
 
     echo "[cross-macos] building raylib for $zig_target..."
     make -C third_party/raylib/src clean >/dev/null
+    # See note in cross-windows.sh — same stale GLTF callback signature
+    # tripping clang 16+'s now-default-error pointer-type check. macOS
+    # targets don't need the *.obj→*.o wrapper, but it's a no-op there
+    # so we use it anyway to keep the two cross scripts consistent.
     make -C third_party/raylib/src PLATFORM=PLATFORM_DESKTOP RAYLIB_LIBTYPE=STATIC \
-         CC="zig cc -target $zig_target -isysroot $SDK_DIR" \
-         AR="zig ar"
+         CC="$PWD/tools/zigcc-objout -target $zig_target -isysroot $SDK_DIR" \
+         AR="zig ar" \
+         CUSTOM_CFLAGS="-Wno-incompatible-function-pointer-types"
 
     echo "[cross-macos] building enet for $zig_target..."
     rm -f third_party/enet/*.o third_party/enet/libenet.a

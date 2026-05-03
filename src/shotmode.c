@@ -22,6 +22,13 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#ifdef _WIN32
+#include <direct.h>
+#define SHOT_MKDIR(path) _mkdir(path)
+#else
+#define SHOT_MKDIR(path) mkdir((path), 0755)
+#endif
+
 /* ---- Script representation ---------------------------------------- */
 
 typedef enum {
@@ -343,11 +350,11 @@ static void mkdir_p(const char *path) {
     for (char *p = buf + 1; *p; ++p) {
         if (*p == '/') {
             *p = 0;
-            mkdir(buf, 0755);
+            SHOT_MKDIR(buf);
             *p = '/';
         }
     }
-    mkdir(buf, 0755);
+    SHOT_MKDIR(buf);
 }
 
 /* ---- Spawn — mirror of main.c::seed_world. Kept inline so this module

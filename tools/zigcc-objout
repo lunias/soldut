@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# zigcc-objout — wrap `zig cc` so compile-only invocations always emit
+# *.o, even on Windows targets where `zig cc` otherwise defaults to *.obj.
+#
+# raylib's Makefile uses recipes like `$(CC) -c $<` (no explicit -o) and
+# then archives an OBJS list spelled with .o suffixes — so the .obj
+# default breaks the ar step. We inject `-o <basename>.o` for any
+# invocation that has -c, no -o, and exactly one *.c source.
+set -eu
+
+args=("$@")
+src=""
+src_count=0
+has_c=0
+has_o=0
+for ((i=0; i<${#args[@]}; i++)); do
+    case "${args[i]}" in
+        -c) has_c=1 ;;
+        -o) has_o=1 ;;
+        *.c) src="${args[i]}"; src_count=$((src_count+1)) ;;
+    esac
+done
+
+if [[ $has_c -eq 1 && $has_o -eq 0 && $src_count -eq 1 ]]; then
+    exec zig cc "${args[@]}" -o "${src%.c}.o"
+fi
+exec zig cc "${args[@]}"

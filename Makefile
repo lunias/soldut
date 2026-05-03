@@ -81,12 +81,22 @@ $(BUILD_DIR):
 
 # raylib: only built once unless the source changes. The vendored copy
 # may already ship libraylib.a; if so we keep it.
+#
+# CUSTOM_CFLAGS suppresses -Wincompatible-function-pointer-types entirely:
+# clang 16+ (Apple Clang in Xcode 15+, and `zig cc`) makes it a default
+# error, but raylib 5.x has a stale ReleaseFileGLTFCallback signature
+# that doesn't match its vendored cgltf's file.release field. gcc
+# silently ignores unknown -Wno-<flag> names so this is safe on Linux too.
+RAYLIB_CFLAGS_OVERRIDE = -Wno-incompatible-function-pointer-types
+
 $(RAYLIB_LIB):
 	@echo "[soldut] building raylib for $(PLATFORM)..."
-	$(MAKE) -C third_party/raylib/src PLATFORM=PLATFORM_DESKTOP RAYLIB_LIBTYPE=STATIC
+	$(MAKE) -C third_party/raylib/src PLATFORM=PLATFORM_DESKTOP RAYLIB_LIBTYPE=STATIC \
+	    CUSTOM_CFLAGS="$(RAYLIB_CFLAGS_OVERRIDE)"
 
 raylib:
-	$(MAKE) -C third_party/raylib/src PLATFORM=PLATFORM_DESKTOP RAYLIB_LIBTYPE=STATIC
+	$(MAKE) -C third_party/raylib/src PLATFORM=PLATFORM_DESKTOP RAYLIB_LIBTYPE=STATIC \
+	    CUSTOM_CFLAGS="$(RAYLIB_CFLAGS_OVERRIDE)"
 
 ENET_SRC := $(wildcard third_party/enet/*.c)
 ENET_OBJ := $(ENET_SRC:.c=.o)
