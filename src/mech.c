@@ -549,6 +549,14 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
     Mech *m = &w->mechs[mid];
     const Chassis *ch = mech_chassis((ChassisId)m->chassis_id);
 
+    /* Latch aim from the input. ClientInput.aim_x/y are world-space:
+     * the client converts cursor screen→world via its camera before
+     * sending. Server reads as-is. The single-player path also writes
+     * world-space directly into latched_input.aim_x/y. */
+    if (in.aim_x != 0.0f || in.aim_y != 0.0f) {
+        m->aim_world = (Vec2){ in.aim_x, in.aim_y };
+    }
+
     if (m->alive && !m->is_dummy) {
         bool grounded = any_foot_grounded(w, m);
         m->grounded = grounded;

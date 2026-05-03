@@ -57,25 +57,42 @@ See [CURRENT_STATE.md](../CURRENT_STATE.md) and [TRADE_OFFS.md](../TRADE_OFFS.md
 
 ## M2 — Networking foundation
 
-**Four weeks.**
+**Four weeks.** **Status: foundation in 2026-05-03; bake test pending.**
 
 **Goal**: Two players on a LAN can play the M1 loop together.
 
-- [ ] `net.h` interface
-- [ ] ENet host/client wrapping
-- [ ] Packet header (protocol id, sequence, ack bitfield)
-- [ ] Channels: STATE, EVENT, CHAT, LOBBY
-- [ ] Client input upload (60 Hz) with sequence numbers
-- [ ] Server simulate loop (60 Hz) consuming inputs
-- [ ] Server snapshot broadcast (30 Hz) — uncompressed first
-- [ ] Client snapshot interpolation for remote mechs
-- [ ] Client-side prediction + reconciliation for local mech
-- [ ] Lag compensation for hitscan (server rewinds bone history)
-- [ ] Connection handshake (challenge nonce, version check)
-- [ ] LAN broadcast for server discovery
-- [ ] Direct-connect by IP+port
+- [x] `net.h` interface
+- [x] ENet host/client wrapping
+- [x] Packet header (tag byte + per-message body; ENet handles
+      sequencing & ack bitfield internally on reliable channels)
+- [x] Channels: STATE, EVENT, CHAT, LOBBY
+- [x] Client input upload (60 Hz) with sequence numbers
+- [x] Server simulate loop (60 Hz) consuming inputs
+- [x] Server snapshot broadcast (30 Hz) — uncompressed
+- [ ] Client snapshot **interpolation** for remote mechs (snapshots
+      apply instantly today; the interp_delay path is a TRADE_OFFS
+      entry — fine on LAN, needed once we're across the internet)
+- [x] Client-side prediction + reconciliation for local mech
+- [x] Lag compensation for hitscan (server rewinds bone history,
+      capped at 200 ms)
+- [x] Connection handshake (challenge nonce, version check) —
+      uses keyed FNV1a today, HMAC-SHA256 deferred (see TRADE_OFFS.md)
+- [x] LAN broadcast for server discovery
+- [x] Direct-connect by IP+port
 
 **Done when**: two laptops on the same WiFi can both run the binary, one types `:23073` to host, the other types the host's IP, and they shoot each other for ten minutes without a desync.
+
+**Carried forward (deliberate, not finished here):**
+
+- Mid-tick interpolation of remote mechs (the "render 100 ms in the past" path).
+- Snapshot delta encoding (full snapshots only at M2 — fine for
+  small player counts, will hit the bandwidth budget at 16+ players).
+- Server-side entity culling (also a bandwidth + anti-ESP feature).
+- Visual smoothing of reconciliation jumps on the client.
+- HMAC-SHA256 for handshake tokens.
+- In-game lobby UI (M4).
+
+See [CURRENT_STATE.md](../CURRENT_STATE.md) and [TRADE_OFFS.md](../TRADE_OFFS.md) for the full picture.
 
 ## M3 — Combat depth
 

@@ -5,7 +5,7 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-03** (end of M1 debug pass).
+Last updated: **2026-05-03** (M2 networking foundation in).
 
 ---
 
@@ -15,9 +15,36 @@ Last updated: **2026-05-03** (end of M1 debug pass).
 |-----------|-----------------------------------------|
 | **M0**    | Done — see [README.md](README.md).      |
 | **M1**    | Playable end-to-end. B1, B3, B4, B5, B6, B7 fixed 2026-05-03. Close-delay fixed same day. |
-| **M2**    | Not started.                            |
+| **M2**    | Foundation lands 2026-05-03. Host/client handshake works locally; per-tick input ship + 30 Hz snapshot broadcast + client-side prediction & replay + per-mech bone history for hitscan lag compensation are wired. LAN-only, full snapshots, no mid-tick interpolation of remote mechs (see TRADE_OFFS.md). Two-laptop bake test still pending. |
 
 ---
+
+## Networking modes (M2)
+
+`./soldut` opens single-player tutorial as before. New entry points:
+
+- `./soldut --host [PORT]` — runs an authoritative server on UDP
+  port `PORT` (default `23073`) plus a local client. Other players
+  connect with `--connect`. The host plays as mech id 0; remote
+  joiners get sequential mech ids starting at 2 (mech 1 is the
+  M1 dummy on the host's side).
+- `./soldut --connect HOST[:PORT] [--name NAME]` — joins a server.
+  Connection flow: ENet low-level handshake → `CONNECT_REQUEST` →
+  `CHALLENGE`(nonce, token) → `CHALLENGE_RESPONSE` → `ACCEPT` →
+  `INITIAL_STATE`. Client then ships one `ClientInput` per sim tick
+  (60 Hz, on `STATE` channel unreliable) and applies snapshots as
+  they arrive (30 Hz default broadcast).
+
+A discovery socket at `PORT+1` answers `DISCOVERY_QUERY` broadcasts
+with a `DISCOVERY_REPLY`. `net_discover_lan` sends the broadcast;
+`net_discover_drain` returns whatever has arrived. There's no UI for
+this yet — the helpers exist, ready for M4 lobby work.
+
+The first `--host` + `--connect 127.0.0.1` round-trip on the same
+machine completes in <100 ms in playtest. Two mechs in one window
+(the host's keyboard mech + the remote mech driven by the second
+process's input) are simulated authoritatively on the host side and
+streamed to the client at 30 Hz.
 
 ## What works
 

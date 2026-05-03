@@ -32,3 +32,16 @@ const Weapon *weapon_def(int id);
  * mech and the level tile grid; applies damage and recoil; spawns the
  * tracer FX. */
 void weapons_fire_hitscan(World *w, int mid);
+
+/* Server-side: same but uses lag-compensated bone positions for the
+ * targets. The client's perceived snapshot was rendered ~`interp_ms`
+ * ms in the past plus the shooter's RTT/2; we look up that historical
+ * tick in each potential target's lag_hist and ray-test against
+ * those positions. Passing -1 for `shot_at_tick` falls back to
+ * weapons_fire_hitscan. */
+void weapons_fire_hitscan_lag_comp(World *w, int mid, uint64_t shot_at_tick);
+
+/* Client-only: simulate the *visual* aspects of firing (recoil + tracer
+ * + cooldown decrement) without applying damage or hits. The server
+ * authoritative result will arrive in a snapshot ~RTT later. */
+void weapons_predict_local_fire(World *w, int mid);

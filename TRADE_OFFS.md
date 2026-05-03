@@ -201,12 +201,117 @@ Last updated: **2026-05-03**.
 
 ## Networking
 
-### Single-player only
+### Non-cryptographic handshake token (keyed FNV1a, not HMAC-SHA256)
 
-- **What we did** — No network code exists. Local mech runs the player
-  input; the dummy is local too.
-- **Why** — M2 territory.
-- **Revisit when** — M2.
+- **What we did** — `mint_token` in `src/net.c` builds a 32-bit token
+  from `fnv1a_64(secret || nonce || addr_host) >> 32` and uses it as
+  the CHALLENGE / CHALLENGE_RESPONSE proof. The design canon
+  ([05-networking.md](documents/05-networking.md) §"NAT and the IP+port
+  join model") calls for HMAC-SHA256.
+- **Why** — Adding SHA-256 is ~150 LOC of well-known code we don't
+  need to ship M2's "two-laptop test." Threat model is "stranger on the
+  LAN" — they can't observe the secret, can't replay because the nonce
+  is fresh per-connection, and the address binding makes a token from
+  one connection useless on another. A real HMAC-SHA256 buys
+  hash-extension resistance we don't currently care about.
+- **Revisit when** —
+  - We expose the server to the open internet (master server, NAT
+    hole-punching). External attackers are a different threat model.
+  - Anyone reports anti-spoof bypasses on the LAN.
+  - We add encryption-at-rest for chat / lobby messages — at that
+    point we'd want a real KDF.
+
+### No snapshot delta encoding (full snapshots only)
+
+- **What we did** — `snapshot_encode` always serializes every mech in
+  full (22 bytes each) regardless of what changed. The wire format
+  has the `baseline_tick` field but we always set it to 0.
+- **Why** — Per [10-performance-budget.md](documents/10-performance-budget.md),
+  the budget without delta is **~5.6 Mbps host upstream at 32 players,
+  30 Hz**. Above the 2 Mbps target. For M2 ("two laptops shoot each
+  other"), uncompressed is ~22 KB/s = 175 kbps each direction —
+  trivial. The delta path is the main bandwidth optimization for the
+  16+ player case.
+- **Revisit when** —
+  - We host an 8+ player playtest and a participant reports stutter
+    / packet loss correlating with scene complexity.
+  - Profiling shows the snapshot path consuming >5% of host CPU.
+  - We do an internet-public test where uplink is the bottleneck.
+
+### No client-side visual smoothing of reconciliation jumps
+
+- **What we did** — `Reconcile.visual_offset` is computed and
+  decayed but the renderer never reads it. When the server overrules
+  client prediction, the local mech "snaps" to the corrected position.
+- **Why** — On a LAN the corrections are sub-pixel; the snap is
+  invisible. The smoothing only matters on internet connections with
+  sustained 50+ ms RTT. M2 is LAN-only by spec.
+- **Revisit when** — We do an internet test (master server / direct
+  connect over WAN) and corrections become visible. The hook (visual
+  offset + smoothing tick) is already wired; just needs the renderer
+  to read it.
+
+### No server-side entity culling
+
+- **What we did** — Server sends every mech's snapshot to every
+  peer regardless of whether the receiver can see it.
+- **Why** — Culling cuts bandwidth and is the strongest defense
+  against ESP / wallhack cheats (don't send entities the client
+  shouldn't know about). Implementing it well needs a per-peer
+  visibility model (line-of-sight + small buffer); not load-bearing
+  at M2 scale (2 players, both visible to each other).
+- **Revisit when** —
+  - We ship M3 maps with rooms / vertical layers where two players
+    can be off-screen from each other.
+  - Bandwidth becomes a problem (see "no delta encoding" above).
+  - Cheats become a reported issue.
+
+### No client-side mid-tick interpolation of remote mechs
+
+- **What we did** — `snapshot_apply` overwrites remote mech
+  positions instantly when each snapshot arrives. The doc
+  ([05-networking.md](documents/05-networking.md) §4 "Snapshot
+  interpolation") prescribes rendering remote mechs ~100 ms in the
+  past, between the two most recent snapshots.
+- **Why** — At 30 Hz, snapshots arrive every 33 ms. Two snapshots
+  buffered + lerp by `t = (now - snap_a.time) / (snap_b.time - snap_a.time)`
+  is the standard fix for jitter, but on a LAN with 1-2 ms jitter
+  it's a perfect-vs-good-enough call. Showing the most recent
+  snapshot directly looks fine in playtest. The lag-comp path on the
+  server still uses `shooter_rtt + interp_delay` math; we just don't
+  apply the interp_delay on the render side yet.
+- **Revisit when** —
+  - We test on connections >50 ms RTT and remote mechs visibly
+    jitter.
+  - We measure desyncs in lag-comp where the server's "shooter saw"
+    estimate disagrees with what the client actually rendered.
+
+### Dummy is a non-dummy on the client
+
+- **What we did** — When the client receives INITIAL_STATE and
+  spawns mech 1 (the host's dummy), it spawns it as a regular mech.
+  The `is_dummy` bit isn't carried in the EntitySnapshot.
+- **Why** — One bit, no room in the current state_bits byte. On the
+  client the dummy will try to drive its right arm to its (snapshot-
+  set) aim_world, which looks slightly different from the host's
+  view but is purely cosmetic — it doesn't move, doesn't fire,
+  and the snapshot's pelvis position keeps it where it should be.
+- **Revisit when** — We add bots (M3 stretch) or any non-input-driven
+  entity. At that point we either widen state_bits to a uint16, add
+  a separate flags byte, or remove dummies in favor of bots.
+
+### Lobby & match flow not wired through the network
+
+- **What we did** — There's no in-game UI to host/join (it's CLI
+  flags `--host` and `--connect`). Once connected, there's no
+  pre-round lobby, no team selection, no chat broadcast. Players
+  appear in the world the moment they're accepted.
+- **Why** — That's M4 work per [11-roadmap.md](documents/11-roadmap.md).
+  M2's "Done when" criterion is "they shoot each other for ten
+  minutes without a desync" — UI sugar above that is post-M2.
+- **Revisit when** — M4. The plumbing for LOBBY-channel reliable
+  messages is already in net.c; we just don't generate any of those
+  message types yet.
 
 ---
 

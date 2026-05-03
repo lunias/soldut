@@ -4,6 +4,8 @@
 #include "mech.h"
 #include "particle.h"
 #include "physics.h"
+#include "snapshot.h"
+#include "weapons.h"
 
 static const char *anim_name(int a) {
     switch (a) {
@@ -75,6 +77,17 @@ static void shot_dump_tick(const World *w) {
 }
 
 void simulate(World *w, ClientInput in, float dt) {
+    /* Latch the externally-supplied input onto the local mech.
+     * Server / replay paths call simulate_step() directly with
+     * per-mech inputs already populated; single-player and the host's
+     * own player path go through this convenience wrapper. */
+    if (w->local_mech_id >= 0) {
+        w->mechs[w->local_mech_id].latched_input = in;
+    }
+    simulate_step(w, dt);
+}
+
+void simulate_step(World *w, float dt) {
     /* Hit-pause: the world clock freezes for a few ticks after a
      * notable kill. We still run FX (so blood keeps falling), but
      * physics and pose drive don't advance. */
@@ -91,17 +104,37 @@ void simulate(World *w, ClientInput in, float dt) {
         return;
     }
 
-    /* For each mech: drive (pose, input forces, fire). Only the local
-     * mech consumes input; the others get a zeroed input. */
+    /* For each mech: drive (pose, input forces). Each mech consumes
+     * its own latched_input (filled by the platform layer for the
+     * local mech, by net.c for remote mechs on the server, or by
+     * reconcile during client replay). */
     for (int i = 0; i < w->mech_count; ++i) {
-        ClientInput drive_in = (i == w->local_mech_id) ? in : (ClientInput){0};
+        ClientInput drive_in = w->mechs[i].latched_input;
         if (drive_in.dt <= 0.0f) drive_in.dt = dt;
         mech_step_drive(w, i, drive_in, dt);
     }
 
-    /* Try-fire happens after drive so the latest hand position is used. */
-    if (w->local_mech_id >= 0) {
-        mech_try_fire(w, w->local_mech_id, in);
+    /* Try-fire. Authoritative server fires for *every* mech driven by
+     * a remote peer (their latched input may have BTN_FIRE set). The
+     * local-only path also fires for the local mech. Pure clients
+     * never fire authoritatively — the server overrules — so we gate
+     * on world.authoritative. The local client still spawns a tracer
+     * locally for instant feedback inside mech_step_drive's pose
+     * pass, but no damage is applied. */
+    if (w->authoritative) {
+        for (int i = 0; i < w->mech_count; ++i) {
+            mech_try_fire(w, i, w->mechs[i].latched_input);
+        }
+    } else if (w->local_mech_id >= 0) {
+        /* Client-only: visual tracer for predicted shots. The server
+         * will overrule with the real hit on the next snapshot. */
+        Mech *m = &w->mechs[w->local_mech_id];
+        if ((m->latched_input.buttons & BTN_FIRE) &&
+            m->fire_cooldown <= 0.0f && m->reload_timer <= 0.0f &&
+            m->ammo > 0) {
+            weapons_predict_local_fire(w, w->local_mech_id);
+            m->ammo--;
+        }
     }
 
     /* Physics passes. Constraints and tile collisions are interleaved
@@ -126,6 +159,16 @@ void simulate(World *w, ClientInput in, float dt) {
     w->shake_intensity *= 0.92f;
     if (w->shake_intensity < 0.001f) w->shake_intensity = 0.0f;
     w->last_event_time += dt;
+
+    /* Server-only: record bone history for lag compensation. We do
+     * this every authoritative tick so the rolling 12-tick window is
+     * always fresh. Clients don't need lag history (they don't run
+     * authoritative hit detection). */
+    if (w->authoritative) {
+        for (int i = 0; i < w->mech_count; ++i) {
+            snapshot_record_lag_hist(w, i);
+        }
+    }
 
     if (g_shot_mode) shot_dump_tick(w);
 

@@ -3,6 +3,8 @@
 #include "arena.h"
 #include "hash.h"
 #include "input.h"
+#include "net.h"
+#include "reconcile.h"
 #include "world.h"
 
 #include <stdbool.h>
@@ -39,9 +41,17 @@ typedef struct Game {
     /* Most recent input sampled by the platform layer. */
     ClientInput input;
 
-    /* The simulation. M1 owns the World here; later milestones layer
-     * NetState, AudioState, LobbyState, etc. alongside. */
+    /* The simulation. */
     World world;
+
+    /* Networking. M2 lives here. NET_ROLE_OFFLINE for single-player; set
+     * by main.c after parsing CLI flags. */
+    NetState net;
+
+    /* Client-side prediction + reconciliation buffer. Only used when
+     * net.role == NET_ROLE_CLIENT. The host doesn't predict (server is
+     * authoritative on the same process). */
+    Reconcile reconcile;
 } Game;
 
 bool game_init(Game *g);

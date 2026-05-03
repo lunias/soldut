@@ -20,4 +20,13 @@
  * non-deterministic source and it's seeded by the host.
  */
 
+/* Convenience: latch `in` onto the local mech, then call simulate_step.
+ * The single-player and host-player paths use this. */
 void simulate(World *w, ClientInput in, float dt);
+
+/* Step the world without latching a fresh input. Each mech consumes
+ * its own World->mechs[i].latched_input. The server populates those
+ * from received NET_MSG_INPUT packets before calling simulate_step;
+ * client reconciliation calls simulate_step during replay with the
+ * local mech's latched_input rotated through the unacked-inputs ring. */
+void simulate_step(World *w, float dt);

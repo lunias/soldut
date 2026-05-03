@@ -87,8 +87,23 @@ enum {
 };
 
 /* ---- Mech ----------------------------------------------------------- */
-#define MAX_MECHS  32
-#define MAX_BLOOD  3000
+#define MAX_MECHS         32
+#define MAX_BLOOD         3000
+
+/* Lag-compensation history: per mech, ring buffer of bone particle
+ * positions for the last LAG_HIST_TICKS ticks. At 60 Hz this covers
+ * 200 ms — the cap on how far back we'll rewind a hitscan to a target's
+ * past position. The hitscan path on the server scans this ring for the
+ * frame the shooter "saw" and tests against those positions, not the
+ * current ones. (See [05-networking.md] §5 — Lag compensation.) */
+#define LAG_HIST_TICKS    12
+
+typedef struct {
+    float    pos_x[PART_COUNT];
+    float    pos_y[PART_COUNT];
+    uint64_t tick;                /* world tick this snapshot belongs to */
+    bool     valid;
+} BoneHistFrame;
 
 typedef struct {
     int       id;                 /* index into world.mechs[] */
@@ -106,8 +121,20 @@ typedef struct {
     uint16_t  constraint_count;
 
     /* Aim is the world-space target the cursor points at. The mech's
-     * arms/torso are pulled toward it via the pose system. */
+     * arms/torso are pulled toward it via the pose system.
+     *
+     * Set by mech_step_drive from latched_input.aim_x/y at the start of
+     * each tick. The host's main loop converts cursor screen→world via
+     * its camera and writes that into latched_input.aim_x/y; pure
+     * clients do the same on their side before sending to the server. */
     Vec2      aim_world;
+
+    /* The latest input we'll consume on the next sim tick. The server
+     * fills this from received NET_MSG_INPUT packets (one per peer);
+     * the local-input path (single-player or host) writes it from the
+     * keyboard. simulate() reads each mech's latched_input regardless
+     * of source. */
+    ClientInput latched_input;
 
     /* Combat state. */
     float     health;
@@ -139,6 +166,17 @@ typedef struct {
     /* Sleep tracking for dead bodies (skips integrate when settled). */
     int       sleep_ticks;
     bool      sleeping;
+
+    /* Server-side: the most recent input we processed for this mech.
+     * Echoed back in snapshots so the client can drop already-acked
+     * inputs from its replay buffer. */
+    uint16_t  last_processed_input_seq;
+
+    /* Bone-position history for lag compensation. Filled at the end of
+     * each server tick by mech_record_lag_hist; only meaningful on the
+     * authoritative side (server). Indexed modulo LAG_HIST_TICKS. */
+    BoneHistFrame lag_hist[LAG_HIST_TICKS];
+    int           lag_hist_head;  /* next slot to write */
 } Mech;
 
 /* ---- Blood / sparks (FX particles, AoS for simplicity at M1 scale).
@@ -214,9 +252,22 @@ typedef struct World {
     /* World-local RNG, seeded by Game. */
     pcg32_t *rng;
 
-    /* Local player handle. */
+    /* Local player handle. The mech this client predicts and renders
+     * with input latency hidden. On the host, this is the host's own
+     * mech; on a remote client, it's whichever mech the server
+     * assigned us at handshake. -1 outside a match. */
     int      local_mech_id;
     int      dummy_mech_id;
+
+    /* Authoritative? True on the server (simulation owns kills,
+     * damage, hit detection). False on a pure client — the client
+     * still runs simulate() for prediction, but its damage/death
+     * decisions are overwritten by snapshot apply.
+     *
+     * We DON'T fire weapons or apply damage on the client even during
+     * prediction: instead, the client renders a tracer locally so the
+     * shot feels instant, but the actual hit is decided server-side. */
+    bool     authoritative;
 
     /* Monotonic simulation tick. */
     uint64_t tick;

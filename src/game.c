@@ -57,6 +57,12 @@ bool game_init(Game *g) {
     g->world.local_mech_id = -1;
     g->world.dummy_mech_id = -1;
     g->world.camera_zoom = 1.0f;
+    /* Default to authoritative — single-player and offline tests run
+     * the world themselves. main.c flips this to false for pure
+     * clients after they've established a connection. */
+    g->world.authoritative = true;
+    g->net.role = NET_ROLE_OFFLINE;
+    g->net.discovery_socket = -1;
 
     g->mode = MODE_LOBBY;
     g->tick = 0;

@@ -3,7 +3,9 @@
 #include "level.h"
 #include "log.h"
 #include "mech.h"
+#include "net.h"
 #include "platform.h"
+#include "reconcile.h"
 #include "render.h"
 #include "shotmode.h"
 #include "simulate.h"
@@ -18,50 +20,111 @@
 #include <unistd.h>
 
 /*
- * M1 entry point.
+ * Entry point.
  *
- *   - Build the tutorial level.
- *   - Spawn a player mech and a target dummy.
- *   - Run a fixed-step 60 Hz simulate inside an accumulator loop.
- *   - Render at the display's vsync rate.
+ * Modes:
+ *   ./soldut                                 single-player tutorial (M1)
+ *   ./soldut --host [PORT]                   host an authoritative server + play
+ *   ./soldut --connect HOST[:PORT]           join a server as client
+ *   ./soldut --shot tests/shots/foo.shot     scripted scene → PNGs
+ *
+ * The simulation step is the same in every mode. What varies is who
+ * latches the inputs (server: from each peer; client/local: from the
+ * keyboard via platform_sample_input).
  */
 
 #define SIM_HZ        60
 static const double TICK_DT = 1.0 / (double)SIM_HZ;
 #define MAX_FRAME_DT  0.25
 
-static void seed_world(Game *g) {
+typedef enum {
+    LAUNCH_OFFLINE = 0,
+    LAUNCH_HOST,
+    LAUNCH_CLIENT,
+} LaunchMode;
+
+typedef struct {
+    LaunchMode  mode;
+    uint16_t    port;
+    char        host[64];
+    char        name[24];
+} LaunchArgs;
+
+static void parse_args(int argc, char **argv, LaunchArgs *out) {
+    memset(out, 0, sizeof *out);
+    out->port = SOLDUT_DEFAULT_PORT;
+    snprintf(out->name, sizeof out->name, "player");
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--host") == 0) {
+            out->mode = LAUNCH_HOST;
+            if (i + 1 < argc && argv[i+1][0] != '-') {
+                out->port = (uint16_t)atoi(argv[++i]);
+                if (out->port == 0) out->port = SOLDUT_DEFAULT_PORT;
+            }
+        }
+        else if (strcmp(argv[i], "--connect") == 0 && i + 1 < argc) {
+            out->mode = LAUNCH_CLIENT;
+            const char *s = argv[++i];
+            const char *colon = strrchr(s, ':');
+            if (colon) {
+                size_t hl = (size_t)(colon - s);
+                if (hl >= sizeof out->host) hl = sizeof out->host - 1;
+                memcpy(out->host, s, hl); out->host[hl] = '\0';
+                int port = atoi(colon + 1);
+                out->port = (uint16_t)(port > 0 ? port : SOLDUT_DEFAULT_PORT);
+            } else {
+                snprintf(out->host, sizeof out->host, "%s", s);
+                out->port = SOLDUT_DEFAULT_PORT;
+            }
+        }
+        else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
+            snprintf(out->name, sizeof out->name, "%s", argv[++i]);
+        }
+    }
+}
+
+/* Build the tutorial level + a player mech (and a dummy in offline /
+ * host mode). The host's player is local mech id 0; remote clients get
+ * their mechs spawned at handshake by net.c. */
+static void seed_world(Game *g, LaunchMode mode) {
     World *w = &g->world;
 
-    /* Build the tutorial map (its arena memory must outlive the World). */
     level_build_tutorial(&w->level, &g->level_arena);
 
-    /* Splat layer covers the entire level. */
     decal_init((int)level_width_px(&w->level),
                (int)level_height_px(&w->level));
 
-    /* Spawn the player so its feet rest 4 px (= particle radius) above
-     * the platform top. With the foot's particle center at floor−r the
-     * collision distance equals r, so there's no first-tick overlap and
-     * the body doesn't have to settle through the constraint solver
-     * before play feels coherent. */
     const float feet_below_pelvis = 36.0f;
     const float foot_clearance    = 4.0f;
     Vec2 player_spawn = { 16.0f * 32.0f + 8.0f,
                           30.0f * 32.0f - feet_below_pelvis - foot_clearance };
-    w->local_mech_id = mech_create(w, CHASSIS_TROOPER, player_spawn,
-                                   /*team*/ 1, /*is_dummy*/ false);
 
-    /* Dummy on the right platform (row 32 → y=1024). */
+    if (mode == LAUNCH_CLIENT) {
+        /* Pure client: the server's INITIAL_STATE will spawn the
+         * mechs for us. We deliberately leave the world empty here. */
+        w->camera_target = player_spawn;
+        w->camera_smooth = player_spawn;
+        w->camera_zoom   = 1.4f;
+        w->local_mech_id = -1;
+        w->dummy_mech_id = -1;
+        w->authoritative = false;
+        return;
+    }
+
+    w->local_mech_id = mech_create(w, CHASSIS_TROOPER, player_spawn,
+                                   /*team*/1, /*is_dummy*/false);
+
     Vec2 dummy_spawn = { 75.0f * 32.0f,
                          32.0f * 32.0f - feet_below_pelvis - foot_clearance };
     w->dummy_mech_id = mech_create(w, CHASSIS_TROOPER, dummy_spawn,
-                                   /*team*/ 2, /*is_dummy*/ true);
+                                   /*team*/2, /*is_dummy*/true);
 
-    /* Camera initial focus. */
     w->camera_target = player_spawn;
     w->camera_smooth = player_spawn;
     w->camera_zoom   = 1.4f;
+
+    /* Single-player and host both run authoritatively. */
+    w->authoritative = true;
 }
 
 static void draw_diag(void *user, int sw, int sh) {
@@ -76,16 +139,27 @@ static void draw_diag(void *user, int sw, int sh) {
                         g->world.mech_count,
                         g->world.particles.count),
              12, 52, 14, LIGHTGRAY);
+
+    const char *role = "offline";
+    Color rc = GRAY;
+    if (g->net.role == NET_ROLE_SERVER) { role = "host"; rc = GREEN; }
+    if (g->net.role == NET_ROLE_CLIENT) { role = "client"; rc = SKYBLUE; }
+
+    NetStats st_n; net_get_stats(&g->net, &st_n);
+    DrawText(TextFormat("%s peers=%d rtt=%ums tx=%uKB rx=%uKB",
+                        role, st_n.peer_count, st_n.rtt_ms_max,
+                        st_n.bytes_sent / 1024u, st_n.bytes_recv / 1024u),
+             12, 70, 14, rc);
+
     DrawText("WASD: move/jet  SPACE: jump  LMB: fire",
              12, sh - 22, 14, GRAY);
 }
 
 int main(int argc, char **argv) {
     log_init("soldut.log");
-    LOG_I("soldut " SOLDUT_VERSION_STRING " (M1) starting");
+    LOG_I("soldut " SOLDUT_VERSION_STRING " (M2) starting");
 
-    /* Shot mode: render a scripted scene to PNGs and exit. The script
-     * format and runner live in src/shotmode.{h,c}. */
+    /* Shot mode early-exit. */
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) {
             int rc = shotmode_run(argv[i + 1]);
@@ -94,24 +168,64 @@ int main(int argc, char **argv) {
         }
     }
 
+    LaunchArgs args;
+    parse_args(argc, argv, &args);
+
     Game game;
     if (!game_init(&game)) { log_shutdown(); return EXIT_FAILURE; }
+    reconcile_init(&game.reconcile);
 
     PlatformConfig pcfg = {
         .window_w = 1280, .window_h = 720,
         .vsync = true, .fullscreen = false,
-        .title = "Soldut " SOLDUT_VERSION_STRING " — M1: one mech",
+        .title = (args.mode == LAUNCH_HOST)   ? "Soldut " SOLDUT_VERSION_STRING " — host"
+               : (args.mode == LAUNCH_CLIENT) ? "Soldut " SOLDUT_VERSION_STRING " — client"
+                                              : "Soldut " SOLDUT_VERSION_STRING " — M2",
     };
     if (!platform_init(&pcfg)) {
         game_shutdown(&game); log_shutdown(); return EXIT_FAILURE;
     }
 
-    seed_world(&game);
+    /* Network setup. seed_world depends on knowing the launch mode. */
+    if (args.mode != LAUNCH_OFFLINE) {
+        if (!net_init()) { game_shutdown(&game); log_shutdown(); return EXIT_FAILURE; }
+    }
+
+    if (args.mode == LAUNCH_HOST) {
+        if (!net_server_start(&game.net, args.port, &game)) {
+            LOG_E("host: failed to bind UDP %u", (unsigned)args.port);
+            game_shutdown(&game); net_shutdown(); log_shutdown();
+            return EXIT_FAILURE;
+        }
+        seed_world(&game, LAUNCH_HOST);
+        net_discovery_open(&game.net);
+        LOG_I("host: ready on port %u — invite a client with `--connect <ip>:%u`",
+              (unsigned)args.port, (unsigned)args.port);
+    }
+    else if (args.mode == LAUNCH_CLIENT) {
+        seed_world(&game, LAUNCH_CLIENT);
+        if (!net_client_connect(&game.net, args.host, args.port,
+                                args.name, &game))
+        {
+            LOG_E("client: failed to connect to %s:%u",
+                  args.host[0] ? args.host : "?", (unsigned)args.port);
+            platform_shutdown();
+            game_shutdown(&game); net_shutdown(); log_shutdown();
+            return EXIT_FAILURE;
+        }
+    }
+    else {
+        seed_world(&game, LAUNCH_OFFLINE);
+    }
 
     Renderer rd;
-    renderer_init(&rd,
-        GetScreenWidth(), GetScreenHeight(),
-        mech_chest_pos(&game.world, game.world.local_mech_id));
+    {
+        Vec2 follow = (game.world.local_mech_id >= 0)
+            ? mech_chest_pos(&game.world, game.world.local_mech_id)
+            : (Vec2){ (float)game.world.level.width  * 16.0f,
+                      (float)game.world.level.height * 16.0f };
+        renderer_init(&rd, GetScreenWidth(), GetScreenHeight(), follow);
+    }
 
     PlatformFrame pf = {0};
     double accum = 0.0;
@@ -126,24 +240,51 @@ int main(int argc, char **argv) {
 
         platform_begin_frame(&pf);
 
-        /* Fixed-step simulation. We sample input each tick and feed it
-         * through simulate(); the platform layer keeps the most recent
-         * cursor pos for renderer use. */
+        /* Pump network FIRST so inbound inputs (server side) and
+         * snapshots (client side) are visible before this frame's
+         * sim ticks run. */
+        if (game.net.role != NET_ROLE_OFFLINE) {
+            net_poll(&game.net, &game, dt);
+        }
+
+        /* Fixed-step simulation. */
         while (accum >= TICK_DT) {
             ClientInput in;
             platform_sample_input(&in);
-            in.dt = (float)TICK_DT;
+            in.dt  = (float)TICK_DT;
             in.seq = (uint16_t)(game.world.tick + 1);
 
-            /* Convert cursor screen-space to world-space using the *current*
-             * camera. Then write it onto the local mech as aim_world. */
+            /* Convert cursor screen→world via the live camera. We do
+             * this on the client side so the server doesn't need a
+             * camera; it just reads aim_world directly. */
             Vec2 cursor_world = renderer_screen_to_world(&rd,
                 (Vec2){ in.aim_x, in.aim_y });
-            if (game.world.local_mech_id >= 0) {
-                game.world.mechs[game.world.local_mech_id].aim_world = cursor_world;
+            in.aim_x = cursor_world.x;
+            in.aim_y = cursor_world.y;
+
+            if (game.net.role == NET_ROLE_CLIENT) {
+                /* Predict locally: latch onto our mech, simulate. */
+                if (game.world.local_mech_id >= 0) {
+                    game.world.mechs[game.world.local_mech_id].latched_input = in;
+                }
+                simulate_step(&game.world, (float)TICK_DT);
+
+                /* Push onto the unacked-input ring + ship to server. */
+                reconcile_push_input(&game.reconcile, in);
+                net_client_send_input(&game.net, in);
+                reconcile_tick_smoothing(&game.reconcile);
+            }
+            else {
+                /* Offline / host: latch onto local mech and run the
+                 * authoritative tick. (On the host, peer inputs were
+                 * latched onto their respective mechs by net_poll
+                 * before this loop entered.) */
+                if (game.world.local_mech_id >= 0) {
+                    game.world.mechs[game.world.local_mech_id].latched_input = in;
+                }
+                simulate_step(&game.world, (float)TICK_DT);
             }
 
-            simulate(&game.world, in, (float)TICK_DT);
             game.input = in;
             accum -= TICK_DT;
         }
@@ -157,6 +298,11 @@ int main(int argc, char **argv) {
 
     LOG_I("soldut shutting down (ran %llu sim ticks)",
           (unsigned long long)game.world.tick);
+
+    if (game.net.role != NET_ROLE_OFFLINE) {
+        net_close(&game.net);
+        net_shutdown();
+    }
 
     /* Fast exit: only flush the log file, then hand the rest back to
      * the OS. raylib's CloseAudioDevice (miniaudio teardown) and
