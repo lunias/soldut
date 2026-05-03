@@ -1,6 +1,7 @@
 #include "game.h"
 #include "log.h"
 #include "particle.h"
+#include "projectile.h"
 
 #include <string.h>
 
@@ -52,6 +53,7 @@ bool game_init(Game *g) {
     if (!init_constraint_pool(g)) { LOG_E("constraint pool init failed"); return false; }
 
     fx_pool_init(&g->world.fx, &g->permanent, MAX_BLOOD);
+    projectile_pool_init(&g->world.projectiles);
 
     g->world.rng = &g->rng;
     g->world.local_mech_id = -1;
@@ -61,6 +63,10 @@ bool game_init(Game *g) {
      * the world themselves. main.c flips this to false for pure
      * clients after they've established a connection. */
     g->world.authoritative = true;
+    /* Friendly-fire defaults off (casual servers per
+     * documents/02-game-design.md). M3 has no lobby UI; flipping it
+     * is a server-config / CLI exercise. */
+    g->world.friendly_fire = false;
     g->net.role = NET_ROLE_OFFLINE;
     g->net.discovery_socket = -1;
 

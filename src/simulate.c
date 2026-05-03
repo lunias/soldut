@@ -4,6 +4,7 @@
 #include "mech.h"
 #include "particle.h"
 #include "physics.h"
+#include "projectile.h"
 #include "snapshot.h"
 #include "weapons.h"
 
@@ -125,6 +126,11 @@ void simulate_step(World *w, float dt) {
         for (int i = 0; i < w->mech_count; ++i) {
             mech_try_fire(w, i, w->mechs[i].latched_input);
         }
+        /* Now that both passes have seen this tick's edges, latch the
+         * input into prev_buttons so next tick's edge-detect is fresh. */
+        for (int i = 0; i < w->mech_count; ++i) {
+            mech_latch_prev_buttons(w, i);
+        }
     } else if (w->local_mech_id >= 0) {
         /* Client-only: visual tracer for predicted shots. The server
          * will overrule with the real hit on the next snapshot. */
@@ -134,6 +140,11 @@ void simulate_step(World *w, float dt) {
             m->ammo > 0) {
             weapons_predict_local_fire(w, w->local_mech_id);
             m->ammo--;
+        }
+        /* Pure-client path: also latch prev_buttons so the predicted
+         * mech sees edges correctly during replay. */
+        for (int i = 0; i < w->mech_count; ++i) {
+            mech_latch_prev_buttons(w, i);
         }
     }
 
@@ -152,8 +163,19 @@ void simulate_step(World *w, float dt) {
         mech_post_physics_anchor(w, i);
     }
 
+    /* Projectiles — integrate, collide, detonate. Runs after the mech
+     * physics pass so projectiles see the just-settled bone positions
+     * (matters for hit attribution on a shot that lands on the same
+     * tick the target finished a jump). */
+    projectile_step(w, dt);
+
     /* FX particles (blood, sparks, tracers). */
     fx_update(w, dt);
+
+    /* Age the kill feed; HUD reads .age to fade entries out. */
+    for (int i = 0; i < KILLFEED_CAPACITY; ++i) {
+        w->killfeed[i].age += dt;
+    }
 
     /* Decays. */
     w->shake_intensity *= 0.92f;

@@ -1,0 +1,22 @@
+# m3_plasma_smg.shot — Scout with Plasma SMG at moderate range. Verifies
+#   - Projectile pool spawn on every fire tick (60 ms cycle)
+#   - Hit detection on bone segments (not via hitscan)
+#   - Self-bink kicks in over sustained fire (crosshair widens)
+# The dummy at 80 dmg/limb takes ~8 hits per limb at 10 dmg each.
+
+window 1280 720
+seed   2 2
+out    build/shots/m3_plasma_smg
+loadout Scout "Plasma SMG" - Light Standard
+contact_sheet sheet cols 4 cell 480 270
+
+spawn_at 2240 984
+mouse    1100 360
+
+at  20 shot t020_idle
+at  30 press fire
+burst fire from 60 to 240 every 20
+at 260 release fire
+
+at 280 shot t280_settled
+at 310 end

@@ -5,7 +5,7 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-03** (M2 networking foundation in).
+Last updated: **2026-05-03** (M3 combat depth in).
 
 ---
 
@@ -16,6 +16,7 @@ Last updated: **2026-05-03** (M2 networking foundation in).
 | **M0**    | Done — see [README.md](README.md).      |
 | **M1**    | Playable end-to-end. B1, B3, B4, B5, B6, B7 fixed 2026-05-03. Close-delay fixed same day. |
 | **M2**    | Foundation lands 2026-05-03. Host/client handshake works locally; per-tick input ship + 30 Hz snapshot broadcast + client-side prediction & replay + per-mech bone history for hitscan lag compensation are wired. LAN-only, full snapshots, no mid-tick interpolation of remote mechs (see TRADE_OFFS.md). Two-laptop bake test still pending. |
+| **M3**    | Combat depth in 2026-05-03. All 5 chassis (Trooper / Scout / Heavy / Sniper / Engineer) with passives. All 8 primaries (Pulse Rifle, Plasma SMG, Riot Cannon, Rail Cannon, Auto-Cannon, Mass Driver, Plasma Cannon, Microgun) and 6 secondaries (Sidearm, Burst SMG, Frag Grenades, Micro-Rockets, Combat Knife, Grappling Hook). Projectile pool with bone + tile collision. Explosions: damage falloff, line-of-sight check, impulse to ragdolls. Per-limb HP and dismemberment of all 5 limbs. Recoil + bink + self-bink fully wired. Friendly-fire toggle (`--ff` server flag). Kill feed with HEADSHOT/GIB/OVERKILL/RAGDOLL/SUICIDE flags. Loadout via CLI flags (`--chassis`, `--primary`, `--secondary`, `--armor`, `--jetpack`). Snapshot wire format widened to carry chassis/armor/jet/secondary; protocol id bumped to `S0LE`. |
 
 ---
 
@@ -45,6 +46,61 @@ machine completes in <100 ms in playtest. Two mechs in one window
 (the host's keyboard mech + the remote mech driven by the second
 process's input) are simulated authoritatively on the host side and
 streamed to the client at 30 Hz.
+
+## M3 combat depth — what's wired
+
+The full combat layer per documents/04-combat.md ships at M3. Highlights:
+
+- **5 chassis** with parameterized stats. Pick on the local mech with
+  `--chassis Heavy` (or Scout / Trooper / Sniper / Engineer). Each
+  chassis carries a passive — Trooper: -25% reload time; Scout: BTN_DASH
+  one-shot horizontal burst on grounded; Heavy: -10% explosion damage;
+  Sniper: steady (placeholder for crouched-spread reduction); Engineer:
+  BTN_USE drops a 50-HP self-heal on a 30s cooldown (proper "deployable
+  pack" lands at M5 with the pickup system).
+- **14 weapons** (8 primaries + 6 secondaries) in `src/weapons.c`'s
+  `g_weapons[]` table. Hitscan, projectile, spread (pellets), burst
+  (auto-fire N rounds), throw (grenades), melee (knife backstab x2.5),
+  and grapple (stub — see TRADE_OFFS).
+- **Projectiles** in their own SoA pool (`src/projectile.{h,c}`,
+  PROJECTILE_CAPACITY=512). Per-tick gravity, drag, swept tile
+  collision, swept bone collision against every other mech. Bouncy
+  flag for grenades. AOE projectiles trigger explosion_spawn on hit
+  or fuse expiry.
+- **Explosions** apply damage with `1-(d/r)^2` falloff, halve damage
+  through walls (LOS ray), apply impulse to every particle in radius
+  (alive *and* corpse), spawn 28 sparks fan-out + screen shake.
+- **Per-limb HP** (`hp_arm_l/_r, hp_leg_l/_r, hp_head`). When a limb
+  drops to zero, `mech_dismember` deactivates the constraints between
+  the limb's particles and the rest of the body. Limbs keep
+  Verlet-integrating as gibs. Head detach is also lethal.
+- **Bink + self-bink**: each weapon has `bink` (rad jolt to nearby
+  targets per shot) and `self_bink` (rad jitter on shooter per shot).
+  `mech.aim_bink` accumulates and decays exponentially each tick. The
+  fire path rotates `mech_aim_dir` by `aim_bink` before tracing.
+- **Friendly-fire toggle** at `world.friendly_fire` (default false,
+  CLI `--ff`). Damage path drops same-team hits when off. Self-damage
+  always goes through (Mass Driver self-splash is intentional).
+- **Kill feed** ring buffer (5 entries) on World, drawn top-right by
+  HUD with HEADSHOT / GIB (≥2 limbs) / OVERKILL (>200 dmg) / RAGDOLL
+  (midair kill) / SUICIDE flags. Single-line center banner kept for
+  shot-mode clarity.
+- **Armor**: 4 variants (None / Light / Heavy / Reactive). Bullet
+  damage flows through armor first at `absorb_ratio` until armor HP
+  drains; then armor falls off. Reactive eats one explosion fully and
+  breaks. Heavy plating costs 10% movement + jet.
+- **Jetpacks**: 4 modules (Standard / Burst / Glide / JumpJet).
+  Burst dumps 30% fuel for 0.4s × 2 thrust on BTN_DASH. Glide gives
+  small lift at empty fuel. JumpJet replaces continuous thrust with
+  re-jumps on BTN_JET (consumes a fuel chunk per).
+
+Verification: see `tests/shots/m3_*.shot` — Mass Driver, Plasma SMG,
+Frag Grenade, Riot Cannon spread, Rail Cannon charge, and an Armor
+test all run through the real renderer + sim and dump PNG + log
+pairs. The Mass Driver shot lands a one-rocket kill on the dummy with
+a visible body launch off the platform; the Frag Grenade test shows
+the projectile lobbing, bouncing, and detonating; Plasma SMG shows
+40+ projectiles in flight over a single trigger hold.
 
 ## What works
 
@@ -467,7 +523,8 @@ attention. Each links to its longer-form entry in
 ## Tunables (current values)
 
 These are the numbers driving the feel. Documented here so we can A/B
-them against playtest reactions.
+them against playtest reactions. (Per-weapon stats are in the
+`g_weapons[]` table in `src/weapons.c` — too many to mirror here.)
 
 | Source                    | Constant                        | Value    |
 |---------------------------|---------------------------------|----------|
@@ -479,11 +536,20 @@ them against playtest reactions.
 | `src/mech.c`              | `JET_THRUST_PXS2`               | 2200     |
 | `src/mech.c`              | `JET_DRAIN_PER_SEC`             | 0.60     |
 | `src/mech.c`              | `AIR_CONTROL`                   | 0.35     |
-| `src/mech.c` (Trooper)    | `health_max`                    | 150      |
-| `src/mech.c` (Trooper)    | `bone_thigh` / `bone_shin`      | 18 / 18  |
-| `src/mech.c` (Trooper)    | `torso_h` / `neck_h`            | 30 / 14  |
+| `src/mech.c`              | `BINK_DECAY_PER_SEC`            | 1.8      |
+| `src/mech.c`              | `BINK_MAX`                      | 0.35 (~20°) |
+| `src/mech.c`              | `SCOUT_DASH_PXS`                | 720      |
+| `src/mech.c`              | `ENGINEER_HEAL`                 | 50       |
+| `src/mech.c`              | `ENGINEER_COOLDOWN`             | 30 s     |
+| Chassis HP (Scout/Trp/Heavy/Sniper/Eng) | `health_max`          | 100/150/220/130/140 |
+| Armor capacity (None/Light/Heavy/Reactive) | `hp`               | 0/30/75/30 |
+| Armor absorb_ratio        | (Light/Heavy/Reactive)          | 0.40/0.60/0.40 |
 | `src/weapons.c` (Pulse)   | damage / cycle / reload         | 18 / 110ms / 1.5s |
 | `src/weapons.c` (Pulse)   | mag / range                     | 30 / 2400 |
+| `src/weapons.c` (Mass Driver) | direct + AOE_dmg / radius   | 220 + 130 / 160 |
+| `src/weapons.c` (Frag)    | AOE_dmg / radius / fuse         | 80 / 140 / 1.5s |
+| `src/weapons.c` (Rail)    | damage / charge / cycle         | 95 / 400ms / 1200ms |
+| Limb HP (arm/leg/head)    | `hp_*_max`                      | 80 / 80 / 50 |
 
 The simulation runs at **60 Hz** at M1 (not 120 Hz as
 [documents/03-physics-and-mechs.md](documents/03-physics-and-mechs.md)

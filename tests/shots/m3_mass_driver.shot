@@ -1,0 +1,31 @@
+# m3_mass_driver.shot — Heavy chassis with a Mass Driver lobs a rocket
+# at the dummy. We expect:
+#   - One projectile in flight on tick ~5 after fire press
+#   - Explosion VFX on impact (sparks fan-out + smoke + screen shake)
+#   - AOE damage to the dummy (one rocket should kill via 220 base + AOE)
+#   - Multiple limbs detach due to GIB-class hit (mask >= 0x06)
+# Bink/self-bink shouldn't matter much for a single shot, but we log it.
+
+window 1280 720
+seed   1 1
+out    build/shots/m3_mass_driver
+loadout Heavy "Mass Driver" - Heavy Standard
+contact_sheet sheet cols 4 cell 480 270
+
+# Park player on the dummy platform at the same height as in m1_dummy_kill.
+spawn_at 2240 984
+mouse    1100 360
+
+at  10 shot t010_idle
+at  30 press fire
+at  35 release fire           # Mass driver fires at most once per 1100 ms
+at  40 shot t040_inflight
+at  50 shot t050_inflight
+at  60 shot t060_impact
+at  80 shot t080_aftermath
+at 110 shot t110_aftermath
+
+# Give it time for ragdoll to settle.
+burst settle from 130 to 240 every 20
+
+at 260 end

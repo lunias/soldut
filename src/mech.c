@@ -3,46 +3,151 @@
 #include "log.h"
 #include "particle.h"
 #include "physics.h"
+#include "projectile.h"
 #include "weapons.h"
 
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 /* ---- Chassis table -------------------------------------------------- */
+/*
+ * One physics model per game; chassis variants differ only by data
+ * (mass, speed, fuel, health, bone lengths, passive). Each chassis maps
+ * to the same 16-particle skeleton — only the bone REST lengths shift
+ * with hitbox_scale.
+ *
+ * Numbers track documents/02-game-design.md §Mechs.
+ */
 
-static const Chassis g_chassis[CHASSIS_COUNT_M1] = {
+static const Chassis g_chassis[CHASSIS_COUNT] = {
     [CHASSIS_TROOPER] = {
-        .name         = "Trooper",
-        .run_mult     = 1.00f,
-        .jump_mult    = 1.00f,
-        .jet_mult     = 1.00f,
-        .fuel_max     = 1.00f,
-        .fuel_regen   = 0.20f,    /* per second when grounded */
-        .mass_scale   = 1.00f,
-        .health_max   = 150.0f,
-        .bone_arm     = 14.0f,
-        .bone_forearm = 16.0f,
-        .bone_thigh   = 18.0f,
-        .bone_shin    = 18.0f,
-        .torso_h      = 30.0f,
-        .neck_h       = 14.0f,
+        .name = "Trooper",
+        .run_mult = 1.00f, .jump_mult = 1.00f, .jet_mult = 1.00f,
+        .fuel_max = 1.00f, .fuel_regen = 0.20f, .mass_scale = 1.00f,
+        .health_max = 150.0f,
+        .bone_arm = 14.0f, .bone_forearm = 16.0f,
+        .bone_thigh = 18.0f, .bone_shin = 18.0f,
+        .torso_h = 30.0f, .neck_h = 14.0f,
+        .hitbox_scale = 1.00f,
+        .passive = PASSIVE_TROOPER_FAST_RELOAD,
+    },
+    [CHASSIS_SCOUT] = {
+        .name = "Scout",
+        .run_mult = 1.20f, .jump_mult = 1.10f, .jet_mult = 1.30f,
+        .fuel_max = 1.20f, .fuel_regen = 0.25f, .mass_scale = 0.80f,
+        .health_max = 100.0f,
+        .bone_arm = 12.0f, .bone_forearm = 14.0f,
+        .bone_thigh = 16.0f, .bone_shin = 16.0f,
+        .torso_h = 26.0f, .neck_h = 12.0f,
+        .hitbox_scale = 0.85f,
+        .passive = PASSIVE_SCOUT_DASH,
+    },
+    [CHASSIS_HEAVY] = {
+        .name = "Heavy",
+        .run_mult = 0.85f, .jump_mult = 0.85f, .jet_mult = 0.80f,
+        .fuel_max = 0.85f, .fuel_regen = 0.15f, .mass_scale = 1.40f,
+        .health_max = 220.0f,
+        .bone_arm = 16.0f, .bone_forearm = 18.0f,
+        .bone_thigh = 20.0f, .bone_shin = 20.0f,
+        .torso_h = 34.0f, .neck_h = 14.0f,
+        .hitbox_scale = 1.20f,
+        .passive = PASSIVE_HEAVY_AOE_RESIST,
+    },
+    [CHASSIS_SNIPER] = {
+        .name = "Sniper",
+        .run_mult = 0.95f, .jump_mult = 1.00f, .jet_mult = 1.00f,
+        .fuel_max = 1.10f, .fuel_regen = 0.20f, .mass_scale = 0.95f,
+        .health_max = 130.0f,
+        .bone_arm = 14.0f, .bone_forearm = 17.0f,
+        .bone_thigh = 18.0f, .bone_shin = 18.0f,
+        .torso_h = 30.0f, .neck_h = 14.0f,
+        .hitbox_scale = 1.00f,
+        .passive = PASSIVE_SNIPER_STEADY,
+    },
+    [CHASSIS_ENGINEER] = {
+        .name = "Engineer",
+        .run_mult = 1.00f, .jump_mult = 1.00f, .jet_mult = 1.10f,
+        .fuel_max = 1.00f, .fuel_regen = 0.25f, .mass_scale = 1.00f,
+        .health_max = 140.0f,
+        .bone_arm = 14.0f, .bone_forearm = 16.0f,
+        .bone_thigh = 18.0f, .bone_shin = 18.0f,
+        .torso_h = 30.0f, .neck_h = 14.0f,
+        .hitbox_scale = 1.00f,
+        .passive = PASSIVE_ENGINEER_REPAIR,
     },
 };
 
 const Chassis *mech_chassis(ChassisId id) {
-    if ((unsigned)id >= CHASSIS_COUNT_M1) return &g_chassis[CHASSIS_TROOPER];
+    if ((unsigned)id >= CHASSIS_COUNT) return &g_chassis[CHASSIS_TROOPER];
     return &g_chassis[id];
 }
 
-/* ---- Movement tunables (Soldat-derived; see reference/soldat-constants.md) */
-#define RUN_SPEED_PXS      280.0f   /* per second */
-#define JUMP_IMPULSE_PXS   320.0f   /* vertical impulse on press */
-#define JET_THRUST_PXS2    2200.0f  /* upward acceleration while jetting */
-#define JET_DRAIN_PER_SEC  0.60f
-#define AIR_CONTROL        0.35f    /* run-force scale while airborne */
+ChassisId chassis_id_from_name(const char *name) {
+    if (!name) return CHASSIS_TROOPER;
+    for (int i = 0; i < CHASSIS_COUNT; ++i) {
+        if (strcasecmp(name, g_chassis[i].name) == 0) return (ChassisId)i;
+    }
+    LOG_W("chassis_id_from_name: unknown '%s' — defaulting to Trooper", name);
+    return CHASSIS_TROOPER;
+}
 
-/* ---- Helpers: particle (de)init ------------------------------------ */
+/* ---- Armor table --------------------------------------------------- */
+
+static const Armor g_armors[ARMOR_COUNT] = {
+    [ARMOR_NONE]     = { .name = "None",     .hp = 0.0f,  .absorb_ratio = 0.0f, .run_mult = 1.00f, .jet_mult = 1.00f, .reactive_charges = 0 },
+    [ARMOR_LIGHT]    = { .name = "Light",    .hp = 30.0f, .absorb_ratio = 0.40f, .run_mult = 1.00f, .jet_mult = 1.00f, .reactive_charges = 0 },
+    [ARMOR_HEAVY]    = { .name = "Heavy",    .hp = 75.0f, .absorb_ratio = 0.60f, .run_mult = 0.90f, .jet_mult = 0.90f, .reactive_charges = 0 },
+    [ARMOR_REACTIVE] = { .name = "Reactive", .hp = 30.0f, .absorb_ratio = 0.40f, .run_mult = 1.00f, .jet_mult = 1.00f, .reactive_charges = 1 },
+};
+
+const Armor *armor_def(int id) {
+    if ((unsigned)id >= ARMOR_COUNT) return &g_armors[ARMOR_NONE];
+    return &g_armors[id];
+}
+
+/* ---- Jetpack table ------------------------------------------------- */
+
+static const Jetpack g_jetpacks[JET_COUNT] = {
+    [JET_NONE]       = { .name = "Baseline", .fuel_mult = 1.00f, .thrust_mult = 1.00f },
+    [JET_STANDARD]   = { .name = "Standard", .fuel_mult = 1.20f, .thrust_mult = 1.10f },
+    [JET_BURST]      = { .name = "Burst",    .fuel_mult = 1.00f, .thrust_mult = 1.00f,
+                         .boost_fuel_cost = 0.30f, .boost_thrust_mult = 2.00f, .boost_duration = 0.40f },
+    [JET_GLIDE_WING] = { .name = "Glide",    .fuel_mult = 0.70f, .thrust_mult = 0.85f,
+                         .glide_thrust = 600.0f },
+    [JET_JUMP_JET]   = { .name = "JumpJet",  .fuel_mult = 1.00f, .thrust_mult = 0.0f,
+                         .jump_on_land = true },
+};
+
+const Jetpack *jetpack_def(int id) {
+    if ((unsigned)id >= JET_COUNT) return &g_jetpacks[JET_NONE];
+    return &g_jetpacks[id];
+}
+
+MechLoadout mech_default_loadout(void) {
+    return (MechLoadout){
+        .chassis_id   = CHASSIS_TROOPER,
+        .primary_id   = WEAPON_PULSE_RIFLE,
+        .secondary_id = WEAPON_SIDEARM,
+        .armor_id     = ARMOR_LIGHT,
+        .jetpack_id   = JET_STANDARD,
+    };
+}
+
+/* ---- Movement tunables (Soldat-derived; see reference/soldat-constants.md) */
+#define RUN_SPEED_PXS      280.0f
+#define JUMP_IMPULSE_PXS   320.0f
+#define JET_THRUST_PXS2    2200.0f
+#define JET_DRAIN_PER_SEC  0.60f
+#define AIR_CONTROL        0.35f
+#define BINK_DECAY_PER_SEC 1.8f       /* exponential decay for aim_bink */
+#define BINK_MAX           0.35f      /* clamp; ~20° */
+#define SCOUT_DASH_PXS     720.0f
+#define ENGINEER_HEAL      50.0f
+#define ENGINEER_COOLDOWN  30.0f
+
+/* ---- Helpers: particle/constraint reservation ---------------------- */
 
 static int particles_reserve(World *w, int n) {
     ParticlePool *p = &w->particles;
@@ -87,32 +192,26 @@ static void add_distance(World *w, int *next, int a, int b, float rest) {
     };
 }
 
-/* Angle constraint at joint `b` between particles `a` and `c`. The angle
- * is measured from b→a to b→c (radians); values outside [min_ang,
- * max_ang] are clamped. Without these, chains like hip-knee-foot can
- * fold in any direction under gravity. */
-static void add_angle(World *w, int *next, int a, int b, int c, float min_ang, float max_ang) {
-    Constraint *cs = &w->constraints.items[(*next)++];
-    *cs = (Constraint){
-        .a = (uint16_t)a, .b = (uint16_t)c, .c = (uint16_t)b,
-        .kind = CSTR_ANGLE, .active = 1,
-        .rest = 0, .min_len = 0, .max_len = 0,
-        .min_ang = min_ang, .max_ang = max_ang,
-    };
-}
-
 /* ---- mech_create --------------------------------------------------- */
 
 int mech_create(World *w, ChassisId chassis_id, Vec2 spawn, int team, bool is_dummy) {
+    MechLoadout lo = mech_default_loadout();
+    lo.chassis_id = (int)chassis_id;
+    return mech_create_loadout(w, lo, spawn, team, is_dummy);
+}
+
+int mech_create_loadout(World *w, MechLoadout lo, Vec2 spawn,
+                        int team, bool is_dummy)
+{
     if (w->mech_count >= MAX_MECHS) {
         LOG_E("mech_create: MAX_MECHS reached");
         return -1;
     }
-
     int pbase = particles_reserve(w, PART_COUNT);
     if (pbase < 0) return -1;
 
-    const Chassis *ch = mech_chassis(chassis_id);
+    const Chassis *ch = mech_chassis((ChassisId)lo.chassis_id);
+    const Armor   *ar = armor_def(lo.armor_id);
 
     /* Skeleton positions, pelvis-relative. (See diagram in mech.h.) */
     Vec2 P[PART_COUNT];
@@ -138,9 +237,8 @@ int mech_create(World *w, ChassisId chassis_id, Vec2 spawn, int team, bool is_du
         set_particle(w, pbase + i, wp, 1.0f / ch->mass_scale);
     }
 
-    /* Constraints — distance constraints for bones + spans + torso
-     * triangulation, plus angle constraints on knees and elbows so the
-     * chains don't fold under gravity. Reserve generously and trim. */
+    /* Constraints (same set as M1; per-chassis bone lengths flow from
+     * the layout above). 21 distance constraints. */
     int cbase = constraints_reserve(w, 32);
     if (cbase < 0) return -1;
     int next = cbase;
@@ -149,48 +247,29 @@ int mech_create(World *w, ChassisId chassis_id, Vec2 spawn, int team, bool is_du
         sqrtf((P[an].x - P[bn].x)*(P[an].x - P[bn].x) + \
               (P[an].y - P[bn].y)*(P[an].y - P[bn].y)))
 
-    /* Spine. The HEAD↔CHEST constraint plus HEAD↔NECK and NECK↔CHEST
-     * makes a rigid head/neck/chest triangle, so the head can't fold
-     * forward under gravity when the pose drive isn't strong enough. */
     DIST(PART_HEAD,        PART_NECK);
     DIST(PART_NECK,        PART_CHEST);
     DIST(PART_HEAD,        PART_CHEST);
     DIST(PART_CHEST,       PART_PELVIS);
-    /* Clavicles. */
     DIST(PART_CHEST,       PART_L_SHOULDER);
     DIST(PART_CHEST,       PART_R_SHOULDER);
-    /* Hips. */
     DIST(PART_PELVIS,      PART_L_HIP);
     DIST(PART_PELVIS,      PART_R_HIP);
-    /* Arms. */
     DIST(PART_L_SHOULDER,  PART_L_ELBOW);
     DIST(PART_L_ELBOW,     PART_L_HAND);
     DIST(PART_R_SHOULDER,  PART_R_ELBOW);
     DIST(PART_R_ELBOW,     PART_R_HAND);
-    /* Legs. */
     DIST(PART_L_HIP,       PART_L_KNEE);
     DIST(PART_L_KNEE,      PART_L_FOOT);
     DIST(PART_R_HIP,       PART_R_KNEE);
     DIST(PART_R_KNEE,      PART_R_FOOT);
-    /* Stabilizer spans (shoulder + hip widths). */
     DIST(PART_L_SHOULDER,  PART_R_SHOULDER);
     DIST(PART_L_HIP,       PART_R_HIP);
-    /* Triangulate the torso so it doesn't shear left/right. We *don't*
-     * also add l_sho↔r_hip cross-braces — that pair fights with the
-     * shoulder/pelvis triangulation and oscillates. */
     DIST(PART_L_SHOULDER,  PART_PELVIS);
     DIST(PART_R_SHOULDER,  PART_PELVIS);
 
     #undef DIST
 
-    /* (No angle constraints at M1 — they only restrict the *interior*
-     * angle at the joint, which is π for any straight chain regardless
-     * of orientation. So they don't prevent a leg from rotating into a
-     * horizontal "lying down" pose, which is the failure mode we'd
-     * want them to prevent. A real fix needs orientation constraints
-     * relative to a "world-up" reference, which is out of scope for M1.) */
-
-    /* Trim the pool back to what we actually used. */
     int constraint_count = next - cbase;
     w->constraints.count = next;
 
@@ -199,7 +278,7 @@ int mech_create(World *w, ChassisId chassis_id, Vec2 spawn, int team, bool is_du
     Mech *m = &w->mechs[mid];
     memset(m, 0, sizeof(*m));
     m->id              = mid;
-    m->chassis_id      = (int)chassis_id;
+    m->chassis_id      = (int)lo.chassis_id;
     m->team            = team;
     m->alive           = true;
     m->is_dummy        = is_dummy;
@@ -209,21 +288,47 @@ int mech_create(World *w, ChassisId chassis_id, Vec2 spawn, int team, bool is_du
     m->aim_world       = (Vec2){ spawn.x + 100.0f, spawn.y - 20.0f };
     m->health          = ch->health_max;
     m->health_max      = ch->health_max;
-    m->fuel            = ch->fuel_max;
-    m->fuel_max        = ch->fuel_max;
+
+    /* Loadout. */
+    m->primary_id      = lo.primary_id;
+    m->secondary_id    = lo.secondary_id;
+    m->active_slot     = 0;
+    const Weapon *pw = weapon_def(m->primary_id);
+    const Weapon *sw = weapon_def(m->secondary_id);
+    m->ammo_primary    = pw ? pw->mag_size : 0;
+    m->ammo_secondary  = sw ? sw->mag_size : 0;
+    m->weapon_id       = m->primary_id;
+    m->ammo            = m->ammo_primary;
+    m->ammo_max        = pw ? pw->mag_size : 0;
+
+    /* Armor. */
+    m->armor_id        = lo.armor_id;
+    m->armor_hp        = ar->hp;
+    m->armor_hp_max    = ar->hp;
+    m->armor_charges   = ar->reactive_charges;
+
+    /* Jetpack module + adjusted fuel cap. */
+    m->jetpack_id      = lo.jetpack_id;
+    const Jetpack *jp  = jetpack_def(m->jetpack_id);
+    m->fuel_max        = ch->fuel_max * jp->fuel_mult;
+    m->fuel            = m->fuel_max;
+    m->boost_timer     = 0.0f;
+    m->jump_armed      = true;
+
+    /* Per-limb HP. */
     m->hp_arm_l        = 80.0f;
     m->hp_arm_r        = 80.0f;
     m->hp_leg_l        = 80.0f;
     m->hp_leg_r        = 80.0f;
     m->hp_head         = 50.0f;
-    m->weapon_id       = WEAPON_PULSE_RIFLE;
-    m->ammo_max        = 30;
-    m->ammo            = 30;
     m->facing_left     = false;
+    m->aim_bink        = 0.0f;
+    m->ability_cooldown = 0.0f;
 
-    LOG_I("mech_create: id=%d chassis=%s%s (particles[%d..%d), cstr[%d..%d))",
+    LOG_I("mech_create: id=%d chassis=%s%s armor=%s jet=%s primary=%s secondary=%s",
           mid, ch->name, is_dummy ? " (dummy)" : "",
-          pbase, pbase + PART_COUNT, cbase, cbase + constraint_count);
+          ar->name, jp->name,
+          pw ? pw->name : "?", sw ? sw->name : "?");
     return mid;
 }
 
@@ -251,6 +356,18 @@ Vec2 mech_aim_dir(const World *w, int mid) {
     return (Vec2){ d.x / L, d.y / L };
 }
 
+void mech_apply_bink(Mech *m, float bink_amount, float proximity_t,
+                     pcg32_t *rng)
+{
+    if (!m->alive || bink_amount <= 0.0f) return;
+    if (proximity_t < 0.0f) proximity_t = 0.0f;
+    if (proximity_t > 1.0f) proximity_t = 1.0f;
+    float sign = ((pcg32_next(rng) & 1u) ? 1.0f : -1.0f);
+    m->aim_bink += sign * bink_amount * (0.5f + 0.5f * proximity_t);
+    if (m->aim_bink >  BINK_MAX) m->aim_bink =  BINK_MAX;
+    if (m->aim_bink < -BINK_MAX) m->aim_bink = -BINK_MAX;
+}
+
 /* ---- Pose drive (animation) --------------------------------------- */
 
 static void clear_pose(Mech *m) {
@@ -262,13 +379,6 @@ static void pose_set(Mech *m, int part, Vec2 target, float strength) {
     m->pose_strength[part] = strength;
 }
 
-/* Apply pose targets — runs *before* gravity/integrate. We don't lerp
- * the pelvis (that's where gravity and movement displacement land);
- * everything else gets pulled toward its target by strength.
- *
- * Crucially this is a *kinematic* translate (updates both pos AND prev
- * by the same delta). If we only moved pos, the next Verlet integrate
- * would read the lerp as injected velocity and the body would oscillate. */
 static void apply_pose_to_particles(World *w, Mech *m) {
     ParticlePool *p = &w->particles;
     for (int i = 0; i < PART_COUNT; ++i) {
@@ -277,32 +387,10 @@ static void apply_pose_to_particles(World *w, Mech *m) {
         int idx = m->particle_base + i;
         float dx = (m->pose_target[i].x - p->pos_x[idx]) * s;
         float dy = (m->pose_target[i].y - p->pos_y[idx]) * s;
-        /* Swept kinematic translate so a strong pose pull (e.g. 0.7 *
-         * a 50-px gap to standing-height head target) can't teleport a
-         * particle through a 1-tile-thick platform in one tick. */
         physics_translate_kinematic_swept(p, &w->level, idx, dx, dy);
     }
 }
 
-/* Build an animation pose into m->pose_*. Pelvis position is taken from
- * the live particle so the body remains attached to wherever physics
- * actually put it.
- *
- * KEY RULES:
- *   - Pose targets are *layout-consistent*. Each part's target is exactly
- *     its layout offset relative to the (possibly lifted) pelvis, so the
- *     distance between any two pose-driven particles equals the rest
- *     length of the constraint between them. That removes the
- *     pose-vs-constraint tug-of-war that otherwise pumps drift velocity
- *     into the body.
- *   - When grounded, the pelvis itself gets a pose target at the
- *     "standing height" derived from foot position. Without this,
- *     gravity slowly sags the pelvis below standing height; the
- *     pose-Y targets for legs follow it down; foot targets end up
- *     under the floor; collision pins them at the floor; the chain
- *     collapses to horizontal. Pose-driving the pelvis breaks the
- *     positive-feedback loop.
- *   - Aim only drives the right (rifle) arm chain. */
 static void build_pose(const Chassis *ch, World *w, Mech *m, float dt) {
     clear_pose(m);
     if (!m->alive) return;
@@ -312,27 +400,16 @@ static void build_pose(const Chassis *ch, World *w, Mech *m, float dt) {
     Vec2 aim_dir = mech_aim_dir(w, m->id);
     m->facing_left = aim_dir.x < 0.0f;
 
-    /* Compute the pelvis's pose-target Y. When grounded, we derive it
-     * from the foot positions (so the body stands tall above its feet).
-     * When in the air, just hold the live pelvis Y. */
     float pelvis_x = p->pos_x[b + PART_PELVIS];
     float pelvis_y = p->pos_y[b + PART_PELVIS];
     float chain_len = ch->bone_thigh + ch->bone_shin;
-    /* When grounded, anchor the *target* pelvis Y at standing height
-     * (foot−chain_len) so the body's pose is computed for an upright
-     * stance regardless of where physics has put the live pelvis. The
-     * actual lift of the live pelvis happens in the post-physics
-     * pass via mech_post_physics_anchor (so we don't pump velocity
-     * through the constraint solver). */
     if (m->grounded) {
         float foot_y_avg = (p->pos_y[b + PART_L_FOOT] +
                             p->pos_y[b + PART_R_FOOT]) * 0.5f;
         pelvis_y = foot_y_avg - chain_len;
     }
-    /* The remaining pose targets are computed from this pelvis_y. */
     Vec2 pelvis = { pelvis_x, pelvis_y };
 
-    /* Layout-consistent torso/head. */
     pose_set(m, PART_CHEST,
         (Vec2){ pelvis.x, pelvis.y - ch->torso_h }, 0.7f);
     pose_set(m, PART_NECK,
@@ -340,11 +417,9 @@ static void build_pose(const Chassis *ch, World *w, Mech *m, float dt) {
     pose_set(m, PART_HEAD,
         (Vec2){ pelvis.x, pelvis.y - ch->torso_h - ch->neck_h - 8.0f }, 0.7f);
 
-    /* Hips. */
     pose_set(m, PART_L_HIP, (Vec2){ pelvis.x - 7, pelvis.y }, 0.7f);
     pose_set(m, PART_R_HIP, (Vec2){ pelvis.x + 7, pelvis.y }, 0.7f);
 
-    /* Shoulders. */
     pose_set(m, PART_L_SHOULDER,
         (Vec2){ pelvis.x - 10, pelvis.y - ch->torso_h + 4 }, 0.7f);
     pose_set(m, PART_R_SHOULDER,
@@ -352,57 +427,30 @@ static void build_pose(const Chassis *ch, World *w, Mech *m, float dt) {
 
     float arm_reach = ch->bone_arm + ch->bone_forearm;
     if (!m->is_dummy) {
-        /* Right (rifle) arm — only the hand has a pose target; the
-         * elbow follows from the constraint solver. Placing the hand
-         * on the aim ray at full chain reach keeps the arm constraints
-         * exactly at rest when the pose is fully met. */
         Vec2 r_sho = (Vec2){ pelvis.x + 10, pelvis.y - ch->torso_h + 4 };
         pose_set(m, PART_R_HAND,
             (Vec2){ r_sho.x + aim_dir.x * arm_reach,
                     r_sho.y + aim_dir.y * arm_reach }, 0.7f);
     }
-    /* Left arm has no pose targets in either case. (A proper two-hand
-     * rifle grip needs analytic IK; deferring past M1.) */
     (void)arm_reach;
 
-    /* Legs — by anim. */
     Vec2 lhip = { pelvis.x - 7, pelvis.y };
     Vec2 rhip = { pelvis.x + 7, pelvis.y };
     float leg_strength = 0.5f;
 
     switch ((AnimId)m->anim_id) {
         case ANIM_RUN: {
-            /* Procedural walk cycle. Each foot alternates between
-             * STANCE (foot on the ground, moving backward in
-             * body-frame at exactly the run velocity, so its world
-             * position is stationary — the body pivots over it) and
-             * SWING (foot lifts off and arcs forward to the next
-             * plant point). The previous sinusoidal swing dragged
-             * planted feet through the ground because no point on
-             * the sin curve had body-frame velocity equal to
-             * -RUN_SPEED, so feet skittered.
-             *
-             * cycle_freq is tuned so STANCE_DURATION × RUN_SPEED ==
-             * STRIDE: the body covers exactly one stride length while
-             * one foot is planted, which keeps that foot stationary
-             * in world space. Stride and lift are static and
-             * generous enough to look like a confident walk; on
-             * varying-speed locomotion (air control, slowed by
-             * obstacles) the planted foot will skitter slightly,
-             * which is acceptable. */
             m->anim_time += dt;
-            const float stride     = 28.0f;        /* peak-to-peak */
+            const float stride     = 28.0f;
             const float lift_h     = 9.0f;
             const float run_v      = RUN_SPEED_PXS * ch->run_mult;
-            float       cycle_freq = run_v / (2.0f * stride); /* 5 Hz @ 280 */
+            float       cycle_freq = run_v / (2.0f * stride);
 
             float dir   = m->facing_left ? -1.0f : 1.0f;
-            float front = stride * 0.5f * dir;     /* signed plant point ahead */
-            float back  = -stride * 0.5f * dir;    /* signed plant point behind */
+            float front = stride * 0.5f * dir;
+            float back  = -stride * 0.5f * dir;
             float foot_y_ground = lhip.y + ch->bone_thigh + ch->bone_shin;
 
-            /* phase ∈ [0,1): 0..0.5 is stance, 0.5..1 is swing.
-             * Right foot is offset by 0.5 so the two are out of phase. */
             float p_l = m->anim_time * cycle_freq;
             p_l -= floorf(p_l);
             float p_r = p_l + 0.5f;
@@ -410,11 +458,11 @@ static void build_pose(const Chassis *ch, World *w, Mech *m, float dt) {
 
             float l_fx, l_fy, r_fx, r_fy;
             if (p_l < 0.5f) {
-                float u = p_l * 2.0f;       /* stance: front → back */
+                float u = p_l * 2.0f;
                 l_fx = lhip.x + front + (back - front) * u;
                 l_fy = foot_y_ground;
             } else {
-                float u = (p_l - 0.5f) * 2.0f;     /* swing: back → front + arc */
+                float u = (p_l - 0.5f) * 2.0f;
                 l_fx = lhip.x + back + (front - back) * u;
                 l_fy = foot_y_ground - lift_h * sinf(u * PI);
             }
@@ -428,9 +476,6 @@ static void build_pose(const Chassis *ch, World *w, Mech *m, float dt) {
                 r_fy = foot_y_ground - lift_h * sinf(u * PI);
             }
 
-            /* Knee tracks toward the midpoint of hip and foot, with a
-             * small forward bias on the swing leg so the leg actually
-             * bends forward instead of buckling. */
             float l_knee_y = lhip.y + ch->bone_thigh - 2;
             float r_knee_y = rhip.y + ch->bone_thigh - 2;
             pose_set(m, PART_L_KNEE,
@@ -442,7 +487,6 @@ static void build_pose(const Chassis *ch, World *w, Mech *m, float dt) {
             break;
         }
         case ANIM_JET: {
-            /* Legs trail back/down a bit while jetting. */
             float dir = m->facing_left ? 1.0f : -1.0f;
             pose_set(m, PART_L_KNEE,
                 (Vec2){ lhip.x + dir * 4, lhip.y + ch->bone_thigh - 2 }, 0.4f);
@@ -458,7 +502,6 @@ static void build_pose(const Chassis *ch, World *w, Mech *m, float dt) {
         case ANIM_FIRE:
         case ANIM_STAND:
         default: {
-            /* Stand pose: legs straight down from the hips. */
             pose_set(m, PART_L_KNEE,
                 (Vec2){ lhip.x - 1, lhip.y + ch->bone_thigh }, 0.4f);
             pose_set(m, PART_R_KNEE,
@@ -484,26 +527,19 @@ static bool any_foot_grounded(const World *w, const Mech *m) {
            (p->flags[rf] & PARTICLE_FLAG_GROUNDED);
 }
 
-/* Set per-tick horizontal velocity on every particle in the mech so the
- * whole body translates as a unit. If we only set the lower body, the
- * upper body would have to be dragged along by constraints — a fight,
- * not a follow — and pose drive (which is kinematic) can't supply
- * velocity to the upper body either. Hence: all 16 particles. */
 static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, bool grounded) {
     ParticlePool *p = &w->particles;
     float vx_per_tick = vx_pxs * dt;
-    if (!grounded) vx_per_tick *= AIR_CONTROL;     /* gentler in air */
+    if (!grounded) vx_per_tick *= AIR_CONTROL;
     for (int part = 0; part < PART_COUNT; ++part) {
         int idx = m->particle_base + part;
         physics_set_velocity_x(p, idx, vx_per_tick);
     }
 }
 
-/* Jump: instantaneous upward velocity on every particle. The whole body
- * leaves the ground together. */
 static void apply_jump(World *w, const Mech *m, float jump_pxs, float dt) {
     ParticlePool *p = &w->particles;
-    float vy_per_tick = -jump_pxs * dt;        /* negative = upward */
+    float vy_per_tick = -jump_pxs * dt;
     for (int part = 0; part < PART_COUNT; ++part) {
         int idx = m->particle_base + part;
         physics_set_velocity_y(p, idx, vy_per_tick);
@@ -512,18 +548,8 @@ static void apply_jump(World *w, const Mech *m, float jump_pxs, float dt) {
              (unsigned long long)w->tick, m->id, jump_pxs, vy_per_tick);
 }
 
-/* Jet: continuous upward acceleration applied uniformly to every body
- * particle. Gravity and jet are both whole-body accelerations; applying
- * jet only to the torso would tilt the body forward as the legs lag.
- *
- * We cut the thrust as the body approaches the world's y=0 boundary.
- * Without this guard, sustained thrust crams every particle against
- * the out-of-bounds-as-solid ceiling and the constraint solver tangles
- * the skeleton trying to keep bones rigid against the wedge. The taper
- * starts one chain-length below the ceiling (so the head doesn't quite
- * reach it) and goes to zero at half that distance. */
-#define JET_CEILING_TAPER_BEGIN  64.0f   /* px below y=0 where thrust starts to fade */
-#define JET_CEILING_TAPER_END    24.0f   /* px below y=0 where thrust hits zero */
+#define JET_CEILING_TAPER_BEGIN  64.0f
+#define JET_CEILING_TAPER_END    24.0f
 
 static void apply_jet_force(World *w, const Mech *m, float thrust_pxs2, float dt) {
     ParticlePool *p = &w->particles;
@@ -545,89 +571,200 @@ static void apply_jet_force(World *w, const Mech *m, float thrust_pxs2, float dt
     }
 }
 
+/* Reload: kicks off if magazine is empty AND the weapon uses a mag. */
+static void maybe_start_reload(Mech *m, const Weapon *wpn, const Chassis *ch) {
+    if (!wpn) return;
+    if (wpn->mag_size <= 0) return;     /* knife / grenades have no reload */
+    if (m->reload_timer > 0.0f) return; /* already reloading */
+    if (m->ammo > 0) return;            /* still ammo left */
+    float mult = (ch->passive == PASSIVE_TROOPER_FAST_RELOAD) ? 0.75f : 1.0f;
+    m->reload_timer = wpn->reload_sec * mult;
+}
+
+/* Flip the active weapon slot. Cancels any in-progress reload (per
+ * documents/04-combat.md §"Reloading" — switching to secondary cancels
+ * the reload and the magazine is dropped). */
+static void swap_weapon(Mech *m) {
+    /* Stash the current ammo back into its slot. */
+    if (m->active_slot == 0) m->ammo_primary   = m->ammo;
+    else                     m->ammo_secondary = m->ammo;
+
+    m->active_slot ^= 1;
+    int new_id = (m->active_slot == 0) ? m->primary_id : m->secondary_id;
+    int new_ammo = (m->active_slot == 0) ? m->ammo_primary : m->ammo_secondary;
+    const Weapon *wpn = weapon_def(new_id);
+    m->weapon_id    = new_id;
+    m->ammo         = new_ammo;
+    m->ammo_max     = wpn ? wpn->mag_size : 0;
+    m->reload_timer = 0.0f;
+    m->charge_timer = 0.0f;
+    m->spinup_timer = 0.0f;
+}
+
 void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
     Mech *m = &w->mechs[mid];
     const Chassis *ch = mech_chassis((ChassisId)m->chassis_id);
+    const Armor   *ar = armor_def(m->armor_id);
+    const Jetpack *jp = jetpack_def(m->jetpack_id);
 
-    /* Latch aim from the input. ClientInput.aim_x/y are world-space:
-     * the client converts cursor screen→world via its camera before
-     * sending. Server reads as-is. The single-player path also writes
-     * world-space directly into latched_input.aim_x/y. */
     if (in.aim_x != 0.0f || in.aim_y != 0.0f) {
         m->aim_world = (Vec2){ in.aim_x, in.aim_y };
     }
+
+    /* Edge-detect for press events (swap, dash, use). */
+    uint16_t pressed = (uint16_t)((~m->prev_buttons) & in.buttons);
 
     if (m->alive && !m->is_dummy) {
         bool grounded = any_foot_grounded(w, m);
         m->grounded = grounded;
 
+        if (pressed & BTN_SWAP) swap_weapon(m);
+
+        /* Engineer ability — drop a small repair pack on yourself.
+         * A real "deploy on the ground" pickup wires up at M5; for now
+         * the active ability heals the user. */
+        if ((pressed & BTN_USE) && ch->passive == PASSIVE_ENGINEER_REPAIR
+            && m->ability_cooldown <= 0.0f) {
+            m->health = fminf(m->health_max, m->health + ENGINEER_HEAL);
+            m->ability_cooldown = ENGINEER_COOLDOWN;
+            SHOT_LOG("t=%llu mech=%d engineer_repair +%.0f hp",
+                     (unsigned long long)w->tick, mid, ENGINEER_HEAL);
+        }
+        if (m->ability_cooldown > 0.0f) m->ability_cooldown -= dt;
+
         bool moving = false;
+        float run_speed = RUN_SPEED_PXS * ch->run_mult * ar->run_mult;
         if (in.buttons & BTN_LEFT) {
-            apply_run_velocity(w, m, -RUN_SPEED_PXS * ch->run_mult, dt, grounded);
+            apply_run_velocity(w, m, -run_speed, dt, grounded);
             moving = true;
         }
         if (in.buttons & BTN_RIGHT) {
-            apply_run_velocity(w, m,  RUN_SPEED_PXS * ch->run_mult, dt, grounded);
+            apply_run_velocity(w, m,  run_speed, dt, grounded);
             moving = true;
         }
-        /* Active braking — when no horizontal input and feet are on the
-         * floor, zero horizontal velocity directly so stop is instant.
-         * Verlet's tangential friction alone takes ~half a second to
-         * decelerate, which feels mushy. */
         if (grounded && !moving) {
             apply_run_velocity(w, m, 0.0f, dt, true);
         }
 
-        bool jetting = (in.buttons & BTN_JET) && m->fuel > 0.0f;
-        if (jetting) {
-            apply_jet_force(w, m, JET_THRUST_PXS2 * ch->jet_mult, dt);
-            m->fuel -= JET_DRAIN_PER_SEC * dt;
-            if (m->fuel < 0.0f) m->fuel = 0.0f;
-        } else if (grounded) {
-            m->fuel += ch->fuel_regen * dt;
-            if (m->fuel > ch->fuel_max) m->fuel = ch->fuel_max;
+        /* Scout dash: BTN_DASH while grounded gives a one-shot horizontal
+         * burst. (Air dash is a stretch — would need its own cooldown.) */
+        if ((pressed & BTN_DASH) && grounded
+            && ch->passive == PASSIVE_SCOUT_DASH) {
+            float vx = m->facing_left ? -SCOUT_DASH_PXS : SCOUT_DASH_PXS;
+            apply_run_velocity(w, m, vx, dt, true);
+            moving = true;
+            SHOT_LOG("t=%llu mech=%d scout_dash vx=%.0f",
+                     (unsigned long long)w->tick, mid, vx);
+        }
+
+        /* Jet handling — varies by jetpack module. */
+        bool jetting = false;
+        float effective_thrust = JET_THRUST_PXS2 * ch->jet_mult * ar->jet_mult * jp->thrust_mult;
+
+        if (jp->jump_on_land) {
+            /* JET_JUMP_JET: BTN_JET acts as a re-jump (consumes a chunk
+             * of fuel). Continuous thrust disabled. */
+            if ((pressed & BTN_JET) && m->fuel > 0.05f) {
+                apply_jump(w, m, JUMP_IMPULSE_PXS * ch->jump_mult * 1.05f, dt);
+                m->fuel -= 0.10f;
+                if (m->fuel < 0.0f) m->fuel = 0.0f;
+            }
+        } else {
+            /* Standard / burst / glide. */
+            jetting = (in.buttons & BTN_JET) && (m->fuel > 0.0f);
+            if (jetting) {
+                /* Burst: BTN_DASH triggers a temporary multiplier. */
+                if (jp->boost_thrust_mult > 0.0f && m->boost_timer > 0.0f) {
+                    apply_jet_force(w, m,
+                        effective_thrust * jp->boost_thrust_mult, dt);
+                } else {
+                    apply_jet_force(w, m, effective_thrust, dt);
+                }
+                m->fuel -= JET_DRAIN_PER_SEC * dt;
+                if (m->fuel < 0.0f) m->fuel = 0.0f;
+            } else if (jp->glide_thrust > 0.0f && (in.buttons & BTN_JET)) {
+                /* Glide wing: lift even at empty fuel. */
+                ParticlePool *p = &w->particles;
+                float dy = -jp->glide_thrust * dt * dt;
+                for (int part = 0; part < PART_COUNT; ++part) {
+                    p->pos_y[m->particle_base + part] += dy;
+                }
+            } else if (grounded) {
+                m->fuel += ch->fuel_regen * dt;
+                if (m->fuel > m->fuel_max) m->fuel = m->fuel_max;
+            }
+
+            /* Burst boost trigger. */
+            if (jp->boost_thrust_mult > 0.0f && (pressed & BTN_DASH)
+                && m->boost_timer <= 0.0f && m->fuel > jp->boost_fuel_cost * m->fuel_max) {
+                m->boost_timer = jp->boost_duration;
+                m->fuel -= jp->boost_fuel_cost * m->fuel_max;
+                SHOT_LOG("t=%llu mech=%d jet_burst",
+                         (unsigned long long)w->tick, mid);
+            }
+            if (m->boost_timer > 0.0f) m->boost_timer -= dt;
         }
 
         if ((in.buttons & BTN_JUMP) && grounded) {
             apply_jump(w, m, JUMP_IMPULSE_PXS * ch->jump_mult, dt);
         }
 
-        /* Anim selection — purely visual. */
         if (jetting)        m->anim_id = ANIM_JET;
         else if (!grounded) m->anim_id = ANIM_FALL;
         else if (moving)    m->anim_id = ANIM_RUN;
         else                m->anim_id = ANIM_STAND;
 
-        /* Aim — pose driver reads this; the platform layer fills aim
-         * world-space *before* this step (see simulate.c). */
     } else if (m->alive && m->is_dummy) {
-        /* Dummies stand still. */
         m->anim_id = ANIM_STAND;
         m->grounded = any_foot_grounded(w, m);
     }
 
-    /* Cooldowns. */
+    /* Cooldowns + bink decay. */
     if (m->fire_cooldown > 0.0f) m->fire_cooldown -= dt;
     if (m->recoil_kick   > 0.0f) m->recoil_kick   -= dt * 4.0f;
+    if (m->aim_bink != 0.0f) {
+        float decay = expf(-BINK_DECAY_PER_SEC * dt);
+        m->aim_bink *= decay;
+        if (fabsf(m->aim_bink) < 1e-4f) m->aim_bink = 0.0f;
+    }
 
-    /* Reload state machine. Either we're mid-reload (count down, then
-     * refill on completion) or we're empty and need to kick one off. */
+    /* Reload. The active weapon's reload kicks off when the mag is
+     * empty (set during fire). It can also be commanded with BTN_RELOAD,
+     * but the doc explicitly forbids reload-cancel-into-fire so we just
+     * trigger a fresh reload and consume the press. */
+    const Weapon *wpn_active = weapon_def(m->weapon_id);
     if (m->reload_timer > 0.0f) {
         m->reload_timer -= dt;
         if (m->reload_timer <= 0.0f) {
             m->reload_timer = 0.0f;
-            m->ammo = m->ammo_max;
+            if (wpn_active) m->ammo = wpn_active->mag_size;
+            if (m->active_slot == 0) m->ammo_primary   = m->ammo;
+            else                     m->ammo_secondary = m->ammo;
         }
-    } else if (m->ammo <= 0) {
-        const Weapon *wpn = weapon_def(m->weapon_id);
-        m->reload_timer = wpn ? wpn->reload_sec : 1.5f;
+    } else {
+        if ((pressed & BTN_RELOAD) && wpn_active && wpn_active->mag_size > 0
+            && m->ammo < wpn_active->mag_size) {
+            float mult = (ch->passive == PASSIVE_TROOPER_FAST_RELOAD) ? 0.75f : 1.0f;
+            m->reload_timer = wpn_active->reload_sec * mult;
+        } else {
+            maybe_start_reload(m, wpn_active, ch);
+        }
     }
 
-    /* Build the pose targets and apply them. The constraint pass that
-     * follows will redistribute the displacement through the rest of
-     * the skeleton. */
+    /* prev_buttons gets updated AFTER mech_try_fire (in simulate.c)
+     * so edge-detection inside the fire path sees the same edge that
+     * mech_step_drive saw above. Otherwise BTN_FIRE on its first tick
+     * would be eaten here and the fire path would never see it. */
+
     build_pose(ch, w, m, dt);
     apply_pose_to_particles(w, m);
+}
+
+/* Latch this tick's input into prev_buttons. Called by simulate AFTER
+ * mech_try_fire so both passes share the same "is this an edge?" view. */
+void mech_latch_prev_buttons(World *w, int mid) {
+    Mech *m = &w->mechs[mid];
+    m->prev_buttons = m->latched_input.buttons;
 }
 
 void mech_post_physics_anchor(World *w, int mid) {
@@ -641,50 +778,22 @@ void mech_post_physics_anchor(World *w, int mid) {
         (p->flags[b + PART_R_FOOT] & PARTICLE_FLAG_GROUNDED);
     m->grounded = grounded;
     if (!grounded) return;
-    /* Anchor for any grounded, alive bipedal pose: the upper body wants
-     * to sit at standing height regardless of whether the legs are
-     * static (STAND) or striding (RUN). Skipping the anchor in RUN
-     * caused a "crumpled landing" bug where the body landed mid-stride,
-     * pelvis sagged below standing height, and the run pose alone
-     * couldn't pull it back up. JET/FALL/DEATH don't enter here:
-     * grounded is false during them (or m->alive is false for death). */
     if (m->anim_id != ANIM_STAND && m->anim_id != ANIM_RUN) return;
 
     const Chassis *ch = mech_chassis((ChassisId)m->chassis_id);
     float foot_y = (p->pos_y[b + PART_L_FOOT] + p->pos_y[b + PART_R_FOOT]) * 0.5f;
 
-    /* For a straight, vertical leg: foot at floor, knee mid-chain,
-     * pelvis at the top. Translate each part to its proper height
-     * kinematically (preserving velocity). */
     float pelvis_y_target = foot_y - ch->bone_thigh - ch->bone_shin;
     float knee_y_target   = foot_y - ch->bone_shin;
     float dy_pelvis = pelvis_y_target - p->pos_y[b + PART_PELVIS];
 
-    /* Only lift, never push down (push-down would prevent jumps). */
     if (dy_pelvis >= -0.1f) return;
 
-    /* Per-tick gravity sag is ~0.33 px (1200 px/s² × (1/60)²); the
-     * anchor corrects roughly 2× that every tick at rest. Logging
-     * every steady-state correction buries the actually-interesting
-     * cases (landings, recoveries) under a wall of -0.6 readings, so
-     * threshold at >1.5 px which is comfortably above steady-state. */
     if (dy_pelvis < -1.5f) {
         SHOT_LOG("t=%llu mech=%d anchor anim=%d dy_pelvis=%.2f",
                  (unsigned long long)w->tick, m->id, m->anim_id, dy_pelvis);
     }
 
-    /* Lift pelvis, hips, knees, and the entire upper body together, then
-     * zero Y-velocity by collapsing prev_y onto pos_y. The kinematic
-     * lift alone would preserve the (gravity-accumulated) Y-velocity,
-     * which grows toward terminal velocity over many idle ticks; that
-     * stored velocity then erupts the moment the mech loses ground
-     * contact. We keep X velocity intact so run/jump motion works.
-     *
-     * Knees are translated by the same dy_pelvis as the hips so the
-     * thigh constraint stays at rest length. The shin (knee→foot) gets
-     * stretched by dy_pelvis instead — the constraint solver resolves
-     * it on the next tick. This is preferable to fighting the run
-     * pose's lateral knee swing by snapping knees to mid-chain. */
     int up_with_pelvis[] = {
         PART_PELVIS, PART_L_HIP, PART_R_HIP,
         PART_L_KNEE, PART_R_KNEE,
@@ -697,13 +806,9 @@ void mech_post_physics_anchor(World *w, int mid) {
     for (int i = 0; i < n_up; ++i) {
         int idx = b + up_with_pelvis[i];
         physics_translate_kinematic(p, idx, 0.0f, dy_pelvis);
-        p->prev_y[idx] = p->pos_y[idx];   /* zero Y velocity */
+        p->prev_y[idx] = p->pos_y[idx];
     }
 
-    /* In STAND, the legs are static, so finish straightening them by
-     * snapping each knee to mid-chain Y. (Same X is left to layout from
-     * the pose pass next tick.) Skipping this in RUN lets the stride
-     * cycle drive knee swing naturally. */
     if (m->anim_id == ANIM_STAND) {
         float dy_knee_l = knee_y_target - p->pos_y[b + PART_L_KNEE];
         float dy_knee_r = knee_y_target - p->pos_y[b + PART_R_KNEE];
@@ -714,16 +819,89 @@ void mech_post_physics_anchor(World *w, int mid) {
     }
 }
 
+/* ---- Try-fire: dispatched on weapon class -------------------------- */
+
 bool mech_try_fire(World *w, int mid, ClientInput in) {
     Mech *m = &w->mechs[mid];
     if (!m->alive || m->is_dummy)            return false;
-    if (m->fire_cooldown > 0.0f)              return false;
-    if (m->reload_timer  > 0.0f)              return false;
-    if (m->ammo <= 0)                         return false;
-    if (!(in.buttons & BTN_FIRE))             return false;
+    const Weapon *wpn = weapon_def(m->weapon_id);
+    if (!wpn) return false;
+    if (m->fire_cooldown > 0.0f)             return false;
+    if (m->reload_timer  > 0.0f)             return false;
 
-    weapons_fire_hitscan(w, mid);
-    m->ammo--;
+    bool fire_held    = (in.buttons & BTN_FIRE) != 0;
+    bool fire_pressed = ((~m->prev_buttons) & in.buttons & BTN_FIRE) != 0;
+
+    /* Charged weapons (Rail Cannon, Microgun spin-up) need the trigger
+     * to be HELD for `charge_sec` before they fire. */
+    if (wpn->charge_sec > 0.0f) {
+        if (!fire_held) {
+            m->charge_timer = 0.0f;
+            return false;
+        }
+        m->charge_timer += in.dt > 0 ? in.dt : 1.0f / 60.0f;
+        if (m->charge_timer < wpn->charge_sec) return false;
+        /* Microgun: keep charging "spun up" between shots so sustained
+         * fire doesn't restart the spin every shot. We zero only on
+         * release. */
+    }
+
+    if (wpn->fire == WFIRE_HITSCAN) {
+        if (!fire_held) return false;
+        if (wpn->mag_size > 0 && m->ammo <= 0) return false;
+        weapons_fire_hitscan(w, mid);
+        if (wpn->mag_size > 0) m->ammo--;
+    }
+    else if (wpn->fire == WFIRE_PROJECTILE) {
+        if (!fire_held) return false;
+        if (wpn->mag_size > 0 && m->ammo <= 0) return false;
+        weapons_spawn_projectiles(w, mid, m->weapon_id);
+        if (wpn->mag_size > 0) m->ammo--;
+    }
+    else if (wpn->fire == WFIRE_SPREAD) {
+        if (!fire_pressed) return false;
+        if (wpn->mag_size > 0 && m->ammo <= 0) return false;
+        weapons_spawn_projectiles(w, mid, m->weapon_id);
+        if (wpn->mag_size > 0) m->ammo--;
+    }
+    else if (wpn->fire == WFIRE_BURST) {
+        /* Burst fire: spawn `burst_rounds` projectiles spaced by
+         * burst_interval_sec on the same trigger pull. We fire all of
+         * them on press; the visible cadence comes from the renderer
+         * but for damage purposes they all hit on the same tick. (A
+         * proper implementation would queue rounds for future ticks;
+         * acceptable for M3 first pass.) */
+        if (!fire_pressed) return false;
+        if (wpn->mag_size > 0 && m->ammo < wpn->burst_rounds) return false;
+        for (int b = 0; b < wpn->burst_rounds; ++b) {
+            weapons_spawn_projectiles(w, mid, m->weapon_id);
+        }
+        if (wpn->mag_size > 0) m->ammo -= wpn->burst_rounds;
+    }
+    else if (wpn->fire == WFIRE_THROW) {
+        /* Frag grenades: each press throws one. */
+        if (!fire_pressed) return false;
+        if (wpn->mag_size > 0 && m->ammo <= 0) return false;
+        weapons_spawn_projectiles(w, mid, m->weapon_id);
+        if (wpn->mag_size > 0) m->ammo--;
+    }
+    else if (wpn->fire == WFIRE_MELEE) {
+        if (!fire_pressed) return false;
+        weapons_fire_melee(w, mid, m->weapon_id);
+        m->fire_cooldown = wpn->fire_rate_sec;
+    }
+    else if (wpn->fire == WFIRE_GRAPPLE) {
+        /* Grappling hook: tagged in TRADE_OFFS as deferred. We still
+         * play the cooldown so a player pressing fire isn't surprised
+         * by silence. */
+        if (!fire_pressed) return false;
+        m->fire_cooldown = wpn->fire_rate_sec;
+        SHOT_LOG("t=%llu mech=%d grapple_attempt (NOT YET IMPLEMENTED)",
+                 (unsigned long long)w->tick, mid);
+    }
+
+    if (m->active_slot == 0) m->ammo_primary   = m->ammo;
+    else                     m->ammo_secondary = m->ammo;
     return true;
 }
 
@@ -744,99 +922,245 @@ static float hit_location_mult(int part) {
     }
 }
 
-/* Find the constraint that anchors the L_SHOULDER to the L_ELBOW (the
- * upper-arm bone) and deactivate it. Walk the constraint range — the
- * count is small (~22 per mech). */
-static void dismember_left_arm(World *w, Mech *m) {
-    if (m->dismember_mask & LIMB_L_ARM) return;
-    int p_shoulder = m->particle_base + PART_L_SHOULDER;
-    int p_elbow    = m->particle_base + PART_L_ELBOW;
-    for (int i = 0; i < m->constraint_count; ++i) {
-        Constraint *c = &w->constraints.items[m->constraint_base + i];
-        if ((c->a == p_shoulder && c->b == p_elbow) ||
-            (c->b == p_shoulder && c->a == p_elbow)) {
-            c->active = 0;
-        }
+/* Map a body part to its parent limb (LIMB_*), or 0 for torso parts
+ * that don't dismember. */
+static int part_to_limb(int part) {
+    switch (part) {
+        case PART_HEAD:                                  return LIMB_HEAD;
+        case PART_L_SHOULDER: case PART_L_ELBOW:
+        case PART_L_HAND:                                return LIMB_L_ARM;
+        case PART_R_SHOULDER: case PART_R_ELBOW:
+        case PART_R_HAND:                                return LIMB_R_ARM;
+        case PART_L_HIP: case PART_L_KNEE: case PART_L_FOOT: return LIMB_L_LEG;
+        case PART_R_HIP: case PART_R_KNEE: case PART_R_FOOT: return LIMB_R_LEG;
+        default:                                         return 0;
     }
-    /* Also cut the chest↔shoulder so the whole arm flops free. */
-    int p_chest = m->particle_base + PART_CHEST;
-    for (int i = 0; i < m->constraint_count; ++i) {
-        Constraint *c = &w->constraints.items[m->constraint_base + i];
-        if ((c->a == p_shoulder && c->b == p_chest) ||
-            (c->b == p_shoulder && c->a == p_chest)) {
-            c->active = 0;
-        }
-        /* Cut the shoulder-span and shoulder→pelvis brace too so the
-         * remaining torso doesn't drag the floating arm around. */
-        int p_r_shoulder = m->particle_base + PART_R_SHOULDER;
-        int p_pelvis     = m->particle_base + PART_PELVIS;
-        int p_r_hip      = m->particle_base + PART_R_HIP;
-        if ((c->a == p_shoulder && c->b == p_r_shoulder) ||
-            (c->b == p_shoulder && c->a == p_r_shoulder)) c->active = 0;
-        if ((c->a == p_shoulder && c->b == p_pelvis)     ||
-            (c->b == p_shoulder && c->a == p_pelvis))    c->active = 0;
-        if ((c->a == p_shoulder && c->b == p_r_hip)      ||
-            (c->b == p_shoulder && c->a == p_r_hip))     c->active = 0;
-    }
-    m->dismember_mask |= LIMB_L_ARM;
-
-    /* Spew at the shoulder. */
-    Vec2 sp = part_pos(w, m, PART_L_SHOULDER);
-    Vec2 v0 = (Vec2){ -160.0f, -80.0f };
-    for (int k = 0; k < 24; ++k) fx_spawn_blood(&w->fx, sp, v0, w->rng);
-
-    SHOT_LOG("t=%llu mech=%d dismember L_ARM at (%.1f,%.1f) mask=0x%02x",
-             (unsigned long long)w->tick, m->id, sp.x, sp.y, m->dismember_mask);
 }
 
-void mech_kill(World *w, int mid, int killshot_part, Vec2 dir, float impulse) {
+/* Deactivate every constraint that touches `target_part` AND a particle
+ * on the *parent* side of the dismembered limb. We pass in a list of
+ * "kept-side" particles so the limb's internal sticks survive (the gib
+ * stays connected) while the connection to the rest of the body is cut. */
+static void cut_constraints_between(World *w, Mech *m,
+                                    const int *limb_parts, int n_limb,
+                                    const int *kept_parts, int n_kept)
+{
+    int base = m->particle_base;
+    for (int i = 0; i < m->constraint_count; ++i) {
+        Constraint *c = &w->constraints.items[m->constraint_base + i];
+        if (!c->active) continue;
+        bool a_in_limb = false, b_in_limb = false;
+        bool a_in_kept = false, b_in_kept = false;
+        for (int k = 0; k < n_limb; ++k) {
+            if (c->a == base + limb_parts[k]) a_in_limb = true;
+            if (c->b == base + limb_parts[k]) b_in_limb = true;
+        }
+        for (int k = 0; k < n_kept; ++k) {
+            if (c->a == base + kept_parts[k]) a_in_kept = true;
+            if (c->b == base + kept_parts[k]) b_in_kept = true;
+        }
+        /* Cut constraints that span limb↔kept. Constraints internal to
+         * the limb (both endpoints in limb_parts) survive. */
+        if ((a_in_limb && b_in_kept) || (a_in_kept && b_in_limb)) {
+            c->active = 0;
+        }
+    }
+}
+
+/* Spawn an exuberant blood spew at the joint to sell the dismemberment. */
+static void blood_spew_at(World *w, Vec2 at, Vec2 base_dir) {
+    for (int k = 0; k < 32; ++k) fx_spawn_blood(&w->fx, at, base_dir, w->rng);
+}
+
+void mech_dismember(World *w, int mid, int limb) {
+    Mech *m = &w->mechs[mid];
+    if (m->dismember_mask & limb) return;     /* already gone */
+    int base = m->particle_base;
+    /* All particles in the mech (used to compute kept-side per limb). */
+    static const int all_parts[] = {
+        PART_HEAD, PART_NECK, PART_CHEST, PART_PELVIS,
+        PART_L_SHOULDER, PART_L_ELBOW, PART_L_HAND,
+        PART_R_SHOULDER, PART_R_ELBOW, PART_R_HAND,
+        PART_L_HIP, PART_L_KNEE, PART_L_FOOT,
+        PART_R_HIP, PART_R_KNEE, PART_R_FOOT,
+    };
+    const int N_ALL = (int)(sizeof(all_parts) / sizeof(all_parts[0]));
+
+    int limb_parts[8]; int n_limb = 0;
+    int joint_part = PART_CHEST;
+    switch (limb) {
+        case LIMB_HEAD:
+            limb_parts[n_limb++] = PART_HEAD;
+            joint_part = PART_NECK;
+            break;
+        case LIMB_L_ARM:
+            limb_parts[n_limb++] = PART_L_SHOULDER;
+            limb_parts[n_limb++] = PART_L_ELBOW;
+            limb_parts[n_limb++] = PART_L_HAND;
+            joint_part = PART_L_SHOULDER;
+            break;
+        case LIMB_R_ARM:
+            limb_parts[n_limb++] = PART_R_SHOULDER;
+            limb_parts[n_limb++] = PART_R_ELBOW;
+            limb_parts[n_limb++] = PART_R_HAND;
+            joint_part = PART_R_SHOULDER;
+            break;
+        case LIMB_L_LEG:
+            limb_parts[n_limb++] = PART_L_HIP;
+            limb_parts[n_limb++] = PART_L_KNEE;
+            limb_parts[n_limb++] = PART_L_FOOT;
+            joint_part = PART_L_HIP;
+            break;
+        case LIMB_R_LEG:
+            limb_parts[n_limb++] = PART_R_HIP;
+            limb_parts[n_limb++] = PART_R_KNEE;
+            limb_parts[n_limb++] = PART_R_FOOT;
+            joint_part = PART_R_HIP;
+            break;
+        default:
+            return;
+    }
+
+    /* Kept = all parts that aren't in this limb. */
+    int kept_parts[16]; int n_kept = 0;
+    for (int i = 0; i < N_ALL; ++i) {
+        bool in_limb = false;
+        for (int j = 0; j < n_limb; ++j) {
+            if (all_parts[i] == limb_parts[j]) { in_limb = true; break; }
+        }
+        if (!in_limb) kept_parts[n_kept++] = all_parts[i];
+    }
+
+    cut_constraints_between(w, m, limb_parts, n_limb, kept_parts, n_kept);
+    m->dismember_mask |= (uint8_t)limb;
+
+    Vec2 sp = (Vec2){ w->particles.pos_x[base + joint_part],
+                      w->particles.pos_y[base + joint_part] };
+    blood_spew_at(w, sp, (Vec2){ -120.0f, -60.0f });
+
+    LOG_I("mech %d dismember limb=0x%02x at (%.1f,%.1f)",
+          mid, limb, sp.x, sp.y);
+    SHOT_LOG("t=%llu mech=%d dismember limb=0x%02x at (%.1f,%.1f) mask=0x%02x",
+             (unsigned long long)w->tick, mid, limb, sp.x, sp.y,
+             m->dismember_mask);
+}
+
+void mech_kill(World *w, int mid, int killshot_part, Vec2 dir,
+               float impulse, int killer_mech_id, int weapon_id)
+{
     Mech *m = &w->mechs[mid];
     if (!m->alive) return;
     m->alive = false;
-    /* Drop pose drive. The constraint solver still keeps the body
-     * coherent; gravity now owns the trajectory. */
     clear_pose(m);
-
-    /* Killshot impulse to the pelvis, not the hit part. The pelvis is
-     * always connected to the rest of the body via active constraints,
-     * so the impulse propagates through the skeleton and the body
-     * ragdolls as a unit. Putting it on the hit part would let a
-     * dismembered limb (e.g. L_ELBOW after a left-arm tear) take the
-     * full kick by itself; with no body mass to absorb it the limb
-     * flies clear across the level and pins against the world wall —
-     * visually a long bone-shaped line from the corpse to the wall. */
     (void)killshot_part;
+
+    /* Apply impulse to pelvis so the body ragdolls as a unit. */
     int idx = m->particle_base + PART_PELVIS;
     physics_apply_impulse(&w->particles, idx,
         (Vec2){ dir.x * impulse, dir.y * impulse });
 
+    /* ---- Kill-feed entry. */
+    uint32_t flags = 0;
+    if (killshot_part == PART_HEAD) flags |= KILLFLAG_HEADSHOT;
+    if (limb_count(m->dismember_mask) >= 2) flags |= KILLFLAG_GIB;
+    if (m->last_damage_taken >= 200.0f)     flags |= KILLFLAG_OVERKILL;
+    if (!m->grounded)                        flags |= KILLFLAG_RAGDOLL;
+    if (killer_mech_id == mid)               flags |= KILLFLAG_SUICIDE;
+
+    int slot = w->killfeed_count % KILLFEED_CAPACITY;
+    w->killfeed[slot] = (KillFeedEntry){
+        .killer_mech_id = killer_mech_id,
+        .victim_mech_id = mid,
+        .weapon_id      = weapon_id,
+        .flags          = flags,
+        .age            = 0.0f,
+    };
+    w->killfeed_count++;
+
     snprintf(w->last_event, sizeof(w->last_event),
              "[KILL] mech #%d down", mid);
     w->last_event_time = 0.0f;
-    w->hit_pause_ticks = 5;       /* ~83 ms at 60 Hz */
+    w->hit_pause_ticks = 5;
     w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.6f);
-    LOG_I("mech_kill: id=%d (part=%d, impulse=%.1f, mask=0x%02x)",
-          mid, killshot_part, impulse, m->dismember_mask);
-    SHOT_LOG("t=%llu mech=%d kill killshot_part=%d dir=(%.2f,%.2f) impulse=%.1f mask=0x%02x",
+    LOG_I("mech_kill: id=%d (part=%d, impulse=%.1f, mask=0x%02x, weapon=%d, by=%d)",
+          mid, killshot_part, impulse, m->dismember_mask, weapon_id, killer_mech_id);
+    SHOT_LOG("t=%llu mech=%d kill killshot_part=%d dir=(%.2f,%.2f) impulse=%.1f mask=0x%02x weapon=%d by=%d flags=0x%x",
              (unsigned long long)w->tick, mid, killshot_part,
-             dir.x, dir.y, impulse, m->dismember_mask);
+             dir.x, dir.y, impulse, m->dismember_mask,
+             weapon_id, killer_mech_id, flags);
 }
 
-bool mech_apply_damage(World *w, int mid, int part, float dmg, Vec2 dir) {
+bool mech_apply_damage(World *w, int mid, int part, float dmg, Vec2 dir,
+                       int shooter_mech_id)
+{
     Mech *m = &w->mechs[mid];
     if (!m->alive) return false;
 
-    float final_dmg = dmg * hit_location_mult(part);
-    m->health -= final_dmg;
-    SHOT_LOG("t=%llu mech=%d damage part=%d dmg=%.1f hp=%.1f/%.1f",
-             (unsigned long long)w->tick, mid, part, final_dmg,
-             m->health, m->health_max);
+    /* Friendly-fire gating. Self-damage (e.g. own rocket splash) always
+     * goes through; friendly damage is dropped when FF is off. */
+    if (shooter_mech_id >= 0 && shooter_mech_id != mid) {
+        const Mech *shooter = &w->mechs[shooter_mech_id];
+        if (shooter->team == m->team && !w->friendly_fire) {
+            return false;
+        }
+    }
 
-    /* Limb HP — only L arm at M1 (per the roadmap). */
-    if (part == PART_L_SHOULDER || part == PART_L_ELBOW || part == PART_L_HAND) {
-        m->hp_arm_l -= final_dmg;
-        if (m->hp_arm_l <= 0.0f && !(m->dismember_mask & LIMB_L_ARM)) {
-            dismember_left_arm(w, m);
+    float final_dmg = dmg * hit_location_mult(part);
+
+    /* Armor absorption. Non-reactive armor splits damage by absorb_ratio
+     * until its HP drains, then falls off. (Reactive is handled by the
+     * explosion path, which eats one charge for full negation; bullets
+     * still go through reactive at standard absorb.) */
+    if (m->armor_id != ARMOR_NONE && m->armor_hp > 0.0f) {
+        const Armor *ar = armor_def(m->armor_id);
+        float absorbed = final_dmg * ar->absorb_ratio;
+        if (absorbed > m->armor_hp) absorbed = m->armor_hp;
+        m->armor_hp -= absorbed;
+        final_dmg   -= absorbed;
+        if (m->armor_hp <= 0.0f) {
+            m->armor_hp = 0.0f;
+            m->armor_id = ARMOR_NONE;
+            m->armor_hp_max = 0.0f;
+            SHOT_LOG("t=%llu mech=%d armor_break", (unsigned long long)w->tick, mid);
+        }
+    }
+
+    if (final_dmg <= 0.0f) {
+        /* Light hit feedback even when armor ate it. */
+        Vec2 hp = part_pos(w, m, part);
+        for (int k = 0; k < 4; ++k) fx_spawn_spark(&w->fx, hp, dir, w->rng);
+        return false;
+    }
+
+    m->health -= final_dmg;
+    m->last_damage_taken = final_dmg;
+    SHOT_LOG("t=%llu mech=%d damage part=%d dmg=%.1f hp=%.1f/%.1f mask=0x%02x",
+             (unsigned long long)w->tick, mid, part, final_dmg,
+             m->health, m->health_max, m->dismember_mask);
+
+    /* Per-limb HP tracking. The limb takes the same damage that hit
+     * the chassis. When it drops to zero it dismembers. (See
+     * documents/02-game-design.md §"Health, damage, and death".) */
+    int limb = part_to_limb(part);
+    if (limb) {
+        float *limb_hp = NULL;
+        switch (limb) {
+            case LIMB_HEAD:  limb_hp = &m->hp_head;  break;
+            case LIMB_L_ARM: limb_hp = &m->hp_arm_l; break;
+            case LIMB_R_ARM: limb_hp = &m->hp_arm_r; break;
+            case LIMB_L_LEG: limb_hp = &m->hp_leg_l; break;
+            case LIMB_R_LEG: limb_hp = &m->hp_leg_r; break;
+        }
+        if (limb_hp) {
+            *limb_hp -= final_dmg;
+            if (*limb_hp <= 0.0f && !(m->dismember_mask & limb)) {
+                mech_dismember(w, mid, limb);
+                /* HEAD detach is also lethal — losing your head ends the
+                 * mech regardless of remaining HP. */
+                if (limb == LIMB_HEAD && m->health > 0.0f) {
+                    m->health = 0.0f;
+                }
+            }
         }
     }
 
@@ -846,11 +1170,11 @@ bool mech_apply_damage(World *w, int mid, int part, float dmg, Vec2 dir) {
     for (int k = 0; k < 4; ++k) fx_spawn_spark(&w->fx, hp, dir, w->rng);
 
     if (m->health <= 0.0f) {
-        mech_kill(w, mid, part, dir, 90.0f);
+        mech_kill(w, mid, part, dir, 90.0f, shooter_mech_id,
+                  m->last_killshot_weapon);
         return true;
     }
 
-    /* Light hit-pause + shake on every solid hit. */
     w->hit_pause_ticks = 1;
     w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.12f);
     return false;

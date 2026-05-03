@@ -45,19 +45,31 @@ typedef struct {
 
 #define SNAPSHOT_HEADER_WIRE_BYTES 24
 
-/* Per-mech record. 22 bytes when every field is present.
+/* Per-mech record. M3 widens this from M2's 22 bytes to 27 bytes to
+ * carry the loadout (chassis + armor + jetpack + secondary). The
+ * loadout is technically static for the life of a mech, but we ship it
+ * every snapshot for simplicity — the bandwidth cost is small (5 bytes
+ * × 32 mechs × 30 Hz = 4.8 KB/s) and it lets a mid-stream client see
+ * correct stats without waiting on a separate reliable message.
  *
  * Quantization:
- *   pos_x_q, pos_y_q  → 1/8 px      (16-bit signed covers ±4096 px)
- *   vel_x_q, vel_y_q  → 1/16 px/tick
- *   aim_q             → uint16 fraction of 2π
- *   torso_q           → uint16 fraction of 2π
- *   health, armor     → uint8 (0..255)
- *   weapon_id         → uint8
- *   ammo              → uint8
- *   state_bits        → 1 alive | 2 jet | 4 crouch | 8 prone | 16 fire | 32 reload | 64 grounded | 128 facing_left
- *   team              → uint8
- *   limb_bits         → uint16 (LIMB_* flags)
+ *   pos_x_q, pos_y_q   → 1/8 px      (16-bit signed covers ±4096 px)
+ *   vel_x_q, vel_y_q   → 1/16 px/tick
+ *   aim_q              → uint16 fraction of 2π
+ *   torso_q            → uint16 fraction of 2π
+ *   health             → uint8 (0..255 fraction of health_max)
+ *   armor              → uint8 (0..255 fraction of armor_max)
+ *   weapon_id          → uint8 (active slot's weapon)
+ *   ammo               → uint8 (active slot's ammo)
+ *   state_bits         → 1 alive | 2 jet | 4 crouch | 8 prone | 16 fire
+ *                        | 32 reload | 64 grounded | 128 facing_left
+ *   team               → uint8
+ *   limb_bits          → uint16 (LIMB_* flags)
+ *   chassis_id         → uint8
+ *   armor_id           → uint8
+ *   jetpack_id         → uint8
+ *   secondary_id       → uint8
+ *   ammo_secondary     → uint8
  */
 typedef struct {
     uint16_t mech_id;
@@ -72,11 +84,15 @@ typedef struct {
     uint8_t  state_bits;
     uint8_t  team;
     uint16_t limb_bits;
+    uint8_t  chassis_id;
+    uint8_t  armor_id;
+    uint8_t  jetpack_id;
+    uint8_t  secondary_id;
+    uint8_t  ammo_secondary;
 } EntitySnapshot;
 
-/* On-wire size of one EntitySnapshot, written field-by-field by
- * snapshot_encode (independent of compiler layout). */
-#define ENTITY_SNAPSHOT_WIRE_BYTES 22
+/* On-wire size of one EntitySnapshot. M3 = 22 (M2 size) + 5 = 27 bytes. */
+#define ENTITY_SNAPSHOT_WIRE_BYTES 27
 
 enum {
     SNAP_STATE_ALIVE       = 1u << 0,

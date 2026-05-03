@@ -4,6 +4,7 @@
 #include "log.h"
 #include "mech.h"
 #include "particle.h"
+#include "projectile.h"
 #include "snapshot.h"
 
 #include <math.h>
@@ -11,34 +12,187 @@
 
 /* ---- Weapon table -------------------------------------------------- */
 
-static const Weapon g_weapons[WEAPON_COUNT_M1] = {
+static const Weapon g_weapons[WEAPON_COUNT] = {
     [WEAPON_PULSE_RIFLE] = {
-        .name           = "Pulse Rifle",
-        .hitscan        = true,
-        .damage         = 18.0f,
-        .fire_rate_sec  = 0.110f,
-        .reload_sec     = 1.50f,
-        .mag_size       = 30,
-        .range_px       = 2400.0f,
-        .recoil_impulse = 1.2f,
-        .muzzle_offset  = 22.0f,
+        .name = "Pulse Rifle",
+        .klass = WEAPON_CLASS_PRIMARY,
+        .fire = WFIRE_HITSCAN,
+        .damage = 18.0f, .fire_rate_sec = 0.110f, .reload_sec = 1.50f,
+        .mag_size = 30, .range_px = 2400.0f,
+        .recoil_impulse = 1.2f, .bink = 0.012f, .self_bink = 0.008f,
+        .muzzle_offset = 22.0f,
+    },
+    [WEAPON_PLASMA_SMG] = {
+        .name = "Plasma SMG",
+        .klass = WEAPON_CLASS_PRIMARY,
+        .fire = WFIRE_PROJECTILE,
+        .damage = 10.0f, .fire_rate_sec = 0.060f, .reload_sec = 1.30f,
+        .mag_size = 40, .range_px = 1800.0f,
+        .recoil_impulse = 0.7f, .bink = 0.008f, .self_bink = 0.014f,
+        .muzzle_offset = 22.0f,
+        .projectile_kind = PROJ_PLASMA_BOLT,
+        .projectile_speed_pxs = 1800.0f, .projectile_life_sec = 1.2f,
+        .projectile_drag = 0.05f, .projectile_grav_scale = 0.0f,
+    },
+    [WEAPON_RIOT_CANNON] = {
+        .name = "Riot Cannon",
+        .klass = WEAPON_CLASS_PRIMARY,
+        .fire = WFIRE_SPREAD,
+        .damage = 8.0f, .fire_rate_sec = 0.350f, .reload_sec = 1.70f,
+        .mag_size = 6, .range_px = 800.0f,
+        .recoil_impulse = 3.5f, .bink = 0.060f, .self_bink = 0.020f,
+        .muzzle_offset = 22.0f,
+        .spread_pellets = 6, .spread_cone_rad = 0.18f,
+        .projectile_kind = PROJ_PELLET,
+        .projectile_speed_pxs = 1500.0f, .projectile_life_sec = 0.4f,
+        .projectile_drag = 1.20f, .projectile_grav_scale = 0.05f,
+    },
+    [WEAPON_RAIL_CANNON] = {
+        .name = "Rail Cannon",
+        .klass = WEAPON_CLASS_PRIMARY,
+        .fire = WFIRE_HITSCAN,
+        .damage = 95.0f, .fire_rate_sec = 1.20f, .reload_sec = 2.20f,
+        .mag_size = 4, .range_px = 4096.0f,
+        .recoil_impulse = 6.0f, .bink = 0.10f, .self_bink = 0.04f,
+        .muzzle_offset = 26.0f,
+        .charge_sec = 0.40f,
+    },
+    [WEAPON_AUTO_CANNON] = {
+        .name = "Auto-Cannon",
+        .klass = WEAPON_CLASS_PRIMARY,
+        .fire = WFIRE_PROJECTILE,
+        .damage = 14.0f, .fire_rate_sec = 0.080f, .reload_sec = 1.80f,
+        .mag_size = 60, .range_px = 2200.0f,
+        .recoil_impulse = 1.6f, .bink = 0.014f, .self_bink = 0.018f,
+        .muzzle_offset = 24.0f,
+        .projectile_kind = PROJ_RIFLE_SLUG,
+        .projectile_speed_pxs = 1700.0f, .projectile_life_sec = 1.4f,
+        .projectile_drag = 0.0f, .projectile_grav_scale = 0.05f,
+    },
+    [WEAPON_MASS_DRIVER] = {
+        .name = "Mass Driver",
+        .klass = WEAPON_CLASS_PRIMARY,
+        .fire = WFIRE_PROJECTILE,
+        .damage = 220.0f, .fire_rate_sec = 1.10f, .reload_sec = 3.00f,
+        .mag_size = 1, .range_px = 4096.0f,
+        .recoil_impulse = 5.5f, .bink = 0.10f, .self_bink = 0.04f,
+        .muzzle_offset = 28.0f,
+        .projectile_kind = PROJ_ROCKET,
+        .projectile_speed_pxs = 850.0f, .projectile_life_sec = 5.0f,
+        .projectile_drag = 0.0f, .projectile_grav_scale = 0.0f,
+        .aoe_radius = 160.0f, .aoe_damage = 130.0f, .aoe_impulse = 70.0f,
+    },
+    [WEAPON_PLASMA_CANNON] = {
+        .name = "Plasma Cannon",
+        .klass = WEAPON_CLASS_PRIMARY,
+        .fire = WFIRE_PROJECTILE,
+        .damage = 60.0f, .fire_rate_sec = 0.70f, .reload_sec = 2.20f,
+        .mag_size = 8, .range_px = 3000.0f,
+        .recoil_impulse = 2.2f, .bink = 0.04f, .self_bink = 0.02f,
+        .muzzle_offset = 26.0f,
+        .projectile_kind = PROJ_PLASMA_ORB,
+        .projectile_speed_pxs = 1200.0f, .projectile_life_sec = 2.5f,
+        .projectile_drag = 0.0f, .projectile_grav_scale = 0.0f,
+        .aoe_radius = 60.0f, .aoe_damage = 30.0f, .aoe_impulse = 25.0f,
+    },
+    [WEAPON_MICROGUN] = {
+        .name = "Microgun",
+        .klass = WEAPON_CLASS_PRIMARY,
+        .fire = WFIRE_PROJECTILE,
+        .damage = 6.0f, .fire_rate_sec = 0.025f, .reload_sec = 4.50f,
+        .mag_size = 200, .range_px = 1800.0f,
+        .recoil_impulse = 0.5f, .bink = 0.006f, .self_bink = 0.022f,
+        .muzzle_offset = 26.0f, .charge_sec = 0.50f,
+        .projectile_kind = PROJ_MICROGUN_BULLET,
+        .projectile_speed_pxs = 1900.0f, .projectile_life_sec = 0.95f,
+        .projectile_drag = 0.0f, .projectile_grav_scale = 0.05f,
+    },
+
+    /* --- Secondaries --- */
+    [WEAPON_SIDEARM] = {
+        .name = "Sidearm",
+        .klass = WEAPON_CLASS_SECONDARY,
+        .fire = WFIRE_HITSCAN,
+        .damage = 25.0f, .fire_rate_sec = 0.20f, .reload_sec = 0.80f,
+        .mag_size = 12, .range_px = 1400.0f,
+        .recoil_impulse = 1.4f, .bink = 0.018f, .self_bink = 0.010f,
+        .muzzle_offset = 18.0f,
+    },
+    [WEAPON_BURST_SMG] = {
+        .name = "Burst SMG",
+        .klass = WEAPON_CLASS_SECONDARY,
+        .fire = WFIRE_BURST,
+        .damage = 12.0f, .fire_rate_sec = 0.350f, .reload_sec = 1.40f,
+        .mag_size = 24, .range_px = 1600.0f,
+        .recoil_impulse = 0.9f, .bink = 0.012f, .self_bink = 0.014f,
+        .muzzle_offset = 20.0f,
+        .burst_rounds = 3, .burst_interval_sec = 0.070f,
+        .projectile_kind = PROJ_RIFLE_SLUG,
+        .projectile_speed_pxs = 1700.0f, .projectile_life_sec = 1.0f,
+    },
+    [WEAPON_FRAG_GRENADES] = {
+        .name = "Frag Grenades",
+        .klass = WEAPON_CLASS_SECONDARY,
+        .fire = WFIRE_THROW,
+        .damage = 0.0f, .fire_rate_sec = 0.60f, .reload_sec = 0.0f,
+        .mag_size = 3, .range_px = 0.0f,
+        .recoil_impulse = 0.4f, .bink = 0.0f, .self_bink = 0.0f,
+        .muzzle_offset = 16.0f,
+        .projectile_kind = PROJ_FRAG_GRENADE,
+        .projectile_speed_pxs = 700.0f, .projectile_life_sec = 1.5f,
+        .projectile_drag = 0.4f, .projectile_grav_scale = 1.0f,
+        .aoe_radius = 140.0f, .aoe_damage = 80.0f, .aoe_impulse = 55.0f,
+        .bouncy = true,
+    },
+    [WEAPON_MICRO_ROCKETS] = {
+        .name = "Micro-Rockets",
+        .klass = WEAPON_CLASS_SECONDARY,
+        .fire = WFIRE_PROJECTILE,
+        .damage = 35.0f, .fire_rate_sec = 0.25f, .reload_sec = 2.20f,
+        .mag_size = 5, .range_px = 2400.0f,
+        .recoil_impulse = 1.0f, .bink = 0.020f, .self_bink = 0.020f,
+        .muzzle_offset = 22.0f,
+        .projectile_kind = PROJ_MICRO_ROCKET,
+        .projectile_speed_pxs = 1100.0f, .projectile_life_sec = 2.5f,
+        .projectile_drag = 0.0f, .projectile_grav_scale = 0.0f,
+        .aoe_radius = 50.0f, .aoe_damage = 18.0f, .aoe_impulse = 22.0f,
+    },
+    [WEAPON_COMBAT_KNIFE] = {
+        .name = "Combat Knife",
+        .klass = WEAPON_CLASS_SECONDARY,
+        .fire = WFIRE_MELEE,
+        .damage = 90.0f, .fire_rate_sec = 0.20f, .reload_sec = 0.0f,
+        .mag_size = 0, .range_px = 60.0f,
+        .recoil_impulse = 0.0f, .bink = 0.0f, .self_bink = 0.0f,
+        .muzzle_offset = 0.0f,
+    },
+    [WEAPON_GRAPPLING_HOOK] = {
+        .name = "Grappling Hook",
+        .klass = WEAPON_CLASS_SECONDARY,
+        .fire = WFIRE_GRAPPLE,
+        .damage = 0.0f, .fire_rate_sec = 1.20f, .reload_sec = 0.0f,
+        .mag_size = 1, .range_px = 600.0f,
+        .recoil_impulse = 0.0f, .bink = 0.0f, .self_bink = 0.0f,
+        .muzzle_offset = 18.0f,
     },
 };
 
 const Weapon *weapon_def(int id) {
-    if ((unsigned)id >= WEAPON_COUNT_M1) return NULL;
+    if ((unsigned)id >= WEAPON_COUNT) return NULL;
     return &g_weapons[id];
+}
+
+const char *weapon_short_name(int id) {
+    if ((unsigned)id >= WEAPON_COUNT) return "?";
+    return g_weapons[id].name;
 }
 
 /* ---- Bone segment list (per-mech) ---------------------------------- */
 
-/* Bones we can hit. Each entry is a (parent_part, child_part) — the
- * "bone" is the segment between those two particles. We test the ray
- * against each as a capsule of `bone_radius`. */
 typedef struct {
     int parent;
     int child;
-    int part_for_damage;   /* which body part to attribute the hit to */
+    int part_for_damage;
 } BoneSeg;
 
 static const BoneSeg g_bones[] = {
@@ -62,19 +216,8 @@ static const BoneSeg g_bones[] = {
 
 /* ---- Ray vs segment test ------------------------------------------- */
 
-/* Return the smallest t in (0, t_max] where ray (origin + t*dir) gets
- * within `r` of segment [a,b], or -1 if no hit. Uses a capsule
- * approximation: project ray onto segment, take the closest point, and
- * if distance <= r and projection-along-ray is positive within t_max,
- * report it.
- *
- * This is conservative — we treat the segment as a thin capsule.
- * Adequate for M1; if it bites in playtest we'll switch to closed-form
- * ray-vs-capsule. */
 static float ray_seg_hit(Vec2 ro, Vec2 rd, float t_max,
                          Vec2 a, Vec2 b, float r) {
-    /* Sample 16 points along the segment; for each, find the t along
-     * the ray closest to it, take the min. */
     const int N = 16;
     float best_t = -1.0f;
     for (int i = 0; i <= N; ++i) {
@@ -92,23 +235,61 @@ static float ray_seg_hit(Vec2 ro, Vec2 rd, float t_max,
     return best_t;
 }
 
-/* ---- Fire ---------------------------------------------------------- */
+/* Apply incoming-fire bink to every non-shooter mech whose body is
+ * within `near_px` of the line origin→end. Used by hitscan + projectile
+ * fire paths. */
+static void apply_bink_along_segment(World *w, int shooter,
+                                     Vec2 origin, Vec2 end,
+                                     float bink_amount, float near_px)
+{
+    if (bink_amount <= 0.0f) return;
+    float seg_dx = end.x - origin.x;
+    float seg_dy = end.y - origin.y;
+    float seg2 = seg_dx * seg_dx + seg_dy * seg_dy;
+    if (seg2 < 1e-3f) return;
+
+    for (int mi = 0; mi < w->mech_count; ++mi) {
+        if (mi == shooter) continue;
+        Mech *m = &w->mechs[mi];
+        if (!m->alive) continue;
+        int p = m->particle_base + PART_CHEST;
+        Vec2 c = { w->particles.pos_x[p], w->particles.pos_y[p] };
+        /* Closest distance from line origin→end to point c. */
+        float t = ((c.x - origin.x) * seg_dx + (c.y - origin.y) * seg_dy) / seg2;
+        if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+        Vec2 q = { origin.x + seg_dx * t, origin.y + seg_dy * t };
+        float dx = c.x - q.x, dy = c.y - q.y;
+        float d2 = dx * dx + dy * dy;
+        if (d2 > near_px * near_px) continue;
+        float prox = 1.0f - sqrtf(d2) / near_px;
+        mech_apply_bink(m, bink_amount, prox, w->rng);
+    }
+}
+
+/* ---- Hitscan ------------------------------------------------------- */
+
+static Vec2 apply_self_bink(World *w, Mech *me, Vec2 base_dir) {
+    /* Rotate the aim direction by the shooter's accumulated bink. The
+     * bink decays each tick in mech_step_drive. */
+    float ang = me->aim_bink;
+    float ca = cosf(ang), sa = sinf(ang);
+    Vec2 d = { base_dir.x * ca - base_dir.y * sa,
+               base_dir.x * sa + base_dir.y * ca };
+    (void)w;
+    return d;
+}
 
 void weapons_fire_hitscan(World *w, int mid) {
     Mech *me = &w->mechs[mid];
     const Weapon *wpn = weapon_def(me->weapon_id);
-    if (!wpn || !wpn->hitscan) return;
+    if (!wpn || wpn->fire != WFIRE_HITSCAN) return;
 
-    /* Origin = right hand, plus a small muzzle offset along aim. */
     Vec2 hand = mech_hand_pos(w, mid);
-    Vec2 dir  = mech_aim_dir(w, mid);
+    Vec2 dir  = apply_self_bink(w, me, mech_aim_dir(w, mid));
     Vec2 origin = { hand.x + dir.x * wpn->muzzle_offset,
                     hand.y + dir.y * wpn->muzzle_offset };
-    Vec2 tracer_end = { origin.x + dir.x * wpn->range_px,
-                        origin.y + dir.y * wpn->range_px };
     float t_max = wpn->range_px;
 
-    /* Test against the level first — that's the hard ceiling on range. */
     float wall_t;
     if (level_ray_hits(&w->level,
             origin,
@@ -118,7 +299,6 @@ void weapons_fire_hitscan(World *w, int mid) {
         t_max = wall_t * wpn->range_px;
     }
 
-    /* Walk every other mech's bones. */
     int   hit_mech = -1;
     int   hit_part = -1;
     float hit_t    = -1.0f;
@@ -126,6 +306,7 @@ void weapons_fire_hitscan(World *w, int mid) {
     for (int i = 0; i < w->mech_count; ++i) {
         if (i == mid) continue;
         const Mech *t = &w->mechs[i];
+        if (!t->alive) continue;
         for (int bi = 0; bi < NUM_BONES; ++bi) {
             const BoneSeg *b = &g_bones[bi];
             int pa = t->particle_base + b->parent;
@@ -142,51 +323,49 @@ void weapons_fire_hitscan(World *w, int mid) {
         }
     }
 
-    /* Apply hit. */
     Vec2 final_end;
     if (hit_t >= 0.0f) {
         final_end = (Vec2){ origin.x + dir.x * hit_t, origin.y + dir.y * hit_t };
-        SHOT_LOG("t=%llu fire mech=%d origin=(%.1f,%.1f) dir=(%.2f,%.2f) "
-                 "hit mech=%d part=%d at=(%.1f,%.1f) dmg=%.1f",
-                 (unsigned long long)w->tick, mid, origin.x, origin.y,
-                 dir.x, dir.y, hit_mech, hit_part,
-                 final_end.x, final_end.y, wpn->damage);
-        /* Damage. dir is a unit vector and is forwarded as-is —
-         * mech_apply_damage uses it only for blood-spray angle and to
-         * pass through to mech_kill, which scales by its own kill
-         * impulse. The previous "impulse_px" pre-scaling here got
-         * compounded with the kill scaling and produced a 432-px
-         * displacement on death (an L_ELBOW killshot left the elbow
-         * stuck ~430 px right of the shoulder, drawn as a long red
-         * line in the ragdoll). */
-        mech_apply_damage(w, hit_mech, hit_part, wpn->damage, dir);
+        SHOT_LOG("t=%llu fire mech=%d wpn=%d hit mech=%d part=%d at=(%.1f,%.1f) dmg=%.1f",
+                 (unsigned long long)w->tick, mid, me->weapon_id,
+                 hit_mech, hit_part, final_end.x, final_end.y, wpn->damage);
+        if (w->authoritative) {
+            w->mechs[hit_mech].last_killshot_weapon = me->weapon_id;
+            mech_apply_damage(w, hit_mech, hit_part, wpn->damage, dir, mid);
+        }
     } else {
         final_end = (Vec2){ origin.x + dir.x * t_max, origin.y + dir.y * t_max };
-        SHOT_LOG("t=%llu fire mech=%d origin=(%.1f,%.1f) dir=(%.2f,%.2f) "
-                 "miss end=(%.1f,%.1f) wall=%d",
-                 (unsigned long long)w->tick, mid, origin.x, origin.y,
-                 dir.x, dir.y, final_end.x, final_end.y,
+        SHOT_LOG("t=%llu fire mech=%d wpn=%d miss end=(%.1f,%.1f) wall=%d",
+                 (unsigned long long)w->tick, mid, me->weapon_id,
+                 final_end.x, final_end.y,
                  (int)(t_max < wpn->range_px));
-        /* Sparks if it hit a wall. */
         if (t_max < wpn->range_px) {
             for (int k = 0; k < 6; ++k) {
                 fx_spawn_spark(&w->fx, final_end,
                     (Vec2){ -dir.x * 200.0f, -dir.y * 200.0f }, w->rng);
             }
         }
-        (void)tracer_end;
     }
 
     fx_spawn_tracer(&w->fx, origin, final_end);
 
-    /* Recoil — punch the firing hand backward; the constraint pass
-     * ripples it through the rest of the body. */
+    /* Bink to non-shooters along the line. */
+    apply_bink_along_segment(w, mid, origin, final_end, wpn->bink, 80.0f);
+
+    /* Self-bink on the shooter — adds aim jitter that grows with rate
+     * of fire. We just add the per-shot value; the decay is in
+     * mech_step_drive. */
+    if (wpn->self_bink > 0.0f) {
+        float sign = ((pcg32_next(w->rng) & 1u) ? 1.0f : -1.0f);
+        me->aim_bink += sign * wpn->self_bink;
+    }
+
+    /* Recoil — punch the firing hand backward. */
     int hand_idx = me->particle_base + PART_R_HAND;
     w->particles.pos_x[hand_idx] -= dir.x * wpn->recoil_impulse;
     w->particles.pos_y[hand_idx] -= dir.y * wpn->recoil_impulse;
     me->recoil_kick = 1.0f;
 
-    /* Cooldown + shake + brief muzzle flash spark. */
     me->fire_cooldown = wpn->fire_rate_sec;
     w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.05f);
     for (int k = 0; k < 3; ++k) {
@@ -195,22 +374,11 @@ void weapons_fire_hitscan(World *w, int mid) {
     }
 }
 
-/* Server-side hitscan with lag compensation. The shooter "saw" the
- * world rendered ~interp_delay ago plus their own RTT/2, so we
- * rewind every potential target's bones to that perceived tick before
- * testing. The shooter's own bones come from the live world (they're
- * the authoritative position right now).
- *
- * The hitscan logic is otherwise identical to weapons_fire_hitscan;
- * keeping them as separate functions avoids threading a "use lag
- * history?" flag through ray_seg_hit. */
 void weapons_fire_hitscan_lag_comp(World *w, int mid, uint64_t shot_at_tick) {
     if (shot_at_tick == 0 || shot_at_tick == (uint64_t)-1) {
         weapons_fire_hitscan(w, mid);
         return;
     }
-    /* Cap the rewind at LAG_HIST_TICKS (200 ms). Beyond that we treat
-     * the shot as too laggy to compensate and use live state. */
     if (w->tick > shot_at_tick + LAG_HIST_TICKS) {
         weapons_fire_hitscan(w, mid);
         return;
@@ -218,10 +386,10 @@ void weapons_fire_hitscan_lag_comp(World *w, int mid, uint64_t shot_at_tick) {
 
     Mech *me = &w->mechs[mid];
     const Weapon *wpn = weapon_def(me->weapon_id);
-    if (!wpn || !wpn->hitscan) return;
+    if (!wpn || wpn->fire != WFIRE_HITSCAN) return;
 
     Vec2 hand = mech_hand_pos(w, mid);
-    Vec2 dir  = mech_aim_dir(w, mid);
+    Vec2 dir  = apply_self_bink(w, me, mech_aim_dir(w, mid));
     Vec2 origin = { hand.x + dir.x * wpn->muzzle_offset,
                     hand.y + dir.y * wpn->muzzle_offset };
     float t_max = wpn->range_px;
@@ -239,48 +407,27 @@ void weapons_fire_hitscan_lag_comp(World *w, int mid, uint64_t shot_at_tick) {
     int   hit_part = -1;
     float hit_t    = -1.0f;
 
-    /* Lag-compensated ray test against historical bone positions. */
-    static const struct { int parent, child, part_for_damage; } bones[] = {
-        { PART_NECK,        PART_HEAD,        PART_HEAD       },
-        { PART_CHEST,       PART_NECK,        PART_NECK       },
-        { PART_PELVIS,      PART_CHEST,       PART_CHEST      },
-        { PART_CHEST,       PART_L_SHOULDER,  PART_L_SHOULDER },
-        { PART_CHEST,       PART_R_SHOULDER,  PART_R_SHOULDER },
-        { PART_L_SHOULDER,  PART_L_ELBOW,     PART_L_ELBOW    },
-        { PART_L_ELBOW,     PART_L_HAND,      PART_L_HAND     },
-        { PART_R_SHOULDER,  PART_R_ELBOW,     PART_R_ELBOW    },
-        { PART_R_ELBOW,     PART_R_HAND,      PART_R_HAND     },
-        { PART_PELVIS,      PART_L_HIP,       PART_L_HIP      },
-        { PART_PELVIS,      PART_R_HIP,       PART_R_HIP      },
-        { PART_L_HIP,       PART_L_KNEE,      PART_L_KNEE     },
-        { PART_L_KNEE,      PART_L_FOOT,      PART_L_FOOT     },
-        { PART_R_HIP,       PART_R_KNEE,      PART_R_KNEE     },
-        { PART_R_KNEE,      PART_R_FOOT,      PART_R_FOOT     },
-    };
-    int nbones = (int)(sizeof(bones) / sizeof(bones[0]));
-
     for (int i = 0; i < w->mech_count; ++i) {
         if (i == mid) continue;
+        const Mech *t = &w->mechs[i];
+        if (!t->alive) continue;
         float bx[PART_COUNT], by[PART_COUNT];
         if (!snapshot_lag_lookup(w, i, shot_at_tick, bx, by)) {
-            /* No history → fall back to current pos for this target. */
-            const Mech *t = &w->mechs[i];
             for (int p = 0; p < PART_COUNT; ++p) {
                 bx[p] = w->particles.pos_x[t->particle_base + p];
                 by[p] = w->particles.pos_y[t->particle_base + p];
             }
         }
-        for (int bi = 0; bi < nbones; ++bi) {
-            int pa = bones[bi].parent;
-            int pb = bones[bi].child;
-            Vec2 va = { bx[pa], by[pa] };
-            Vec2 vb = { bx[pb], by[pb] };
+        for (int bi = 0; bi < NUM_BONES; ++bi) {
+            const BoneSeg *b = &g_bones[bi];
+            Vec2 va = { bx[b->parent], by[b->parent] };
+            Vec2 vb = { bx[b->child],  by[b->child]  };
             float th = ray_seg_hit(origin, dir, t_max, va, vb, /*radius*/ 6.0f);
             if (th < 0.0f) continue;
             if (hit_t < 0.0f || th < hit_t) {
                 hit_t    = th;
                 hit_mech = i;
-                hit_part = bones[bi].part_for_damage;
+                hit_part = b->part_for_damage;
             }
         }
     }
@@ -288,10 +435,10 @@ void weapons_fire_hitscan_lag_comp(World *w, int mid, uint64_t shot_at_tick) {
     Vec2 final_end;
     if (hit_t >= 0.0f) {
         final_end = (Vec2){ origin.x + dir.x * hit_t, origin.y + dir.y * hit_t };
-        SHOT_LOG("t=%llu fire-LC mech=%d shot_tick=%llu hit mech=%d part=%d",
-                 (unsigned long long)w->tick, mid,
-                 (unsigned long long)shot_at_tick, hit_mech, hit_part);
-        mech_apply_damage(w, hit_mech, hit_part, wpn->damage, dir);
+        if (w->authoritative) {
+            w->mechs[hit_mech].last_killshot_weapon = me->weapon_id;
+            mech_apply_damage(w, hit_mech, hit_part, wpn->damage, dir, mid);
+        }
     } else {
         final_end = (Vec2){ origin.x + dir.x * t_max, origin.y + dir.y * t_max };
         if (t_max < wpn->range_px) {
@@ -302,6 +449,11 @@ void weapons_fire_hitscan_lag_comp(World *w, int mid, uint64_t shot_at_tick) {
         }
     }
     fx_spawn_tracer(&w->fx, origin, final_end);
+    apply_bink_along_segment(w, mid, origin, final_end, wpn->bink, 80.0f);
+    if (wpn->self_bink > 0.0f) {
+        float sign = ((pcg32_next(w->rng) & 1u) ? 1.0f : -1.0f);
+        me->aim_bink += sign * wpn->self_bink;
+    }
 
     int hand_idx = me->particle_base + PART_R_HAND;
     w->particles.pos_x[hand_idx] -= dir.x * wpn->recoil_impulse;
@@ -316,33 +468,28 @@ void weapons_fire_hitscan_lag_comp(World *w, int mid, uint64_t shot_at_tick) {
     }
 }
 
-/* Client-only: spawn the visual feedback for our own shot WITHOUT
- * applying damage. Server is authoritative; the snapshot will arrive
- * shortly with the actual hit's consequences (damage, kill, blood). */
 void weapons_predict_local_fire(World *w, int mid) {
     Mech *me = &w->mechs[mid];
     const Weapon *wpn = weapon_def(me->weapon_id);
     if (!wpn) return;
 
     Vec2 hand = mech_hand_pos(w, mid);
-    Vec2 dir  = mech_aim_dir(w, mid);
+    Vec2 dir  = apply_self_bink(w, me, mech_aim_dir(w, mid));
     Vec2 origin = { hand.x + dir.x * wpn->muzzle_offset,
                     hand.y + dir.y * wpn->muzzle_offset };
-    /* Tracer goes to wall or full range. We don't probe other mechs
-     * because we wouldn't apply damage anyway, and tracing through
-     * them looks reasonable for the ~50 ms before the snapshot
-     * overrules. */
-    float t_max = wpn->range_px;
-    float wall_t;
-    if (level_ray_hits(&w->level,
-            origin,
-            (Vec2){ origin.x + dir.x * wpn->range_px,
-                    origin.y + dir.y * wpn->range_px },
-            &wall_t)) {
-        t_max = wall_t * wpn->range_px;
+    if (wpn->fire == WFIRE_HITSCAN) {
+        float t_max = wpn->range_px;
+        float wall_t;
+        if (level_ray_hits(&w->level,
+                origin,
+                (Vec2){ origin.x + dir.x * wpn->range_px,
+                        origin.y + dir.y * wpn->range_px },
+                &wall_t)) {
+            t_max = wall_t * wpn->range_px;
+        }
+        Vec2 end = { origin.x + dir.x * t_max, origin.y + dir.y * t_max };
+        fx_spawn_tracer(&w->fx, origin, end);
     }
-    Vec2 end = { origin.x + dir.x * t_max, origin.y + dir.y * t_max };
-    fx_spawn_tracer(&w->fx, origin, end);
 
     int hand_idx = me->particle_base + PART_R_HAND;
     w->particles.pos_x[hand_idx] -= dir.x * wpn->recoil_impulse;
@@ -354,4 +501,138 @@ void weapons_predict_local_fire(World *w, int mid) {
         fx_spawn_spark(&w->fx, origin,
             (Vec2){ dir.x * 350.0f, dir.y * 350.0f }, w->rng);
     }
+}
+
+/* ---- Projectile spawn paths ---------------------------------------- */
+
+static void spawn_one_projectile(World *w, int mid, const Weapon *wpn,
+                                 Vec2 origin, Vec2 dir, int weapon_id)
+{
+    ProjectileSpawn ps = {
+        .kind = wpn->projectile_kind,
+        .weapon_id = weapon_id,
+        .owner_mech_id = mid,
+        .owner_team = w->mechs[mid].team,
+        .origin = origin,
+        .velocity = (Vec2){ dir.x * wpn->projectile_speed_pxs,
+                            dir.y * wpn->projectile_speed_pxs },
+        .damage = wpn->damage,
+        .aoe_radius = wpn->aoe_radius,
+        .aoe_damage = wpn->aoe_damage,
+        .aoe_impulse = wpn->aoe_impulse,
+        .life = wpn->projectile_life_sec,
+        .gravity_scale = wpn->projectile_grav_scale,
+        .drag = wpn->projectile_drag,
+        .bouncy = wpn->bouncy,
+    };
+    projectile_spawn(w, ps);
+}
+
+void weapons_spawn_projectiles(World *w, int mid, int weapon_id) {
+    Mech *me = &w->mechs[mid];
+    const Weapon *wpn = weapon_def(weapon_id);
+    if (!wpn) return;
+
+    Vec2 hand = mech_hand_pos(w, mid);
+    Vec2 dir  = apply_self_bink(w, me, mech_aim_dir(w, mid));
+    Vec2 origin = { hand.x + dir.x * wpn->muzzle_offset,
+                    hand.y + dir.y * wpn->muzzle_offset };
+
+    if (wpn->fire == WFIRE_SPREAD) {
+        int n = wpn->spread_pellets > 0 ? wpn->spread_pellets : 1;
+        float cone = wpn->spread_cone_rad;
+        for (int i = 0; i < n; ++i) {
+            float r = ((float)pcg32_float01(w->rng) * 2.0f - 1.0f) * cone;
+            float ca = cosf(r), sa = sinf(r);
+            Vec2 d = { dir.x * ca - dir.y * sa,
+                       dir.x * sa + dir.y * ca };
+            spawn_one_projectile(w, mid, wpn, origin, d, weapon_id);
+        }
+    } else {
+        spawn_one_projectile(w, mid, wpn, origin, dir, weapon_id);
+    }
+
+    /* Tracer-style FX from the muzzle so spectators see the fire even
+     * before the projectile travels far. */
+    Vec2 spark_end = { origin.x + dir.x * 80.0f,
+                       origin.y + dir.y * 80.0f };
+    fx_spawn_tracer(&w->fx, origin, spark_end);
+
+    /* Bink — projectile bink is applied as the projectile passes near
+     * targets, but a small fire-time bink to anyone in the aim cone is
+     * already useful. (Match the hitscan path for consistency.) */
+    apply_bink_along_segment(w, mid, origin, spark_end, wpn->bink, 80.0f);
+    if (wpn->self_bink > 0.0f) {
+        float sign = ((pcg32_next(w->rng) & 1u) ? 1.0f : -1.0f);
+        me->aim_bink += sign * wpn->self_bink;
+    }
+
+    /* Recoil. */
+    int hand_idx = me->particle_base + PART_R_HAND;
+    w->particles.pos_x[hand_idx] -= dir.x * wpn->recoil_impulse;
+    w->particles.pos_y[hand_idx] -= dir.y * wpn->recoil_impulse;
+    me->recoil_kick = 1.0f;
+    me->fire_cooldown = wpn->fire_rate_sec;
+    w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.04f);
+    for (int k = 0; k < 3; ++k) {
+        fx_spawn_spark(&w->fx, origin,
+            (Vec2){ dir.x * 350.0f, dir.y * 350.0f }, w->rng);
+    }
+
+    SHOT_LOG("t=%llu spawn_proj mech=%d wpn=%d kind=%d dir=(%.2f,%.2f) v=%.0f",
+             (unsigned long long)w->tick, mid, weapon_id,
+             wpn->projectile_kind, dir.x, dir.y, wpn->projectile_speed_pxs);
+}
+
+/* ---- Melee --------------------------------------------------------- */
+
+void weapons_fire_melee(World *w, int mid, int weapon_id) {
+    Mech *me = &w->mechs[mid];
+    const Weapon *wpn = weapon_def(weapon_id);
+    if (!wpn || wpn->fire != WFIRE_MELEE) return;
+
+    Vec2 chest = mech_chest_pos(w, mid);
+    Vec2 dir   = mech_aim_dir(w, mid);
+    Vec2 end   = { chest.x + dir.x * wpn->range_px,
+                   chest.y + dir.y * wpn->range_px };
+
+    /* Find the closest mech bone the swing covers. */
+    int   hit_mech = -1;
+    int   hit_part = -1;
+    float hit_t    = -1.0f;
+    for (int i = 0; i < w->mech_count; ++i) {
+        if (i == mid) continue;
+        const Mech *t = &w->mechs[i];
+        if (!t->alive) continue;
+        for (int bi = 0; bi < NUM_BONES; ++bi) {
+            int pa = t->particle_base + g_bones[bi].parent;
+            int pb = t->particle_base + g_bones[bi].child;
+            Vec2 va = { w->particles.pos_x[pa], w->particles.pos_y[pa] };
+            Vec2 vb = { w->particles.pos_x[pb], w->particles.pos_y[pb] };
+            float th = ray_seg_hit(chest, dir, wpn->range_px, va, vb, 8.0f);
+            if (th < 0.0f) continue;
+            if (hit_t < 0.0f || th < hit_t) {
+                hit_t = th;
+                hit_mech = i;
+                hit_part = g_bones[bi].part_for_damage;
+            }
+        }
+    }
+
+    if (hit_mech >= 0 && w->authoritative) {
+        Mech *t = &w->mechs[hit_mech];
+        float dmg = wpn->damage;
+        /* Backstab: dot of attacker's aim and victim's facing > 0.5. */
+        Vec2 vd = { t->facing_left ? -1.0f : 1.0f, 0.0f };
+        if (dir.x * vd.x + dir.y * vd.y > 0.5f) dmg *= 2.5f;
+        t->last_killshot_weapon = weapon_id;
+        mech_apply_damage(w, hit_mech, hit_part, dmg, dir, mid);
+    }
+    /* Visual swing — short tracer + sparks. */
+    fx_spawn_tracer(&w->fx, chest, end);
+    for (int k = 0; k < 4; ++k) {
+        fx_spawn_spark(&w->fx, chest,
+            (Vec2){ dir.x * 200.0f, dir.y * 200.0f }, w->rng);
+    }
+    me->fire_cooldown = wpn->fire_rate_sec;
 }

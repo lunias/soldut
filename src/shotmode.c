@@ -11,6 +11,7 @@
 #include "render.h"
 #include "simulate.h"
 #include "version.h"
+#include "weapons.h"
 
 #include "../third_party/raylib/src/raylib.h"
 
@@ -19,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -74,6 +76,9 @@ typedef struct {
     bool     have_spawn_at;
     float    spawn_x, spawn_y;
 
+    bool     have_loadout;
+    MechLoadout loadout;
+
     Event   *events;
     int      event_count, event_capacity;
 
@@ -122,6 +127,69 @@ static void script_push(Script *s, Event ev) {
     s->events[s->event_count++] = ev;
 }
 
+/* Resolve a weapon name (substring match, case-insensitive) to an id.
+ * Mirrors main.c's resolve_weapon_id but inline so shotmode.c stays
+ * self-contained. Returns -1 if not found. */
+static int find_weapon_id(const char *name) {
+    if (!name || !*name || strcmp(name, "-") == 0) return -1;
+    for (int i = 0; i < 32; ++i) {
+        const char *n = weapon_short_name(i);
+        if (!n || strcmp(n, "?") == 0) continue;
+        size_t L = strlen(name);
+        bool ok = true;
+        for (size_t k = 0; k < L && n[k]; ++k) {
+            char a = name[k]; if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+            char b = n[k];    if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+            if (a != b) { ok = false; break; }
+        }
+        if (ok) return i;
+    }
+    return -1;
+}
+
+static int find_armor_id(const char *name) {
+    if (!name || !*name || strcmp(name, "-") == 0) return -1;
+    for (int i = 0; i < 8; ++i) {
+        const Armor *a = armor_def(i);
+        if (!a || !a->name) continue;
+        if (strcasecmp(name, a->name) == 0) return i;
+    }
+    return -1;
+}
+
+static int find_jetpack_id(const char *name) {
+    if (!name || !*name || strcmp(name, "-") == 0) return -1;
+    for (int i = 0; i < 8; ++i) {
+        const Jetpack *j = jetpack_def(i);
+        if (!j || !j->name) continue;
+        if (strcasecmp(name, j->name) == 0) return i;
+    }
+    return -1;
+}
+
+/* Pull one whitespace- or quote-bounded token from `s`. Advances `*s`
+ * past the token + any trailing whitespace. Returns false on EOL. */
+static bool next_token(char **s, char *out, int outsz) {
+    char *p = *s;
+    while (*p && isspace((unsigned char)*p)) ++p;
+    if (!*p) return false;
+    char *e;
+    if (*p == '"') {
+        ++p;
+        e = p;
+        while (*e && *e != '"') ++e;
+    } else {
+        e = p;
+        while (*e && !isspace((unsigned char)*e)) ++e;
+    }
+    int n = (int)(e - p); if (n >= outsz) n = outsz - 1;
+    memcpy(out, p, (size_t)n); out[n] = 0;
+    if (*e == '"') ++e;
+    while (*e && isspace((unsigned char)*e)) ++e;
+    *s = e;
+    return true;
+}
+
 static char *trim(char *s) {
     while (*s && isspace((unsigned char)*s)) ++s;
     char *e = s + strlen(s);
@@ -168,6 +236,30 @@ static bool parse_script(const char *path, Script *out) {
             }
         } else if (strcmp(tok, "out") == 0) {
             snprintf(out->out_dir, sizeof(out->out_dir), "%s", rest);
+        } else if (strcmp(tok, "loadout") == 0) {
+            char chassis[32], primary[32], secondary[32], armor[32], jetpack[32];
+            char *q = rest;
+            if (!next_token(&q, chassis, sizeof chassis) ||
+                !next_token(&q, primary, sizeof primary) ||
+                !next_token(&q, secondary, sizeof secondary) ||
+                !next_token(&q, armor, sizeof armor) ||
+                !next_token(&q, jetpack, sizeof jetpack)) {
+                LOG_E("shotmode: %s:%d 'loadout' needs 5 fields (use '-' to keep default)",
+                      path, lineno); ok = false;
+                continue;
+            }
+            out->loadout = mech_default_loadout();
+            if (strcmp(chassis, "-") != 0)
+                out->loadout.chassis_id = chassis_id_from_name(chassis);
+            int wid = find_weapon_id(primary);
+            if (wid >= 0) out->loadout.primary_id = wid;
+            wid = find_weapon_id(secondary);
+            if (wid >= 0) out->loadout.secondary_id = wid;
+            int aid = find_armor_id(armor);
+            if (aid >= 0) out->loadout.armor_id = aid;
+            int jid = find_jetpack_id(jetpack);
+            if (jid >= 0) out->loadout.jetpack_id = jid;
+            out->have_loadout = true;
         } else if (strcmp(tok, "spawn_at") == 0) {
             if (sscanf(rest, "%f %f", &out->spawn_x, &out->spawn_y) != 2) {
                 LOG_E("shotmode: %s:%d bad 'spawn_at'", path, lineno); ok = false;
@@ -359,7 +451,7 @@ static void mkdir_p(const char *path) {
 
 /* ---- Spawn — mirror of main.c::seed_world. Kept inline so this module
  * stays self-contained and main.c isn't refactored just for shot mode. */
-static void seed_world(Game *g) {
+static void seed_world(Game *g, const Script *s) {
     World *w = &g->world;
     level_build_tutorial(&w->level, &g->level_arena);
     decal_init((int)level_width_px(&w->level), (int)level_height_px(&w->level));
@@ -368,13 +460,16 @@ static void seed_world(Game *g) {
     const float foot_clearance    = 4.0f;
     Vec2 player_spawn = { 16.0f * 32.0f + 8.0f,
                           30.0f * 32.0f - feet_below_pelvis - foot_clearance };
-    w->local_mech_id = mech_create(w, CHASSIS_TROOPER, player_spawn,
-                                   /*team*/ 1, /*is_dummy*/ false);
+    MechLoadout lo = (s && s->have_loadout) ? s->loadout : mech_default_loadout();
+    w->local_mech_id = mech_create_loadout(w, lo, player_spawn,
+                                           /*team*/ 1, /*is_dummy*/ false);
 
     Vec2 dummy_spawn = { 75.0f * 32.0f,
                          32.0f * 32.0f - feet_below_pelvis - foot_clearance };
-    w->dummy_mech_id = mech_create(w, CHASSIS_TROOPER, dummy_spawn,
-                                   /*team*/ 2, /*is_dummy*/ true);
+    MechLoadout dlo = mech_default_loadout();
+    dlo.armor_id = ARMOR_NONE;
+    w->dummy_mech_id = mech_create_loadout(w, dlo, dummy_spawn,
+                                           /*team*/ 2, /*is_dummy*/ true);
 
     w->camera_target = player_spawn;
     w->camera_smooth = player_spawn;
@@ -499,7 +594,7 @@ int shotmode_run(const char *script_path) {
         return EXIT_FAILURE;
     }
 
-    seed_world(&game);
+    seed_world(&game, &s);
 
     /* Optional one-shot teleport — moves every body particle by the
      * delta from current pelvis to the requested spawn point so the
@@ -600,29 +695,26 @@ int shotmode_run(const char *script_path) {
             aim_mode = AIM_SCREEN;
         }
 
-        /* (2) Build ClientInput for this tick. We always pass the
-         *     current cursor in screen space through ClientInput.aim_x/y
-         *     (matters for the renderer's cursor overlay even though
-         *     we don't draw it in shot mode); aim_world on the mech is
-         *     either the world-space value directly, or the screen
-         *     cursor converted via the renderer's current camera —
-         *     same path main.c uses. */
-        float screen_x, screen_y;
+        /* (2) Build ClientInput for this tick. We mirror main.c's
+         *     contract: ClientInput.aim_x/y are WORLD-SPACE coords —
+         *     the client (us) converts cursor screen→world via the live
+         *     camera before handing the input to simulate. Putting
+         *     screen coords here would land in mech.aim_world (which
+         *     mech_step_drive latches from the input) and the firing
+         *     ray would aim at e.g. (1100, 360) treated as world,
+         *     not the world point under the cursor. */
         Vec2 world_aim;
         if (aim_mode == AIM_SCREEN) {
-            screen_x = mouse_x; screen_y = mouse_y;
             world_aim = renderer_screen_to_world(&rd, (Vec2){ mouse_x, mouse_y });
         } else {
-            screen_x = (float)s.window_w * 0.5f;
-            screen_y = (float)s.window_h * 0.5f;
             world_aim = (Vec2){ aim_world_x, aim_world_y };
         }
 
         ClientInput in = {
             .buttons = held_buttons,
             .seq = (uint16_t)(game.world.tick + 1),
-            .aim_x = screen_x,
-            .aim_y = screen_y,
+            .aim_x = world_aim.x,
+            .aim_y = world_aim.y,
             .dt = TICK_DT,
         };
         if (game.world.local_mech_id >= 0) {
@@ -635,10 +727,17 @@ int shotmode_run(const char *script_path) {
         /* (3) Render the tick we just simulated. We render every tick so
          *     camera smoothing, FX particles, and decals all evolve as
          *     they would in interactive play. */
+        /* Draw the cursor overlay at the screen-space position when in
+         * AIM_SCREEN mode (so the crosshair tracks the mouse_lerp /
+         * mouse directives), otherwise center it. The aim/firing ray
+         * has already been computed from world_aim above. */
+        Vec2 cursor_screen = (aim_mode == AIM_SCREEN)
+            ? (Vec2){ mouse_x, mouse_y }
+            : (Vec2){ (float)s.window_w * 0.5f, (float)s.window_h * 0.5f };
         renderer_draw_frame(&rd, &game.world,
                             GetScreenWidth(), GetScreenHeight(),
                             /*alpha*/ 0.0f,
-                            (Vec2){ in.aim_x, in.aim_y },
+                            cursor_screen,
                             /*overlay*/ NULL, NULL);
 
         /* (4) Any 'shot' events scheduled for this tick fire after the

@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 /*
@@ -48,6 +49,12 @@ typedef struct {
     uint16_t    port;
     char        host[64];
     char        name[24];
+    char        chassis[16];
+    char        primary[24];
+    char        secondary[24];
+    char        armor[16];
+    char        jetpack[16];
+    bool        friendly_fire;
 } LaunchArgs;
 
 static void parse_args(int argc, char **argv, LaunchArgs *out) {
@@ -80,19 +87,85 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
         else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
             snprintf(out->name, sizeof out->name, "%s", argv[++i]);
         }
+        /* M3 loadout flags. We accept a small handful so that the local
+         * mech can be spawned with any chassis/weapon combo for testing
+         * without a lobby. */
+        else if (strcmp(argv[i], "--chassis") == 0 && i + 1 < argc) {
+            snprintf(out->chassis, sizeof out->chassis, "%s", argv[++i]);
+        }
+        else if (strcmp(argv[i], "--primary") == 0 && i + 1 < argc) {
+            snprintf(out->primary, sizeof out->primary, "%s", argv[++i]);
+        }
+        else if (strcmp(argv[i], "--secondary") == 0 && i + 1 < argc) {
+            snprintf(out->secondary, sizeof out->secondary, "%s", argv[++i]);
+        }
+        else if (strcmp(argv[i], "--armor") == 0 && i + 1 < argc) {
+            snprintf(out->armor, sizeof out->armor, "%s", argv[++i]);
+        }
+        else if (strcmp(argv[i], "--jetpack") == 0 && i + 1 < argc) {
+            snprintf(out->jetpack, sizeof out->jetpack, "%s", argv[++i]);
+        }
+        else if (strcmp(argv[i], "--ff") == 0) {
+            out->friendly_fire = true;
+        }
     }
+}
+
+/* Resolve a weapon name to id by walking the table via weapon_def +
+ * weapon_short_name. Returns the default if unknown. */
+static int resolve_weapon_id(const char *name, int default_id) {
+    if (!name || !*name) return default_id;
+    for (int i = 0; i < 32; ++i) {
+        const char *n = weapon_short_name(i);
+        if (!n || strcmp(n, "?") == 0) continue;
+        /* Case-insensitive prefix match: "pulse" matches "Pulse Rifle". */
+        size_t L = strlen(name);
+        bool ok = true;
+        for (size_t k = 0; k < L && n[k]; ++k) {
+            char a = name[k]; if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+            char b = n[k];    if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+            if (a != b) { ok = false; break; }
+        }
+        if (ok) return i;
+    }
+    LOG_W("resolve_weapon_id: unknown '%s' — defaulting", name);
+    return default_id;
+}
+
+static int resolve_armor_id(const char *name, int default_id) {
+    if (!name || !*name) return default_id;
+    for (int i = 0; i < 8; ++i) {
+        const Armor *a = armor_def(i);
+        if (!a || !a->name) continue;
+        if (strcasecmp(name, a->name) == 0) return i;
+    }
+    LOG_W("resolve_armor_id: unknown '%s'", name);
+    return default_id;
+}
+
+static int resolve_jetpack_id(const char *name, int default_id) {
+    if (!name || !*name) return default_id;
+    for (int i = 0; i < 8; ++i) {
+        const Jetpack *j = jetpack_def(i);
+        if (!j || !j->name) continue;
+        if (strcasecmp(name, j->name) == 0) return i;
+    }
+    LOG_W("resolve_jetpack_id: unknown '%s'", name);
+    return default_id;
 }
 
 /* Build the tutorial level + a player mech (and a dummy in offline /
  * host mode). The host's player is local mech id 0; remote clients get
  * their mechs spawned at handshake by net.c. */
-static void seed_world(Game *g, LaunchMode mode) {
+static void seed_world(Game *g, LaunchMode mode, const LaunchArgs *args) {
     World *w = &g->world;
 
     level_build_tutorial(&w->level, &g->level_arena);
 
     decal_init((int)level_width_px(&w->level),
                (int)level_height_px(&w->level));
+
+    w->friendly_fire = args ? args->friendly_fire : false;
 
     const float feet_below_pelvis = 36.0f;
     const float foot_clearance    = 4.0f;
@@ -111,13 +184,25 @@ static void seed_world(Game *g, LaunchMode mode) {
         return;
     }
 
-    w->local_mech_id = mech_create(w, CHASSIS_TROOPER, player_spawn,
-                                   /*team*/1, /*is_dummy*/false);
+    /* Resolve loadout from CLI flags (or use defaults). */
+    MechLoadout lo = mech_default_loadout();
+    if (args) {
+        lo.chassis_id   = chassis_id_from_name(args->chassis[0] ? args->chassis : "Trooper");
+        lo.primary_id   = resolve_weapon_id  (args->primary,   WEAPON_PULSE_RIFLE);
+        lo.secondary_id = resolve_weapon_id  (args->secondary, WEAPON_SIDEARM);
+        lo.armor_id     = resolve_armor_id   (args->armor,     ARMOR_LIGHT);
+        lo.jetpack_id   = resolve_jetpack_id (args->jetpack,   JET_STANDARD);
+    }
+    w->local_mech_id = mech_create_loadout(w, lo, player_spawn,
+                                           /*team*/1, /*is_dummy*/false);
 
+    /* Dummy: trooper, pulse rifle, no armor — punching bag. */
     Vec2 dummy_spawn = { 75.0f * 32.0f,
                          32.0f * 32.0f - feet_below_pelvis - foot_clearance };
-    w->dummy_mech_id = mech_create(w, CHASSIS_TROOPER, dummy_spawn,
-                                   /*team*/2, /*is_dummy*/true);
+    MechLoadout dlo = mech_default_loadout();
+    dlo.armor_id = ARMOR_NONE;
+    w->dummy_mech_id = mech_create_loadout(w, dlo, dummy_spawn,
+                                           /*team*/2, /*is_dummy*/true);
 
     w->camera_target = player_spawn;
     w->camera_smooth = player_spawn;
@@ -197,13 +282,13 @@ int main(int argc, char **argv) {
             game_shutdown(&game); net_shutdown(); log_shutdown();
             return EXIT_FAILURE;
         }
-        seed_world(&game, LAUNCH_HOST);
+        seed_world(&game, LAUNCH_HOST, &args);
         net_discovery_open(&game.net);
         LOG_I("host: ready on port %u — invite a client with `--connect <ip>:%u`",
               (unsigned)args.port, (unsigned)args.port);
     }
     else if (args.mode == LAUNCH_CLIENT) {
-        seed_world(&game, LAUNCH_CLIENT);
+        seed_world(&game, LAUNCH_CLIENT, &args);
         if (!net_client_connect(&game.net, args.host, args.port,
                                 args.name, &game))
         {
@@ -215,7 +300,7 @@ int main(int argc, char **argv) {
         }
     }
     else {
-        seed_world(&game, LAUNCH_OFFLINE);
+        seed_world(&game, LAUNCH_OFFLINE, &args);
     }
 
     Renderer rd;

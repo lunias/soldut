@@ -1,0 +1,22 @@
+# m3_rail_cannon.shot — Sniper chassis with Rail Cannon. Verifies the
+# 0.4s charge before fire (24 ticks at 60 Hz) — the trigger has to be
+# HELD during charge or it cancels.
+
+window 1280 720
+seed   6 6
+out    build/shots/m3_rail_cannon
+loadout Sniper "Rail Cannon" - Light Standard
+contact_sheet sheet cols 4 cell 480 270
+
+spawn_at 2240 984
+mouse    1100 360
+
+at  10 shot t010_pre
+at  20 press fire             # start charging
+at  30 shot t030_charging
+at  44 shot t044_charged       # 24 ticks after press (0.4s) — should fire next tick
+at  60 shot t060_post
+at  80 release fire
+at 100 shot t100_settled
+
+at 130 end

@@ -3,6 +3,7 @@
 #include "log.h"
 #include "mech.h"
 #include "physics.h"
+#include "weapons.h"
 
 #include <math.h>
 #include <string.h>
@@ -84,7 +85,7 @@ void snapshot_capture(const World *w, SnapshotFrame *out, uint16_t ack_input_seq
         e->torso_q = e->aim_q;
 
         e->health   = quant_health(m->health, m->health_max);
-        e->armor    = quant_health(m->armor,  100.0f);
+        e->armor    = quant_health(m->armor_hp, m->armor_hp_max > 0.0f ? m->armor_hp_max : 1.0f);
         e->weapon_id= (uint8_t)m->weapon_id;
         e->ammo     = (uint8_t)(m->ammo > 255 ? 255 : (m->ammo < 0 ? 0 : m->ammo));
 
@@ -99,6 +100,12 @@ void snapshot_capture(const World *w, SnapshotFrame *out, uint16_t ack_input_seq
 
         e->team      = (uint8_t)m->team;
         e->limb_bits = (uint16_t)m->dismember_mask;
+        e->chassis_id     = (uint8_t)m->chassis_id;
+        e->armor_id       = (uint8_t)m->armor_id;
+        e->jetpack_id     = (uint8_t)m->jetpack_id;
+        e->secondary_id   = (uint8_t)m->secondary_id;
+        e->ammo_secondary = (uint8_t)(m->ammo_secondary > 255 ? 255
+                                : (m->ammo_secondary < 0 ? 0 : m->ammo_secondary));
     }
     out->ent_count = n;
     out->valid = true;
@@ -166,6 +173,12 @@ int snapshot_encode(const SnapshotFrame *cur,
         *p++ = e->team;
         /* limb_bits(2) */
         *p++ = (uint8_t)e->limb_bits; *p++ = (uint8_t)(e->limb_bits >> 8);
+        /* loadout (M3): chassis, armor, jetpack, secondary, ammo_secondary */
+        *p++ = e->chassis_id;
+        *p++ = e->armor_id;
+        *p++ = e->jetpack_id;
+        *p++ = e->secondary_id;
+        *p++ = e->ammo_secondary;
     }
 
     return (int)(p - buf);
@@ -226,6 +239,11 @@ bool snapshot_decode(const uint8_t *buf, int len,
         e->state_bits = *p++;
         e->team       = *p++;
         e->limb_bits  = (uint16_t)(p[0] | (p[1] << 8)); p += 2;
+        e->chassis_id     = *p++;
+        e->armor_id       = *p++;
+        e->jetpack_id     = *p++;
+        e->secondary_id   = *p++;
+        e->ammo_secondary = *p++;
     }
     out->ent_count = cnt;
     out->valid = true;
@@ -235,11 +253,22 @@ bool snapshot_decode(const uint8_t *buf, int len,
 /* ---- Apply: write SnapshotFrame into the local World -------------- */
 
 /* When the client sees a mech_id in the snapshot it doesn't have
- * locally yet, it spawns one at the snapshot position. (Server's
- * INITIAL_STATE delivery uses this.) */
-static int ensure_mech_slot(World *w, int desired_id, Vec2 spawn, int team) {
+ * locally yet, it spawns one at the snapshot position. The loadout in
+ * the snapshot tells us which chassis/armor/jet/secondary to spawn so
+ * the local rendering and physics match the server. */
+static int ensure_mech_slot(World *w, int desired_id, Vec2 spawn,
+                            int team, const EntitySnapshot *e)
+{
     while (w->mech_count <= desired_id) {
-        int got = mech_create(w, CHASSIS_TROOPER, spawn, team, /*is_dummy*/false);
+        MechLoadout lo = mech_default_loadout();
+        if (e) {
+            lo.chassis_id   = e->chassis_id   < CHASSIS_COUNT ? e->chassis_id   : CHASSIS_TROOPER;
+            lo.armor_id     = e->armor_id     < ARMOR_COUNT   ? e->armor_id     : ARMOR_NONE;
+            lo.jetpack_id   = e->jetpack_id   < JET_COUNT     ? e->jetpack_id   : JET_NONE;
+            lo.primary_id   = e->weapon_id    < WEAPON_COUNT  ? e->weapon_id    : WEAPON_PULSE_RIFLE;
+            lo.secondary_id = e->secondary_id < WEAPON_COUNT  ? e->secondary_id : WEAPON_SIDEARM;
+        }
+        int got = mech_create_loadout(w, lo, spawn, team, /*is_dummy*/false);
         if (got < 0) return -1;
     }
     return desired_id;
@@ -255,7 +284,7 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
     for (int i = 0; i < frame->ent_count; ++i) {
         const EntitySnapshot *e = &frame->ents[i];
         Vec2 spawn_pos = { dequant_pos(e->pos_x_q), dequant_pos(e->pos_y_q) };
-        int mid = ensure_mech_slot(w, (int)e->mech_id, spawn_pos, (int)e->team);
+        int mid = ensure_mech_slot(w, (int)e->mech_id, spawn_pos, (int)e->team, e);
         if (mid < 0) continue;
         seen[mid] = true;
 
@@ -291,10 +320,16 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
 
         /* Combat & state. */
         m->health      = (e->health  / 255.0f) * m->health_max;
-        m->armor       = (e->armor   / 255.0f) * 100.0f;
-        m->weapon_id   = e->weapon_id;
-        m->ammo        = e->ammo;
-        m->team        = e->team;
+        if (m->armor_hp_max > 0.0f) {
+            m->armor_hp = (e->armor / 255.0f) * m->armor_hp_max;
+        }
+        m->weapon_id     = e->weapon_id;
+        m->ammo          = e->ammo;
+        m->team          = e->team;
+        m->secondary_id  = e->secondary_id;
+        m->ammo_secondary= e->ammo_secondary;
+        /* Active slot: derived from which weapon_id matches. */
+        m->active_slot   = (e->weapon_id == m->primary_id) ? 0 : 1;
         bool was_alive = m->alive;
         m->alive       = (e->state_bits & SNAP_STATE_ALIVE) != 0;
         m->grounded    = (e->state_bits & SNAP_STATE_GROUNDED) != 0;

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-Soldut is a 2D side-scrolling multiplayer mech shooter in C, in the lineage of Soldat. The current build is **M1 — One mech, no network**: Verlet skeleton physics, one chassis (Trooper), pulse-rifle hitscan, ragdoll on death, blood particles + decal layer, HUD. Networking arrives at M2.
+Soldut is a 2D side-scrolling multiplayer mech shooter in C, in the lineage of Soldat. The current build is **M3 — Combat depth**: Verlet skeleton physics on a 16-particle skeleton; 5 chassis (Trooper / Scout / Heavy / Sniper / Engineer) with passives; 8 primaries + 6 secondaries (Grappling Hook is a stub); projectile pool with gravity, drag, swept tile + bone collision; explosions with line-of-sight halving and impulse to ragdolls; per-limb HP and dismemberment of all 5 limbs; recoil + bink + self-bink; armor + jetpack variants; friendly-fire toggle; kill feed UI. M2 networking foundation in (authoritative server, client prediction + reconciliation, hitscan lag comp; LAN bake-test still pending). Lobby UI lands at M4. See `documents/11-roadmap.md`.
 
 ## Build & run
 
@@ -97,7 +97,7 @@ If the docs disagree with the code about *what* it does, the code wins and the d
 
 ## Architecture in a paragraph
 
-`main.c` runs a fixed-step 60 Hz accumulator; each tick calls `simulate(World*, ClientInput, dt)` (in `src/simulate.c`), which is the pure simulation step — no globals, no wall-clock reads, just the World's seeded PCG RNG. The simulate step does pose drive (`mech_step_drive`) → fire → gravity → Verlet integrate → 12-iter constraint+collision relaxation (interleaved in one loop, see `physics_constrain_and_collide`) → `mech_post_physics_anchor` (the standing-pose hack — see TRADE_OFFS.md) → FX update → bookkeeping. Render reads the latest `World` and draws; render never writes authoritative state. Module dependency graph is a DAG with `world` at the top and `arena`/`pool`/`log`/`math`/`hash`/`ds` as leaves; `render`/`hud`/`lobby` are consumers only.
+`main.c` runs a fixed-step 60 Hz accumulator; each tick calls `simulate(World*, ClientInput, dt)` (in `src/simulate.c`), which is the pure simulation step — no globals, no wall-clock reads, just the World's seeded PCG RNG. The simulate step does pose drive (`mech_step_drive`) → try-fire (`mech_try_fire` dispatches by `WFIRE_*` kind) → latch prev_buttons → gravity → Verlet integrate → 12-iter constraint+collision relaxation (interleaved in one loop, see `physics_constrain_and_collide`) → `mech_post_physics_anchor` (the standing-pose hack — see TRADE_OFFS.md) → `projectile_step` (integrate, sweep-collide vs tiles + bones, detonate AOE) → FX update → kill-feed aging → bookkeeping. Render reads the latest `World` and draws (including projectiles); render never writes authoritative state. Module dependency graph is a DAG with `world` at the top and `arena`/`pool`/`log`/`math`/`hash`/`ds` as leaves; `render`/`hud`/`lobby` are consumers only. `weapons.c` and `projectile.c` are peers (weapons spawn projectiles; projectiles call back into `mech_apply_damage` and `explosion_spawn`).
 
 ## Conventions that bite if you ignore them
 

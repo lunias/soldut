@@ -5,6 +5,7 @@
 #include "level.h"
 #include "mech.h"
 #include "particle.h"
+#include "projectile.h"
 
 #include <math.h>
 
@@ -264,6 +265,7 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
                 draw_mech(&w->particles, &w->constraints,
                           &w->mechs[i], &w->level);
             }
+            projectile_draw(&w->projectiles);
             fx_draw(&w->fx);
         EndMode2D();
 

@@ -77,7 +77,9 @@ enum {
     PART_COUNT
 };
 
-/* Limb bits, used for tracking which joints have been severed. */
+/* Limb bits, used for tracking which joints have been severed. The
+ * dismember mask is broadcast in the snapshot so clients can render
+ * the right set of bones. */
 enum {
     LIMB_HEAD     = 1u << 0,
     LIMB_L_ARM    = 1u << 1,
@@ -85,6 +87,14 @@ enum {
     LIMB_L_LEG    = 1u << 3,
     LIMB_R_LEG    = 1u << 4,
 };
+
+/* All-limbs mask — used by dismemberment counting for KILLFLAG_GIB. */
+#define LIMB_ALL_MASK (LIMB_HEAD | LIMB_L_ARM | LIMB_R_ARM | LIMB_L_LEG | LIMB_R_LEG)
+static inline int limb_count(uint8_t mask) {
+    int n = 0;
+    while (mask) { n += (int)(mask & 1u); mask >>= 1; }
+    return n;
+}
 
 /* ---- Mech ----------------------------------------------------------- */
 #define MAX_MECHS         32
@@ -135,15 +145,27 @@ typedef struct {
      * keyboard. simulate() reads each mech's latched_input regardless
      * of source. */
     ClientInput latched_input;
+    uint16_t    prev_buttons;     /* edge-detect: which BTN_* were down last tick */
 
     /* Combat state. */
     float     health;
     float     health_max;
-    float     armor;
     float     fuel;
     float     fuel_max;
 
-    /* Limb HP — separate counters per [03-physics-and-mechs.md]. */
+    /* Armor (worn body armor, separate from chassis HP). */
+    int       armor_id;           /* ArmorId */
+    float     armor_hp;           /* current armor capacity */
+    float     armor_hp_max;
+    int       armor_charges;      /* reactive armor: shots remaining */
+
+    /* Jetpack module. */
+    int       jetpack_id;         /* JetpackId */
+    float     boost_timer;        /* JET_BURST: time remaining on a boost */
+    bool      jump_armed;         /* JET_JUMP_JET: ready to fire another jump */
+
+    /* Per-limb HP — when one drops to 0 the limb dismembers via
+     * mech_dismember. (See documents/02-game-design.md and 03-physics.) */
     float     hp_arm_l, hp_arm_r, hp_leg_l, hp_leg_r, hp_head;
 
     /* Animation. We keep the index of a small built-in anim set; the
@@ -153,19 +175,40 @@ typedef struct {
     Vec2      pose_target  [PART_COUNT];
     float     pose_strength[PART_COUNT];
 
-    /* Weapon state. */
-    int       weapon_id;
-    int       ammo;
-    int       ammo_max;
+    /* Weapon state. Each mech carries a primary + secondary; only the
+     * active slot consumes BTN_FIRE. BTN_SWAP toggles between them. */
+    int       primary_id;
+    int       secondary_id;
+    int       active_slot;        /* 0 = primary, 1 = secondary */
+    int       ammo_primary;
+    int       ammo_secondary;
+    int       weapon_id;          /* alias for active slot's weapon (snapshot field) */
+    int       ammo;               /* alias for active slot's ammo (snapshot field) */
+    int       ammo_max;           /* alias for active slot's mag size */
     float     fire_cooldown;      /* seconds; counts down */
     float     reload_timer;       /* seconds; >0 = reloading */
+    float     charge_timer;       /* Rail Cannon: charges before fire */
+    float     spinup_timer;       /* Microgun: spin-up before sustained fire */
 
     /* Recoil decay (cosmetic — actual recoil is the hand impulse). */
     float     recoil_kick;
 
+    /* Bink — angular wobble applied to the aim ray on fire. Both
+     * incoming-fire bink (from `weapon.bink`) and self-bink (from
+     * rapid-fire) accumulate here; decays each tick. See
+     * documents/04-combat.md §"Recoil & bink". */
+    float     aim_bink;           /* radians, signed */
+
     /* Sleep tracking for dead bodies (skips integrate when settled). */
     int       sleep_ticks;
     bool      sleeping;
+
+    /* Engineer: cooldown on the BTN_USE repair pack. */
+    float     ability_cooldown;
+
+    /* Last time this mech took a hit (tracking for "OVERKILL", etc.). */
+    float     last_damage_taken;
+    int       last_killshot_weapon;
 
     /* Server-side: the most recent input we processed for this mech.
      * Echoed back in snapshots so the client can drop already-acked
@@ -179,6 +222,73 @@ typedef struct {
     int           lag_hist_head;  /* next slot to write */
 } Mech;
 
+/* ---- Projectiles (SoA, M3+).
+ *
+ * Live ballistic projectiles: grenades, rockets, plasma orbs, pellets.
+ * Hitscan weapons don't go through this pool — they ray-test on the
+ * fire tick and are done. Distinct from mech particles (no constraints)
+ * and from FX particles (collide with mechs and apply damage).
+ *
+ * Capacity covers worst-case 32 mechs each with a microgun spew + a
+ * couple of rockets in the air. */
+#define PROJECTILE_CAPACITY 512
+
+typedef enum {
+    PROJ_NONE = 0,
+    PROJ_PLASMA_BOLT,         /* Plasma SMG */
+    PROJ_PELLET,              /* Riot Cannon (6 per shot) */
+    PROJ_RIFLE_SLUG,          /* Auto-Cannon */
+    PROJ_ROCKET,              /* Mass Driver */
+    PROJ_PLASMA_ORB,          /* Plasma Cannon */
+    PROJ_MICROGUN_BULLET,
+    PROJ_FRAG_GRENADE,
+    PROJ_MICRO_ROCKET,
+    PROJ_THROWN_KNIFE,
+    PROJ_KIND_COUNT
+} ProjectileKind;
+
+typedef struct {
+    float    pos_x[PROJECTILE_CAPACITY];
+    float    pos_y[PROJECTILE_CAPACITY];
+    float    vel_x[PROJECTILE_CAPACITY];      /* px/sec */
+    float    vel_y[PROJECTILE_CAPACITY];
+    float    life [PROJECTILE_CAPACITY];      /* seconds remaining (also frag-fuse) */
+    float    damage[PROJECTILE_CAPACITY];     /* base damage on direct hit */
+    float    aoe_radius[PROJECTILE_CAPACITY]; /* explosion radius (0 = no AOE) */
+    float    aoe_damage[PROJECTILE_CAPACITY]; /* explosion base damage */
+    float    aoe_impulse[PROJECTILE_CAPACITY];
+    float    gravity_scale[PROJECTILE_CAPACITY];
+    float    drag      [PROJECTILE_CAPACITY]; /* per-second velocity damping */
+    int16_t  owner_mech[PROJECTILE_CAPACITY];
+    int8_t   owner_team[PROJECTILE_CAPACITY];
+    int8_t   weapon_id[PROJECTILE_CAPACITY];  /* WeaponId — for kill feed */
+    uint8_t  kind  [PROJECTILE_CAPACITY];     /* ProjectileKind */
+    uint8_t  alive [PROJECTILE_CAPACITY];
+    uint8_t  bouncy[PROJECTILE_CAPACITY];     /* Frag grenade: bounces on tile hit */
+    uint8_t  exploded[PROJECTILE_CAPACITY];   /* set when AOE has been spawned */
+    int      count;
+} ProjectilePool;
+
+/* ---- Kill feed ring buffer (HUD top-right). Holds the last few kill
+ * events for display + fade. */
+#define KILLFEED_CAPACITY 5
+
+typedef enum {
+    KILLFLAG_HEADSHOT = 1u << 0,
+    KILLFLAG_GIB      = 1u << 1,   /* >=2 limbs lost in killing blow */
+    KILLFLAG_OVERKILL = 1u << 2,   /* final blow exceeded 200 damage */
+    KILLFLAG_RAGDOLL  = 1u << 3,   /* killed in midair, big tumble */
+    KILLFLAG_SUICIDE  = 1u << 4,
+} KillFlag;
+
+typedef struct {
+    int      killer_mech_id;       /* -1 for environmental kill */
+    int      victim_mech_id;
+    int      weapon_id;
+    uint32_t flags;                /* KillFlag bits */
+    float    age;                  /* seconds since the kill */
+} KillFeedEntry;
+
 /* ---- Blood / sparks (FX particles, AoS for simplicity at M1 scale).
  * Keeping these distinct from mech particles: they don't have constraints
  * and the inner loop is simpler. */
@@ -186,6 +296,7 @@ typedef enum {
     FX_BLOOD = 0,
     FX_SPARK,
     FX_TRACER,
+    FX_SMOKE,
     FX_KIND_COUNT
 } FxKind;
 
@@ -230,7 +341,17 @@ typedef struct World {
 
     Level    level;
 
-    FxPool   fx;
+    FxPool         fx;
+    ProjectilePool projectiles;
+
+    /* Kill feed — small ring buffer; HUD draws the most recent entries
+     * with a fade-out. */
+    KillFeedEntry killfeed[KILLFEED_CAPACITY];
+    int           killfeed_count;       /* total kills observed (head index = count % CAP) */
+
+    /* Server config: friendly-fire toggle. False by default — same-team
+     * damage is dropped. Tournament servers can flip this. */
+    bool     friendly_fire;
 
     /* Camera state — written by the renderer, read by simulate for
      * effects like screen-shake decay. Storing on World means the

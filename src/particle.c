@@ -167,6 +167,13 @@ void fx_draw(const FxPool *pool) {
                            (Vector2){ fp->pos.x + fp->vel.x, fp->pos.y + fp->vel.y },
                            1.5f, col);
                 break;
+            case FX_SMOKE:
+                /* M3 reserves a slot for smoke; for now we render it as
+                 * a darker circle. The proper soft-puff additive
+                 * version lands with the M5 art pass. */
+                DrawCircleV(fp->pos, fp->size * 1.4f,
+                    (Color){ 60, 60, 60, (unsigned char)(a / 2) });
+                break;
             case FX_KIND_COUNT: break;
         }
     }

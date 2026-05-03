@@ -60,6 +60,9 @@ src/
 ├── hash.{c,h}              # PCG, FNV, simple hash table
 ├── ds.c                    # one .c that #defines STB_DS_IMPLEMENTATION
 ├── hotreload.{c,h}         # mtime watcher
+├── shotmode.{c,h}          # scriptable scene runner that drives the real
+│                           #   sim + renderer and writes PNG + log pairs
+│                           #   for visual debugging — see CLAUDE.md
 └── version.h               # version constants
 ```
 

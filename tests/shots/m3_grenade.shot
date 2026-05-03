@@ -1,0 +1,31 @@
+# m3_grenade.shot — Trooper swaps to secondary (Frag Grenades), throws,
+# bounce on the floor, fuses out, AOE kills/dismembers the dummy.
+# Verifies:
+#   - WFIRE_THROW on secondary slot (BTN_SWAP edge to switch)
+#   - Frag bouncy=true bounces off the floor before fuse expires
+#   - Explosion damage with line-of-sight check
+#   - Multi-limb dismemberment from a single explosion
+
+window 1280 720
+seed   3 3
+out    build/shots/m3_grenade
+loadout - "Pulse Rifle" "Frag Grenades" Light Standard
+contact_sheet sheet cols 4 cell 480 270
+
+# Stand a few tiles to the dummy's left so the lob arc can land near it.
+spawn_at 2200 984
+# Aim slightly upward+right to throw a high arc onto the dummy platform.
+mouse    1000 220
+
+at  10 shot t010_pre
+at  15 tap swap                # primary -> secondary (frag)
+at  20 shot t020_post_swap
+at  30 tap fire                # throw a single grenade
+at  50 shot t050_arc
+at  80 shot t080_arc
+at 110 shot t110_explode
+at 130 shot t130_aftermath
+
+burst settle from 150 to 260 every 20
+
+at 280 end

@@ -41,6 +41,17 @@
  *                              from its current position at t0 to (sx,sy)
  *                              at t1, one mouse event per tick.
  *
+ *     loadout <chassis> <primary> <secondary> <armor> <jetpack>
+ *                              configure the local mech's loadout BEFORE
+ *                              any tick runs. Use '-' for any slot to
+ *                              keep the default. Names match
+ *                              chassis_id_from_name / weapon name table /
+ *                              armor_def / jetpack_def (case-insensitive
+ *                              prefix match for weapons).
+ *                              Examples:
+ *                                loadout Heavy "Mass Driver" - Heavy Standard
+ *                                loadout Scout "Plasma SMG" Knife - Burst
+ *
  *     contact_sheet <name> [cols <C>] [cell <W> <H>]
  *                              after the script completes, compose all
  *                              shot PNGs into a single grid image at

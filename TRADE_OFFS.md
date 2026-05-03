@@ -146,27 +146,98 @@ Last updated: **2026-05-03**.
 
 ## Combat
 
-### Only one weapon
+### Burst SMG fires all rounds on the same tick
 
-- **What we did** — `WEAPON_PULSE_RIFLE` is the only entry in the
-  weapons table.
-- **Why** — M1 spec ("one weapon, one chassis"). M3 adds the rest.
-- **Revisit when** — M3.
+- **What we did** — `WFIRE_BURST` (Burst SMG) spawns `burst_rounds`
+  projectiles in a single call, all on the trigger-press tick. The doc
+  describes a 70 ms inter-round cadence.
+- **Why** — Proper queuing needs a per-mech "pending burst" state
+  (next-round tick + remaining count) and a check in mech_step_drive.
+  Acceptable for M3 first pass — the 3-round burst still feels distinct
+  from a sustained weapon; the rounds just fan out spatially via
+  self-bink rather than temporally.
+- **Revisit when** — Playtesting flags the burst as "indistinguishable
+  from a single high-damage shot". Add a `burst_pending_*` field on
+  Mech and step it down in mech_step_drive; spawn the next round when
+  the timer hits zero.
 
-### Only one chassis
+### Grappling Hook is a stub
 
-- **What we did** — `CHASSIS_TROOPER` is the only one in `g_chassis[]`.
-- **Why** — Same as above. The skeleton, constraints, and pose drive
-  are chassis-agnostic, so adding others is mostly a data exercise.
-- **Revisit when** — M3.
+- **What we did** — `WFIRE_GRAPPLE` registers the cooldown but doesn't
+  spawn a projectile or anchor. `mech_try_fire` logs
+  `grapple_attempt (NOT YET IMPLEMENTED)`.
+- **Why** — A hook needs a projectile head, a "snap anchor on tile or
+  bone hit" event, and a per-tick pull (a temporary distance constraint
+  with a contracting rest length, plus a release on BTN_USE). About a
+  day of work; fits cleanly into projectile.c + a small Hook struct on
+  Mech. Punted from M3 to keep the scope on weapons + dismemberment.
+- **Revisit when** — A player wants vertical movement in a chassis
+  without a strong jet, OR a map design has a "swing across this gap"
+  beat. M5 (level editor + maps) is the natural pairing.
 
-### Only the left arm can be dismembered
+### Engineer ability heals self instead of dropping a deployable
 
-- **What we did** — `dismember_left_arm()` is the only dismember path.
-- **Why** — M1 explicitly says "arm only as a proof of concept". The
-  generalization is straightforward (parameterize on the constraint
-  index to deactivate plus the particles to mark loose).
-- **Revisit when** — M3 limb HP per limb.
+- **What we did** — Engineer chassis's BTN_USE adds 50 HP to the
+  engineer themselves, on a 30s cooldown.
+- **Why** — A "drop a 50-HP repair pack on the ground that allies can
+  pick up" needs the pickup system, which lands at M5
+  (documents/02-game-design.md §Map pickups). For M3 we wanted the
+  ability to *exist* on the chassis so the passive table is real, even
+  if its target is the user.
+- **Revisit when** — M5 pickup system lands. At that point the
+  ability spawns a `PICKUP_REPAIR_PACK` at the engineer's feet with a
+  short lifetime; allies (and the engineer) walking onto it consume it.
+
+### Projectile vs bone collision is sample-based, not analytic
+
+- **What we did** — `swept_seg_vs_bone` in `projectile.c` samples 8
+  points along the projectile's per-tick motion, finds the closest
+  point on the bone for each, and returns a hit if any sample is
+  within `(proj_radius + bone_radius)`. Same shape as
+  `weapons.c::ray_seg_hit`.
+- **Why** — Closed-form swept capsule-vs-segment is a few dozen lines
+  of analytic geometry; sampled is 8 lines and we can audit it. At
+  60 Hz with 1200-1700 px/s projectiles, per-tick motion is ~20-28 px,
+  well over the 6-8 px bone radius — sampling at 8 points covers it
+  comfortably. A 1900 px/s microgun slug at the worst case can step
+  ~32 px in a tick, edging the 8-sample density; we accept the
+  occasional miss and revisit if it's a real complaint.
+- **Revisit when** — Players report "I clearly hit them with the
+  microgun and nothing happened" patterns. Switch to analytic
+  ray-vs-capsule and remove the sample loop.
+
+### No cone bink — just per-shot self-bink + accumulator
+
+- **What we did** — `weapon.bink` (incoming-fire bink) is applied at
+  fire-tick to anyone within 80 px of the line origin→end. Projectiles
+  apply bink only at the muzzle's near segment, not as the projectile
+  travels. `weapon.self_bink` adds aim_bink to the shooter on each
+  fire (with random sign).
+- **Why** — Per-tick "did this projectile pass within 80px of any
+  mech?" is real cost; cheaper to do it once at the muzzle for the
+  short-range cone, where most near-misses cluster. Matches the *feel*
+  of "their fire makes my aim wobble" without per-projectile
+  proximity tests.
+- **Revisit when** — Playtesting shows bink doesn't fire on long-range
+  projectile sniping. Add a per-projectile-tick proximity check to the
+  3 nearest mechs.
+
+### Loadouts ship per-mech but no lobby UI
+
+- **What we did** — Each mech carries a full `MechLoadout` (chassis +
+  primary + secondary + armor + jetpack). Set at spawn time via
+  `mech_create_loadout`. The local mech reads its loadout from CLI
+  flags (`--chassis Heavy --primary "Mass Driver"` etc); remote
+  clients use the default Trooper loadout.
+- **Why** — A real lobby + loadout picker is M4 work
+  ([11-roadmap.md](documents/11-roadmap.md) §M4). M3 needed loadouts
+  to *exist* on Mech so weapon swap, armor flow, jetpack variants, and
+  passives all have a home. The CLI flags let us test the table without
+  blocking on UI.
+- **Revisit when** — M4 lands. The lobby reads loadouts from the
+  client over the LOBBY channel, the server validates them, and they
+  get baked into NET_MSG_INITIAL_STATE. The CLI flags can stay as a
+  test escape hatch.
 
 ### Mechs rendered as raw capsules
 

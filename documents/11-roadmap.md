@@ -96,23 +96,36 @@ See [CURRENT_STATE.md](../CURRENT_STATE.md) and [TRADE_OFFS.md](../TRADE_OFFS.md
 
 ## M3 — Combat depth
 
-**Three weeks.**
+**Three weeks.** **Status: shipped 2026-05-03.**
 
 **Goal**: All v1 weapons. All v1 mech chassis. All damage and dismemberment systems.
 
-- [ ] All 5 chassis with parameterized stats
-- [ ] All 8 primaries
-- [ ] All 6 secondaries
-- [ ] All 4 armor variants
-- [ ] All 4 jetpack variants
-- [ ] Recoil + bink + self-bink fully wired
-- [ ] Limb HP per limb, dismemberment of each
-- [ ] Explosions: damage, impulse, line-of-sight
-- [ ] Hit-location damage multipliers
-- [ ] Friendly-fire toggle (server config)
-- [ ] Kill feed UI
+- [x] All 5 chassis with parameterized stats (Trooper / Scout / Heavy / Sniper / Engineer)
+- [x] All 8 primaries (Pulse Rifle, Plasma SMG, Riot Cannon, Rail Cannon,
+      Auto-Cannon, Mass Driver, Plasma Cannon, Microgun)
+- [x] All 6 secondaries (Sidearm, Burst SMG, Frag Grenades, Micro-Rockets,
+      Combat Knife, Grappling Hook — grapple is a stub, see TRADE_OFFS.md)
+- [x] All 4 armor variants (None, Light, Heavy, Reactive)
+- [x] All 4 jetpack variants (Standard, Burst, Glide Wing, Jump Jet)
+- [x] Recoil + bink + self-bink fully wired
+- [x] Limb HP per limb, dismemberment of each (head, both arms, both legs)
+- [x] Explosions: damage falloff, line-of-sight halving, impulse to ragdolls
+- [x] Hit-location damage multipliers (head 1.6×, arms/legs 0.7×, hands/feet 0.5×)
+- [x] Friendly-fire toggle (server config — `--ff` CLI flag)
+- [x] Kill feed UI (HEADSHOT / GIB / OVERKILL / RAGDOLL / SUICIDE flags)
 
-**Done when**: the weapon roster feels distinct in playtest — every gun has a use, none are dominant.
+**Done when**: the weapon roster feels distinct in playtest — every gun has a use, none are dominant. *Met for the implementation; balance pass will run alongside M5 maps.*
+
+**Carried forward (deliberate, not finished here):**
+
+- Grappling Hook is a stub (cooldown ticks, but no projectile / anchor /
+  pull). Lands at M5 paired with map content that needs swing beats.
+- Engineer's BTN_USE heals the engineer (50 HP, 30 s CD). The proper
+  "drop a deployable repair pack" lands at M5 with the pickup system.
+- Burst SMG fires all 3 rounds on the same tick; per-round 70 ms cadence
+  is a TRADE_OFFS entry.
+- No lobby UI for picking loadouts — CLI flags only (`--chassis`,
+  `--primary`, etc). M4 wires the lobby.
 
 ## M4 — Lobby & matches
 

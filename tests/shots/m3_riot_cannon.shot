@@ -1,0 +1,26 @@
+# m3_riot_cannon.shot — point-blank shotgun blast. Verifies WFIRE_SPREAD
+# spawns 6 pellets in a cone. At 8 dmg × 6 pellets = 48 max damage per
+# shot at point blank. Two shots should drop a 150-HP dummy.
+
+window 1280 720
+seed   5 5
+out    build/shots/m3_riot_cannon
+loadout - "Riot Cannon" - Light Standard
+contact_sheet sheet cols 4 cell 480 270
+
+# Park player a bit further from the dummy than usual so the spread
+# is visible and not just one massive overlap.
+spawn_at 2150 984
+mouse    1100 360
+
+at  10 shot t010_pre
+at  30 tap fire
+at  35 shot t035_pellets_inflight
+at  60 tap fire
+at  65 shot t065_pellets_inflight
+at  90 tap fire
+at  95 shot t095_pellets_inflight
+at 130 shot t130_aftermath
+burst settle from 150 to 240 every 20
+
+at 260 end
