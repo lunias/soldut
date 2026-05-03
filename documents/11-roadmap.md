@@ -6,45 +6,54 @@ Time estimates are calendar weeks for one or two engineers working seriously. Th
 
 ## M0 — Foundation
 
-**Two weeks.**
+**Two weeks.** **Status: done (2026).**
 
 **Goal**: We have a window, an empty world, and a build pipeline.
 
-- [ ] Project scaffolding (`src/`, `third_party/`, `Makefile`, `build.sh`)
-- [ ] raylib vendored and statically linked (Linux dev, Windows cross via zig cc, macOS native or cross)
-- [ ] ENet vendored and statically linked
-- [ ] `stb_ds.h`, `stb_sprintf.h` vendored
-- [ ] Build matrix: `make`, `make windows`, `make macos` all produce binaries
-- [ ] CI runs the build matrix on every push
-- [ ] Window opens, clear-color renders, FPS counter
-- [ ] Logger, arena allocator, pool allocator
-- [ ] Math primitives
+- [x] Project scaffolding (`src/`, `third_party/`, `Makefile`, `build.sh`)
+- [x] raylib vendored and statically linked (Linux dev, Windows cross via zig cc, macOS native or cross)
+- [x] ENet vendored and statically linked
+- [x] `stb_ds.h`, `stb_sprintf.h` vendored
+- [x] Build matrix: `make`, `make windows`, `make macos` all produce binaries
+- [x] CI runs the build matrix on every push
+- [x] Window opens, clear-color renders, FPS counter
+- [x] Logger, arena allocator, pool allocator
+- [x] Math primitives
 
 **Done when**: a fresh checkout, three commands, opens a window on Windows and macOS.
 
 ## M1 — One mech, no network
 
-**Three weeks.**
+**Three weeks.** **Status: done (2026-05-03).**
 
 **Goal**: One player can run, jet, jump, shoot at a static target, and see ragdoll on death.
 
-- [ ] Particle pool + Verlet integrator
-- [ ] Constraint pool + relaxation solver
-- [ ] One chassis (Trooper) with the 16-particle skeleton
-- [ ] Tile grid map format + loader
-- [ ] Hard-coded test map (`maps/tutorial.lvl`)
-- [ ] Body-vs-map collision
-- [ ] Animation system: pose-driven, the 24-animation set, manual triggers (run, jump, fire)
-- [ ] Camera2D with smoothed follow
-- [ ] One weapon (Pulse Rifle) — hitscan, tracer, recoil impulse
-- [ ] One target dummy that takes damage
-- [ ] Death: drop pose drive, apply killshot impulse, ragdoll
-- [ ] Limb dismemberment (arm only as a proof of concept)
-- [ ] Blood particles + decal RT layer
-- [ ] Hit-pause + screen shake
-- [ ] HUD: health, ammo, crosshair
+- [x] Particle pool + Verlet integrator
+- [x] Constraint pool + relaxation solver (12 iters, constraint+collide interleaved per iter)
+- [x] One chassis (Trooper) with the 16-particle skeleton
+- [x] Tile grid map format + loader
+- [x] Hard-coded test map (built in code, `level_build_tutorial`)
+- [x] Body-vs-map collision (per-particle vs tile rect, neighbour-aware exit)
+- [x] Animation system: pose-driven (Stand, Run, Jet, Fall, Fire, Death — 6 of the 24 ship at M1)
+- [x] Camera2D with smoothed follow + cursor lookahead + screen shake
+- [x] One weapon (Pulse Rifle) — hitscan, tracer, recoil impulse
+- [x] One target dummy that takes damage
+- [x] Death: drop pose drive, apply killshot impulse, ragdoll
+- [x] Limb dismemberment (left arm only as proof of concept)
+- [x] Blood particles + decal RT layer
+- [x] Hit-pause + screen shake
+- [x] HUD: health, jet fuel, ammo, crosshair, kill feed
 
-**Done when**: a player can play a 30-second loop — run, jet, shoot the dummy until it falls apart — and grin.
+**Done when**: a player can play a 30-second loop — run, jet, shoot the dummy until it falls apart — and grin. *Met.*
+
+**Carried forward (deliberate, not finished here):**
+
+- 120 Hz fixed-step accumulator and render-side interpolation alpha. M1 ships at 60 Hz with one sim tick per render frame. (Picked up before or alongside M2.)
+- Full 24-animation set. M1 ships 6.
+- IK on the left arm. The left hand currently dangles.
+- Angle constraints in active use. Implemented but not registered.
+
+See [CURRENT_STATE.md](../CURRENT_STATE.md) and [TRADE_OFFS.md](../TRADE_OFFS.md) for the full list with revisit triggers.
 
 ## M2 — Networking foundation
 

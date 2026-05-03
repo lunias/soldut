@@ -12,6 +12,11 @@ build/
 soldut
 soldut_editor
 
+# Allow vendored prebuilt static libs — we commit these per platform.
+# See documents/08-build-and-distribution.md.
+!third_party/raylib/lib/**/*.a
+!third_party/raylib/src/libraylib.a
+
 # Editor / OS
 .DS_Store
 Thumbs.db

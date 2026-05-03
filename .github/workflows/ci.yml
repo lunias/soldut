@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+
+jobs:
+  build-linux:
+    name: Linux (native gcc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install X11 + GL dev headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libgl1-mesa-dev \
+            libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxinerama-dev \
+            libasound2-dev
+
+      - name: Build raylib (static)
+        run: make raylib
+
+      - name: Build soldut
+        run: make -j$(nproc)
+
+      - name: Show binary
+        run: |
+          ls -la ./soldut
+          file ./soldut
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: soldut-linux-x86_64
+          path: soldut
+
+  build-windows:
+    name: Windows (zig cc cross)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Cross-build to Windows
+        run: ./cross-windows.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: soldut-windows-x86_64
+          path: build/windows/Soldut.exe
+
+  build-macos:
+    name: macOS (native clang)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build raylib (static)
+        run: make raylib
+
+      - name: Build soldut
+        run: make -j$(sysctl -n hw.ncpu)
+
+      - name: Show binary
+        run: |
+          ls -la ./soldut
+          file ./soldut
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: soldut-macos
+          path: soldut

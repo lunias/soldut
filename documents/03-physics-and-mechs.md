@@ -2,6 +2,13 @@
 
 This document specifies how mechs are constructed, animated, and torn apart. The physics here is **load-bearing for game-feel**: the way a mech moves and breaks is most of what the player remembers about a match.
 
+> **At M1, the shipped behavior diverges from this spec in a few
+> places** — most notably 60 Hz sim instead of 120 Hz, no angle
+> constraints in active use, and a kinematic post-physics anchor for
+> the standing pose. See [CURRENT_STATE.md](../CURRENT_STATE.md) and
+> [TRADE_OFFS.md](../TRADE_OFFS.md) for the actual state and the
+> "revisit when" triggers.
+
 ## Pillars
 
 1. **One physics model.** Alive players, dead bodies, gibs, projectiles — all run through the same Verlet particle/constraint solver. Death is a state change in animation, not a switch to a different physics engine. (This is what Soldat does, and it's why ragdolls feel right.)
@@ -98,9 +105,23 @@ Per mech we have:
 
 That's ~21 constraints per mech, ~672 across 32 mechs. Plus dismembered limb internal constraints (which decrease over time as bodies decay). **Constraint pool capacity = 2048** at startup.
 
+> **M1 note:** the build ships **21 distance constraints** (head/neck/chest
+> triangle, spine, clavicles, hips, arms, legs, shoulder span, hip span,
+> and L/R shoulder↔pelvis triangulation) and **no angle constraints in
+> active use**. The angle solver works but doesn't prevent the failure
+> mode it was supposed to prevent (a leg rotating to horizontal still
+> has interior angle = π at the knee). See
+> [TRADE_OFFS.md](../TRADE_OFFS.md#no-angle-constraints-in-active-use).
+
 ## Integration: Verlet, fixed timestep
 
 The simulation runs at **120 Hz** (every 8.33 ms) inside a fixed-step accumulator. Render runs at whatever frame rate the player has, interpolating between the last two simulated states.
+
+> **M1 note:** the build currently runs **one sim tick per render
+> frame** (effectively 60 Hz on a vsynced display). No fixed-step
+> accumulator, no render-side interpolation alpha. This leaks: jet
+> arcs feel different in fullscreen vs small windows. See
+> [TRADE_OFFS.md](../TRADE_OFFS.md#60-hz-simulation-not-120-hz).
 
 The Verlet step for one particle:
 
@@ -144,6 +165,15 @@ static inline void solve_distance(Particle *a, Particle *b, float rest) {
 
 Eight iterations gives ~95% rigidity (constraints stretch ~5% under load). Increase to 12 if mechs feel rubbery; decrease to 4 for off-screen / far-LOD bodies.
 
+> **M1 note:** the build runs **12 iterations** with **constraints and
+> map collisions interleaved inside the same loop**
+> (`physics_constrain_and_collide()` in `src/physics.c`). This was
+> required to keep a foot held by the floor from sagging the pelvis a
+> little each frame: a single constraint pass followed by a single
+> collision pass didn't propagate the lift on the same tick. Only the
+> last iteration computes contact friction and writes back to `prev`;
+> the earlier iterations apply position-only contact resolution.
+
 ## Animation: pose-driven
 
 When a mech is alive, an **animator** writes target positions for a subset of particles each tick — usually the head, hands, and feet — and the constraint solver pulls the rest of the body into alignment.
@@ -166,6 +196,29 @@ for (int i = 0; i < PART_COUNT; ++i) {
     }
 }
 ```
+
+> **M1 note — kinematic translate.** The lerp above must update both
+> `pos` *and* `prev` by the same delta. Verlet reads `pos − prev` as
+> velocity, so a `pos`-only lerp injects ghost velocity the next tick
+> and the body oscillates. The shipped `apply_pose_to_particles()` in
+> `src/mech.c` calls `physics_translate_kinematic()` instead of a raw
+> lerp.
+>
+> **M1 note — pose targets are layout-consistent.** Each pose target
+> sits at exactly its layout offset from the (possibly anchored)
+> pelvis, so the distance between any two pose-driven particles equals
+> the rest length of the constraint between them. That removes the
+> pose-vs-constraint tug-of-war that otherwise pumps drift velocity
+> through the body.
+>
+> **M1 note — post-physics anchor.** Pose drive alone wasn't enough to
+> hold the standing pose: gravity sag accumulated faster than the
+> solver could correct it. After the physics step, when a mech is
+> grounded *and* in `ANIM_STAND`, `mech_post_physics_anchor()` lifts
+> the pelvis + upper body + knees to standing positions kinematically
+> and zeroes Y-velocity (`prev_y = pos_y`). This only runs in
+> `ANIM_STAND` so run/jump/jet/death respond naturally. See
+> [TRADE_OFFS.md](../TRADE_OFFS.md#post-physics-kinematic-anchor-for-standing-pose).
 
 Animations are sequences of poses (think Soldat's `.poa` files — see `Anims.pas` in the original). We store them as compact arrays of `(particle_index, x, y, strength)` per frame. Animation list (matching Soldat's coverage):
 
