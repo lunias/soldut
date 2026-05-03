@@ -144,6 +144,11 @@ void weapons_fire_hitscan(World *w, int mid) {
     Vec2 final_end;
     if (hit_t >= 0.0f) {
         final_end = (Vec2){ origin.x + dir.x * hit_t, origin.y + dir.y * hit_t };
+        SHOT_LOG("t=%llu fire mech=%d origin=(%.1f,%.1f) dir=(%.2f,%.2f) "
+                 "hit mech=%d part=%d at=(%.1f,%.1f) dmg=%.1f",
+                 (unsigned long long)w->tick, mid, origin.x, origin.y,
+                 dir.x, dir.y, hit_mech, hit_part,
+                 final_end.x, final_end.y, wpn->damage);
         /* Damage. dir is a unit vector and is forwarded as-is —
          * mech_apply_damage uses it only for blood-spray angle and to
          * pass through to mech_kill, which scales by its own kill
@@ -155,6 +160,11 @@ void weapons_fire_hitscan(World *w, int mid) {
         mech_apply_damage(w, hit_mech, hit_part, wpn->damage, dir);
     } else {
         final_end = (Vec2){ origin.x + dir.x * t_max, origin.y + dir.y * t_max };
+        SHOT_LOG("t=%llu fire mech=%d origin=(%.1f,%.1f) dir=(%.2f,%.2f) "
+                 "miss end=(%.1f,%.1f) wall=%d",
+                 (unsigned long long)w->tick, mid, origin.x, origin.y,
+                 dir.x, dir.y, final_end.x, final_end.y,
+                 (int)(t_max < wpn->range_px));
         /* Sparks if it hit a wall. */
         if (t_max < wpn->range_px) {
             for (int k = 0; k < 6; ++k) {

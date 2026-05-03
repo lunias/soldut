@@ -460,10 +460,30 @@ int shotmode_run(const char *script_path) {
         free(s.lerps);
         return EXIT_FAILURE;
     }
-    LOG_I("shotmode: script=%s window=%dx%d events=%d end_tick=%d",
-          script_path, s.window_w, s.window_h, s.event_count, s.end_tick);
 
     mkdir_p(s.out_dir);
+
+    /* Redirect logging to a per-script file under <out_dir> so the run
+     * produces a paired (.png + .log) output that an LLM can review
+     * without hunting through soldut.log. main.c already opened
+     * soldut.log; close it and re-open at the new path before any
+     * SHOT_LOG fires. */
+    {
+        const char *base = strrchr(script_path, '/');
+        base = base ? base + 1 : script_path;
+        char base_no_ext[128];
+        snprintf(base_no_ext, sizeof(base_no_ext), "%s", base);
+        char *dot = strrchr(base_no_ext, '.');
+        if (dot) *dot = 0;
+        char log_path[512];
+        snprintf(log_path, sizeof(log_path), "%s/%s.log", s.out_dir, base_no_ext);
+        log_shutdown();
+        log_init(log_path);
+    }
+    g_shot_mode = 1;
+
+    LOG_I("shotmode: script=%s window=%dx%d events=%d end_tick=%d",
+          script_path, s.window_w, s.window_h, s.event_count, s.end_tick);
 
     Game game;
     if (!game_init(&game)) { free(s.events); free(s.lerps); return EXIT_FAILURE; }
@@ -656,5 +676,6 @@ int shotmode_run(const char *script_path) {
     game_shutdown(&game);
     free(s.events);
     free(s.lerps);
+    g_shot_mode = 0;
     return EXIT_SUCCESS;
 }

@@ -12,6 +12,8 @@
 
 static FILE *g_log_file;
 
+int g_shot_mode = 0;
+
 static const char *level_tag(LogLevel l) {
     switch (l) {
         case SLOG_DEBUG: return "DEBUG";
@@ -71,5 +73,19 @@ void log_msg(LogLevel level, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     log_vmsg(level, fmt, ap);
+    va_end(ap);
+}
+
+/* SHOT_LOG: file-only sink. The macro guards the call with g_shot_mode,
+ * so this function is unreachable when shot mode is off — but we still
+ * check g_log_file in case shot mode was set without log_init. */
+void log_shot(const char *fmt, ...) {
+    if (!g_log_file) return;
+    va_list ap;
+    va_start(ap, fmt);
+    fputs("[SHOT ] ", g_log_file);
+    vfprintf(g_log_file, fmt, ap);
+    fputc('\n', g_log_file);
+    fflush(g_log_file);
     va_end(ap);
 }

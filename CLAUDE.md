@@ -76,6 +76,15 @@ The runner uses a fixed `dt = 1/60`, doesn't read wall-clock time, and
 re-seeds the World RNG when a `seed` directive is present — so a re-run
 produces the same PNGs. See `src/shotmode.c`.
 
+Each run also writes a `<scriptname>.log` next to its PNGs, with a
+per-tick summary line for the local mech plus event lines for anim
+transitions, grounded toggles, jet ceiling taper, post-physics anchor
+recoveries, pose-sweep clamps, inside-tile escapes, hitscan
+fire/hit/miss, damage, dismemberment, and kills. Use the `SHOT_LOG()`
+macro from `src/log.h` to add more events; it's gated on
+`g_shot_mode` (a one-branch no-op outside shot mode), so it's free to
+sprinkle into hot paths.
+
 ## Required reading for non-trivial work
 
 Three files near the root are not optional:

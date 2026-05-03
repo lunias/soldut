@@ -305,7 +305,16 @@ make shot                                    # tests/shots/walk_right.shot
 make shot SCRIPT=tests/shots/your_case.shot
 ```
 
-Script grammar lives in `src/shotmode.h`. Output: `build/shots/*.png`.
+Script grammar lives in `src/shotmode.h`. Output: `build/shots/*.png`,
+plus a `<scriptname>.log` file in the same dir. The log is on by
+default in shot mode (the `g_shot_mode` flag toggles `SHOT_LOG()` in
+`src/log.h`); it captures one compact summary line per tick (anim,
+grounded, pelvis pos/vel, fuel, hp, ammo) plus event lines for anim
+transitions, grounded toggles, jet ceiling taper, post-physics anchor
+recoveries (>1.5 px), pose-drive sweep clamps, inside-tile collision
+escapes, hitscan fire/hit/miss, damage applied, dismemberment, and
+kills. The log is paired 1:1 with the shot run so an LLM reviewing a
+contact sheet can read exactly what happened during the run.
 Fixed `dt = 1/60`, no wall-clock reads, RNG re-seedable from script —
 re-runs are byte-identical.
 

@@ -347,6 +347,11 @@ static void collide_map_one_pass(World *w, bool finalize_velocity) {
                             default: nx =  0; ny =  1; amount = d_bot + r; break;
                         }
                     }
+
+                    SHOT_LOG("t=%llu inside_tile particle=%d tile=(%d,%d) "
+                             "pos=(%.1f,%.1f) prev=(%.1f,%.1f) exit=(%.0f,%.0f)",
+                             (unsigned long long)w->tick, i, cx, cy,
+                             px, py, ppx, ppy, nx, ny);
                 }
 
                 if (finalize_velocity) contact_with_velocity(p, i, nx, ny, amount);
@@ -388,6 +393,10 @@ void physics_translate_kinematic_swept(ParticlePool *p, const Level *L,
             float seg_len = sqrtf(seg2);
             float t_clamped = t - (PHYSICS_PARTICLE_RADIUS + 0.5f) / seg_len;
             if (t_clamped < 0.0f) t_clamped = 0.0f;
+            SHOT_LOG("pose_sweep clamp particle=%d at=(%.1f,%.1f) "
+                     "want=(%.2f,%.2f) t=%.3f -> got=(%.2f,%.2f)",
+                     i, qx, qy, dx, dy, t_clamped,
+                     dx * t_clamped, dy * t_clamped);
             dx *= t_clamped;
             dy *= t_clamped;
         }

@@ -508,6 +508,8 @@ static void apply_jump(World *w, const Mech *m, float jump_pxs, float dt) {
         int idx = m->particle_base + part;
         physics_set_velocity_y(p, idx, vy_per_tick);
     }
+    SHOT_LOG("t=%llu mech=%d jump impulse=%.0f vy/tick=%.3f",
+             (unsigned long long)w->tick, m->id, jump_pxs, vy_per_tick);
 }
 
 /* Jet: continuous upward acceleration applied uniformly to every body
@@ -532,6 +534,8 @@ static void apply_jet_force(World *w, const Mech *m, float thrust_pxs2, float dt
         if (head_y <= JET_CEILING_TAPER_END) scale = 0.0f;
         else scale = (head_y - JET_CEILING_TAPER_END) /
                      (JET_CEILING_TAPER_BEGIN - JET_CEILING_TAPER_END);
+        SHOT_LOG("t=%llu mech=%d jet_taper head_y=%.1f scale=%.2f",
+                 (unsigned long long)w->tick, m->id, head_y, scale);
     }
     if (scale <= 0.0f) return;
     float dy = -thrust_pxs2 * scale * dt * dt;
@@ -651,6 +655,16 @@ void mech_post_physics_anchor(World *w, int mid) {
     /* Only lift, never push down (push-down would prevent jumps). */
     if (dy_pelvis >= -0.1f) return;
 
+    /* Per-tick gravity sag is ~0.33 px (1200 px/s² × (1/60)²); the
+     * anchor corrects roughly 2× that every tick at rest. Logging
+     * every steady-state correction buries the actually-interesting
+     * cases (landings, recoveries) under a wall of -0.6 readings, so
+     * threshold at >1.5 px which is comfortably above steady-state. */
+    if (dy_pelvis < -1.5f) {
+        SHOT_LOG("t=%llu mech=%d anchor anim=%d dy_pelvis=%.2f",
+                 (unsigned long long)w->tick, m->id, m->anim_id, dy_pelvis);
+    }
+
     /* Lift pelvis, hips, knees, and the entire upper body together, then
      * zero Y-velocity by collapsing prev_y onto pos_y. The kinematic
      * lift alone would preserve the (gravity-accumulated) Y-velocity,
@@ -762,6 +776,9 @@ static void dismember_left_arm(World *w, Mech *m) {
     Vec2 sp = part_pos(w, m, PART_L_SHOULDER);
     Vec2 v0 = (Vec2){ -160.0f, -80.0f };
     for (int k = 0; k < 24; ++k) fx_spawn_blood(&w->fx, sp, v0, w->rng);
+
+    SHOT_LOG("t=%llu mech=%d dismember L_ARM at (%.1f,%.1f) mask=0x%02x",
+             (unsigned long long)w->tick, m->id, sp.x, sp.y, m->dismember_mask);
 }
 
 void mech_kill(World *w, int mid, int killshot_part, Vec2 dir, float impulse) {
@@ -792,6 +809,9 @@ void mech_kill(World *w, int mid, int killshot_part, Vec2 dir, float impulse) {
     w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.6f);
     LOG_I("mech_kill: id=%d (part=%d, impulse=%.1f, mask=0x%02x)",
           mid, killshot_part, impulse, m->dismember_mask);
+    SHOT_LOG("t=%llu mech=%d kill killshot_part=%d dir=(%.2f,%.2f) impulse=%.1f mask=0x%02x",
+             (unsigned long long)w->tick, mid, killshot_part,
+             dir.x, dir.y, impulse, m->dismember_mask);
 }
 
 bool mech_apply_damage(World *w, int mid, int part, float dmg, Vec2 dir) {
@@ -800,6 +820,9 @@ bool mech_apply_damage(World *w, int mid, int part, float dmg, Vec2 dir) {
 
     float final_dmg = dmg * hit_location_mult(part);
     m->health -= final_dmg;
+    SHOT_LOG("t=%llu mech=%d damage part=%d dmg=%.1f hp=%.1f/%.1f",
+             (unsigned long long)w->tick, mid, part, final_dmg,
+             m->health, m->health_max);
 
     /* Limb HP — only L arm at M1 (per the roadmap). */
     if (part == PART_L_SHOULDER || part == PART_L_ELBOW || part == PART_L_HAND) {
