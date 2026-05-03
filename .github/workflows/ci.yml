@@ -11,7 +11,7 @@ jobs:
     name: Linux (native gcc)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install X11 + GL dev headers
         run: |
@@ -33,7 +33,7 @@ jobs:
           ls -la ./soldut
           file ./soldut
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: soldut-linux-x86_64
           path: soldut
@@ -42,17 +42,17 @@ jobs:
     name: Windows (zig cc cross)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install zig
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v2
         with:
           version: 0.13.0
 
       - name: Cross-build to Windows
         run: ./cross-windows.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: soldut-windows-x86_64
           path: build/windows/Soldut.exe
@@ -61,7 +61,7 @@ jobs:
     name: macOS (native clang)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build raylib (static)
         run: make raylib
@@ -74,7 +74,7 @@ jobs:
           ls -la ./soldut
           file ./soldut
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: soldut-macos
           path: soldut
