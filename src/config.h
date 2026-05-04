@@ -1,0 +1,74 @@
+#pragma once
+
+#include "match.h"
+#include "version.h"
+
+#include <stdbool.h>
+#include <stdint.h>
+
+/*
+ * config — soldut.cfg parsing.
+ *
+ * Hosts can drop a `soldut.cfg` next to the executable to set match
+ * defaults. CLI flags override the file (the file is the "saved
+ * defaults", not the source of truth at runtime).
+ *
+ * Format: key=value, one per line, '#' comments. Values are trimmed.
+ *
+ *     # ports + capacity
+ *     port=23073
+ *     max_players=16
+ *
+ *     # match rules
+ *     mode=ffa            # ffa | tdm | ctf
+ *     score_limit=25
+ *     time_limit=600      # seconds
+ *     friendly_fire=0
+ *     auto_start_seconds=60
+ *
+ *     # rotation (comma-separated short names from maps.c / match modes)
+ *     map_rotation=foundry,slipstream,reactor
+ *     mode_rotation=ffa,ffa,tdm
+ *
+ * Anything missing keeps its built-in default. Anything malformed logs
+ * a warning and falls back to the default.
+ */
+
+#define CONFIG_ROTATION_MAX 8
+
+typedef struct ServerConfig {
+    /* Connection. */
+    uint16_t  port;
+    int       max_players;
+
+    /* Match rules. */
+    MatchModeId mode;
+    int         score_limit;
+    float       time_limit;
+    bool        friendly_fire;
+    float       auto_start_seconds;
+
+    /* Rotations. */
+    int       map_rotation [CONFIG_ROTATION_MAX];
+    int       map_rotation_count;
+    MatchModeId mode_rotation[CONFIG_ROTATION_MAX];
+    int       mode_rotation_count;
+
+    /* Bookkeeping. */
+    bool      loaded_from_file;
+    char      source_path[256];
+} ServerConfig;
+
+/* Populate cfg with built-in defaults (see config.c). Always succeeds. */
+void config_defaults(ServerConfig *cfg);
+
+/* Load + parse `path` if it exists. Returns true if a file was read
+ * (regardless of warnings). Missing file is not an error — defaults
+ * just stay in place and `loaded_from_file` remains false. */
+bool config_load(ServerConfig *cfg, const char *path);
+
+/* Pull the next map / mode from the rotation. Caller passes the round
+ * counter; we round-robin through the rotation table. Falls back to
+ * the static `mode`/`map_rotation[0]` if rotation is empty. */
+int         config_pick_map (const ServerConfig *cfg, int round_index);
+MatchModeId config_pick_mode(const ServerConfig *cfg, int round_index);

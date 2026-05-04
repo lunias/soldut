@@ -222,22 +222,6 @@ Last updated: **2026-05-03**.
   projectile sniping. Add a per-projectile-tick proximity check to the
   3 nearest mechs.
 
-### Loadouts ship per-mech but no lobby UI
-
-- **What we did** — Each mech carries a full `MechLoadout` (chassis +
-  primary + secondary + armor + jetpack). Set at spawn time via
-  `mech_create_loadout`. The local mech reads its loadout from CLI
-  flags (`--chassis Heavy --primary "Mass Driver"` etc); remote
-  clients use the default Trooper loadout.
-- **Why** — A real lobby + loadout picker is M4 work
-  ([11-roadmap.md](documents/11-roadmap.md) §M4). M3 needed loadouts
-  to *exist* on Mech so weapon swap, armor flow, jetpack variants, and
-  passives all have a home. The CLI flags let us test the table without
-  blocking on UI.
-- **Revisit when** — M4 lands. The lobby reads loadouts from the
-  client over the LOBBY channel, the server validates them, and they
-  get baked into NET_MSG_INITIAL_STATE. The CLI flags can stay as a
-  test escape hatch.
 
 ### Mechs rendered as raw capsules
 
@@ -337,25 +321,152 @@ Last updated: **2026-05-03**.
   - Bandwidth becomes a problem (see "no delta encoding" above).
   - Cheats become a reported issue.
 
-### No client-side mid-tick interpolation of remote mechs
+### Snapshot interp is a 35% lerp, not a full two-snapshot buffer
 
-- **What we did** — `snapshot_apply` overwrites remote mech
-  positions instantly when each snapshot arrives. The doc
-  ([05-networking.md](documents/05-networking.md) §4 "Snapshot
-  interpolation") prescribes rendering remote mechs ~100 ms in the
-  past, between the two most recent snapshots.
-- **Why** — At 30 Hz, snapshots arrive every 33 ms. Two snapshots
-  buffered + lerp by `t = (now - snap_a.time) / (snap_b.time - snap_a.time)`
-  is the standard fix for jitter, but on a LAN with 1-2 ms jitter
-  it's a perfect-vs-good-enough call. Showing the most recent
-  snapshot directly looks fine in playtest. The lag-comp path on the
-  server still uses `shooter_rtt + interp_delay` math; we just don't
-  apply the interp_delay on the render side yet.
+- **What we did** — `snapshot_apply` translates remote-mech
+  particles by 35 % of the (snapshot − current) delta each time a
+  snapshot arrives. Over 3-4 snapshots we converge to the server
+  position without the per-snapshot pop the user saw on the M4
+  initial release. Velocity is set on every particle (not just
+  pelvis) so the constraint solver doesn't fight a velocity
+  mismatch each tick.
+- **Why** — The 05-networking.md design calls for a proper
+  two-snapshot buffer with `t = (now − snap_a.time) /
+  (snap_b.time − snap_a.time)` lerp, rendering ~100 ms in the
+  past. The lerp version is two lines of code and visually
+  indistinguishable on LAN; the full interp adds a per-mech
+  history ring + a render-time clock + a "what if I lose a
+  snapshot" fallback. Defer until we measure the LAN-vs-WAN
+  difference in playtest.
 - **Revisit when** —
-  - We test on connections >50 ms RTT and remote mechs visibly
-    jitter.
-  - We measure desyncs in lag-comp where the server's "shooter saw"
-    estimate disagrees with what the client actually rendered.
+  - WAN testing (RTT > 50 ms) reveals visible drift / lag.
+  - We need lag-compensation accuracy that depends on the client
+    rendering a known-past timeline (so the server can rewind to
+    the SAME past state for hit detection).
+  - Big velocity changes happen rarely enough that the lerp's
+    convergence-over-3-snapshots looks slow (~100 ms) — e.g. a
+    rocket-jump that pings the user across the screen.
+
+### Shot-mode driving of UI screens is not built
+
+- **What we did** — `tests/net/run.sh` and `tests/net/run_3p.sh`
+  end-to-end the full host+client flow via real ENet loopback and
+  assert on log-line milestones. There is no PNG-based shot test
+  for the UI screens themselves (title, browser, lobby, summary).
+- **Why** — Driving the UI screens through the shot architecture
+  requires synthesizing mouse positions / clicks / keypresses
+  through raylib (which doesn't have an input-injection API), and
+  refactoring `main.c`'s state-machine loop into something
+  callable from `shotmode_run`. That's a substantial engine
+  refactor for purely-visual coverage. The log-driven network
+  tests catch the actual functional bugs (the M4 black-screen-on-
+  client regression was found this way), so the marginal value of
+  PNG UI tests is mostly visual-regression — easier to do once
+  M5's level editor lands and we want the same pipeline for
+  authored-content review.
+- **Revisit when** — A UI regression slips through the network
+  tests AND a screenshot would have caught it. Likely candidates:
+  layout overlap at unusual aspect ratios, text-shaping issues
+  with non-Latin chars, scaling artifacts at fractional DPI. The
+  candidate paths are (a) extend `shotmode.c` with `screen <x>`
+  + `click` / `key` directives + a synthesized-input shim that
+  the UI helpers consult when in shot mode, or (b) a small
+  separate `tools/ui_shots.c` that opens raylib at multiple
+  resolutions and renders each screen with hard-coded fake state.
+
+### Default raylib font (no vendored TTF)
+
+- **What we did** — Use `GetFontDefault()` (raylib's 10×10
+  pixel-font baked into the library) for all UI text, with
+  `SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR)` to
+  smooth the upscale and a per-screen UI scale factor (1× at
+  720p, snapping in 0.25 increments up to 3× at 4K). Combined
+  with `FLAG_MSAA_4X_HINT` for line/shape antialiasing.
+- **Why** — A real TTF would be sharper at high DPI but adds an
+  asset to vendor (font files are >100 KB; the public-domain
+  ones we'd want — Inter, Atkinson Hyperlegible, JetBrains
+  Mono — are ~200-400 KB each). The bilinear-filtered default
+  font + UI scale is "good enough" for M4's purpose and keeps
+  the binary at <3 MB. We can swap to a real TTF in M5 alongside
+  the art pass if HUD/lobby text feels mushy.
+- **Revisit when** — User-facing complaints about fuzzy text at
+  4K, OR a localization push needs glyphs the bitmap doesn't
+  cover (any non-Latin script). At that point: vendor a single
+  TTF in `assets/fonts/`, load with `LoadFontEx` at, say, 32 px
+  base size with codepoint set sized for the language, route all
+  `ui_draw_text` calls through it.
+
+### Map vote picker UI is partial
+
+- **What we did** — The protocol carries `vote_map_a/b/c` candidates
+  and three uint32 bitmasks for tallies; the server picks a winner
+  via `lobby_vote_winner`. But the lobby UI doesn't surface a
+  three-card "pick A/B/C" modal at the end of a round — the next
+  round just uses `config_pick_map(round_counter+1)` from the
+  rotation.
+- **Why** — Plumbing is the load-bearing part; the modal is one
+  screen of layout work that's easier once we have map preview
+  thumbnails (M5 art pass).
+- **Revisit when** — M5 maps land with screenshots. At that point
+  the summary screen grows a "Vote next map" panel that calls
+  `net_client_send_map_vote`; the server tallies and broadcasts
+  `LOBBY_VOTE_STATE` (already wired).
+
+### Kick / ban UI not exposed
+
+- **What we did** — `LOBBY_KICK` / `LOBBY_BAN` messages are wired
+  end-to-end (`net_client_send_kick/ban`, `lobby_ban_addr`,
+  server-side host-only enforcement). The lobby UI doesn't render a
+  per-row [Kick] [Ban] button on the player list yet.
+- **Why** — Same shape as the vote picker: protocol first, UI
+  affordance second. A working kick path also needs `bans.txt`
+  persistence to be useful across host restarts.
+- **Revisit when** — A host actually wants to moderate, OR M5 ships
+  a "host controls" panel. At that point: row hover → buttons,
+  confirmation modal, plus `bans.txt` read-on-start /
+  write-on-update.
+
+### Single-player mode has no practice dummy
+
+- **What we did** — Title screen "Single Player" bootstraps an
+  offline-solo "server" with one slot (the player). Round runs
+  against an empty map; player can move, jet, and shoot at nothing.
+- **Why** — M3 had a hard-coded dummy at `(75, 32)` for visible
+  feedback in shot tests. M4 removed it from the lobby/match flow
+  because a real lobby + auto-spawn would conflict with it. Adding
+  a "spawn a dummy slot" path is M5 work alongside the pickup
+  system (a "Practice" room could spawn a target dummy as a
+  pickup-like entity).
+- **Revisit when** — M5 lands the pickup system; add a
+  `PICKUP_PRACTICE_DUMMY` (or just a special spawn) for the offline-
+  solo path. Until then, shotmode + headless_sim still spawn a
+  dummy directly via `mech_create`.
+
+### `bans.txt` not persisted
+
+- **What we did** — `lobby_ban_addr` adds bans to in-memory
+  `LobbyState.bans[]`. They survive across rounds in the same
+  process but vanish on restart.
+- **Why** — File I/O at the right layer is its own can of worms
+  (where does it live? what's the format? how do we handle
+  concurrent edits?). Ship in-memory, document the gap.
+- **Revisit when** — A host actually deals with a problem player and
+  asks "did the ban stick?" Add load-on-start / write-on-update of
+  a flat `bans.txt` next to the executable.
+
+### `tick_hz` config field accepted but ignored
+
+- **What we did** — `config.c`'s parser silently accepts `tick_hz=`
+  if present (well, it logs a warning — there's no key handler for
+  it). The simulation runs at fixed 60 Hz from `main.c`.
+- **Why** — Aligning the sim rate with the existing 60 Hz vs 120 Hz
+  trade-off is one decision per project (see "60 Hz simulation, not
+  120 Hz" above). A per-server `tick_hz` would compound that
+  trade-off with no upside until we have configurable rates working
+  internally.
+- **Revisit when** — We finish the fixed-step accumulator (the
+  120 Hz refactor); at that point `tick_hz` becomes a meaningful
+  knob.
 
 ### Dummy is a non-dummy on the client
 
@@ -371,18 +482,11 @@ Last updated: **2026-05-03**.
   entity. At that point we either widen state_bits to a uint16, add
   a separate flags byte, or remove dummies in favor of bots.
 
-### Lobby & match flow not wired through the network
+### Loadouts ship per-mech but no lobby UI ~~(M3)~~ — RESOLVED M4
 
-- **What we did** — There's no in-game UI to host/join (it's CLI
-  flags `--host` and `--connect`). Once connected, there's no
-  pre-round lobby, no team selection, no chat broadcast. Players
-  appear in the world the moment they're accepted.
-- **Why** — That's M4 work per [11-roadmap.md](documents/11-roadmap.md).
-  M2's "Done when" criterion is "they shoot each other for ten
-  minutes without a desync" — UI sugar above that is post-M2.
-- **Revisit when** — M4. The plumbing for LOBBY-channel reliable
-  messages is already in net.c; we just don't generate any of those
-  message types yet.
+The M3 entry that "the local mech reads its loadout from CLI flags"
+is now obsolete. The lobby UI (`src/lobby_ui.c`) cycles loadout
+slots; CLI flags pre-fill them as a test escape hatch.
 
 ---
 

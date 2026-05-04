@@ -1,0 +1,13 @@
+# UI audit — host side. Sits in lobby/match/summary so we get a
+# clean screenshot of each at the default 1280x720. Pairs with the
+# client to populate a 2-player lobby.
+
+window 1280 720
+out build/shots/net/ui_host
+network host 24021
+name HostA
+
+at  60 shot lobby_2p
+at 200 shot match
+at 750 shot summary
+at 800 end

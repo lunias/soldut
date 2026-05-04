@@ -1,0 +1,306 @@
+#include "ui.h"
+
+#include "../third_party/raylib/src/raylib.h"
+
+#include <ctype.h>
+#include <string.h>
+
+float ui_compute_scale(int screen_h) {
+    /* Design baseline: 1280×720. We pick the scale that keeps a 18 px
+     * font occupying ~2.5% of the screen height. Round to 0.25 steps so
+     * widgets snap to consistent sizes (avoids a jittery 1.07x at
+     * unusual resolutions). Capped at 3x so 8K doesn't go silly. */
+    if (screen_h <= 0) return 1.0f;
+    float raw = (float)screen_h / 720.0f;
+    if (raw < 1.0f) raw = 1.0f;
+    if (raw > 3.0f) raw = 3.0f;
+    /* Snap to 0.25 steps: 1.00, 1.25, 1.50, 1.75, 2.00, 2.25, 2.50, 2.75, 3.00 */
+    float snap = (float)((int)((raw * 4.0f) + 0.5f)) / 4.0f;
+    if (snap < 1.0f) snap = 1.0f;
+    return snap;
+}
+
+int ui_font_px(const UIContext *u) {
+    int s = (int)((float)u->font_size * u->scale + 0.5f);
+    return s < 8 ? 8 : s;
+}
+
+void ui_draw_text(const UIContext *u, const char *text, int x, int y,
+                  int base_size, Color col)
+{
+    if (!text || !*text) return;
+    int sz = (int)((float)base_size * u->scale + 0.5f);
+    if (sz < 8) sz = 8;
+    /* DrawTextEx with the default font + a non-1.0 spacing gives us
+     * raylib's nice GLSL-shader alpha blend, plus the bilinear filter
+     * we set on the default font texture in platform.c. */
+    DrawTextEx(GetFontDefault(), text, (Vector2){ (float)x, (float)y },
+               (float)sz, (float)sz / 10.0f, col);
+}
+
+int ui_measure(const UIContext *u, const char *text, int base_size) {
+    if (!text || !*text) return 0;
+    int sz = (int)((float)base_size * u->scale + 0.5f);
+    if (sz < 8) sz = 8;
+    Vector2 v = MeasureTextEx(GetFontDefault(), text, (float)sz,
+                              (float)sz / 10.0f);
+    return (int)(v.x + 0.5f);
+}
+
+void ui_begin(UIContext *u, Vec2 mouse_screen, float dt, int screen_h) {
+    u->mouse           = mouse_screen;
+    u->mouse_pressed   = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    u->mouse_released  = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
+    u->mouse_down      = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    u->shift_down      = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    u->dt              = dt;
+    u->scale           = ui_compute_scale(screen_h);
+    u->next_focus_id   = u->focus_id;   /* keep focus unless someone steals it */
+
+    /* Clicking outside any focused text-input clears focus. The text-input
+     * widget will rewrite next_focus_id if its rect is hit; if no widget
+     * does, ui_end commits the cleared focus. */
+    if (u->mouse_pressed) u->next_focus_id = 0;
+
+    if (u->font_size == 0) {
+        u->font_size      = 18;
+        u->text_col       = (Color){235, 235, 235, 255};
+        u->text_dim       = (Color){160, 160, 165, 255};
+        u->accent         = (Color){ 80, 180, 255, 255};
+        u->panel_bg       = (Color){ 22,  26,  34, 235};
+        u->panel_edge     = (Color){ 70,  85, 110, 255};
+        u->button_bg      = (Color){ 38,  46,  60, 255};
+        u->button_hover   = (Color){ 56,  72,  96, 255};
+        u->button_press   = (Color){ 24,  32,  44, 255};
+        u->button_disabled= (Color){ 40,  44,  52, 200};
+    }
+}
+
+void ui_end(UIContext *u) {
+    u->focus_id    = u->next_focus_id;
+    u->caret_phase = u->caret_phase + u->dt;
+    if (u->caret_phase > 1.0f) u->caret_phase -= 1.0f;
+}
+
+bool ui_point_in_rect(Vec2 p, Rectangle r) {
+    return p.x >= r.x && p.x < r.x + r.width &&
+           p.y >= r.y && p.y < r.y + r.height;
+}
+
+int ui_text_width(const UIContext *u, const char *text) {
+    return ui_measure(u, text, u->font_size);
+}
+
+/* ---- Panel --------------------------------------------------------- */
+
+void ui_panel(Rectangle r, Color bg, Color edge) {
+    DrawRectangleRec(r, bg);
+    DrawRectangleLinesEx(r, 1.0f, edge);
+}
+
+void ui_panel_default(const UIContext *u, Rectangle r) {
+    ui_panel(r, u->panel_bg, u->panel_edge);
+}
+
+/* ---- Label --------------------------------------------------------- */
+
+void ui_label(const UIContext *u, Rectangle r, const char *text, Color col) {
+    if (!text) return;
+    int fp = ui_font_px(u);
+    int ty = (int)(r.y + (r.height - (float)fp) * 0.5f);
+    ui_draw_text(u, text, (int)r.x, ty, u->font_size, col);
+}
+
+void ui_label_center(const UIContext *u, Rectangle r, const char *text, Color col) {
+    if (!text) return;
+    int tw = ui_measure(u, text, u->font_size);
+    int fp = ui_font_px(u);
+    int tx = (int)(r.x + (r.width - (float)tw) * 0.5f);
+    int ty = (int)(r.y + (r.height - (float)fp) * 0.5f);
+    ui_draw_text(u, text, tx, ty, u->font_size, col);
+}
+
+/* ---- Button -------------------------------------------------------- */
+
+bool ui_button(UIContext *u, Rectangle r, const char *label, bool enabled) {
+    bool hover = ui_point_in_rect(u->mouse, r);
+    Color bg;
+    if (!enabled) bg = u->button_disabled;
+    else if (hover && u->mouse_down) bg = u->button_press;
+    else if (hover) bg = u->button_hover;
+    else bg = u->button_bg;
+
+    DrawRectangleRec(r, bg);
+    DrawRectangleLinesEx(r, u->scale, u->panel_edge);
+    Color text = enabled ? u->text_col : u->text_dim;
+    if (label) {
+        int tw = ui_measure(u, label, u->font_size);
+        int fp = ui_font_px(u);
+        int tx = (int)(r.x + (r.width - (float)tw) * 0.5f);
+        int ty = (int)(r.y + (r.height - (float)fp) * 0.5f);
+        ui_draw_text(u, label, tx, ty, u->font_size, text);
+    }
+    return enabled && hover && u->mouse_pressed;
+}
+
+/* ---- Toggle -------------------------------------------------------- */
+
+bool ui_toggle(UIContext *u, Rectangle r, const char *label, bool *on) {
+    bool hover = ui_point_in_rect(u->mouse, r);
+    Color bg;
+    if (*on)        bg = (Color){40, 110, 60, 255};
+    else if (hover) bg = u->button_hover;
+    else            bg = u->button_bg;
+
+    DrawRectangleRec(r, bg);
+    DrawRectangleLinesEx(r, u->scale, u->panel_edge);
+
+    /* Indicator: small filled circle on the left side, scaled with UI. */
+    float cx = r.x + 14.0f * u->scale;
+    float cy = r.y + r.height * 0.5f;
+    DrawCircleLines((int)cx, (int)cy, 8.0f * u->scale, u->panel_edge);
+    if (*on) DrawCircle((int)cx, (int)cy, 5.0f * u->scale, u->accent);
+
+    if (label) {
+        int fp = ui_font_px(u);
+        int ty = (int)(r.y + (r.height - (float)fp) * 0.5f);
+        ui_draw_text(u, label, (int)(r.x + 32.0f * u->scale), ty,
+                     u->font_size, u->text_col);
+    }
+
+    if (hover && u->mouse_pressed) {
+        *on = !*on;
+        return true;
+    }
+    return false;
+}
+
+/* ---- Text input ---------------------------------------------------- */
+
+bool ui_text_input(UIContext *u, Rectangle r, char *buf, int buf_cap,
+                   uint32_t widget_id, const char *placeholder)
+{
+    bool hover   = ui_point_in_rect(u->mouse, r);
+    bool focused = (u->focus_id == widget_id);
+    if (hover && u->mouse_pressed) {
+        u->next_focus_id = widget_id;
+        focused = true;       /* visual feedback this frame */
+    }
+
+    Color bg = focused ? (Color){34, 42, 56, 255} : u->button_bg;
+    DrawRectangleRec(r, bg);
+    Color edge = focused ? u->accent : u->panel_edge;
+    DrawRectangleLinesEx(r, focused ? 2.0f : 1.0f, edge);
+
+    /* Hand-rolled strnlen — strnlen is POSIX-only, and we don't need
+     * to drag in a feature-test macro for one call. */
+    int len = 0;
+    while (len < buf_cap && buf[len] != '\0') len++;
+    bool committed = false;
+
+    if (focused) {
+        /* Pull characters off raylib's input queue. We accept printable
+         * ASCII; everything else (codepoints >127) is dropped at this
+         * scale of typing. */
+        for (;;) {
+            int ch = GetCharPressed();
+            if (ch == 0) break;
+            if (ch < 32 || ch > 126) continue;
+            if (len + 1 < buf_cap) {
+                buf[len++] = (char)ch;
+                buf[len]   = '\0';
+            }
+        }
+        /* Backspace — repeats while held. */
+        if (IsKeyPressed(KEY_BACKSPACE) ||
+            (IsKeyDown(KEY_BACKSPACE) && IsKeyPressedRepeat(KEY_BACKSPACE)))
+        {
+            if (len > 0) { buf[--len] = '\0'; }
+        }
+        /* Enter commits. We don't clear the buffer; the caller decides. */
+        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+            committed = true;
+        }
+        /* Escape blurs without committing. */
+        if (IsKeyPressed(KEY_ESCAPE)) {
+            u->next_focus_id = 0;
+        }
+    }
+
+    /* Render text. Padding scales with UI so the text doesn't kiss
+     * the box edge at high DPI. */
+    int pad = (int)(8.0f * u->scale + 0.5f);
+    int fp = ui_font_px(u);
+    int ty = (int)(r.y + (r.height - (float)fp) * 0.5f);
+    if (len == 0 && !focused && placeholder) {
+        ui_draw_text(u, placeholder, (int)r.x + pad, ty, u->font_size, u->text_dim);
+    } else {
+        ui_draw_text(u, buf, (int)r.x + pad, ty, u->font_size, u->text_col);
+    }
+    /* Caret. */
+    if (focused && u->caret_phase < 0.5f) {
+        int cw = (len > 0) ? ui_measure(u, buf, u->font_size) : 0;
+        int cx = (int)r.x + pad + cw + 1;
+        DrawRectangle(cx, ty, (int)(2 * u->scale + 0.5f), fp, u->text_col);
+    }
+
+    return committed;
+}
+
+/* ---- Lists --------------------------------------------------------- */
+
+int ui_list_pick(UIContext *u, Rectangle r, const char **items, int n,
+                 int selected, int row_h)
+{
+    ui_panel_default(u, r);
+    BeginScissorMode((int)r.x, (int)r.y, (int)r.width, (int)r.height);
+    int picked = -1;
+    int scaled_row_h = (int)((float)row_h * u->scale + 0.5f);
+    int rows = (int)(r.height / (float)scaled_row_h);
+    if (n < rows) rows = n;
+    for (int i = 0; i < rows; ++i) {
+        Rectangle row = (Rectangle){
+            r.x, r.y + (float)(i * scaled_row_h),
+            r.width, (float)scaled_row_h
+        };
+        bool hover = ui_point_in_rect(u->mouse, row) &&
+                     ui_point_in_rect(u->mouse, r);
+        Color row_bg = (i == selected) ? u->accent
+                     : hover           ? u->button_hover
+                                       : (Color){0,0,0,0};
+        if (row_bg.a > 0) DrawRectangleRec(row, row_bg);
+        Color tc = (i == selected) ? (Color){12, 18, 26, 255} : u->text_col;
+        if (items[i]) {
+            int fp = ui_font_px(u);
+            int ty = (int)(row.y + ((float)scaled_row_h - (float)fp) * 0.5f);
+            ui_draw_text(u, items[i], (int)row.x + (int)(12 * u->scale),
+                         ty, u->font_size, tc);
+        }
+        if (hover && u->mouse_pressed) picked = i;
+    }
+    EndScissorMode();
+    return picked;
+}
+
+int ui_list_custom(UIContext *u, Rectangle r, int n, int row_h,
+                   int selected, UIRowDrawFn draw, void *user)
+{
+    ui_panel_default(u, r);
+    BeginScissorMode((int)r.x, (int)r.y, (int)r.width, (int)r.height);
+    int picked = -1;
+    int scaled_row_h = (int)((float)row_h * u->scale + 0.5f);
+    int rows = (int)(r.height / (float)scaled_row_h);
+    if (n < rows) rows = n;
+    for (int i = 0; i < rows; ++i) {
+        Rectangle row = (Rectangle){
+            r.x, r.y + (float)(i * scaled_row_h),
+            r.width, (float)scaled_row_h
+        };
+        bool hover = ui_point_in_rect(u->mouse, row) &&
+                     ui_point_in_rect(u->mouse, r);
+        if (draw) draw(u, row, i, hover, i == selected, user);
+        if (hover && u->mouse_pressed) picked = i;
+    }
+    EndScissorMode();
+    return picked;
+}

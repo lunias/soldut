@@ -1,0 +1,25 @@
+# 2p_meet — client walks LEFT toward the col-55 wall, jets over.
+# Pairs with 2p_meet.host.shot. Same screenshot ticks for direct
+# host-vs-client comparison.
+
+window 1280 720
+out build/shots/net/meet_client
+network connect 127.0.0.1:24051
+name ClientB
+
+at 150 press left
+at 320 press jet
+at 380 release jet
+at 380 release left
+at 440 press left
+at 470 release left
+
+at 200 shot match_start
+at 320 shot walking
+at 400 shot jetting_over_wall
+at 520 shot meet_t520
+at 580 shot meet_t580
+at 700 shot summary
+at 750 end
+
+contact_sheet sheet cols 3 cell 320 180

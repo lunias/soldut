@@ -10,6 +10,7 @@ build/
 *.dylib
 *.so
 soldut
+soldut-dbg
 soldut_editor
 
 # Allow vendored prebuilt static libs — we commit these per platform.

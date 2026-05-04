@@ -1,0 +1,12 @@
+# 2p_summary — client side. Mirror screenshots of the summary phase.
+window 1280 720
+out build/shots/net/sum_client
+network connect 127.0.0.1:24071
+name ClientB
+
+at 650 shot summary_t650
+at 700 shot summary_t700
+at 770 shot summary_t770
+at 830 shot summary_t830
+at 870 shot lobby_after
+at 950 end

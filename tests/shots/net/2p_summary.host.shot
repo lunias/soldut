@@ -1,0 +1,21 @@
+# 2p_summary — focused test for the summary-screen "Next round in
+# Ns" countdown. Both players sit still through round 1 → summary →
+# round 2. Screenshots taken DURING the summary phase from both
+# sides. The displayed countdown should tick down on both sides
+# and show within ~0.5 s of each other (host broadcasts at start of
+# summary; client decays its local copy).
+
+window 1280 720
+out build/shots/net/sum_host
+network host 24071
+name HostA
+
+# Round 1 starts ~tick 130, ends on time_limit at ~tick 610.
+# Summary runs ~610 → ~850 (4 s in shot mode).
+# Burst-screenshot the summary phase so we can read the countdown.
+at 650 shot summary_t650
+at 700 shot summary_t700
+at 770 shot summary_t770
+at 830 shot summary_t830
+at 870 shot lobby_after
+at 950 end

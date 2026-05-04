@@ -1,7 +1,12 @@
+#include "config.h"
 #include "decal.h"
 #include "game.h"
 #include "level.h"
+#include "lobby.h"
+#include "lobby_ui.h"
 #include "log.h"
+#include "maps.h"
+#include "match.h"
 #include "mech.h"
 #include "net.h"
 #include "platform.h"
@@ -23,15 +28,15 @@
 /*
  * Entry point.
  *
- * Modes:
- *   ./soldut                                 single-player tutorial (M1)
- *   ./soldut --host [PORT]                   host an authoritative server + play
- *   ./soldut --connect HOST[:PORT]           join a server as client
- *   ./soldut --shot tests/shots/foo.shot     scripted scene → PNGs
+ * M4 game flow:
+ *   ./soldut                      title screen → user picks
+ *   ./soldut --host [PORT]        skip title; host server, sit in lobby
+ *   ./soldut --connect HOST[:P]   skip title; connect to server, sit in lobby
+ *   ./soldut --shot scripts/x     scripted scene → PNGs (legacy)
  *
- * The simulation step is the same in every mode. What varies is who
- * latches the inputs (server: from each peer; client/local: from the
- * keyboard via platform_sample_input).
+ * The simulation step is the same in every mode; the wrapping state
+ * machine in this file decides whether we're showing the title screen,
+ * a server browser, the lobby, an active round, or a summary.
  */
 
 #define SIM_HZ        60
@@ -55,6 +60,8 @@ typedef struct {
     char        armor[16];
     char        jetpack[16];
     bool        friendly_fire;
+    bool        skip_title;
+    bool        ff_set;
 } LaunchArgs;
 
 static void parse_args(int argc, char **argv, LaunchArgs *out) {
@@ -64,6 +71,7 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--host") == 0) {
             out->mode = LAUNCH_HOST;
+            out->skip_title = true;
             if (i + 1 < argc && argv[i+1][0] != '-') {
                 out->port = (uint16_t)atoi(argv[++i]);
                 if (out->port == 0) out->port = SOLDUT_DEFAULT_PORT;
@@ -71,6 +79,7 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
         }
         else if (strcmp(argv[i], "--connect") == 0 && i + 1 < argc) {
             out->mode = LAUNCH_CLIENT;
+            out->skip_title = true;
             const char *s = argv[++i];
             const char *colon = strrchr(s, ':');
             if (colon) {
@@ -87,9 +96,8 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
         else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
             snprintf(out->name, sizeof out->name, "%s", argv[++i]);
         }
-        /* M3 loadout flags. We accept a small handful so that the local
-         * mech can be spawned with any chassis/weapon combo for testing
-         * without a lobby. */
+        /* M3 loadout flags — pre-fill the lobby loadout for the local
+         * mech; the lobby UI still lets the user retoss. */
         else if (strcmp(argv[i], "--chassis") == 0 && i + 1 < argc) {
             snprintf(out->chassis, sizeof out->chassis, "%s", argv[++i]);
         }
@@ -106,19 +114,16 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
             snprintf(out->jetpack, sizeof out->jetpack, "%s", argv[++i]);
         }
         else if (strcmp(argv[i], "--ff") == 0) {
-            out->friendly_fire = true;
+            out->friendly_fire = true; out->ff_set = true;
         }
     }
 }
 
-/* Resolve a weapon name to id by walking the table via weapon_def +
- * weapon_short_name. Returns the default if unknown. */
 static int resolve_weapon_id(const char *name, int default_id) {
     if (!name || !*name) return default_id;
     for (int i = 0; i < 32; ++i) {
         const char *n = weapon_short_name(i);
         if (!n || strcmp(n, "?") == 0) continue;
-        /* Case-insensitive prefix match: "pulse" matches "Pulse Rifle". */
         size_t L = strlen(name);
         bool ok = true;
         for (size_t k = 0; k < L && n[k]; ++k) {
@@ -139,7 +144,6 @@ static int resolve_armor_id(const char *name, int default_id) {
         if (!a || !a->name) continue;
         if (strcasecmp(name, a->name) == 0) return i;
     }
-    LOG_W("resolve_armor_id: unknown '%s'", name);
     return default_id;
 }
 
@@ -150,84 +154,327 @@ static int resolve_jetpack_id(const char *name, int default_id) {
         if (!j || !j->name) continue;
         if (strcasecmp(name, j->name) == 0) return i;
     }
-    LOG_W("resolve_jetpack_id: unknown '%s'", name);
     return default_id;
 }
 
-/* Build the tutorial level + a player mech (and a dummy in offline /
- * host mode). The host's player is local mech id 0; remote clients get
- * their mechs spawned at handshake by net.c. */
-static void seed_world(Game *g, LaunchMode mode, const LaunchArgs *args) {
-    World *w = &g->world;
+/* ---- Match flow controller (host-side) --------------------------- */
 
-    level_build_tutorial(&w->level, &g->level_arena);
+/* Walk newly-recorded killfeed entries and credit the lobby slots. We
+ * track how many we've consumed so subsequent ticks pick up only the
+ * new ones. */
+static int g_killfeed_processed = 0;
 
-    decal_init((int)level_width_px(&w->level),
-               (int)level_height_px(&w->level));
-
-    w->friendly_fire = args ? args->friendly_fire : false;
-
-    const float feet_below_pelvis = 36.0f;
-    const float foot_clearance    = 4.0f;
-    Vec2 player_spawn = { 16.0f * 32.0f + 8.0f,
-                          30.0f * 32.0f - feet_below_pelvis - foot_clearance };
-
-    if (mode == LAUNCH_CLIENT) {
-        /* Pure client: the server's INITIAL_STATE will spawn the
-         * mechs for us. We deliberately leave the world empty here. */
-        w->camera_target = player_spawn;
-        w->camera_smooth = player_spawn;
-        w->camera_zoom   = 1.4f;
-        w->local_mech_id = -1;
-        w->dummy_mech_id = -1;
-        w->authoritative = false;
-        return;
+static void apply_new_kills(Game *g) {
+    /* killfeed_count is a monotonic counter; killfeed[] is a CAP-sized
+     * ring. If we've fallen behind by more than the ring capacity, we
+     * silently skip the missed kills (they're scoreboard only). */
+    int cur = g->world.killfeed_count;
+    int begin = g_killfeed_processed;
+    if (cur - begin > KILLFEED_CAPACITY) {
+        begin = cur - KILLFEED_CAPACITY;
     }
-
-    /* Resolve loadout from CLI flags (or use defaults). */
-    MechLoadout lo = mech_default_loadout();
-    if (args) {
-        lo.chassis_id   = chassis_id_from_name(args->chassis[0] ? args->chassis : "Trooper");
-        lo.primary_id   = resolve_weapon_id  (args->primary,   WEAPON_PULSE_RIFLE);
-        lo.secondary_id = resolve_weapon_id  (args->secondary, WEAPON_SIDEARM);
-        lo.armor_id     = resolve_armor_id   (args->armor,     ARMOR_LIGHT);
-        lo.jetpack_id   = resolve_jetpack_id (args->jetpack,   JET_STANDARD);
+    bool any = false;
+    for (int n = begin; n < cur; ++n) {
+        int idx = n % KILLFEED_CAPACITY;
+        if (idx < 0) idx += KILLFEED_CAPACITY;
+        const KillFeedEntry *k = &g->world.killfeed[idx];
+        int killer_slot = (k->killer_mech_id >= 0)
+            ? lobby_find_slot_by_mech(&g->lobby, k->killer_mech_id) : -1;
+        int victim_slot = lobby_find_slot_by_mech(&g->lobby, k->victim_mech_id);
+        match_apply_kill(&g->match, &g->lobby, killer_slot, victim_slot, k->flags);
+        net_server_broadcast_kill(&g->net, k->killer_mech_id,
+                                   k->victim_mech_id, k->weapon_id);
+        any = true;
     }
-    w->local_mech_id = mech_create_loadout(w, lo, player_spawn,
-                                           /*team*/1, /*is_dummy*/false);
-
-    /* Dummy: trooper, pulse rifle, no armor — punching bag. */
-    Vec2 dummy_spawn = { 75.0f * 32.0f,
-                         32.0f * 32.0f - feet_below_pelvis - foot_clearance };
-    MechLoadout dlo = mech_default_loadout();
-    dlo.armor_id = ARMOR_NONE;
-    w->dummy_mech_id = mech_create_loadout(w, dlo, dummy_spawn,
-                                           /*team*/2, /*is_dummy*/true);
-
-    w->camera_target = player_spawn;
-    w->camera_smooth = player_spawn;
-    w->camera_zoom   = 1.4f;
-
-    /* Single-player and host both run authoritatively. */
-    w->authoritative = true;
+    g_killfeed_processed = cur;
+    /* Slot scores changed → reship the lobby table on the next net_poll
+     * so client scoreboards stay current and the summary MVP is right. */
+    if (any) g->lobby.dirty = true;
 }
 
+static void start_round(Game *g) {
+    /* Pick map + mode from rotation. */
+    g->match.map_id = config_pick_map (&g->config, g->round_counter);
+    g->match.mode   = config_pick_mode(&g->config, g->round_counter);
+    /* Re-derive limits from config to account for mode-rotation. */
+    g->match.score_limit  = g->config.score_limit;
+    g->match.time_limit   = g->config.time_limit;
+    g->match.friendly_fire= g->config.friendly_fire;
+    /* FFA mode: every player is on team 1 (MATCH_TEAM_FFA aliases
+     * MATCH_TEAM_RED). The friendly-fire check in mech_apply_damage
+     * compares teams and drops same-team hits when ff is off — so
+     * with FFA + ff=off, NO damage ever lands (every kill request
+     * gets dropped because shooter and victim are same-team). Force
+     * ff on for FFA so hits register; ff toggle remains meaningful
+     * for TDM/CTF where teams are distinct. */
+    g->world.friendly_fire= g->config.friendly_fire ||
+                            (g->match.mode == MATCH_MODE_FFA);
+
+    /* Build map. */
+    arena_reset(&g->level_arena);
+    map_build((MapId)g->match.map_id, &g->world.level, &g->level_arena);
+    decal_init((int)level_width_px(&g->world.level),
+               (int)level_height_px(&g->world.level));
+
+    /* Spawn mechs for every active slot. lobby_spawn_round_mechs sets
+     * each slot's mech_id; mark the table dirty so the next net_poll
+     * iteration broadcasts the updated mapping to clients. The client
+     * uses slot.mech_id to resolve its own world.local_mech_id —
+     * without this it stays at -1, the camera doesn't follow, and the
+     * client renders a black screen. */
+    lobby_spawn_round_mechs(&g->lobby, &g->world,
+                            g->match.map_id, g->local_slot_id,
+                            g->match.mode);
+    g->lobby.dirty = true;
+
+    match_begin_round(&g->match);
+    g->mode = MODE_MATCH;
+    g_killfeed_processed = g->world.killfeed_count;
+
+    if (g->net.role == NET_ROLE_SERVER) {
+        /* Order: ship the lobby table first so clients have mech_id
+         * mappings *before* ROUND_START and the snapshot stream. Both
+         * are reliable+ordered on NET_CH_LOBBY. */
+        net_server_broadcast_lobby_list  (&g->net, &g->lobby);
+        g->lobby.dirty = false;
+        net_server_broadcast_round_start (&g->net, &g->match);
+    }
+    LOG_I("match_flow: round %d begin (mode=%s map=%s)",
+          g->round_counter,
+          match_mode_name(g->match.mode),
+          map_def(g->match.map_id)->display_name);
+}
+
+static void end_round(Game *g) {
+    match_end_round(&g->match, &g->lobby);
+    g->mode = MODE_SUMMARY;
+    /* Snapshots stop flowing now (gated in net_poll on
+     * MATCH_PHASE_ACTIVE), so corpses freeze nicely.
+     *
+     * Order matters here: ship the lobby table first (carries final
+     * per-slot scores) so the round-end broadcast that follows lands
+     * with the client already holding accurate score data — it can
+     * compute MVP locally if mvp_slot didn't ride the wire. Both are
+     * reliable+ordered on NET_CH_LOBBY. */
+    if (g->net.role == NET_ROLE_SERVER) {
+        net_server_broadcast_lobby_list(&g->net, &g->lobby);
+        g->lobby.dirty = false;
+        net_server_broadcast_round_end (&g->net, &g->match);
+    }
+    LOG_I("match_flow: round %d end (mvp=%d)", g->round_counter, g->match.mvp_slot);
+}
+
+static void begin_next_lobby(Game *g) {
+    g->round_counter++;
+    /* Pre-stage next round's mode/map for the lobby UI. */
+    g->match.map_id = config_pick_map (&g->config, g->round_counter);
+    g->match.mode   = config_pick_mode(&g->config, g->round_counter);
+    g->match.score_limit  = g->config.score_limit;
+    g->match.time_limit   = g->config.time_limit;
+    g->match.friendly_fire= g->config.friendly_fire;
+    g->match.phase        = MATCH_PHASE_LOBBY;
+    /* Tear down mechs; lobby drawing doesn't need them. */
+    lobby_clear_round_mechs(&g->lobby, &g->world);
+    /* Reset round stats + ready flags. */
+    lobby_reset_round_stats(&g->lobby);
+    g->mode = MODE_LOBBY;
+
+    /* If we have at least 2 active slots, auto-arm the start countdown. */
+    int active = 0;
+    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i)
+        if (g->lobby.slots[i].in_use && g->lobby.slots[i].team != MATCH_TEAM_NONE) active++;
+    if (active >= 2) lobby_auto_start_arm(&g->lobby, g->lobby.auto_start_default);
+
+    if (g->net.role == NET_ROLE_SERVER) {
+        net_server_broadcast_match_state(&g->net, &g->match);
+        net_server_broadcast_lobby_list (&g->net, &g->lobby);
+    }
+}
+
+/* Track whether the host's countdown was active last tick so we can
+ * detect arm/cancel transitions and ship them to clients immediately,
+ * AND throttle a periodic refresh while it's live. The client decays
+ * its own local copy each frame for smooth display between broadcasts. */
+static bool  g_prev_auto_start_active = false;
+static float g_countdown_broadcast_accum = 0.0f;
+
+static void host_broadcast_countdown_if_changed(Game *g, float dt) {
+    if (g->net.role != NET_ROLE_SERVER) return;
+    bool now_active = g->lobby.auto_start_active;
+    bool transition = (now_active != g_prev_auto_start_active);
+    g_prev_auto_start_active = now_active;
+
+    if (transition) {
+        /* Ship the new state right away so the client UI updates
+         * without waiting for the periodic refresh. */
+        net_server_broadcast_countdown(&g->net,
+            now_active ? g->lobby.auto_start_remaining : 0.0f,
+            /*reason*/ now_active ? 1u : 0u);
+        g_countdown_broadcast_accum = 0.0f;
+        return;
+    }
+    if (now_active) {
+        /* Refresh every 0.5 s. With the client decaying locally, this
+         * keeps drift to <0.5 s without flooding the wire. */
+        g_countdown_broadcast_accum += dt;
+        if (g_countdown_broadcast_accum >= 0.5f) {
+            g_countdown_broadcast_accum -= 0.5f;
+            net_server_broadcast_countdown(&g->net,
+                g->lobby.auto_start_remaining, /*reason*/ 1u);
+        }
+    }
+}
+
+static void host_match_flow_step(Game *g, float dt) {
+    switch (g->match.phase) {
+        case MATCH_PHASE_LOBBY: {
+            /* All-ready accelerator. The auto-start countdown may
+             * already be running with the long default (60 s); when
+             * everyone hits Ready, override it to a short 3 s so the
+             * round actually starts soon — otherwise players see "all
+             * ready ✓" but nothing happens. Only override down (don't
+             * extend a shorter timer). */
+            bool all_ready = lobby_all_ready(&g->lobby);
+            if (all_ready) {
+                if (!g->lobby.auto_start_active) {
+                    lobby_auto_start_arm(&g->lobby, 3.0f);
+                } else if (g->lobby.auto_start_remaining > 3.0f) {
+                    g->lobby.auto_start_remaining = 3.0f;
+                    g->lobby.dirty = true;
+                }
+            }
+            if (lobby_tick(&g->lobby, dt)) {
+                /* Auto-start fired → enter countdown. */
+                match_begin_countdown(&g->match, 5.0f);
+                if (g->net.role == NET_ROLE_SERVER) {
+                    net_server_broadcast_match_state(&g->net, &g->match);
+                }
+            }
+            host_broadcast_countdown_if_changed(g, dt);
+            lobby_chat_age(&g->lobby, dt);
+            break;
+        }
+        case MATCH_PHASE_COUNTDOWN:
+            if (match_tick(&g->match, dt)) {
+                start_round(g);
+            }
+            break;
+        case MATCH_PHASE_ACTIVE: {
+            apply_new_kills(g);
+            /* End on score limit (FFA = any per-player slot >= cap). */
+            bool end = false;
+            if (g->match.mode == MATCH_MODE_FFA) {
+                for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+                    if (g->lobby.slots[i].in_use &&
+                        g->lobby.slots[i].score >= g->match.score_limit)
+                    {
+                        end = true; break;
+                    }
+                }
+            }
+            if (!end && match_round_should_end(&g->match)) end = true;
+            if (match_tick(&g->match, dt)) end = true;
+            if (end) end_round(g);
+            break;
+        }
+        case MATCH_PHASE_SUMMARY:
+            if (match_tick(&g->match, dt)) {
+                begin_next_lobby(g);
+            }
+            break;
+    }
+}
+
+/* ---- Bootstrap helpers ------------------------------------------- */
+
+static void apply_loadout_flags(Game *g, const LaunchArgs *args) {
+    if (g->local_slot_id < 0) return;
+    LobbySlot *me = lobby_slot(&g->lobby, g->local_slot_id);
+    if (!me) return;
+    MechLoadout lo = me->loadout;
+    if (args->chassis[0]) lo.chassis_id = chassis_id_from_name(args->chassis);
+    lo.primary_id   = resolve_weapon_id  (args->primary,   lo.primary_id);
+    lo.secondary_id = resolve_weapon_id  (args->secondary, lo.secondary_id);
+    lo.armor_id     = resolve_armor_id   (args->armor,     lo.armor_id);
+    lo.jetpack_id   = resolve_jetpack_id (args->jetpack,   lo.jetpack_id);
+    lobby_set_loadout(&g->lobby, g->local_slot_id, lo);
+}
+
+/* For host & offline solo: stand up a server (no listening for offline)
+ * and seat the local player in slot 0. */
+static bool bootstrap_host(Game *g, const LaunchArgs *args, bool offline) {
+    if (!offline) {
+        if (!net_init()) return false;
+        if (!net_server_start(&g->net, g->config.port, g)) {
+            LOG_E("host: failed to bind UDP %u", (unsigned)g->config.port);
+            return false;
+        }
+        net_discovery_open(&g->net);
+        LOG_I("host: ready on port %u", (unsigned)g->config.port);
+    } else {
+        g->net.role = NET_ROLE_OFFLINE;
+        g->offline_solo = true;
+    }
+
+    /* Host's own slot — slot 0, peer_id = -1, is_host = true. */
+    int slot = lobby_add_slot(&g->lobby, /*peer_id*/-1,
+                              args ? args->name : "player", true);
+    g->local_slot_id = slot;
+    g->world.authoritative = true;
+
+    apply_loadout_flags(g, args);
+
+    /* Pre-build the level so the first-time lobby has *something* to
+     * draw under the UI. ROUND_START rebuilds it for the chosen map. */
+    map_build(MAP_FOUNDRY, &g->world.level, &g->level_arena);
+    decal_init((int)level_width_px(&g->world.level),
+               (int)level_height_px(&g->world.level));
+    return true;
+}
+
+/* Pure client: connect, sit in lobby until ROUND_START. */
+static bool bootstrap_client(Game *g, const LaunchArgs *args) {
+    if (!net_init()) return false;
+    if (!net_client_connect(&g->net, args->host, args->port,
+                            args->name, g))
+    {
+        LOG_E("client: connect to %s:%u failed", args->host, (unsigned)args->port);
+        return false;
+    }
+    /* Initial state has been applied in net.c — local_slot_id is set,
+     * mode is MODE_LOBBY. */
+    g->world.authoritative = false;
+    return true;
+}
+
+/* ---- Diag overlay ------------------------------------------------- */
+
+/* Frame context the overlay callbacks need. raylib's overlay-callback
+ * signature gives us one void* — we pack Game + LobbyUIState into this
+ * struct so both the match HUD overlay and the summary panel can run
+ * inside renderer_draw_frame's single Begin/EndDrawing pair. */
+typedef struct {
+    Game         *game;
+    LobbyUIState *ui;
+} OverlayCtx;
+
 static void draw_diag(void *user, int sw, int sh) {
-    (void)sw;
-    const Game *g = (const Game *)user;
+    OverlayCtx *ctx = (OverlayCtx *)user;
+    Game *g = ctx->game;
     int fps = GetFPS();
     Color st = (fps >= 55) ? GREEN : (fps >= 30) ? YELLOW : RED;
     DrawText("soldut " SOLDUT_VERSION_STRING, 12, 10, 18, RAYWHITE);
     DrawText(TextFormat("FPS %d", fps), 12, 32, 18, st);
-    DrawText(TextFormat("tick %llu  mechs %d  particles %d",
+    DrawText(TextFormat("tick %llu  mechs %d  parts %d  phase=%s",
                         (unsigned long long)g->world.tick,
                         g->world.mech_count,
-                        g->world.particles.count),
+                        g->world.particles.count,
+                        match_phase_name(g->match.phase)),
              12, 52, 14, LIGHTGRAY);
 
     const char *role = "offline";
     Color rc = GRAY;
-    if (g->net.role == NET_ROLE_SERVER) { role = "host"; rc = GREEN; }
+    if (g->net.role == NET_ROLE_SERVER) { role = "host";   rc = GREEN; }
     if (g->net.role == NET_ROLE_CLIENT) { role = "client"; rc = SKYBLUE; }
 
     NetStats st_n; net_get_stats(&g->net, &st_n);
@@ -236,13 +483,29 @@ static void draw_diag(void *user, int sw, int sh) {
                         st_n.bytes_sent / 1024u, st_n.bytes_recv / 1024u),
              12, 70, 14, rc);
 
-    DrawText("WASD: move/jet  SPACE: jump  LMB: fire",
+    DrawText("WASD: move/jet  SPACE: jump  LMB: fire  ESC: leave",
              12, sh - 22, 14, GRAY);
+
+    /* Match score/timer banner. Drawn here (inside the renderer's
+     * single Begin/EndDrawing pair) instead of in a second pair —
+     * doing two swaps per frame produces a per-other-frame "blank +
+     * banner only" present, which reads as flicker. */
+    match_overlay_draw(g, sw, sh);
 }
+
+/* Summary overlay: draws the round-summary panel on top of the frozen
+ * world frame inside the renderer's single Begin/EndDrawing pair (same
+ * flicker logic as draw_diag). */
+static void draw_summary_overlay(void *user, int sw, int sh) {
+    OverlayCtx *ctx = (OverlayCtx *)user;
+    summary_screen_run(ctx->ui, ctx->game, sw, sh);
+}
+
+/* ---- Main --------------------------------------------------------- */
 
 int main(int argc, char **argv) {
     log_init("soldut.log");
-    LOG_I("soldut " SOLDUT_VERSION_STRING " (M2) starting");
+    LOG_I("soldut " SOLDUT_VERSION_STRING " starting");
 
     /* Shot mode early-exit. */
     for (int i = 1; i < argc; ++i) {
@@ -260,63 +523,56 @@ int main(int argc, char **argv) {
     if (!game_init(&game)) { log_shutdown(); return EXIT_FAILURE; }
     reconcile_init(&game.reconcile);
 
+    /* Server config — load file, then let CLI flags override. */
+    config_load(&game.config, "soldut.cfg");
+    if (args.mode == LAUNCH_HOST && args.port != 0) game.config.port = args.port;
+    if (args.ff_set) game.config.friendly_fire = args.friendly_fire;
+    /* Re-apply MatchState defaults from the loaded config. */
+    match_init(&game.match, game.config.mode, game.config.score_limit,
+               game.config.time_limit, game.config.friendly_fire);
+    game.match.map_id = config_pick_map(&game.config, 0);
+    game.lobby.auto_start_default = game.config.auto_start_seconds;
+    game.world.friendly_fire = game.config.friendly_fire;
+
     PlatformConfig pcfg = {
         .window_w = 1280, .window_h = 720,
         .vsync = true, .fullscreen = false,
         .title = (args.mode == LAUNCH_HOST)   ? "Soldut " SOLDUT_VERSION_STRING " — host"
                : (args.mode == LAUNCH_CLIENT) ? "Soldut " SOLDUT_VERSION_STRING " — client"
-                                              : "Soldut " SOLDUT_VERSION_STRING " — M2",
+                                              : "Soldut " SOLDUT_VERSION_STRING,
     };
     if (!platform_init(&pcfg)) {
         game_shutdown(&game); log_shutdown(); return EXIT_FAILURE;
     }
 
-    /* Network setup. seed_world depends on knowing the launch mode. */
-    if (args.mode != LAUNCH_OFFLINE) {
-        if (!net_init()) { game_shutdown(&game); log_shutdown(); return EXIT_FAILURE; }
-    }
-
-    if (args.mode == LAUNCH_HOST) {
-        if (!net_server_start(&game.net, args.port, &game)) {
-            LOG_E("host: failed to bind UDP %u", (unsigned)args.port);
-            game_shutdown(&game); net_shutdown(); log_shutdown();
-            return EXIT_FAILURE;
-        }
-        seed_world(&game, LAUNCH_HOST, &args);
-        net_discovery_open(&game.net);
-        LOG_I("host: ready on port %u — invite a client with `--connect <ip>:%u`",
-              (unsigned)args.port, (unsigned)args.port);
-    }
-    else if (args.mode == LAUNCH_CLIENT) {
-        seed_world(&game, LAUNCH_CLIENT, &args);
-        if (!net_client_connect(&game.net, args.host, args.port,
-                                args.name, &game))
-        {
-            LOG_E("client: failed to connect to %s:%u",
-                  args.host[0] ? args.host : "?", (unsigned)args.port);
-            platform_shutdown();
-            game_shutdown(&game); net_shutdown(); log_shutdown();
-            return EXIT_FAILURE;
-        }
-    }
-    else {
-        seed_world(&game, LAUNCH_OFFLINE, &args);
-    }
+    LobbyUIState ui = (LobbyUIState){0};
+    lobby_ui_init(&ui);
+    if (args.name[0]) snprintf(ui.player_name, sizeof ui.player_name, "%s", args.name);
 
     Renderer rd;
-    {
-        Vec2 follow = (game.world.local_mech_id >= 0)
-            ? mech_chest_pos(&game.world, game.world.local_mech_id)
-            : (Vec2){ (float)game.world.level.width  * 16.0f,
-                      (float)game.world.level.height * 16.0f };
-        renderer_init(&rd, GetScreenWidth(), GetScreenHeight(), follow);
+    renderer_init(&rd, GetScreenWidth(), GetScreenHeight(), (Vec2){640, 360});
+
+    /* Initial mode: title (unless CLI shortcut). */
+    if (args.skip_title) {
+        if (args.mode == LAUNCH_HOST) {
+            if (!bootstrap_host(&game, &args, false)) {
+                game_shutdown(&game); log_shutdown(); return EXIT_FAILURE;
+            }
+            game.mode = MODE_LOBBY;
+        } else if (args.mode == LAUNCH_CLIENT) {
+            if (!bootstrap_client(&game, &args)) {
+                game_shutdown(&game); log_shutdown(); return EXIT_FAILURE;
+            }
+        }
+    } else {
+        game.mode = MODE_TITLE;
     }
 
     PlatformFrame pf = {0};
     double accum = 0.0;
     double last  = GetTime();
 
-    while (!WindowShouldClose()) {
+    while (!WindowShouldClose() && game.mode != MODE_QUIT) {
         double now = GetTime();
         double dt  = now - last;
         last = now;
@@ -325,60 +581,277 @@ int main(int argc, char **argv) {
 
         platform_begin_frame(&pf);
 
-        /* Pump network FIRST so inbound inputs (server side) and
-         * snapshots (client side) are visible before this frame's
-         * sim ticks run. */
+        /* Pump network FIRST so inbound inputs / snapshots / lobby
+         * messages are visible before this frame's sim ticks. */
         if (game.net.role != NET_ROLE_OFFLINE) {
             net_poll(&game.net, &game, dt);
         }
 
-        /* Fixed-step simulation. */
-        while (accum >= TICK_DT) {
-            ClientInput in;
-            platform_sample_input(&in);
-            in.dt  = (float)TICK_DT;
-            in.seq = (uint16_t)(game.world.tick + 1);
+        /* Per-mode update + render. */
+        switch (game.mode) {
 
-            /* Convert cursor screen→world via the live camera. We do
-             * this on the client side so the server doesn't need a
-             * camera; it just reads aim_world directly. */
-            Vec2 cursor_world = renderer_screen_to_world(&rd,
-                (Vec2){ in.aim_x, in.aim_y });
-            in.aim_x = cursor_world.x;
-            in.aim_y = cursor_world.y;
-
-            if (game.net.role == NET_ROLE_CLIENT) {
-                /* Predict locally: latch onto our mech, simulate. */
-                if (game.world.local_mech_id >= 0) {
-                    game.world.mechs[game.world.local_mech_id].latched_input = in;
+        case MODE_TITLE: {
+            BeginDrawing();
+            title_screen_run(&ui, &game, pf.render_w, pf.render_h);
+            EndDrawing();
+            if (ui.request_quit)             { game.mode = MODE_QUIT; }
+            else if (ui.request_single_player) {
+                ui.request_single_player = false;
+                snprintf(args.name, sizeof args.name, "%s", ui.player_name);
+                if (bootstrap_host(&game, &args, /*offline*/true)) {
+                    /* Auto-start with a short countdown. */
+                    lobby_auto_start_arm(&game.lobby, 1.0f);
+                    game.mode = MODE_LOBBY;
                 }
-                simulate_step(&game.world, (float)TICK_DT);
-
-                /* Push onto the unacked-input ring + ship to server. */
-                reconcile_push_input(&game.reconcile, in);
-                net_client_send_input(&game.net, in);
-                reconcile_tick_smoothing(&game.reconcile);
             }
-            else {
-                /* Offline / host: latch onto local mech and run the
-                 * authoritative tick. (On the host, peer inputs were
-                 * latched onto their respective mechs by net_poll
-                 * before this loop entered.) */
-                if (game.world.local_mech_id >= 0) {
-                    game.world.mechs[game.world.local_mech_id].latched_input = in;
+            else if (ui.request_host) {
+                ui.request_host = false;
+                snprintf(args.name, sizeof args.name, "%s", ui.player_name);
+                if (bootstrap_host(&game, &args, /*offline*/false)) {
+                    game.mode = MODE_LOBBY;
                 }
-                simulate_step(&game.world, (float)TICK_DT);
             }
-
-            game.input = in;
-            accum -= TICK_DT;
+            else if (ui.request_browse) {
+                ui.request_browse = false;
+                /* Open a transient discovery socket so we can scan. */
+                if (game.net.role == NET_ROLE_OFFLINE) {
+                    net_init();
+                    net_discovery_open(&game.net);
+                }
+                game.mode = MODE_BROWSER;
+            }
+            break;
         }
 
-        renderer_draw_frame(&rd, &game.world,
-                            pf.render_w, pf.render_h,
-                            (float)(accum / TICK_DT),
-                            (Vec2){ (float)GetMouseX(), (float)GetMouseY() },
-                            draw_diag, &game);
+        case MODE_BROWSER: {
+            BeginDrawing();
+            browser_screen_run(&ui, &game, pf.render_w, pf.render_h);
+            EndDrawing();
+            net_poll(&game.net, &game, dt);   /* drain discovery replies */
+            if (ui.request_connect) {
+                ui.request_connect = false;
+                snprintf(args.name, sizeof args.name, "%s", ui.player_name);
+                snprintf(args.host, sizeof args.host, "%s", game.pending_host);
+                args.port = game.pending_port;
+                if (bootstrap_client(&game, &args)) {
+                    /* INITIAL_STATE already moved us to MODE_LOBBY. */
+                } else {
+                    game.mode = MODE_TITLE;
+                }
+            }
+            break;
+        }
+
+        case MODE_CONNECT: {
+            BeginDrawing();
+            connect_screen_run(&ui, &game, pf.render_w, pf.render_h);
+            EndDrawing();
+            if (ui.request_connect) {
+                ui.request_connect = false;
+                snprintf(args.name, sizeof args.name, "%s", ui.player_name);
+                snprintf(args.host, sizeof args.host, "%s", game.pending_host);
+                args.port = game.pending_port;
+                if (bootstrap_client(&game, &args)) {
+                    /* INITIAL_STATE already moved us to MODE_LOBBY. */
+                } else {
+                    game.mode = MODE_TITLE;
+                }
+            }
+            break;
+        }
+
+        case MODE_LOBBY: {
+            /* Host: tick the match flow controller. */
+            if (game.net.role == NET_ROLE_SERVER || game.offline_solo) {
+                host_match_flow_step(&game, (float)dt);
+            }
+            /* Client: age chat + locally decay the auto-start countdown
+             * so the visible "Match starts in N.Ns" ticks smoothly
+             * between the host's broadcasts (which arrive every ~0.5
+             * s). The host's COUNTDOWN-phase timer (match.countdown_
+             * remaining) is decayed similarly so the client's UI shows
+             * a consistent number even before the next match_state
+             * broadcast lands. */
+            if (game.net.role == NET_ROLE_CLIENT) {
+                lobby_chat_age(&game.lobby, (float)dt);
+                if (game.lobby.auto_start_active &&
+                    game.lobby.auto_start_remaining > 0.0f)
+                {
+                    game.lobby.auto_start_remaining -= (float)dt;
+                    if (game.lobby.auto_start_remaining < 0.0f)
+                        game.lobby.auto_start_remaining = 0.0f;
+                }
+                if (game.match.phase == MATCH_PHASE_COUNTDOWN &&
+                    game.match.countdown_remaining > 0.0f)
+                {
+                    game.match.countdown_remaining -= (float)dt;
+                    if (game.match.countdown_remaining < 0.0f)
+                        game.match.countdown_remaining = 0.0f;
+                }
+            }
+
+            BeginDrawing();
+            lobby_screen_run(&ui, &game, pf.render_w, pf.render_h);
+            EndDrawing();
+
+            /* Honor the lobby UI's "Leave" button. */
+            if (game.mode == MODE_TITLE) {
+                /* Disconnect / shut down server. */
+                if (game.net.role != NET_ROLE_OFFLINE) {
+                    net_close(&game.net);
+                    net_shutdown();
+                }
+                lobby_clear_round_mechs(&game.lobby, &game.world);
+                memset(&game.lobby, 0, sizeof game.lobby);
+                lobby_init(&game.lobby, game.config.auto_start_seconds);
+                match_init(&game.match, game.config.mode, game.config.score_limit,
+                           game.config.time_limit, game.config.friendly_fire);
+                game.local_slot_id = -1;
+                game.offline_solo  = false;
+            }
+            break;
+        }
+
+        case MODE_MATCH: {
+            /* Late-bind world.local_mech_id from our lobby slot. The
+             * server ships the lobby table (with each slot's mech_id)
+             * just before ROUND_START; clients need to wait until the
+             * matching mech actually shows up in the snapshot stream
+             * before pointing local_mech_id at it. Without this the
+             * camera never follows anyone and the client renders a
+             * black screen. */
+            if (game.world.local_mech_id < 0 && game.local_slot_id >= 0) {
+                int mid = game.lobby.slots[game.local_slot_id].mech_id;
+                if (mid >= 0 && mid < game.world.mech_count) {
+                    game.world.local_mech_id = mid;
+                    LOG_I("client: local_mech_id resolved → %d (slot %d)",
+                          mid, game.local_slot_id);
+                }
+            }
+
+            /* Client: locally decay match.time_remaining so the match
+             * overlay's countdown ticks smoothly. The host doesn't
+             * broadcast match_state during ACTIVE phase (only on
+             * round transitions), so without local decay the client
+             * just shows the round-start value frozen for the entire
+             * match — diverging from the host's actual remaining
+             * time by up to time_limit seconds. */
+            if (game.net.role == NET_ROLE_CLIENT &&
+                game.match.phase == MATCH_PHASE_ACTIVE &&
+                game.match.time_remaining > 0.0f)
+            {
+                game.match.time_remaining -= (float)dt;
+                if (game.match.time_remaining < 0.0f)
+                    game.match.time_remaining = 0.0f;
+            }
+
+            /* Fixed-step simulation. */
+            while (accum >= TICK_DT) {
+                ClientInput in;
+                platform_sample_input(&in);
+                in.dt  = (float)TICK_DT;
+                in.seq = (uint16_t)(game.world.tick + 1);
+
+                Vec2 cursor_world = renderer_screen_to_world(&rd,
+                    (Vec2){ in.aim_x, in.aim_y });
+                in.aim_x = cursor_world.x;
+                in.aim_y = cursor_world.y;
+
+                if (game.net.role == NET_ROLE_CLIENT) {
+                    if (game.world.local_mech_id >= 0) {
+                        game.world.mechs[game.world.local_mech_id].latched_input = in;
+                    }
+                    simulate_step(&game.world, (float)TICK_DT);
+                    reconcile_push_input(&game.reconcile, in);
+                    net_client_send_input(&game.net, in);
+                    reconcile_tick_smoothing(&game.reconcile);
+                } else {
+                    if (game.world.local_mech_id >= 0) {
+                        game.world.mechs[game.world.local_mech_id].latched_input = in;
+                    }
+                    simulate_step(&game.world, (float)TICK_DT);
+                }
+
+                game.input = in;
+                accum -= TICK_DT;
+            }
+
+            /* Host: drive match flow (kills → scores → end-of-round). */
+            if (game.net.role == NET_ROLE_SERVER || game.offline_solo) {
+                host_match_flow_step(&game, (float)dt);
+            }
+
+            /* Render world + HUD + (diag + match banner via draw_diag).
+             * One Begin/EndDrawing pair total per frame. */
+            OverlayCtx ovc = { .game = &game, .ui = &ui };
+            renderer_draw_frame(&rd, &game.world,
+                                pf.render_w, pf.render_h,
+                                (float)(accum / TICK_DT),
+                                (Vec2){ (float)GetMouseX(), (float)GetMouseY() },
+                                draw_diag, &ovc);
+
+            if (IsKeyPressed(KEY_ESCAPE)) {
+                if (game.net.role == NET_ROLE_SERVER || game.offline_solo) {
+                    /* Host: end the round early. */
+                    end_round(&game);
+                } else {
+                    /* Client: drop the connection, return to title. */
+                    net_close(&game.net);
+                    net_shutdown();
+                    game.mode = MODE_TITLE;
+                    game.offline_solo = false;
+                }
+            }
+            break;
+        }
+
+        case MODE_SUMMARY: {
+            /* Host: tick the summary timer; clients receive ROUND_END
+             * via net so their match.phase == SUMMARY automatically. */
+            if (game.net.role == NET_ROLE_SERVER || game.offline_solo) {
+                host_match_flow_step(&game, (float)dt);
+            } else if (game.net.role == NET_ROLE_CLIENT) {
+                /* Decay the visible countdown locally. */
+                if (game.match.summary_remaining > 0.0f) {
+                    game.match.summary_remaining -= (float)dt;
+                    if (game.match.summary_remaining < 0.0f)
+                        game.match.summary_remaining = 0.0f;
+                }
+            }
+
+            /* Draw world (frozen) + summary overlay in a single
+             * Begin/EndDrawing pair via the renderer's overlay
+             * callback. Two pairs per frame double-swap and read as
+             * flicker. */
+            OverlayCtx ovc = { .game = &game, .ui = &ui };
+            renderer_draw_frame(&rd, &game.world,
+                                pf.render_w, pf.render_h, 0.0f,
+                                (Vec2){ (float)GetMouseX(), (float)GetMouseY() },
+                                draw_summary_overlay, &ovc);
+
+            if (game.mode == MODE_TITLE) {
+                /* User clicked Leave. Tear down. */
+                if (game.net.role != NET_ROLE_OFFLINE) {
+                    net_close(&game.net);
+                    net_shutdown();
+                }
+                lobby_clear_round_mechs(&game.lobby, &game.world);
+                memset(&game.lobby, 0, sizeof game.lobby);
+                lobby_init(&game.lobby, game.config.auto_start_seconds);
+                match_init(&game.match, game.config.mode, game.config.score_limit,
+                           game.config.time_limit, game.config.friendly_fire);
+                game.local_slot_id = -1;
+                game.offline_solo  = false;
+            }
+            break;
+        }
+
+        default:
+            BeginDrawing();
+            ClearBackground(BLACK);
+            EndDrawing();
+            break;
+        }
     }
 
     LOG_I("soldut shutting down (ran %llu sim ticks)",
@@ -389,14 +862,6 @@ int main(int argc, char **argv) {
         net_shutdown();
     }
 
-    /* Fast exit: only flush the log file, then hand the rest back to
-     * the OS. raylib's CloseAudioDevice (miniaudio teardown) and
-     * CloseWindow (glfwTerminate / Wayland connection close) can each
-     * stall the process for a noticeable beat on WSLg/Linux; arena
-     * destroys would also free ~60 MB. None of that is necessary —
-     * the kernel reclaims memory, GL context, and audio device when
-     * the process exits. We only flush our own log so the last lines
-     * survive. */
     log_shutdown();
     _exit(EXIT_SUCCESS);
 }

@@ -129,22 +129,43 @@ See [CURRENT_STATE.md](../CURRENT_STATE.md) and [TRADE_OFFS.md](../TRADE_OFFS.md
 
 ## M4 — Lobby & matches
 
-**Three weeks.**
+**Three weeks.** **Status: shipped 2026-05-03.**
 
 **Goal**: Players can join a server, pick a loadout, ready up, and play a 5-minute match with score and round summary.
 
-- [ ] Server browser (LAN-only at first)
-- [ ] Lobby UI: player list, chat, mech selector, loadout slots, ready button
-- [ ] Map vote UI
-- [ ] Round timer + score display
-- [ ] FFA mode (kill counts, target score / time limit)
-- [ ] TDM mode (team selector, two teams, friendly-fire toggle)
-- [ ] Round summary: per-player stats, MVP
-- [ ] Map cycle / next-round transition
-- [ ] Server config file (port, max players, tick rate, mode rotation)
-- [ ] Kick / ban (host-only)
+- [x] Server browser (LAN-only at first)
+- [x] Lobby UI: player list, chat, mech selector, loadout slots, ready button
+- [x] Map vote UI (vote-state plumbing + winner selection — UI surfaces on
+      summary; full three-card picker is M5)
+- [x] Round timer + score display (top-of-screen overlay)
+- [x] FFA mode (kill counts, target score / time limit)
+- [x] TDM mode (team selector, two teams, friendly-fire toggle)
+- [x] Round summary: per-player stats, MVP
+- [x] Map cycle / next-round transition (config rotation)
+- [x] Server config file (`soldut.cfg` — port, max players, mode rotation,
+      score/time limits, friendly-fire, auto-start seconds)
+- [x] Kick / ban (host-only) — backend wired (`net_client_send_kick`,
+      `lobby_ban_addr`); UI buttons land at M5 alongside the host-controls
+      panel
 
-**Done when**: 8 players can join a host's server, pick loadouts, play a TDM round, see scores, vote a new map, play another. Without crashes.
+**Done when**: 8 players can join a host's server, pick loadouts, play a TDM round, see scores, vote a new map, play another. Without crashes. *Met for the implementation; full 8-player playtest pending — host/client smoke tested at 1+1 on the same machine, full round flow verified end-to-end.*
+
+**Carried forward (deliberate, not finished here):**
+
+- Three-card map vote picker UI (the protocol carries `vote_map_a/b/c`
+  + tally bitmasks; the lobby just doesn't surface a "pick A/B/C"
+  modal yet — first round of the rotation runs by default).
+- Host-controls panel (kick / ban buttons in the player list). The
+  `LOBBY_KICK` / `LOBBY_BAN` messages are wired and tested via CLI;
+  surfacing the buttons is M5.
+- `bans.txt` persistence — bans are in-memory only at M4. Reload of
+  the host process clears them.
+- Tick-rate config — `tick_hz` accepted by parser but the sim is
+  fixed at 60 Hz (see TRADE_OFFS.md → "60 Hz simulation").
+- Solo practice "dummy" — single-player mode currently spawns the
+  player alone on an empty map. The M3 dummy was load-bearing for
+  shot tests and is still spawned by `tests/headless_sim.c` and
+  `src/shotmode.c`; main.c's solo path doesn't add one.
 
 ## M5 — Maps & content
 

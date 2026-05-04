@@ -1,0 +1,34 @@
+# 2p_kill — client side. Pairs with 2p_kill.host.shot.
+#
+# Round 1: client just stands and dies.
+# Round 2: client fires LEFT at host → kill.
+
+window 1280 720
+out build/shots/net/kill_client
+network connect 127.0.0.1:24091
+name ClientB
+loadout - "Pulse Rifle" - Light Standard
+
+# Spawn client at (1500, 1112) — 200 px right of host's spawn.
+spawn_at 1500 1112
+
+# ---- Round 1: client is the target. ----
+# (No fire.)
+
+# ---- Round 2: client fires LEFT at host ----
+at 1010 aim 1300 1112
+at 1020 press fire
+at 1500 release fire
+
+# ---- Screenshots ----------------------------------------------------
+at 170  shot r1_match_start
+at 250  shot r1_dying
+at 360  shot r1_dead
+at 700  shot r1_summary
+at 870  shot r2_lobby
+at 1000 shot r2_match_start
+at 1200 shot r2_killing
+at 1400 shot r2_summary
+at 1500 end
+
+contact_sheet sheet cols 3 cell 320 180

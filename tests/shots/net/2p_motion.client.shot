@@ -1,0 +1,33 @@
+# 2p_motion — client side. No input; just observes whether the
+# host's moving mech shows up in the snapshot stream and renders
+# correctly in real time. The client's local mech is stationary.
+#
+# A working client should see a mech (the host's) moving from the
+# left side toward the right, over ticks 120..300. A black or
+# frozen-frame screen at any of these ticks indicates the snapshot
+# pipeline is broken.
+
+window 1280 720
+out build/shots/net/client_motion
+network connect 127.0.0.1:24011
+name ClientB
+
+# Client walks LEFT to meet the host. Jet to clear cover.
+at 150 press left
+at 200 press jet
+at 260 release jet
+at 350 press jet
+at 410 release jet
+
+at 150 shot match_start_t150
+at 250 shot walking_t250
+at 360 shot midway_t360
+at 460 shot meeting_t460
+at 530 release left
+at 560 shot together_t560
+at 720 shot summary_t720
+at 780 end
+
+contact_sheet sheet cols 3 cell 320 180
+
+contact_sheet sheet cols 3 cell 320 180

@@ -2,6 +2,7 @@
 
 #include "log.h"
 #include "mech.h"
+#include "particle.h"
 #include "physics.h"
 #include "weapons.h"
 
@@ -281,6 +282,8 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
      * snapshot mentions. Anything still stale at the end gets killed. */
     bool seen[MAX_MECHS] = {false};
 
+    int local_id = w->local_mech_id;
+
     for (int i = 0; i < frame->ent_count; ++i) {
         const EntitySnapshot *e = &frame->ents[i];
         Vec2 spawn_pos = { dequant_pos(e->pos_x_q), dequant_pos(e->pos_y_q) };
@@ -290,27 +293,70 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
 
         Mech *m = &w->mechs[mid];
         ParticlePool *pp = &w->particles;
+        bool is_local = (mid == local_id);
 
         /* Translate the whole skeleton kinematically so the mech
-         * "snaps" to the server position. We lerp internally during
-         * smoothing; here we do the hard write. */
+         * "snaps" to the server position.
+         *
+         * For the LOCAL mech: full snap. Reconciliation (in
+         * reconcile.c) then replays unacked inputs to bring the body
+         * forward to "now". Anything else would break that contract.
+         *
+         * For REMOTE mechs: a hard snap every snapshot looks like
+         * visible jitter to the user (each snapshot is ~33 ms apart;
+         * gravity + stale-input simulation between snapshots drifts
+         * the body, then we snap it back). Smooth the correction
+         * with a 35% lerp toward the server position — the body
+         * still tracks the server but without the per-snapshot
+         * pop. Over a few snapshots we converge. This is a poor-
+         * man's snapshot interpolation; full
+         * "render-100-ms-in-the-past" interp is M2 carry-forward
+         * (see TRADE_OFFS.md → "no client-side mid-tick interp").
+         *
+         * Spawn case: when ensure_mech_slot has just created this
+         * mech, the existing position equals new_px/new_py so dx/dy
+         * are zero — no lerp damping concern. */
         float old_px = pp->pos_x[m->particle_base + PART_PELVIS];
         float old_py = pp->pos_y[m->particle_base + PART_PELVIS];
         float new_px = dequant_pos(e->pos_x_q);
         float new_py = dequant_pos(e->pos_y_q);
-        float dx = new_px - old_px;
-        float dy = new_py - old_py;
+        float dx_full = new_px - old_px;
+        float dy_full = new_py - old_py;
+        float lerp = is_local ? 1.0f : 0.35f;
+        /* For very large remote-mech corrections (>200 px — likely a
+         * teleport / round-start respawn) skip the lerp and snap
+         * fully. Without this a respawn would take seconds to slide
+         * into position. */
+        if (!is_local && (dx_full * dx_full + dy_full * dy_full) > 200.0f * 200.0f) {
+            lerp = 1.0f;
+        }
+        float dx = dx_full * lerp;
+        float dy = dy_full * lerp;
         for (int part = 0; part < PART_COUNT; ++part) {
             int idx = m->particle_base + part;
             physics_translate_kinematic(pp, idx, dx, dy);
         }
 
-        /* Set per-tick velocity so Verlet picks the right (pos - prev). */
+        /* Per-tick velocity. We set EVERY particle (not just the
+         * pelvis) to the snapshot's pelvis velocity. The old code
+         * only touched the pelvis, leaving the rest of the skeleton
+         * with whatever velocity it had before the snap — the
+         * mismatch made the constraint solver fight to reconcile
+         * shapes between particles moving at different rates, which
+         * the user saw as a per-tick jitter. With every particle
+         * synced to the same body-frame velocity the skeleton moves
+         * as a rigid unit between snapshots and the constraints
+         * just maintain shape, not bleed energy. (The local-mech
+         * pose drive in mech_step_drive will overwrite per-particle
+         * velocities for the next tick anyway, so there's no
+         * downstream side effect.) */
         float vx = dequant_vel(e->vel_x_q);
         float vy = dequant_vel(e->vel_y_q);
-        int pelv = m->particle_base + PART_PELVIS;
-        physics_set_velocity_x(pp, pelv, vx);
-        physics_set_velocity_y(pp, pelv, vy);
+        for (int part = 0; part < PART_COUNT; ++part) {
+            int idx = m->particle_base + part;
+            physics_set_velocity_x(pp, idx, vx);
+            physics_set_velocity_y(pp, idx, vy);
+        }
 
         /* Aim: reconstruct from the angle. The pose drive needs an
          * aim_world point, not an angle; pick a long-range point. */
@@ -318,7 +364,13 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
         m->aim_world = (Vec2){ new_px + cosf(ang) * 200.0f,
                                new_py + sinf(ang) * 200.0f };
 
-        /* Combat & state. */
+        /* Combat & state. Capture pre-snapshot health so we can
+         * spawn local FX (blood / sparks) when the server reports a
+         * hit — those FX live in the client's local fx pool and
+         * aren't carried in the snapshot wire format. Without this
+         * the client sees no blood when remote players are damaged
+         * (only the host's view shows hits). */
+        float prev_health = m->health;
         m->health      = (e->health  / 255.0f) * m->health_max;
         if (m->armor_hp_max > 0.0f) {
             m->armor_hp = (e->armor / 255.0f) * m->armor_hp_max;
@@ -338,10 +390,40 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
         else if (m->grounded)               m->anim_id = ANIM_STAND;
         else                                 m->anim_id = ANIM_FALL;
 
+        /* Health decreased → server registered a hit; mirror the
+         * blood/spark FX locally so the client sees the same visual
+         * feedback as the host. Spawn count scales loosely with
+         * damage (~4 blood per ~5 % health lost), capped to keep
+         * the fx pool from saturating on multi-hit bursts.
+         *
+         * Position: at the chest, with a small spray direction (we
+         * don't know which side the bullet came from on the wire,
+         * so default upward + outward is a reasonable proxy). */
+        if (m->alive && m->health < prev_health) {
+            float dmg = prev_health - m->health;
+            int n_blood = (int)(dmg / 4.0f) + 2;
+            if (n_blood > 12) n_blood = 12;
+            int chest = m->particle_base + PART_CHEST;
+            Vec2 at = { pp->pos_x[chest], pp->pos_y[chest] };
+            Vec2 spray = { (m->facing_left ? 60.0f : -60.0f), -40.0f };
+            for (int k = 0; k < n_blood; ++k)
+                fx_spawn_blood(&w->fx, at, spray, w->rng);
+            for (int k = 0; k < 2; ++k)
+                fx_spawn_spark(&w->fx, at, spray, w->rng);
+        }
+
         if (was_alive && !m->alive) {
             /* Local cosmetic kill — drop the pose drive so render
-             * shows ragdoll. */
+             * shows ragdoll. Also spawn the death blood fountain so
+             * the client matches the host's visual on kill. */
             for (int s = 0; s < PART_COUNT; ++s) m->pose_strength[s] = 0.0f;
+            int chest = m->particle_base + PART_CHEST;
+            Vec2 at = { pp->pos_x[chest], pp->pos_y[chest] };
+            Vec2 base_dir = { (m->facing_left ? 100.0f : -100.0f), -120.0f };
+            for (int k = 0; k < 32; ++k)
+                fx_spawn_blood(&w->fx, at, base_dir, w->rng);
+            for (int k = 0; k < 8; ++k)
+                fx_spawn_spark(&w->fx, at, base_dir, w->rng);
         }
 
         /* Apply dismemberment by deactivating constraints in the new

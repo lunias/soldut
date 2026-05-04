@@ -1,0 +1,21 @@
+# Jitter diagnostic — client. Sits still. Burst-screenshots
+# during the host's walk so we can compare consecutive frames
+# and see if the host's mech jitters in the client's view.
+#
+# Looking for: host's mech position changes smoothly across
+# burst frames (no zigzag, no pop-back).
+
+window 1280 720
+out build/shots/net/jitter_client
+network connect 127.0.0.1:24041
+name ClientB
+
+# Walk LEFT to meet the host so both visible in same frame.
+at 150 press left
+at 200 release left
+
+# Burst: capture every 6 ticks (10 fps) during ticks 300..600
+# while the host is walking past us.
+burst burst from 300 to 600 every 12
+
+at 750 end

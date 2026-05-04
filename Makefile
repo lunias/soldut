@@ -48,9 +48,56 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics shot
+.PHONY: all clean distclean raylib enet windows macos help test-physics shot \
+        debug gdb gdb-host gdb-client valgrind
 
 all: $(BIN)
+
+# ---- Debug build ----------------------------------------------------
+# Same source, but compiled with -O0 + ASan/UBSan + extra debug info so
+# gdb can walk every local variable. Output binary is `soldut-dbg` —
+# distinct from the release binary so you can keep both around.
+DBG_CFLAGS = -std=c11 -O0 -g3 -ggdb -Wall -Wextra -Wpedantic -Werror \
+             -fno-omit-frame-pointer -fsanitize=address -fsanitize=undefined
+DBG_LDFLAGS = -fsanitize=address -fsanitize=undefined
+DBG_OBJ := $(SRC:src/%.c=$(BUILD_DIR)/dbg/%.o)
+DBG_DEP := $(DBG_OBJ:.o=.d)
+DBG_BIN := soldut-dbg$(EXE_SUFFIX)
+
+$(BUILD_DIR)/dbg:
+	@mkdir -p $(BUILD_DIR)/dbg
+
+$(BUILD_DIR)/dbg/%.o: src/%.c | $(BUILD_DIR)/dbg
+	$(CC) $(DBG_CFLAGS) $(WARNINGS) $(INCLUDES) -MMD -MP -c $< -o $@
+
+$(DBG_BIN): $(DBG_OBJ) $(RAYLIB_LIB) $(ENET_LIB)
+	$(CC) $(DBG_OBJ) $(LDFLAGS) $(DBG_LDFLAGS) $(LIBS) -o $@
+
+debug: $(DBG_BIN)
+
+# `make gdb` launches the release binary under gdb with our init
+# script (tools/gdb/init.gdb) preloaded — useful breakpoints + macros.
+# `gdb-host` and `gdb-client` skip into the right launch flow.
+GDB := gdb -q -x tools/gdb/init.gdb
+
+gdb: $(DBG_BIN)
+	$(GDB) ./$(DBG_BIN)
+
+gdb-host: $(DBG_BIN)
+	$(GDB) --args ./$(DBG_BIN) --host 23073 --name HostA
+
+# Default to localhost. Override:  make gdb-client HOST=10.0.0.5:23073
+HOST ?= 127.0.0.1:23073
+gdb-client: $(DBG_BIN)
+	$(GDB) --args ./$(DBG_BIN) --connect $(HOST) --name DbgClient
+
+# valgrind catches uninitialized reads + out-of-bounds + leaks. Slow
+# (~10x). Useful for the headless physics or shot tests, not for
+# interactive play.
+valgrind: $(BUILD_DIR)/headless_sim
+	valgrind --leak-check=full --show-leak-kinds=definite,indirect \
+	         --error-exitcode=2 --track-origins=yes \
+	         ./$(BUILD_DIR)/headless_sim
 
 # Headless physics tester — runs simulate() over scripted inputs and
 # dumps particle positions. Lets us iterate on physics/pose without
@@ -125,7 +172,12 @@ distclean: clean
 
 help:
 	@echo "Targets:"
-	@echo "  make             native build for $(PLATFORM)"
+	@echo "  make             native release build for $(PLATFORM)"
+	@echo "  make debug       O0 + ASan/UBSan debug build → ./soldut-dbg"
+	@echo "  make gdb         launch debug binary under gdb"
+	@echo "  make gdb-host    gdb + automatic --host launch"
+	@echo "  make gdb-client  gdb + --connect HOST=ip:port"
+	@echo "  make valgrind    headless-sim under valgrind (full leak check)"
 	@echo "  make raylib      build third_party/raylib/src/libraylib.a"
 	@echo "  make enet        build third_party/enet/libenet.a"
 	@echo "  make windows     cross-compile to Windows via zig cc"
@@ -136,3 +188,4 @@ help:
 	@echo "                   override script: make shot SCRIPT=path/to/x.shot"
 
 -include $(DEP)
+-include $(DBG_DEP)

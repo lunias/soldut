@@ -1,8 +1,11 @@
 #pragma once
 
 #include "arena.h"
+#include "config.h"
 #include "hash.h"
 #include "input.h"
+#include "lobby.h"
+#include "match.h"
 #include "net.h"
 #include "reconcile.h"
 #include "world.h"
@@ -20,7 +23,12 @@
 
 typedef enum {
     MODE_BOOT = 0,    /* before init has completed */
+    MODE_TITLE,       /* main menu (Single Player / Host / Browse / Connect / Quit) */
+    MODE_BROWSER,     /* server browser screen */
+    MODE_CONNECT,     /* enter host:port to direct-connect */
+    MODE_CONNECTING,  /* enet/handshake in flight */
     MODE_LOBBY,       /* lobby UI; no match running */
+    MODE_COUNTDOWN,   /* pre-round briefing (5 s) */
     MODE_MATCH,       /* in-round simulation */
     MODE_SUMMARY,     /* round summary screen */
     MODE_QUIT,        /* shutdown requested */
@@ -52,6 +60,35 @@ typedef struct Game {
      * net.role == NET_ROLE_CLIENT. The host doesn't predict (server is
      * authoritative on the same process). */
     Reconcile reconcile;
+
+    /* M4 — lobby + match flow. The server owns these; clients receive
+     * both via reliable LOBBY-channel messages (lobby slot table + a
+     * compact MatchState delta on round transitions). */
+    LobbyState   lobby;
+    MatchState   match;
+    ServerConfig config;
+
+    /* Index of the local player's lobby slot (host's own slot on the
+     * server; assigned slot on a client). -1 outside a lobby. */
+    int          local_slot_id;
+
+    /* Round counter — incremented each time the server transitions out
+     * of MATCH_PHASE_SUMMARY. Drives map / mode rotation. */
+    int          round_counter;
+
+    /* Pending direct-connect target (host:port) entered on the connect
+     * screen. Filled by the UI; consumed by main.c. */
+    char         pending_host[64];
+    uint16_t     pending_port;
+
+    /* "Single-player auto-host" hint — set by the title screen when the
+     * user clicks "Single Player". main.c bootstraps a self-hosted
+     * server with auto-start enabled. */
+    bool         auto_start_single_player;
+
+    /* "Host the match without networking" — used by the offline path
+     * so the lobby + match flow runs even with no peers. */
+    bool         offline_solo;
 } Game;
 
 bool game_init(Game *g);

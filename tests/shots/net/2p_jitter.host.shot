@@ -1,0 +1,14 @@
+# Jitter diagnostic — host. Walks RIGHT at constant velocity for
+# the entire match. Pairs with 2p_jitter.client.shot which sits
+# still and screenshots burst-style so we can see whether the
+# host's mech (as the client sees it) moves smoothly or jitters.
+
+window 1280 720
+out build/shots/net/jitter_host
+network host 24041
+name HostA
+
+at 150 press right
+at 150 shot match_start
+at 700 shot late
+at 800 end

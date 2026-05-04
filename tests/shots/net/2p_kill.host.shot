@@ -1,0 +1,48 @@
+# 2p_kill — multi-round kill test.
+#
+# The host owns authoritative positions, so it teleports BOTH
+# mechs to their layout positions (the client's spawn_at is just
+# cosmetic until snapshots arrive). Both end up adjacent on the
+# ground with no terrain between them.
+#
+# Round 1: host fires Pulse Rifle right at the client → kill.
+# Summary 4 s (countdown sync verified).
+# Round 2: roles reverse — client fires left at host → kill.
+#
+# Exercises: kill flow over the wire, round transitions, summary
+# countdown sync, respawn at peer_spawn point each round.
+
+window 1280 720
+out build/shots/net/kill_host
+network host 24091
+name HostA
+loadout - "Pulse Rifle" - Light Standard
+
+# Host (slot 0) spawns at world (1300, 1112). Client (slot 1)
+# spawns at (1500, 1112). 200 px gap, both on the ground in a
+# clear area (left of the col-55 wall).
+spawn_at 1300 1112
+peer_spawn 1 1500 1112
+
+# ---- Round 1: host fires right at client ----
+# Match starts ~tick 130. Aim at client's chest (1500, 1080) so
+# hitscan rays land on torso bones.
+at 150 aim 1500 1080
+at 160 press fire
+at 700 release fire
+
+# ---- Round 2: host stays put, client kills it ----
+# Just sit there.
+
+# ---- Screenshots ----------------------------------------------------
+at 170  shot r1_match_start
+at 250  shot r1_firing
+at 360  shot r1_kill
+at 700  shot r1_summary
+at 870  shot r2_lobby
+at 1000 shot r2_match_start
+at 1200 shot r2_dying
+at 1400 shot r2_summary
+at 1500 end
+
+contact_sheet sheet cols 3 cell 320 180

@@ -69,6 +69,21 @@
  *
  * Buttons: left right jump jet crouch prone fire reload melee use swap dash.
  *
+ *     network host PORT
+ *     network connect HOST:PORT
+ *                              run the script with networking enabled.
+ *                              `host` opens a server (bootstrap_host
+ *                              path); `connect` opens a client and
+ *                              joins. When set, shotmode runs the full
+ *                              main-loop dispatcher (TITLE → LOBBY →
+ *                              MATCH → SUMMARY) instead of the direct
+ *                              sim-only path. Use `network host` on
+ *                              one process and `network connect` on
+ *                              another to test multiplayer scenarios.
+ *
+ *     name <name>              display name for networked play
+ *                              (defaults to "shot")
+ *
  * Returns process exit code (0 on success).
  */
 int shotmode_run(const char *script_path);

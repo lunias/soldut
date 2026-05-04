@@ -1,0 +1,39 @@
+# 2p_meet — host walks RIGHT toward the col-55 wall, jets over, then
+# stops on the dummy platform. Client walks LEFT. They should end up
+# adjacent and both visible in each other's camera.
+#
+# Pairs with 2p_meet.client.shot. Both run for 850 ticks. Screenshots
+# are taken at the SAME tick numbers from each side so direct visual
+# diff is possible (host vs client view of "now").
+#
+# What to look for in the screenshots:
+#   - At touch_t540: are both mechs in the same world position from
+#     each player's perspective? Are aim arrows pointing consistently?
+#   - Does the client's view of the host's mech match the host's view
+#     of itself (within snapshot lag)?
+
+window 1280 720
+out build/shots/net/meet_host
+network host 24051
+name HostA
+
+# Walk right toward the wall. Jet to clear it. Land + stop so the
+# meet screenshots show both mechs on the same plane (camera follows
+# host, so we want host on the ground when client is also on ground).
+at 150 press right
+at 320 press jet
+at 380 release jet
+at 380 release right
+# Now host is in the air; let it drift down + walk a bit more.
+at 440 press right
+at 470 release right
+
+at 200 shot match_start
+at 320 shot walking
+at 400 shot jetting_over_wall
+at 520 shot meet_t520
+at 580 shot meet_t580
+at 700 shot summary
+at 750 end
+
+contact_sheet sheet cols 3 cell 320 180

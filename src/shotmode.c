@@ -1,13 +1,20 @@
 #include "shotmode.h"
 
+#include "config.h"
 #include "decal.h"
 #include "game.h"
 #include "input.h"
 #include "level.h"
+#include "lobby.h"
+#include "lobby_ui.h"
 #include "log.h"
+#include "maps.h"
+#include "match.h"
 #include "mech.h"
+#include "net.h"
 #include "platform.h"
 #include "physics.h"
+#include "reconcile.h"
 #include "render.h"
 #include "simulate.h"
 #include "version.h"
@@ -64,6 +71,15 @@ typedef struct {
     bool  snapshotted;
 } LerpSeg;
 
+/* Networked-shot setup. None = legacy single-process world; Host
+ * runs an authoritative server + a local lobby slot; Client connects
+ * to a remote host. */
+typedef enum {
+    NETMODE_NONE = 0,
+    NETMODE_HOST,
+    NETMODE_CONNECT,
+} ShotNetMode;
+
 typedef struct {
     int      window_w, window_h;
     bool     seed_override;
@@ -92,6 +108,23 @@ typedef struct {
     int      contact_cell_w, contact_cell_h;
 
     int      end_tick;       /* -1 = derive from last event */
+
+    /* Networked-shot config (legacy single-process when NETMODE_NONE). */
+    ShotNetMode netmode;
+    uint16_t    netport;          /* host: listen port; connect: target port */
+    char        nethost[64];      /* connect: target host */
+    char        netname[24];      /* display name */
+
+    /* Host-side override of peer mech positions on each round start.
+     * Useful for kill tests where you want a specific layout on the
+     * authoritative side (the client's local spawn_at is purely
+     * cosmetic — the server owns positions and will overwrite the
+     * client via snapshot). */
+    struct {
+        int   slot;
+        float x, y;
+    }       peer_spawns[8];
+    int     peer_spawn_count;
 } Script;
 
 static const struct { const char *name; uint16_t bit; } BUTTON_TABLE[] = {
@@ -398,6 +431,78 @@ static bool parse_script(const char *path, Script *out) {
             out->contact_cols   = cols;
             out->contact_cell_w = cw;
             out->contact_cell_h = ch;
+        } else if (strcmp(tok, "network") == 0) {
+            char kind[16] = {0};
+            int eaten2 = 0;
+            if (sscanf(rest, "%15s%n", kind, &eaten2) != 1) {
+                LOG_E("shotmode: %s:%d 'network' needs host|connect", path, lineno);
+                ok = false; continue;
+            }
+            char *q = trim(rest + eaten2);
+            if (strcmp(kind, "host") == 0) {
+                int port;
+                if (sscanf(q, "%d", &port) != 1 || port <= 0 || port > 65535) {
+                    LOG_E("shotmode: %s:%d 'network host' needs PORT", path, lineno);
+                    ok = false; continue;
+                }
+                out->netmode = NETMODE_HOST;
+                out->netport = (uint16_t)port;
+            } else if (strcmp(kind, "connect") == 0) {
+                /* HOST[:PORT] — clamp to nethost size so a long input
+                 * can't overflow the destination buffer. */
+                char addr[80] = {0};
+                if (sscanf(q, "%79s", addr) != 1) {
+                    LOG_E("shotmode: %s:%d 'network connect' needs HOST[:PORT]", path, lineno);
+                    ok = false; continue;
+                }
+                const char *colon = strrchr(addr, ':');
+                if (colon) {
+                    size_t hl = (size_t)(colon - addr);
+                    if (hl >= sizeof out->nethost) hl = sizeof out->nethost - 1;
+                    memcpy(out->nethost, addr, hl); out->nethost[hl] = '\0';
+                    int port = atoi(colon + 1);
+                    out->netport = (uint16_t)(port > 0 ? port : SOLDUT_DEFAULT_PORT);
+                } else {
+                    /* Copy with explicit length cap so the dst-size FORTIFY
+                     * check is happy at -O0. */
+                    size_t hl = strlen(addr);
+                    if (hl >= sizeof out->nethost) hl = sizeof out->nethost - 1;
+                    memcpy(out->nethost, addr, hl); out->nethost[hl] = '\0';
+                    (void)snprintf;
+                    out->netport = SOLDUT_DEFAULT_PORT;
+                }
+                out->netmode = NETMODE_CONNECT;
+            } else {
+                LOG_E("shotmode: %s:%d 'network' kind must be host|connect", path, lineno);
+                ok = false;
+            }
+        } else if (strcmp(tok, "peer_spawn") == 0) {
+            int slot;
+            float x, y;
+            if (sscanf(rest, "%d %f %f", &slot, &x, &y) != 3) {
+                LOG_E("shotmode: %s:%d 'peer_spawn' needs SLOT WX WY", path, lineno);
+                ok = false; continue;
+            }
+            if (out->peer_spawn_count < 8) {
+                out->peer_spawns[out->peer_spawn_count].slot = slot;
+                out->peer_spawns[out->peer_spawn_count].x    = x;
+                out->peer_spawns[out->peer_spawn_count].y    = y;
+                out->peer_spawn_count++;
+            } else {
+                LOG_W("shotmode: %s:%d 'peer_spawn' table full (8 max)",
+                      path, lineno);
+            }
+        } else if (strcmp(tok, "name") == 0) {
+            /* Read directly into out->netname, capped at its size minus
+             * one — keeps FORTIFY at -O0 happy without needing an
+             * intermediate buffer. */
+            char nm[24] = {0};
+            if (sscanf(rest, "%23s", nm) != 1) {
+                LOG_E("shotmode: %s:%d 'name' needs an identifier", path, lineno);
+                ok = false; continue;
+            }
+            memcpy(out->netname, nm, sizeof nm);
+            out->netname[sizeof out->netname - 1] = '\0';
         } else if (strcmp(tok, "burst") == 0) {
             char prefix[48], from_kw[8], to_kw[8], every_kw[8];
             int t0, t1, k;
@@ -447,6 +552,278 @@ static void mkdir_p(const char *path) {
         }
     }
     SHOT_MKDIR(buf);
+}
+
+/* ---- Networked shot — main-loop dispatcher --------------------------
+ *
+ * When the script declares `network host PORT` or `network connect
+ * HOST:PORT`, shotmode skips its direct seed_world+sim path and
+ * instead drives the full game-mode dispatcher each tick: TITLE →
+ * LOBBY → COUNTDOWN → MATCH → SUMMARY. This mirrors main.c's run
+ * loop so the shotmode binary exercises the same code paths real
+ * play does, with screenshots captured per scripted tick.
+ *
+ * Input button events in the script apply to the local mech during
+ * MODE_MATCH (same as the legacy path). Click/keyboard events for
+ * lobby UI driving aren't supported yet — we rely on the host's
+ * auto-start countdown to fire the round, so a one-shot test can
+ * cover lobby + match + summary without needing synthesized clicks.
+ */
+static void networked_shot_bootstrap(Game *g, const Script *s) {
+    /* Fast auto-start + short summary so shot tests don't sit in
+     * lobby / summary for half a minute. We set both the LIVE values
+     * (lobby/match) AND the config so that start_round's "re-derive
+     * limits from config" path doesn't reset them back to long
+     * defaults mid-round. */
+    g->config.auto_start_seconds = 1.0f;
+    g->config.time_limit         = 8.0f;
+    g->config.score_limit        = 10;
+    g->lobby.auto_start_default  = 1.0f;
+    g->match.countdown_default   = 1.0f;
+    g->match.summary_default     = 4.0f;   /* 15 s default; 4 s for tests */
+    g->match.time_limit          = g->config.time_limit;
+    g->match.score_limit         = g->config.score_limit;
+
+    if (s->netmode == NETMODE_HOST) {
+        if (!net_init()) {
+            LOG_E("shotmode: net_init failed"); return;
+        }
+        if (!net_server_start(&g->net, s->netport, g)) {
+            LOG_E("shotmode: failed to bind UDP %u", (unsigned)s->netport);
+            return;
+        }
+        net_discovery_open(&g->net);
+        const char *nm = s->netname[0] ? s->netname : "host-shot";
+        int slot = lobby_add_slot(&g->lobby, /*peer_id*/-1, nm, /*is_host*/true);
+        g->local_slot_id = slot;
+        g->world.authoritative = true;
+        /* Apply script `loadout` directive to the host's slot so the
+         * spawned mech uses the requested chassis / weapons. */
+        if (s->have_loadout && slot >= 0) {
+            lobby_set_loadout(&g->lobby, slot, s->loadout);
+        }
+        /* Pre-build the level so the lobby has something to draw the
+         * world frame against. ROUND_START rebuilds for the chosen map. */
+        map_build(MAP_FOUNDRY, &g->world.level, &g->level_arena);
+        decal_init((int)level_width_px(&g->world.level),
+                   (int)level_height_px(&g->world.level));
+        g->mode = MODE_LOBBY;
+        LOG_I("shotmode: hosting on port %u as '%s'", (unsigned)s->netport, nm);
+    } else if (s->netmode == NETMODE_CONNECT) {
+        if (!net_init()) {
+            LOG_E("shotmode: net_init failed"); return;
+        }
+        const char *nm = s->netname[0] ? s->netname : "client-shot";
+        if (!net_client_connect(&g->net, s->nethost, s->netport, nm, g)) {
+            LOG_E("shotmode: connect to %s:%u failed",
+                  s->nethost, (unsigned)s->netport);
+            return;
+        }
+        g->world.authoritative = false;
+        /* Send a LOADOUT message to the server so the client's
+         * spawned mech uses the right chassis + weapons. */
+        if (s->have_loadout) {
+            net_client_send_loadout(&g->net, s->loadout);
+        }
+        /* The handshake moved us to MODE_LOBBY via INITIAL_STATE. */
+        LOG_I("shotmode: connected to %s:%u as '%s' (slot %d)",
+              s->nethost, (unsigned)s->netport, nm, g->local_slot_id);
+    }
+}
+
+/* Same kill-feed → lobby score path main.c uses. We re-implement it
+ * here (rather than refactor main.c) to keep shotmode self-contained. */
+static int g_shot_kill_processed = 0;
+static void shot_apply_new_kills(Game *g) {
+    int cur = g->world.killfeed_count;
+    int begin = g_shot_kill_processed;
+    if (cur - begin > KILLFEED_CAPACITY) begin = cur - KILLFEED_CAPACITY;
+    bool any = false;
+    for (int n = begin; n < cur; ++n) {
+        int idx = n % KILLFEED_CAPACITY;
+        if (idx < 0) idx += KILLFEED_CAPACITY;
+        const KillFeedEntry *k = &g->world.killfeed[idx];
+        int killer_slot = (k->killer_mech_id >= 0)
+            ? lobby_find_slot_by_mech(&g->lobby, k->killer_mech_id) : -1;
+        int victim_slot = lobby_find_slot_by_mech(&g->lobby, k->victim_mech_id);
+        match_apply_kill(&g->match, &g->lobby, killer_slot, victim_slot, k->flags);
+        net_server_broadcast_kill(&g->net, k->killer_mech_id,
+                                   k->victim_mech_id, k->weapon_id);
+        any = true;
+    }
+    g_shot_kill_processed = cur;
+    if (any) g->lobby.dirty = true;
+}
+
+/* Host-side match-flow controller, condensed from main.c. */
+static bool g_shot_prev_active = false;
+static float g_shot_cd_accum = 0.0f;
+static void shot_host_flow(Game *g, float dt) {
+    /* Countdown broadcast (same logic as main.c's
+     * host_broadcast_countdown_if_changed). */
+    if (g->net.role == NET_ROLE_SERVER) {
+        bool active = g->lobby.auto_start_active;
+        if (active != g_shot_prev_active) {
+            net_server_broadcast_countdown(&g->net,
+                active ? g->lobby.auto_start_remaining : 0.0f,
+                active ? 1u : 0u);
+            g_shot_cd_accum = 0.0f;
+        } else if (active) {
+            g_shot_cd_accum += dt;
+            if (g_shot_cd_accum >= 0.5f) {
+                g_shot_cd_accum -= 0.5f;
+                net_server_broadcast_countdown(&g->net,
+                    g->lobby.auto_start_remaining, 1u);
+            }
+        }
+        g_shot_prev_active = active;
+    }
+
+    switch (g->match.phase) {
+        case MATCH_PHASE_LOBBY: {
+            /* Auto-arm so the round actually starts in shot mode. We
+             * use a 1-second countdown for shot iteration speed. */
+            if (!g->lobby.auto_start_active) {
+                lobby_auto_start_arm(&g->lobby, g->lobby.auto_start_default);
+            }
+            if (lobby_tick(&g->lobby, dt)) {
+                match_begin_countdown(&g->match, g->match.countdown_default);
+                if (g->net.role == NET_ROLE_SERVER) {
+                    net_server_broadcast_match_state(&g->net, &g->match);
+                }
+            }
+            lobby_chat_age(&g->lobby, dt);
+            break;
+        }
+        case MATCH_PHASE_COUNTDOWN:
+            if (match_tick(&g->match, dt)) {
+                /* start_round equivalent — inlined from main.c. */
+                g->match.map_id = config_pick_map(&g->config, g->round_counter);
+                g->match.mode   = config_pick_mode(&g->config, g->round_counter);
+                g->match.score_limit  = g->config.score_limit;
+                g->match.time_limit   = g->config.time_limit;
+                g->match.friendly_fire= g->config.friendly_fire;
+                /* See comment in main.c::start_round — FFA needs
+                 * world.friendly_fire forced on or no hit lands. */
+                g->world.friendly_fire= g->config.friendly_fire ||
+                                        (g->match.mode == MATCH_MODE_FFA);
+                arena_reset(&g->level_arena);
+                map_build((MapId)g->match.map_id, &g->world.level, &g->level_arena);
+                decal_init((int)level_width_px(&g->world.level),
+                           (int)level_height_px(&g->world.level));
+                lobby_spawn_round_mechs(&g->lobby, &g->world,
+                                        g->match.map_id, g->local_slot_id,
+                                        g->match.mode);
+                g->lobby.dirty = true;
+                match_begin_round(&g->match);
+                g->mode = MODE_MATCH;
+                g_shot_kill_processed = g->world.killfeed_count;
+                if (g->net.role == NET_ROLE_SERVER) {
+                    net_server_broadcast_lobby_list (&g->net, &g->lobby);
+                    g->lobby.dirty = false;
+                    net_server_broadcast_round_start(&g->net, &g->match);
+                }
+            }
+            break;
+        case MATCH_PHASE_ACTIVE: {
+            shot_apply_new_kills(g);
+            bool end = false;
+            if (g->match.mode == MATCH_MODE_FFA) {
+                for (int i = 0; i < MAX_LOBBY_SLOTS; ++i)
+                    if (g->lobby.slots[i].in_use &&
+                        g->lobby.slots[i].score >= g->match.score_limit) end = true;
+            }
+            if (!end && match_round_should_end(&g->match)) end = true;
+            if (match_tick(&g->match, dt)) end = true;
+            if (end) {
+                match_end_round(&g->match, &g->lobby);
+                g->mode = MODE_SUMMARY;
+                if (g->net.role == NET_ROLE_SERVER) {
+                    net_server_broadcast_lobby_list (&g->net, &g->lobby);
+                    g->lobby.dirty = false;
+                    net_server_broadcast_round_end  (&g->net, &g->match);
+                }
+            }
+            break;
+        }
+        case MATCH_PHASE_SUMMARY:
+            if (match_tick(&g->match, dt)) {
+                g->round_counter++;
+                g->match.phase = MATCH_PHASE_LOBBY;
+                lobby_clear_round_mechs(&g->lobby, &g->world);
+                lobby_reset_round_stats(&g->lobby);
+                g->mode = MODE_LOBBY;
+                if (g->net.role == NET_ROLE_SERVER) {
+                    net_server_broadcast_lobby_list (&g->net, &g->lobby);
+                    g->lobby.dirty = false;
+                    net_server_broadcast_match_state(&g->net, &g->match);
+                }
+            }
+            break;
+    }
+}
+
+/* Client-side per-tick housekeeping: chat aging + countdown decay +
+ * match time decay (host doesn't broadcast match_state during the
+ * ACTIVE phase, so without local decay the client's overlay shows the
+ * round-start value frozen for the whole match). */
+static void shot_client_tick(Game *g, float dt) {
+    lobby_chat_age(&g->lobby, dt);
+    if (g->lobby.auto_start_active && g->lobby.auto_start_remaining > 0.0f) {
+        g->lobby.auto_start_remaining -= dt;
+        if (g->lobby.auto_start_remaining < 0.0f) g->lobby.auto_start_remaining = 0.0f;
+    }
+    if (g->match.phase == MATCH_PHASE_COUNTDOWN &&
+        g->match.countdown_remaining > 0.0f)
+    {
+        g->match.countdown_remaining -= dt;
+        if (g->match.countdown_remaining < 0.0f) g->match.countdown_remaining = 0.0f;
+    }
+    if (g->match.phase == MATCH_PHASE_ACTIVE &&
+        g->match.time_remaining > 0.0f)
+    {
+        g->match.time_remaining -= dt;
+        if (g->match.time_remaining < 0.0f) g->match.time_remaining = 0.0f;
+    }
+    if (g->match.phase == MATCH_PHASE_SUMMARY &&
+        g->match.summary_remaining > 0.0f)
+    {
+        g->match.summary_remaining -= dt;
+        if (g->match.summary_remaining < 0.0f) g->match.summary_remaining = 0.0f;
+    }
+}
+
+/* Renderer-overlay-callback adapter for the match HUD banner and the
+ * round-summary panel. The renderer's overlay slot takes a
+ * (void *, sw, sh) signature; we pack Game * and the LobbyUIState
+ * into a small struct so each callback can pull what it needs. */
+typedef struct {
+    Game         *game;
+    LobbyUIState *ui;
+} ShotOverlayCtx;
+
+static void match_overlay_draw_thunk(void *user, int sw, int sh) {
+    ShotOverlayCtx *c = (ShotOverlayCtx *)user;
+    match_overlay_draw(c->game, sw, sh);
+}
+
+static void summary_overlay_draw_thunk(void *user, int sw, int sh) {
+    ShotOverlayCtx *c = (ShotOverlayCtx *)user;
+    summary_screen_run(c->ui, c->game, sw, sh);
+}
+
+/* Late-bind world.local_mech_id from local_slot.mech_id once the
+ * matching mech actually shows up. Same logic as main.c's MODE_MATCH
+ * pre-loop step. */
+static void shot_client_late_bind_mech(Game *g) {
+    if (g->world.local_mech_id < 0 && g->local_slot_id >= 0) {
+        int mid = g->lobby.slots[g->local_slot_id].mech_id;
+        if (mid >= 0 && mid < g->world.mech_count) {
+            g->world.local_mech_id = mid;
+            LOG_I("shotmode: client local_mech_id resolved → %d (slot %d)",
+                  mid, g->local_slot_id);
+        }
+    }
 }
 
 /* ---- Spawn — mirror of main.c::seed_world. Kept inline so this module
@@ -584,14 +961,301 @@ int shotmode_run(const char *script_path) {
     if (!game_init(&game)) { free(s.events); free(s.lerps); return EXIT_FAILURE; }
     if (s.seed_override) pcg32_seed(&game.rng, s.seed_hi, s.seed_lo);
 
+    /* Window title — show host/client role so screenshots are
+     * self-labeling. */
+    char title_buf[160];
+    if (s.netmode == NETMODE_HOST) {
+        snprintf(title_buf, sizeof title_buf,
+                 "Soldut %s — shot host:%u", SOLDUT_VERSION_STRING,
+                 (unsigned)s.netport);
+    } else if (s.netmode == NETMODE_CONNECT) {
+        snprintf(title_buf, sizeof title_buf,
+                 "Soldut %s — shot client to %s:%u", SOLDUT_VERSION_STRING,
+                 s.nethost, (unsigned)s.netport);
+    } else {
+        snprintf(title_buf, sizeof title_buf,
+                 "Soldut %s — shot mode", SOLDUT_VERSION_STRING);
+    }
     PlatformConfig pcfg = {
         .window_w = s.window_w, .window_h = s.window_h,
         .vsync = false, .fullscreen = false,
-        .title = "Soldut " SOLDUT_VERSION_STRING " — shot mode",
+        .title = title_buf,
     };
     if (!platform_init(&pcfg)) {
         game_shutdown(&game); free(s.events); free(s.lerps);
         return EXIT_FAILURE;
+    }
+
+    /* Networked path: bootstrap host or client, then run the full
+     * mode dispatcher each tick. The legacy match-only path below is
+     * kept for the existing M1/M3 shot tests. */
+    if (s.netmode != NETMODE_NONE) {
+        networked_shot_bootstrap(&game, &s);
+        if ((s.netmode == NETMODE_HOST && game.net.role != NET_ROLE_SERVER) ||
+            (s.netmode == NETMODE_CONNECT && game.net.role != NET_ROLE_CLIENT))
+        {
+            LOG_E("shotmode: networked bootstrap failed");
+            platform_shutdown();
+            game_shutdown(&game); free(s.events); free(s.lerps);
+            net_shutdown();
+            return EXIT_FAILURE;
+        }
+
+        Renderer rd_n;
+        renderer_init(&rd_n, GetScreenWidth(), GetScreenHeight(),
+                      (Vec2){640, 360});
+        rd_n.cam_dt_override = 1.0f / 60.0f;
+        LobbyUIState ui_n = {0};
+        lobby_ui_init(&ui_n);
+        snprintf(ui_n.player_name, sizeof ui_n.player_name, "%s",
+                 s.netname[0] ? s.netname : "shot");
+
+        const float TICK_DT = 1.0f / 60.0f;
+        int ev_idx_n = 0;
+        bool ended_n = false;
+        int shots_taken_n = 0;
+        uint16_t held_n = 0;
+
+        /* `spawn_at` for networked mode: each round start respawns
+         * the local mech at the FFA/team lane. We re-teleport to the
+         * scripted point on every -1 → valid transition of
+         * world.local_mech_id, so multi-round tests honor it across
+         * rounds. */
+        int prev_local_mech_n = -1;
+
+        /* Aim state for the networked path. If the script sets an
+         * aim point (via `aim WX WY` or `at T aim WX WY`) we use that
+         * world-space point. Otherwise default to "200 px right of
+         * the local mech's chest" so the mech faces a predictable
+         * direction. */
+        bool  aim_set_n      = (s.initial_aim_mode == AIM_WORLD);
+        float aim_world_x_n  = aim_set_n ? s.initial_ax : 0.0f;
+        float aim_world_y_n  = aim_set_n ? s.initial_ay : 0.0f;
+
+        for (int tick = 0; tick <= s.end_tick && !ended_n; ++tick) {
+            if (WindowShouldClose()) { LOG_W("shotmode: window closed early"); break; }
+
+            /* Apply scheduled press/release/end/aim events. Click /
+             * key / mouse-screen events for lobby UI driving aren't
+             * yet supported. */
+            while (ev_idx_n < s.event_count && s.events[ev_idx_n].tick == tick) {
+                const Event *ev = &s.events[ev_idx_n];
+                switch (ev->kind) {
+                case EV_PRESS:   held_n |= ev->button; break;
+                case EV_RELEASE: held_n &= (uint16_t)~ev->button; break;
+                case EV_AIM:
+                    aim_set_n     = true;
+                    aim_world_x_n = ev->ax;
+                    aim_world_y_n = ev->ay;
+                    break;
+                case EV_END:     ended_n = true; break;
+                case EV_SHOT:    /* handled after render */ break;
+                default:         break;  /* mouse-screen / tap unused here */
+                }
+                ev_idx_n++;
+            }
+
+            /* Pump network FIRST. */
+            net_poll(&game.net, &game, TICK_DT);
+
+            /* Per-mode dispatch. */
+            switch (game.mode) {
+            case MODE_LOBBY:
+                if (game.net.role == NET_ROLE_SERVER) shot_host_flow(&game, TICK_DT);
+                else                                   shot_client_tick(&game, TICK_DT);
+                break;
+            case MODE_MATCH: {
+                shot_client_late_bind_mech(&game);
+                if (game.net.role == NET_ROLE_SERVER) shot_host_flow(&game, TICK_DT);
+                else if (game.net.role == NET_ROLE_CLIENT) shot_client_tick(&game, TICK_DT);
+
+                /* Detect "local mech just spawned" (-1 → valid) and
+                 * teleport to the scripted spawn_at point if any.
+                 * Fires once per round; we update prev IMMEDIATELY
+                 * after the check so a single iter's transition is
+                 * processed exactly once. */
+                if (s.have_spawn_at &&
+                    prev_local_mech_n < 0 &&
+                    game.world.local_mech_id >= 0)
+                {
+                    Mech *pm = &game.world.mechs[game.world.local_mech_id];
+                    ParticlePool *pp = &game.world.particles;
+                    int b = pm->particle_base;
+                    float cur_x = pp->pos_x[b + PART_PELVIS];
+                    float cur_y = pp->pos_y[b + PART_PELVIS];
+                    float dx = s.spawn_x - cur_x;
+                    float dy = s.spawn_y - cur_y;
+                    for (int i = 0; i < PART_COUNT; ++i) {
+                        physics_translate_kinematic(pp, b + i, dx, dy);
+                    }
+                    LOG_I("shotmode: spawn_at teleport mech=%d to (%.1f,%.1f)",
+                          game.world.local_mech_id, s.spawn_x, s.spawn_y);
+                }
+                /* Host-only: also teleport peer mechs per the
+                 * `peer_spawn SLOT WX WY` directives. Only the host
+                 * has authoritative positions; the client's own
+                 * spawn_at is cosmetic until the server agrees. */
+                if (game.net.role == NET_ROLE_SERVER &&
+                    prev_local_mech_n < 0 &&
+                    game.world.local_mech_id >= 0)
+                {
+                    for (int pi = 0; pi < s.peer_spawn_count; ++pi) {
+                        int slot = s.peer_spawns[pi].slot;
+                        if (slot < 0 || slot >= MAX_LOBBY_SLOTS) continue;
+                        int mid = game.lobby.slots[slot].mech_id;
+                        if (mid < 0 || mid >= game.world.mech_count) continue;
+                        Mech *pm = &game.world.mechs[mid];
+                        ParticlePool *pp = &game.world.particles;
+                        int b = pm->particle_base;
+                        float dx = s.peer_spawns[pi].x - pp->pos_x[b + PART_PELVIS];
+                        float dy = s.peer_spawns[pi].y - pp->pos_y[b + PART_PELVIS];
+                        for (int i = 0; i < PART_COUNT; ++i) {
+                            physics_translate_kinematic(pp, b + i, dx, dy);
+                        }
+                        LOG_I("shotmode: peer_spawn teleport slot=%d mech=%d to (%.1f,%.1f)",
+                              slot, mid, s.peer_spawns[pi].x, s.peer_spawns[pi].y);
+                    }
+                }
+                /* Track local_mech_id transitions HERE (inside the
+                 * MATCH case) rather than at end-of-iter. The
+                 * MODE_LOBBY → MODE_MATCH switch can set
+                 * local_mech_id mid-iter (in shot_host_flow's
+                 * start_round); updating prev at end-of-iter would
+                 * miss the -1→valid transition that actually
+                 * happens AFTER start_round but BEFORE the next
+                 * MATCH iter. */
+                prev_local_mech_n = game.world.local_mech_id;
+                /* Build input + simulate. Use the script-provided aim
+                 * point if any; otherwise default to "200 px right of
+                 * local mech chest" so the mech faces predictably. */
+                Vec2 aim;
+                if (aim_set_n) {
+                    aim = (Vec2){ aim_world_x_n, aim_world_y_n };
+                } else if (game.world.local_mech_id >= 0) {
+                    Vec2 cp = mech_chest_pos(&game.world, game.world.local_mech_id);
+                    aim = (Vec2){ cp.x + 200.0f, cp.y };
+                } else {
+                    aim = (Vec2){0, 0};
+                }
+                ClientInput nin = {
+                    .buttons = held_n,
+                    .seq     = (uint16_t)(game.world.tick + 1),
+                    .aim_x   = aim.x, .aim_y = aim.y,
+                    .dt      = TICK_DT,
+                };
+                if (game.world.local_mech_id >= 0) {
+                    game.world.mechs[game.world.local_mech_id].latched_input = nin;
+                    game.world.mechs[game.world.local_mech_id].aim_world = aim;
+                }
+                if (game.net.role == NET_ROLE_CLIENT) {
+                    simulate_step(&game.world, TICK_DT);
+                    reconcile_push_input(&game.reconcile, nin);
+                    net_client_send_input(&game.net, nin);
+                    reconcile_tick_smoothing(&game.reconcile);
+                } else {
+                    simulate_step(&game.world, TICK_DT);
+                }
+                break;
+            }
+            case MODE_SUMMARY:
+                if (game.net.role == NET_ROLE_SERVER) shot_host_flow(&game, TICK_DT);
+                else                                   shot_client_tick(&game, TICK_DT);
+                /* Round ended → reset prev so next round_start
+                 * triggers a fresh teleport. local_mech_id may
+                 * still be the dead-mech id at this point; what
+                 * matters is the next MATCH transition starts from
+                 * "we have not yet teleported this round". */
+                prev_local_mech_n = -1;
+                break;
+            default: break;
+            }
+
+            /* Render. The renderer always draws the world frame
+             * inside one Begin/EndDrawing pair. We layer per-mode
+             * overlays via the overlay callback so everything lands
+             * in the same frame:
+             *   MATCH   → top score banner
+             *   SUMMARY → translucent panel + scoreboard
+             *   LOBBY   → no world overlay; lobby UI runs in a
+             *             separate pair afterward (the lobby is
+             *             chrome-only, the world frame underneath
+             *             is mostly empty).
+             * Doing two Begin/End pairs per frame double-presents
+             * and reads as flicker (M4 bug — see CURRENT_STATE), so
+             * we only do it for LOBBY where the underlying frame
+             * doesn't matter.
+             *
+             * Cursor: track the scripted aim point projected to
+             * screen so the rendered reticle visibly follows what
+             * the player is aiming at. Defaults to screen center
+             * when no aim is set. */
+            Vec2 cursor;
+            if (aim_set_n) {
+                Vector2 sc = GetWorldToScreen2D(
+                    (Vector2){ aim_world_x_n, aim_world_y_n },
+                    rd_n.camera);
+                cursor = (Vec2){ sc.x, sc.y };
+            } else {
+                cursor = (Vec2){ (float)s.window_w * 0.5f,
+                                 (float)s.window_h * 0.5f };
+            }
+            ShotOverlayCtx octx = { .game = &game, .ui = &ui_n };
+            RendererOverlayFn overlay = NULL;
+            if (game.mode == MODE_MATCH)   overlay = match_overlay_draw_thunk;
+            if (game.mode == MODE_SUMMARY) overlay = summary_overlay_draw_thunk;
+            renderer_draw_frame(&rd_n, &game.world,
+                                GetScreenWidth(), GetScreenHeight(),
+                                0.0f, cursor, overlay, &octx);
+            if (game.mode == MODE_LOBBY) {
+                BeginDrawing();
+                lobby_screen_run(&ui_n, &game,
+                                 GetScreenWidth(), GetScreenHeight());
+                EndDrawing();
+            }
+
+            /* Capture screenshots scheduled at this tick. */
+            bool grabbed = false;
+            Image shot = {0};
+            for (int j = 0; j < s.event_count; ++j) {
+                if (s.events[j].tick != tick) continue;
+                if (s.events[j].kind != EV_SHOT) continue;
+                if (!grabbed) { shot = LoadImageFromScreen(); grabbed = true; }
+                char path[512];
+                snprintf(path, sizeof(path), "%s/%s.png", s.out_dir, s.events[j].name);
+                if (ExportImage(shot, path)) {
+                    LOG_I("shotmode: tick %d → %s (mode=%s, mech=%d)",
+                          tick, path,
+                          game.mode == MODE_LOBBY   ? "LOBBY" :
+                          game.mode == MODE_MATCH   ? "MATCH" :
+                          game.mode == MODE_SUMMARY ? "SUMMARY" : "?",
+                          game.world.local_mech_id);
+                    shots_taken_n++;
+                } else {
+                    LOG_E("shotmode: ExportImage failed for %s", path);
+                }
+            }
+            if (grabbed) UnloadImage(shot);
+        }
+
+        LOG_I("shotmode: networked done. ticks=%llu shots=%d (mode=%s, role=%s)",
+              (unsigned long long)game.world.tick, shots_taken_n,
+              game.mode == MODE_LOBBY ? "LOBBY" :
+              game.mode == MODE_MATCH ? "MATCH" :
+              game.mode == MODE_SUMMARY ? "SUMMARY" : "?",
+              game.net.role == NET_ROLE_SERVER ? "host" :
+              game.net.role == NET_ROLE_CLIENT ? "client" : "offline");
+        if (s.make_contact && shots_taken_n > 0) {
+            build_contact_sheet(&s);
+        }
+        net_close(&game.net);
+        net_shutdown();
+        decal_shutdown();
+        platform_shutdown();
+        game_shutdown(&game);
+        free(s.events);
+        free(s.lerps);
+        g_shot_mode = 0;
+        return EXIT_SUCCESS;
     }
 
     seed_world(&game, &s);

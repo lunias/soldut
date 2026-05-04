@@ -1,0 +1,10 @@
+# UI audit — client side.
+window 1280 720
+out build/shots/net/ui_client
+network connect 127.0.0.1:24021
+name ClientB
+
+at  60 shot lobby_2p
+at 200 shot match
+at 750 shot summary
+at 800 end

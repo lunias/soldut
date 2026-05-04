@@ -5,7 +5,7 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-03** (M3 combat depth in).
+Last updated: **2026-05-03** (M4 lobby & matches in).
 
 ---
 
@@ -17,29 +17,65 @@ Last updated: **2026-05-03** (M3 combat depth in).
 | **M1**    | Playable end-to-end. B1, B3, B4, B5, B6, B7 fixed 2026-05-03. Close-delay fixed same day. |
 | **M2**    | Foundation lands 2026-05-03. Host/client handshake works locally; per-tick input ship + 30 Hz snapshot broadcast + client-side prediction & replay + per-mech bone history for hitscan lag compensation are wired. LAN-only, full snapshots, no mid-tick interpolation of remote mechs (see TRADE_OFFS.md). Two-laptop bake test still pending. |
 | **M3**    | Combat depth in 2026-05-03. All 5 chassis (Trooper / Scout / Heavy / Sniper / Engineer) with passives. All 8 primaries (Pulse Rifle, Plasma SMG, Riot Cannon, Rail Cannon, Auto-Cannon, Mass Driver, Plasma Cannon, Microgun) and 6 secondaries (Sidearm, Burst SMG, Frag Grenades, Micro-Rockets, Combat Knife, Grappling Hook). Projectile pool with bone + tile collision. Explosions: damage falloff, line-of-sight check, impulse to ragdolls. Per-limb HP and dismemberment of all 5 limbs. Recoil + bink + self-bink fully wired. Friendly-fire toggle (`--ff` server flag). Kill feed with HEADSHOT/GIB/OVERKILL/RAGDOLL/SUICIDE flags. Loadout via CLI flags (`--chassis`, `--primary`, `--secondary`, `--armor`, `--jetpack`). Snapshot wire format widened to carry chassis/armor/jet/secondary; protocol id bumped to `S0LE`. |
+| **M4**    | Lobby & matches in 2026-05-03. Game flow is now title → browser → lobby → countdown → match → summary → next lobby. New modules: `match.{h,c}`, `lobby.{h,c}`, `lobby_ui.{h,c}`, `ui.{h,c}` (small immediate-mode raylib UI helpers, scale-aware for 4K), `config.{h,c}` (`soldut.cfg` key=value parser), `maps.{h,c}` (Foundry / Slipstream / Reactor — three code-built maps for the rotation; `.lvl` loader is M5). LOBBY-channel messages (player list with `mech_id`, slot delta, loadout, ready, team change, chat, vote, kick/ban, countdown, round start/end, match state). Server config file: port, max_players, mode, score_limit, time_limit, friendly_fire, auto_start_seconds, map_rotation, mode_rotation. Single-player flow auto-hosts an offline server and arms a 1s countdown. Protocol id bumped `S0LE` → `S0LF`. Network test scaffold under `tests/net/` runs the host/client end-to-end via real ENet loopback and asserts on log-line milestones. |
 
 ---
 
-## Networking modes (M2)
+## Game flow (M4)
 
-`./soldut` opens single-player tutorial as before. New entry points:
+`./soldut` opens at the **title screen**. Main paths:
 
-- `./soldut --host [PORT]` — runs an authoritative server on UDP
-  port `PORT` (default `23073`) plus a local client. Other players
-  connect with `--connect`. The host plays as mech id 0; remote
-  joiners get sequential mech ids starting at 2 (mech 1 is the
-  M1 dummy on the host's side).
-- `./soldut --connect HOST[:PORT] [--name NAME]` — joins a server.
-  Connection flow: ENet low-level handshake → `CONNECT_REQUEST` →
-  `CHALLENGE`(nonce, token) → `CHALLENGE_RESPONSE` → `ACCEPT` →
-  `INITIAL_STATE`. Client then ships one `ClientInput` per sim tick
-  (60 Hz, on `STATE` channel unreliable) and applies snapshots as
-  they arrive (30 Hz default broadcast).
+- **Single Player** — bootstraps an offline-solo "server" (no
+  network), seats the player in slot 0, and arms a 1-second
+  auto-start. Round runs against an empty map; useful for testing
+  movement/jets in isolation. (A practice dummy is M5 alongside
+  pickups.)
+- **Host Server** — opens a real ENet server on `cfg.port` (default
+  23073), seats the host in slot 0, sits in the lobby waiting for
+  joiners. Auto-arms the round countdown when ≥2 active slots are
+  filled (or a host clicks "Start now").
+- **Browse Servers** — broadcasts a `DISCOVERY_QUERY` to
+  255.255.255.255:DEFAULT_PORT+1; servers reply with a
+  `DISCOVERY_REPLY` carrying name + port + player count. Refresh
+  every 5 s (or via the Refresh button). Click a row → Connect.
+- **Direct Connect** — text input for host:port → connect.
 
-A discovery socket at `PORT+1` answers `DISCOVERY_QUERY` broadcasts
-with a `DISCOVERY_REPLY`. `net_discover_lan` sends the broadcast;
-`net_discover_drain` returns whatever has arrived. There's no UI for
-this yet — the helpers exist, ready for M4 lobby work.
+CLI shortcuts (skip title screen):
+
+- `./soldut --host [PORT]` — go straight to host lobby.
+- `./soldut --connect HOST[:PORT] [--name NAME]` — go straight to
+  client lobby.
+- `./soldut --chassis Heavy --primary "Mass Driver" ...` — pre-fill
+  the loadout for the local slot.
+
+Server config: drop a `soldut.cfg` next to the binary —
+key=value pairs (port, max_players, mode, score_limit, time_limit,
+friendly_fire, auto_start_seconds, map_rotation, mode_rotation).
+CLI flags override the file.
+
+## Networking (M2 + M4)
+
+Connection flow:
+ENet handshake → `CONNECT_REQUEST` → `CHALLENGE`(nonce, token) →
+`CHALLENGE_RESPONSE` → `ACCEPT`(client_id, **slot_id**) →
+`INITIAL_STATE`(lobby table + match state). Client transitions to
+`MODE_LOBBY`. Mechs aren't spawned until `LOBBY_ROUND_START`
+broadcasts; from then on the 30 Hz snapshot stream flows on the
+`STATE` channel.
+
+LOBBY-channel messages (`net.h` enum 20–33):
+- `LOBBY_LIST` — full slot table (server → all)
+- `LOBBY_SLOT_UPDATE` — one slot delta
+- `LOBBY_LOADOUT` — pick chassis/weapons/armor/jet (client → server)
+- `LOBBY_READY` — toggle ready
+- `LOBBY_TEAM_CHANGE` — pick team (FFA forces team 1)
+- `LOBBY_CHAT` — bidirectional, server scrubs + rate-limits
+- `LOBBY_MAP_VOTE` — pick A/B/C
+- `LOBBY_VOTE_STATE` — server → client current tally
+- `LOBBY_KICK` / `LOBBY_BAN` — host-only commands
+- `LOBBY_COUNTDOWN` — server → client auto-start tick
+- `LOBBY_ROUND_START` / `LOBBY_ROUND_END` — phase transitions
+- `LOBBY_MATCH_STATE` — current MatchState (mode/map/limits)
 
 The first `--host` + `--connect 127.0.0.1` round-trip on the same
 machine completes in <100 ms in playtest. Two mechs in one window
@@ -146,6 +182,61 @@ The 30-second loop the M1 milestone calls for ("run, jet, shoot the
 dummy until it falls apart — and grin") is reachable.
 
 ---
+
+## Network smoke tests (M4)
+
+`tests/net/run.sh` and `tests/net/run_3p.sh` spawn `./soldut --host`
+and `./soldut --connect` as background processes against a real
+loopback ENet socket. They wait for the lobby/match flow to play
+through (auto_start → countdown → round → end) and assert on key
+log-line milestones — e.g. "client resolves local_mech_id → 1".
+The scripts always reap their child processes via a `trap cleanup
+EXIT` so a half-finished test never leaves an orphan window on the
+desktop.
+
+Run:
+```
+./tests/net/run.sh        # 1 host + 1 client, FFA, 1 round → 13 assertions
+./tests/net/run_3p.sh     # 1 host + 2 clients, TDM, 1 round → 10 assertions
+./tests/net/run.sh -k     # keep tmp dirs (/tmp/soldut-net-XXX) for inspection
+```
+
+This is the test that caught the M4 black-screen-on-client bug
+(`lobby_decode_list` was clobbering the just-decoded `mech_id`
+back to -1 — see "Recently fixed" below).
+
+## Networked SHOT tests (paired host+client screenshots)
+
+`tests/shots/net/run.sh <name>` orchestrates a host shot script
++ a client shot script, both connecting via ENet loopback, both
+writing PNG screenshots from their own perspective. Lets you
+visually verify what each player's screen looked like at the
+same moment.
+
+Available test pairs:
+- `2p_basic`     — sit in lobby + match + summary; FFA, no movement
+- `2p_motion`    — host walks RIGHT + jets, client walks LEFT, they
+                   meet near map center (verifies snapshots flow)
+- `2p_countdown` — captures the lobby with countdown banner active
+                   for host vs client comparison
+- `ui_audit`     — clean screenshots of lobby / match / summary at
+                   1280×720 for visual regression review
+
+Outputs land in `build/shots/net/{host,client}/<name>.png` plus a
+contact-sheet `sheet.png` that composes all named screenshots into
+one image. The shot script syntax adds `network host PORT` and
+`network connect HOST:PORT` directives to the existing shotmode
+grammar — see `src/shotmode.h` for the full reference.
+
+Run:
+```
+./tests/shots/net/run.sh 2p_basic
+./tests/shots/net/run.sh 2p_motion
+./tests/shots/net/run.sh ui_audit
+```
+
+The driver always reaps its children, so test runs don't leave
+orphan windows.
 
 ## Headless test
 
@@ -404,6 +495,207 @@ re-runs are byte-identical.
 ---
 
 ## Recently fixed
+
+### M4 — "black screen on client during match" (FIXED 2026-05-03)
+
+Reported by the user after the first M4 ship. Both players reach the
+lobby, both ready up, the round starts on the host, but the client
+shows a black screen with no mech to follow.
+
+Three compounding bugs:
+
+1. **`lobby_decode_list` clobbered the just-decoded `mech_id`.** After
+   `decode_one_slot` correctly populated `s->mech_id` from the wire,
+   the next line stomped it back to -1 (a copy-paste from the
+   pre-decode wipe loop). Net result: the client's lobby slots always
+   showed `mech_id = -1`, even after the host shipped the mapping.
+2. **`mech_id` was never on the LobbySlot wire format.** The ACCEPT
+   handshake carries `slot_id`, but `world.mechs[]` indices are
+   independent of slot ids when slots in the middle are unused. The
+   client had no way to resolve "which snapshot mech is mine."
+3. **`start_round` didn't broadcast the freshly-spawned mech_ids.**
+   Even if the wire had carried mech_id, the host needed to ship the
+   updated lobby table after `lobby_spawn_round_mechs` and *before*
+   the snapshot stream began.
+
+Fixes:
+
+- Added `mech_id` to `LOBBY_SLOT_WIRE_BYTES` (now 40 bytes/slot).
+- Removed the bogus reset in `lobby_decode_list`.
+- `start_round` now ships `lobby_list` first, then `round_start`,
+  both reliable on `NET_CH_LOBBY` (so they arrive in order).
+- Per-frame check at the top of MODE_MATCH late-binds
+  `world.local_mech_id` from `lobby.slots[local_slot].mech_id`
+  once the corresponding mech actually shows up in the local
+  snapshot.
+
+The `tests/net/run.sh` script catches this regression — assertion
+"client resolves local_mech_id → 1 (slot 1)" specifically watches for
+the late-bind log line.
+
+### M4 — "no Start button when both players ready" (FIXED 2026-05-03)
+
+`server_handle_challenge_response` auto-armed a 60 s countdown when
+the second peer joined. When both players hit Ready, the
+`if (lobby_all_ready && !auto_start_active)` short-circuit skipped
+re-arming, so the existing 60 s timer kept running. The "Start now"
+button still showed but it read "Cancel start" with the long
+countdown still ticking. Confusing.
+
+Fix in `host_match_flow_step`: when all slots are ready, override the
+remaining countdown to 3 s (only down, never up). Players who stayed
+ready can now expect the round to start within 3 s of the last person
+clicking Ready.
+
+### M4 — server dropped ALL client inputs (FIXED 2026-05-03)
+
+This was the actual root cause of the user's reported "extreme
+client jitter" + "mouse pulls me around" + "client and server show
+different states." Initial fixes (snapshot velocity sync, remote
+mech lerp) helped but didn't address the root: **inputs from the
+client were being silently dropped on the server**.
+
+Diagnostic chain:
+1. User reported jitter still present after the velocity-sync fix.
+2. Built `tests/shots/net/2p_meet.{host,client}.shot` where both
+   players walk toward each other to verify they actually meet.
+3. Inspecting host log: client's mech (slot 1) stayed pinned at
+   spawn x=2568 the entire match, while client's local prediction
+   moved it to x=2446. Client and server completely disagreed.
+4. Added one-shot logs to `net_client_send_input` and
+   `server_pump_events` — client WAS sending NET_MSG_INPUT
+   packets (~420 of them); host WAS receiving them (`type=3
+   tag=0x07`); but `server_handle_input` never logged.
+5. First line of `server_handle_input`:
+   ```c
+   if (p->state != NET_PEER_ACTIVE || p->mech_id < 0) return;
+   ```
+   `p->mech_id` was -1. Grepped for assignments — only set to -1
+   in handshake; **never updated when the round starts**.
+
+Why it broke specifically at M4: M2/M3 spawned the peer's mech at
+challenge response (so `p->mech_id` was set immediately). M4
+deferred mech spawn to round-start (mechs don't exist during
+lobby), and `lobby_spawn_round_mechs` set `slot.mech_id` (the
+LOBBY slot's mech_id) but nobody updated `p->mech_id` (the PEER
+struct's mech_id).
+
+Fix in `server_handle_input`: lazy-resolve `p->mech_id` from the
+lobby slot the first time we see an input that arrives with
+`p->mech_id == -1`.
+
+```c
+if (p->mech_id < 0) {
+    int slot = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
+    if (slot >= 0 && g->lobby.slots[slot].mech_id >= 0) {
+        p->mech_id = g->lobby.slots[slot].mech_id;
+    }
+}
+if (p->mech_id < 0) return;
+```
+
+Visible after the fix: `tests/shots/net/2p_meet`'s `meet_t580.png`
+now shows both mechs side-by-side from each player's perspective —
+the test that was specifically designed to make this bug visible.
+
+### M4 — match.time_remaining frozen on client (FIXED 2026-05-03)
+
+Spotted in the same `meet_t580.png` comparison: host's score
+banner read "0s", client's read "8s" (= round-start value).
+`match_state` is broadcast on round transitions only, never during
+the active round, so the client's `time_remaining` was frozen at
+whatever value `LOBBY_ROUND_START` carried. Fix: client locally
+decays `match.time_remaining` each tick during MATCH_PHASE_ACTIVE
+(same pattern we already used for `auto_start_remaining` and
+`countdown_remaining`).
+
+### M4 — extreme client-side jitter (FIXED 2026-05-03)
+
+User report: "extremely jittery play on the client which cleared
+up when I closed the host window." Two compounding bugs in
+`snapshot_apply`:
+
+1. **Velocity-sync was pelvis-only.** The translate set `prev = pos
+   + delta` for all 16 particles (preserving each particle's old
+   velocity), then `physics_set_velocity_*` overrode ONLY the
+   pelvis velocity from the snapshot. Result: pelvis moving at v_p,
+   neck/head/arms/legs all at their previous velocities — the
+   constraint solver burned a few iterations every snapshot trying
+   to reconcile the velocity mismatch, which the user saw as
+   per-tick body shudder. Fix: set per-tick velocity on EVERY
+   particle so the whole skeleton moves as a rigid unit.
+
+2. **Remote-mech corrections were a hard snap.** Each snapshot the
+   client snapped the remote pelvis to the server position. With
+   the host walking at 280 px/s, that's a ~9 px jump every 33 ms
+   (snapshot interval). Fix: smooth remote-mech corrections with a
+   35 % lerp toward the snapshot position; over 3-4 snapshots we
+   converge to the server state without the per-snapshot pop.
+   Local mech still snaps fully so client-side reconcile (in
+   reconcile.c) can replay unacked inputs from a known-truth
+   anchor.
+
+Diagnosed with `tests/shots/net/2p_jitter.{host,client}.shot`,
+which extends the per-tick `SHOT_LOG` dump in `simulate.c` to
+record EVERY mech's pelvis position (not just local), then
+inspected the client log for oscillation patterns. Pre-fix log:
+local pelvis bouncing 2528 ↔ 2568 (40-px swings); post-fix:
+stable around 2567-2568 with one ≤22 px transient on a single
+sample. See `tests/shots/net/run.sh 2p_jitter` to reproduce.
+
+This is a partial implementation of the "render remote mechs
+~100 ms in the past" interpolation called for in
+[05-networking.md](documents/05-networking.md) §4. The lerp is
+the cheap version; full snapshot-buffer interpolation lands
+later (see TRADE_OFFS.md).
+
+### M4 — visible-to-the-eye lobby UI bugs (FIXED 2026-05-03)
+
+User noticed:
+
+1. **Chat panel overlapping the loadout panel** — the chat panel
+   was sized to full window width but the loadout panel sits at
+   the right column from y=110 to y=506. Below `sh/2` they
+   collided in the right-most ~340 px. Fix: explicit two-column
+   layout (left: player list + chat; right: loadout + ready),
+   chat constrained to `left_w` so it stops short of the
+   loadout column.
+2. **Match-start countdown numbers desync between host/client.**
+   `NET_MSG_LOBBY_COUNTDOWN` was defined but never sent. The host
+   now broadcasts on arm/cancel transitions and refreshes every
+   0.5 s while active; the client decays its local `auto_start_
+   remaining` each frame so the displayed number ticks smoothly
+   between broadcasts. (See `host_broadcast_countdown_if_changed`
+   in main.c, plus the per-frame decay in `MODE_LOBBY` for clients.)
+3. **Mechs spawn on top of each other in FFA.** `MATCH_TEAM_FFA`
+   aliases `MATCH_TEAM_RED` (both = 1), so `map_spawn_point`
+   picked the red lanes (clustered at x=8..14) instead of the
+   FFA lanes (spread across x=16..88). Fix: `map_spawn_point`
+   now takes a `MatchModeId` arg and prefers the FFA lanes when
+   `mode == MATCH_MODE_FFA` regardless of team.
+4. **Lobby team chip read "Red" in FFA.** Same alias as above —
+   `team_name(1)` returned "Red". Added `team_name_for_mode`
+   that returns "FFA" when mode==FFA, plus a neutral-gray chip.
+5. **Summary screen had HUD ghosting.** The translucent
+   `(0,0,0,200)` panel let the HP bar / weapon labels bleed
+   through. Bumped to `(4,6,10,240)` plus routed the summary
+   overlay through the renderer's single Begin/EndDrawing pair
+   so we don't double-present (which would have shown the world
+   frame underneath the summary in alternating frames).
+
+### M4 — top banner flicker (FIXED 2026-05-03)
+
+The match score/timer banner was rendered in a *second*
+`BeginDrawing/EndDrawing` pair after the world frame, producing a
+present-swap-present sequence that alternated "world+HUD" and "stale
+buffer + banner only" frames. Same root cause hit `MODE_SUMMARY`.
+
+Fix: routed both overlays through the renderer's existing `overlay_cb`
+callback so each rendered frame uses exactly one Begin/EndDrawing
+pair. `OverlayCtx { Game *g; LobbyUIState *ui; }` packs both pieces
+the callbacks need into the single `void *user`.
+
+### Pre-M4 fixed bugs
 
 The M1 implementation pass shipped, then we played it. These are the
 real bugs we found and fixed, in chronological order — kept here so we

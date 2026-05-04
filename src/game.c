@@ -1,5 +1,8 @@
 #include "game.h"
+#include "config.h"
 #include "log.h"
+#include "lobby.h"
+#include "match.h"
 #include "particle.h"
 #include "projectile.h"
 
@@ -70,7 +73,19 @@ bool game_init(Game *g) {
     g->net.role = NET_ROLE_OFFLINE;
     g->net.discovery_socket = -1;
 
-    g->mode = MODE_LOBBY;
+    /* M4 lobby/match defaults. main.c overrides as needed before
+     * entering the run loop. */
+    config_defaults(&g->config);
+    lobby_init(&g->lobby, g->config.auto_start_seconds);
+    match_init(&g->match, g->config.mode, g->config.score_limit,
+               g->config.time_limit, g->config.friendly_fire);
+    g->local_slot_id  = -1;
+    g->round_counter  = 0;
+    g->pending_port   = SOLDUT_DEFAULT_PORT;
+    g->offline_solo   = false;
+    g->auto_start_single_player = false;
+
+    g->mode = MODE_BOOT;
     g->tick = 0;
     g->time_seconds = 0.0;
     LOG_I("game_init: ok (perm=%zu level=%zu frame=%zu, particles=%d, cstr=%d, fx=%d)",

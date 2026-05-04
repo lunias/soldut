@@ -1,12 +1,34 @@
 #define _POSIX_C_SOURCE 200809L
 
+/* Windows cross-build: ENet's win32.h pulls in windows.h via
+ * winsock2.h. windows.h then drags in wingdi.h (which declares
+ * `Rectangle` as a function) and winuser.h (which declares
+ * `CloseWindow` and `ShowCursor`). Our own headers transitively
+ * include raylib via math.h — raylib defines `Rectangle` as a
+ * struct typedef and `CloseWindow` / `ShowCursor` as functions
+ * with different signatures. Same TU = compile errors.
+ *
+ * NOGDI + NOUSER tell windows.h to skip wingdi.h + winuser.h, which
+ * we don't need from this file (net code touches sockets, not GDI
+ * or user input). WIN32_LEAN_AND_MEAN trims the rest of the
+ * less-used windows.h surface for faster compilation.
+ *
+ * On non-Windows builds these macros are no-ops (windows.h isn't
+ * included at all). */
+#define WIN32_LEAN_AND_MEAN
+#define NOGDI
+#define NOUSER
+
 #include "net.h"
 
 #include "decal.h"
 #include "game.h"
 #include "hash.h"
 #include "level.h"
+#include "lobby.h"
 #include "log.h"
+#include "match.h"
+#include "maps.h"
 #include "mech.h"
 #include "reconcile.h"
 #include "snapshot.h"
@@ -406,28 +428,18 @@ static void send_accept(void *peer, uint32_t client_id, int mech_id,
                  buf, (int)(p - buf));
 }
 
-/* ACCEPT is followed by INITIAL_STATE which carries the full snapshot
- * + level info needed to bootstrap the client. */
-static void send_initial_state(void *peer, World *w) {
-    SnapshotFrame snap;
-    snapshot_capture(w, &snap, /*ack_input_seq*/0);
-
-    enum { CAP = 4 + 4 + SNAPSHOT_HEADER_WIRE_BYTES +
-                  MAX_MECHS * (ENTITY_SNAPSHOT_WIRE_BYTES + 2) };
+/* ACCEPT is followed by INITIAL_STATE which carries the lobby slot
+ * table + match state so the client can render the lobby UI. The
+ * world snapshot stream begins only at ROUND_START — clients don't
+ * need world geometry until then. */
+static void send_initial_state(void *peer, const Game *g) {
+    enum { CAP = 4 + LOBBY_LIST_WIRE_BYTES + MATCH_SNAPSHOT_WIRE_BYTES };
     uint8_t buf[CAP];
     uint8_t *p = buf;
     w_u8 (&p, NET_MSG_INITIAL_STATE);
-    w_u32(&p, SOLDUT_PROTOCOL_ID);   /* echo so version mismatches show twice */
-    w_u32(&p, (uint32_t)w->level.width);
-    w_u32(&p, (uint32_t)w->level.height);
-    w_u32(&p, (uint32_t)w->level.tile_size);
-    int snap_room = (int)(sizeof buf - (p - buf));
-    int n = snapshot_encode(&snap, NULL, p, snap_room);
-    if (n <= 0) {
-        LOG_E("send_initial_state: snapshot did not fit");
-        return;
-    }
-    p += n;
+    w_u32(&p, SOLDUT_PROTOCOL_ID);            /* echo so version errors show twice */
+    lobby_encode_list(&g->lobby, p);          p += LOBBY_LIST_WIRE_BYTES;
+    match_encode     (&g->match, p);          p += MATCH_SNAPSHOT_WIRE_BYTES;
     enet_send_to(peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
                  buf, (int)(p - buf));
 }
@@ -496,42 +508,190 @@ static void server_handle_challenge_response(NetState *ns, NetPeer *p,
         return;
     }
 
-    /* Spawn a mech for this peer on the authoritative world. */
-    World *w = &g->world;
-    if (w->mech_count >= MAX_MECHS) {
+    /* Bans persist; reject early so we don't churn slots. */
+    if (lobby_is_banned(&g->lobby, p->remote_addr_host, p->name)) {
+        LOG_I("server: peer %u banned — rejecting", (unsigned)p->client_id);
+        send_reject(p->enet_peer, NET_REJECT_BAD_NONCE);
+        enet_peer_disconnect_later((ENetPeer *)p->enet_peer, 0);
+        return;
+    }
+
+    /* M4 join flow: place the peer in a lobby slot. The mech is
+     * spawned only at ROUND_START. */
+    int slot = lobby_add_slot(&g->lobby, (int)p->client_id, p->name,
+                              /*is_host*/false);
+    if (slot < 0) {
         send_reject(p->enet_peer, NET_REJECT_SERVER_FULL);
         enet_peer_disconnect_later((ENetPeer *)p->enet_peer, 0);
         return;
     }
-    /* Spawn position: derive from a simple offset of the existing
-     * spawn pattern. We let mech_create handle pool reservation; the
-     * physical spawn coords are pulled from main.c's seed_world
-     * tutorial layout. (See main.c). For M2 we hand each new client
-     * a slot near the player spawn with a small offset. */
-    extern Vec2 net_default_spawn_for_slot(World *w, int peer_index);
-    Vec2 spawn = net_default_spawn_for_slot(w, (int)p->client_id);
-    int mid = mech_create(w, CHASSIS_TROOPER, spawn,
-                          /*team*/2, /*is_dummy*/false);
-    if (mid < 0) {
-        send_reject(p->enet_peer, NET_REJECT_SERVER_FULL);
-        enet_peer_disconnect_later((ENetPeer *)p->enet_peer, 0);
-        return;
-    }
-    p->mech_id = mid;
+    p->mech_id = -1;             /* assigned at round start */
     p->state   = NET_PEER_ACTIVE;
 
-    LOG_I("server: ACCEPT peer %u → mech %d (spawn %.0f,%.0f)",
-          (unsigned)p->client_id, mid, spawn.x, spawn.y);
+    LOG_I("server: ACCEPT peer %u → lobby slot %d (name='%s')",
+          (unsigned)p->client_id, slot, p->name);
+
+    /* Auto-arm the start countdown once we have at least 2 slots
+     * (host + 1 joiner) — gives players an upper bound on lobby
+     * idling. The host can still hit Ready to start sooner. */
+    int active = 0;
+    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i)
+        if (g->lobby.slots[i].in_use && g->lobby.slots[i].team != MATCH_TEAM_NONE) active++;
+    if (active >= 2 && !g->lobby.auto_start_active &&
+        g->match.phase == MATCH_PHASE_LOBBY)
+    {
+        lobby_auto_start_arm(&g->lobby, g->lobby.auto_start_default);
+    }
+
+    /* Friendly system message in chat. */
+    char welcome[64];
+    snprintf(welcome, sizeof welcome, "%s joined the lobby", p->name);
+    lobby_chat_system(&g->lobby, welcome);
 
     uint32_t srv_ms = (uint32_t)(ns->server_time * 1000.0);
-    send_accept(p->enet_peer, p->client_id, mid, srv_ms, w->tick);
-    send_initial_state(p->enet_peer, w);
+    send_accept(p->enet_peer, p->client_id, slot, srv_ms, g->world.tick);
+    send_initial_state(p->enet_peer, g);
+
+    /* The next net_poll iteration will run the dirty-broadcast pass
+     * (lobby state changed); that ships the joined slot to existing
+     * peers. */
+    g->lobby.dirty = true;
+}
+
+/* ---- Server LOBBY-channel handlers -------------------------------- */
+
+static void server_handle_lobby_loadout(NetPeer *p, const uint8_t *body,
+                                        int blen, Game *g)
+{
+    if (blen < 5) return;
+    int slot = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
+    if (slot < 0) return;
+    /* Valid in lobby/countdown/summary; ignored once a round is active. */
+    if (g->match.phase == MATCH_PHASE_ACTIVE) return;
+    const uint8_t *r = body;
+    MechLoadout lo = {0};
+    lo.chassis_id   = (int)r_u8(&r);
+    lo.primary_id   = (int)r_u8(&r);
+    lo.secondary_id = (int)r_u8(&r);
+    lo.armor_id     = (int)r_u8(&r);
+    lo.jetpack_id   = (int)r_u8(&r);
+    /* Clamp ids so a malicious or stale client can't crash us. */
+    if (lo.chassis_id < 0 || lo.chassis_id >= CHASSIS_COUNT) lo.chassis_id = CHASSIS_TROOPER;
+    if (lo.primary_id < 0 || lo.primary_id >= WEAPON_COUNT)  lo.primary_id = WEAPON_PULSE_RIFLE;
+    if (lo.secondary_id < 0 || lo.secondary_id >= WEAPON_COUNT) lo.secondary_id = WEAPON_SIDEARM;
+    if (lo.armor_id < 0 || lo.armor_id >= ARMOR_COUNT)       lo.armor_id    = ARMOR_LIGHT;
+    if (lo.jetpack_id < 0 || lo.jetpack_id >= JET_COUNT)     lo.jetpack_id  = JET_STANDARD;
+    lobby_set_loadout(&g->lobby, slot, lo);
+}
+
+static void server_handle_lobby_ready(NetPeer *p, const uint8_t *body,
+                                      int blen, Game *g)
+{
+    if (blen < 1) return;
+    int slot = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
+    if (slot < 0) return;
+    if (g->match.phase != MATCH_PHASE_LOBBY &&
+        g->match.phase != MATCH_PHASE_SUMMARY) return;
+    bool ready = body[0] ? true : false;
+    lobby_set_ready(&g->lobby, slot, ready);
+}
+
+static void server_handle_lobby_team(NetPeer *p, const uint8_t *body,
+                                     int blen, Game *g)
+{
+    if (blen < 1) return;
+    int slot = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
+    if (slot < 0) return;
+    if (g->match.phase != MATCH_PHASE_LOBBY &&
+        g->match.phase != MATCH_PHASE_SUMMARY) return;
+    int team = (int)body[0];
+    if (team < 0 || team >= MATCH_TEAM_COUNT) return;
+    /* In FFA mode, force everyone to team 1. */
+    if (g->match.mode == MATCH_MODE_FFA && team != MATCH_TEAM_NONE) team = MATCH_TEAM_FFA;
+    lobby_set_team(&g->lobby, slot, team);
+}
+
+static void server_handle_lobby_chat(NetState *ns, NetPeer *p,
+                                     const uint8_t *body, int blen, Game *g)
+{
+    if (blen < 1) return;
+    int slot = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
+    if (slot < 0) return;
+    char text[LOBBY_CHAT_BYTES] = {0};
+    int n = blen < LOBBY_CHAT_BYTES - 1 ? blen : LOBBY_CHAT_BYTES - 1;
+    memcpy(text, body, (size_t)n);
+    text[n] = '\0';
+    if (lobby_chat_post(&g->lobby, slot, text, ns->server_time)) {
+        /* Fan out to all peers. */
+        const LobbyChatLine *line = &g->lobby.chat[(g->lobby.chat_count - 1) % LOBBY_CHAT_LINES];
+        net_server_broadcast_chat(ns, line->sender_slot, line->sender_team,
+                                  line->text);
+    }
+}
+
+static void server_handle_lobby_vote(NetState *ns, NetPeer *p,
+                                     const uint8_t *body, int blen, Game *g)
+{
+    if (blen < 1) return;
+    int slot = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
+    if (slot < 0) return;
+    int choice = (int)body[0];
+    if (choice < 0 || choice > 2) return;
+    lobby_vote_cast(&g->lobby, slot, choice);
+    net_server_broadcast_vote_state(ns, &g->lobby);
+}
+
+static void server_handle_lobby_kick_or_ban(NetState *ns, NetPeer *p,
+                                            const uint8_t *body, int blen,
+                                            Game *g, bool ban)
+{
+    (void)ns;
+    if (blen < 1) return;
+    int requester = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
+    if (requester < 0) return;
+    if (!g->lobby.slots[requester].is_host) {
+        LOG_W("server: non-host slot %d tried to %s", requester, ban ? "ban" : "kick");
+        return;
+    }
+    int target = (int)body[0];
+    LobbySlot *ts = lobby_slot(&g->lobby, target);
+    if (!ts || ts->is_host) return;       /* can't kick the host */
+    if (ban) lobby_ban_addr(&g->lobby, 0, ts->name);
+    /* Disconnect the corresponding peer. */
+    if (ts->peer_id >= 0) {
+        for (int i = 0; i < NET_MAX_PEERS; ++i) {
+            if (g->net.peers[i].state == NET_PEER_FREE) continue;
+            if ((int)g->net.peers[i].client_id == ts->peer_id) {
+                enet_peer_disconnect_later((ENetPeer *)g->net.peers[i].enet_peer, 0);
+                break;
+            }
+        }
+    }
+    /* Slot will be freed by the DISCONNECT event; chat the news. */
+    char msg[80];
+    snprintf(msg, sizeof msg, "%s was %s by host", ts->name, ban ? "banned" : "kicked");
+    lobby_chat_system(&g->lobby, msg);
 }
 
 static void server_handle_input(NetState *ns, NetPeer *p,
                                 const uint8_t *body, int blen, Game *g)
 {
-    if (p->state != NET_PEER_ACTIVE || p->mech_id < 0) return;
+    if (p->state != NET_PEER_ACTIVE) return;
+    /* Lazy mech_id resolution. p->mech_id is set to -1 at handshake
+     * because the mech doesn't exist yet (it's spawned at round
+     * start). The peer's mech is owned by its lobby slot, which gets
+     * mech_id assigned by lobby_spawn_round_mechs. We resolve here on
+     * every input — cheap (single linear walk over 32 slots) and
+     * keeps net.c from needing a "after-spawn" hook into the host's
+     * match-flow controller. Without this, server_handle_input
+     * early-returned forever and remote players couldn't move. */
+    if (p->mech_id < 0) {
+        int slot = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
+        if (slot >= 0 && g->lobby.slots[slot].mech_id >= 0) {
+            p->mech_id = g->lobby.slots[slot].mech_id;
+        }
+    }
+    if (p->mech_id < 0) return;
     if (blen < 12) return;
     const uint8_t *r = body;
     uint16_t seq     = r_u16(&r);
@@ -592,51 +752,135 @@ static void client_handle_accept(NetState *ns, const uint8_t *body, int blen) {
 static void client_handle_initial_state(NetState *ns, const uint8_t *body,
                                         int blen, Game *g)
 {
-    if (blen < 16) return;
+    if (blen < 4 + LOBBY_LIST_WIRE_BYTES + MATCH_SNAPSHOT_WIRE_BYTES) {
+        LOG_E("client: INITIAL_STATE too short (%d)", blen);
+        return;
+    }
     const uint8_t *r = body;
     uint32_t proto = r_u32(&r);
-    uint32_t lw    = r_u32(&r);
-    uint32_t lh    = r_u32(&r);
-    uint32_t lt    = r_u32(&r);
     if (proto != SOLDUT_PROTOCOL_ID) {
         LOG_E("client: INITIAL_STATE protocol mismatch");
         return;
     }
+    lobby_decode_list(&g->lobby, r);    r += LOBBY_LIST_WIRE_BYTES;
+    match_decode    (&g->match, r);     r += MATCH_SNAPSHOT_WIRE_BYTES;
 
-    /* Build the level locally (M2 uses the hard-coded tutorial map; we
-     * don't transfer geometry over the wire yet. The dimensions are
-     * sanity-checked.) */
-    if (g->world.level.tiles == NULL) {
-        level_build_tutorial(&g->world.level, &g->level_arena);
-        decal_init((int)level_width_px(&g->world.level),
-                   (int)level_height_px(&g->world.level));
-    }
-    if ((int)lw != g->world.level.width ||
-        (int)lh != g->world.level.height ||
-        (int)lt != g->world.level.tile_size)
-    {
-        LOG_W("client: INITIAL_STATE level dimensions disagree (server %ux%u, "
-              "client %dx%d) — proceeding anyway",
-              (unsigned)lw, (unsigned)lh,
-              g->world.level.width, g->world.level.height);
-    }
-
-    /* Decode the snapshot and apply. snapshot_apply spawns missing
-     * mechs and mirrors server state into our local world. */
-    int snap_blen = blen - 16;
-    SnapshotFrame snap;
-    if (!snapshot_decode(r, snap_blen, NULL, &snap)) {
-        LOG_E("client: INITIAL_STATE snapshot decode failed");
-        return;
-    }
-    snapshot_apply(&g->world, &snap);
-
-    g->world.local_mech_id = ns->local_mech_id_assigned;
+    /* Map will be built when ROUND_START arrives. For now we keep the
+     * world empty so the lobby UI has something to draw against. */
     g->world.authoritative = false;
-    ns->connected = true;
+    g->local_slot_id  = ns->local_mech_id_assigned;   /* repurposed: slot id */
+    g->world.local_mech_id = -1;
+    g->mode = MODE_LOBBY;
+
+    ns->connected   = true;
     ns->server.state = NET_PEER_ACTIVE;
-    LOG_I("client: INITIAL_STATE applied — entering match (local mech=%d)",
-          g->world.local_mech_id);
+    LOG_I("client: INITIAL_STATE applied — in lobby (local_slot=%d, "
+          "match_phase=%s map=%d)",
+          g->local_slot_id, match_phase_name(g->match.phase), g->match.map_id);
+}
+
+/* ---- M4 LOBBY-channel handlers (client side) -------------------- */
+
+static void client_handle_lobby_list(const uint8_t *body, int blen, Game *g) {
+    if (blen < LOBBY_LIST_WIRE_BYTES) return;
+    lobby_decode_list(&g->lobby, body);
+    /* One-line confirmation that the table arrived + our mech_id is
+     * resolved. Useful when diagnosing a black-screen / camera-doesn't-
+     * follow scenario; cheap (one log per state change on the server). */
+    if (g->local_slot_id >= 0) {
+        const LobbySlot *me = &g->lobby.slots[g->local_slot_id];
+        LOG_I("client: lobby_list received — slot %d mech_id=%d in_use=%d",
+              g->local_slot_id, me->mech_id, (int)me->in_use);
+    }
+}
+
+static void client_handle_lobby_slot_update(const uint8_t *body, int blen, Game *g) {
+    if (blen < LOBBY_SLOT_DELTA_WIRE_BYTES) return;
+    lobby_decode_slot(&g->lobby, body);
+}
+
+static void client_handle_lobby_chat(const uint8_t *body, int blen, Game *g) {
+    if (blen < LOBBY_CHAT_WIRE_BYTES) return;
+    int idx = g->lobby.chat_count % LOBBY_CHAT_LINES;
+    LobbyChatLine *line = &g->lobby.chat[idx];
+    lobby_decode_chat_line(line, body);
+    g->lobby.chat_count++;
+}
+
+static void client_handle_match_state(const uint8_t *body, int blen, Game *g) {
+    if (blen < MATCH_SNAPSHOT_WIRE_BYTES) return;
+    match_decode(&g->match, body);
+}
+
+static void client_handle_round_start(const uint8_t *body, int blen, Game *g) {
+    if (blen < MATCH_SNAPSHOT_WIRE_BYTES) return;
+    match_decode(&g->match, body);
+    /* Rebuild the level for the chosen map. Reset the level arena so
+     * we don't leak across rounds. */
+    arena_reset(&g->level_arena);
+    map_build((MapId)g->match.map_id, &g->world.level, &g->level_arena);
+    decal_init((int)level_width_px(&g->world.level),
+               (int)level_height_px(&g->world.level));
+    /* Pools cleared so the snapshot stream can spawn mechs from
+     * scratch. */
+    g->world.particles.count   = 0;
+    g->world.constraints.count = 0;
+    g->world.projectiles.count = 0;
+    g->world.mech_count        = 0;
+    g->world.local_mech_id     = -1;
+    g->mode = MODE_MATCH;
+    LOG_I("client: ROUND_START map=%d mode=%s",
+          g->match.map_id, match_mode_name(g->match.mode));
+}
+
+static void client_handle_round_end(const uint8_t *body, int blen, Game *g) {
+    if (blen < MATCH_SNAPSHOT_WIRE_BYTES) return;
+    match_decode(&g->match, body);
+    /* match.summary_remaining isn't on the wire (it's a host-side
+     * countdown). Reset the client's local copy to summary_default
+     * so the "Next round in N s" overlay starts from the correct
+     * value and ticks down via the per-frame decay in the
+     * MODE_SUMMARY case of the run loop. Without this, the client
+     * inherits whatever value it had before (often 0), and the
+     * countdown reads "0s" the entire summary. */
+    g->match.summary_remaining = g->match.summary_default;
+    g->mode = MODE_SUMMARY;
+    LOG_I("client: ROUND_END mvp=%d winner_team=%d (summary %.1fs)",
+          g->match.mvp_slot, g->match.winner_team,
+          (double)g->match.summary_remaining);
+}
+
+static void client_handle_countdown(const uint8_t *body, int blen, Game *g) {
+    if (blen < 5) return;
+    const uint8_t *r = body;
+    float remaining; uint32_t u = r_u32(&r); memcpy(&remaining, &u, 4);
+    uint8_t reason = r_u8(&r);
+    g->lobby.auto_start_remaining = remaining;
+    g->lobby.auto_start_active    = (remaining > 0.0f);
+    (void)reason;
+}
+
+static void client_handle_vote_state(const uint8_t *body, int blen, Game *g) {
+    /* 1 + 1 + 1 + 1 + 4 + 4 + 4 + 4 = 19 bytes (active, a, b, c, ma, mb, mc, remaining_q). */
+    if (blen < 19) return;
+    const uint8_t *r = body;
+    uint8_t active = r_u8(&r);
+    uint8_t a      = r_u8(&r);
+    uint8_t b      = r_u8(&r);
+    uint8_t c      = r_u8(&r);
+    uint32_t ma    = r_u32(&r);
+    uint32_t mb    = r_u32(&r);
+    uint32_t mc    = r_u32(&r);
+    uint32_t rem_u = r_u32(&r);
+    float remaining; memcpy(&remaining, &rem_u, 4);
+    g->lobby.vote_active    = active ? true : false;
+    g->lobby.vote_map_a     = (a == 0xFFu) ? -1 : (int)a;
+    g->lobby.vote_map_b     = (b == 0xFFu) ? -1 : (int)b;
+    g->lobby.vote_map_c     = (c == 0xFFu) ? -1 : (int)c;
+    g->lobby.vote_mask_a    = ma;
+    g->lobby.vote_mask_b    = mb;
+    g->lobby.vote_mask_c    = mc;
+    g->lobby.vote_remaining = remaining;
 }
 
 static void client_handle_snapshot(NetState *ns, const uint8_t *body,
@@ -647,6 +891,13 @@ static void client_handle_snapshot(NetState *ns, const uint8_t *body,
     if (!snapshot_decode(body, blen, NULL, &snap)) {
         LOG_W("client: snapshot decode failed (%d bytes)", blen);
         return;
+    }
+    /* One-shot log so we can see snapshots are flowing. */
+    static int s_logged = 0;
+    if (!s_logged) {
+        s_logged = 1;
+        LOG_I("client: first snapshot — %d ents, mech_count=%d, local_slot=%d",
+              snap.ent_count, g->world.mech_count, g->local_slot_id);
     }
     /* The snapshot's ack_input_seq tells us how far the server has
      * processed our inputs. Hand off to reconcile, which will
@@ -849,9 +1100,21 @@ static void server_pump_events(NetState *ns, Game *g) {
                         server_handle_challenge_response(ns, p, body, blen, g); break;
                     case NET_MSG_INPUT:
                         server_handle_input(ns, p, body, blen, g); break;
-                    case NET_MSG_CHAT:
-                        /* Server forwards to all (M4 lobby work).
-                         * For M2 we accept and drop. */
+                    case NET_MSG_LOBBY_LOADOUT:
+                        server_handle_lobby_loadout(p, body, blen, g); break;
+                    case NET_MSG_LOBBY_READY:
+                        server_handle_lobby_ready(p, body, blen, g); break;
+                    case NET_MSG_LOBBY_TEAM_CHANGE:
+                        server_handle_lobby_team(p, body, blen, g); break;
+                    case NET_MSG_LOBBY_CHAT:
+                        server_handle_lobby_chat(ns, p, body, blen, g); break;
+                    case NET_MSG_LOBBY_MAP_VOTE:
+                        server_handle_lobby_vote(ns, p, body, blen, g); break;
+                    case NET_MSG_LOBBY_KICK:
+                        server_handle_lobby_kick_or_ban(ns, p, body, blen, g, false); break;
+                    case NET_MSG_LOBBY_BAN:
+                        server_handle_lobby_kick_or_ban(ns, p, body, blen, g, true); break;
+                    case NET_MSG_CHAT:   /* legacy in-match chat — fan out unscrubbed at M4 */
                         break;
                     default:
                         LOG_D("server: unhandled tag %u from peer %u",
@@ -865,12 +1128,20 @@ static void server_pump_events(NetState *ns, Game *g) {
                 NetPeer *p = (NetPeer *)ev.peer->data;
                 if (!p) p = server_find_peer(ns, ev.peer);
                 if (p) {
-                    LOG_I("server: peer %u (mech %d) disconnected",
-                          (unsigned)p->client_id, p->mech_id);
+                    int slot = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
+                    LOG_I("server: peer %u (slot %d, mech %d) disconnected",
+                          (unsigned)p->client_id, slot, p->mech_id);
                     /* Mark the mech dead so client snapshots reflect it. */
-                    if (p->mech_id >= 0) {
+                    if (p->mech_id >= 0 && p->mech_id < g->world.mech_count) {
                         Mech *m = &g->world.mechs[p->mech_id];
                         m->alive = false;
+                    }
+                    if (slot >= 0) {
+                        char msg[80];
+                        snprintf(msg, sizeof msg, "%s left",
+                                 g->lobby.slots[slot].name);
+                        lobby_chat_system(&g->lobby, msg);
+                        lobby_remove_slot(&g->lobby, slot);
                     }
                     server_free_peer(ns, p);
                 }
@@ -912,6 +1183,22 @@ static void client_dispatch_event(NetState *ns, Game *g, ENetEvent *ev) {
                     client_handle_snapshot(ns, body, blen, g); break;
                 case NET_MSG_KILL_EVENT:
                     client_handle_kill_event(ns, body, blen, g); break;
+                case NET_MSG_LOBBY_LIST:
+                    client_handle_lobby_list(body, blen, g); break;
+                case NET_MSG_LOBBY_SLOT_UPDATE:
+                    client_handle_lobby_slot_update(body, blen, g); break;
+                case NET_MSG_LOBBY_CHAT:
+                    client_handle_lobby_chat(body, blen, g); break;
+                case NET_MSG_LOBBY_MATCH_STATE:
+                    client_handle_match_state(body, blen, g); break;
+                case NET_MSG_LOBBY_ROUND_START:
+                    client_handle_round_start(body, blen, g); break;
+                case NET_MSG_LOBBY_ROUND_END:
+                    client_handle_round_end(body, blen, g); break;
+                case NET_MSG_LOBBY_COUNTDOWN:
+                    client_handle_countdown(body, blen, g); break;
+                case NET_MSG_LOBBY_VOTE_STATE:
+                    client_handle_vote_state(body, blen, g); break;
                 default:
                     LOG_D("client: unhandled tag %u", tag);
                     break;
@@ -944,11 +1231,22 @@ void net_poll(NetState *ns, Game *g, double dt_real) {
     if (ns->role == NET_ROLE_SERVER) {
         server_pump_events(ns, g);
 
-        /* Snapshot broadcast at SNAPSHOT_HZ. */
-        ns->snapshot_accum += dt_real;
-        while (ns->snapshot_accum >= ns->snapshot_interval) {
-            ns->snapshot_accum -= ns->snapshot_interval;
-            net_server_broadcast_snapshot(ns, &g->world);
+        /* If the lobby was mutated this frame, broadcast the new slot
+         * table reliably. Cheap at 32 players (~1.3 KB) and rare. */
+        if (g->lobby.dirty) {
+            net_server_broadcast_lobby_list(ns, &g->lobby);
+            g->lobby.dirty = false;
+        }
+
+        /* Snapshot broadcast — only during an active round. Clients in
+         * the lobby don't need world snapshots and broadcasting them
+         * during SUMMARY would tear down the corpses we want frozen. */
+        if (g->match.phase == MATCH_PHASE_ACTIVE) {
+            ns->snapshot_accum += dt_real;
+            while (ns->snapshot_accum >= ns->snapshot_interval) {
+                ns->snapshot_accum -= ns->snapshot_interval;
+                net_server_broadcast_snapshot(ns, &g->world);
+            }
         }
     } else if (ns->role == NET_ROLE_CLIENT) {
         client_pump_events(ns, g);
@@ -1048,11 +1346,172 @@ void net_get_stats(const NetState *ns, NetStats *out) {
     out->rtt_ms_max = worst;
 }
 
+/* ---- M4 broadcast helpers ----------------------------------------- */
+
+void net_server_broadcast_lobby_list(NetState *ns, const LobbyState *lobby) {
+    if (!ns || !lobby || ns->role != NET_ROLE_SERVER) return;
+    enum { CAP = 1 + LOBBY_LIST_WIRE_BYTES };
+    uint8_t buf[CAP];
+    buf[0] = NET_MSG_LOBBY_LIST;
+    lobby_encode_list(lobby, buf + 1);
+    ENetPacket *pkt = enet_packet_create(buf, CAP, ENET_PACKET_FLAG_RELIABLE);
+    enet_host_broadcast((ENetHost *)ns->enet_host, NET_CH_LOBBY, pkt);
+    ns->bytes_sent += CAP;
+    ns->packets_sent++;
+}
+
+void net_server_broadcast_chat(NetState *ns, int sender_slot, uint8_t team,
+                               const char *text)
+{
+    if (!ns || !text || ns->role != NET_ROLE_SERVER) return;
+    LobbyChatLine line = {0};
+    line.sender_slot = sender_slot;
+    line.sender_team = team;
+    snprintf(line.text, sizeof line.text, "%s", text);
+
+    enum { CAP = 1 + LOBBY_CHAT_WIRE_BYTES };
+    uint8_t buf[CAP];
+    buf[0] = NET_MSG_LOBBY_CHAT;
+    lobby_encode_chat_line(&line, buf + 1);
+    ENetPacket *pkt = enet_packet_create(buf, CAP, ENET_PACKET_FLAG_RELIABLE);
+    enet_host_broadcast((ENetHost *)ns->enet_host, NET_CH_LOBBY, pkt);
+    ns->bytes_sent += CAP;
+    ns->packets_sent++;
+}
+
+static void broadcast_match_state_tag(NetState *ns, const MatchState *m,
+                                      uint8_t tag)
+{
+    if (!ns || !m || ns->role != NET_ROLE_SERVER) return;
+    enum { CAP = 1 + MATCH_SNAPSHOT_WIRE_BYTES };
+    uint8_t buf[CAP];
+    buf[0] = tag;
+    match_encode(m, buf + 1);
+    ENetPacket *pkt = enet_packet_create(buf, CAP, ENET_PACKET_FLAG_RELIABLE);
+    enet_host_broadcast((ENetHost *)ns->enet_host, NET_CH_LOBBY, pkt);
+    ns->bytes_sent += CAP;
+    ns->packets_sent++;
+}
+
+void net_server_broadcast_round_start(NetState *ns, const MatchState *m) {
+    broadcast_match_state_tag(ns, m, NET_MSG_LOBBY_ROUND_START);
+}
+
+void net_server_broadcast_round_end(NetState *ns, const MatchState *m) {
+    broadcast_match_state_tag(ns, m, NET_MSG_LOBBY_ROUND_END);
+}
+
+void net_server_broadcast_match_state(NetState *ns, const MatchState *m) {
+    broadcast_match_state_tag(ns, m, NET_MSG_LOBBY_MATCH_STATE);
+}
+
+void net_server_broadcast_vote_state(NetState *ns, const LobbyState *lobby) {
+    if (!ns || !lobby || ns->role != NET_ROLE_SERVER) return;
+    /* 1 (tag) + 1+1+1+1 (active,a,b,c) + 4+4+4 (ma,mb,mc) + 4 (remaining). */
+    enum { CAP = 1 + 1 + 1 + 1 + 1 + 4 + 4 + 4 + 4 };
+    uint8_t buf[CAP];
+    uint8_t *p = buf;
+    w_u8(&p, NET_MSG_LOBBY_VOTE_STATE);
+    w_u8(&p, lobby->vote_active ? 1u : 0u);
+    w_u8(&p, lobby->vote_map_a < 0 ? 0xFFu : (uint8_t)lobby->vote_map_a);
+    w_u8(&p, lobby->vote_map_b < 0 ? 0xFFu : (uint8_t)lobby->vote_map_b);
+    w_u8(&p, lobby->vote_map_c < 0 ? 0xFFu : (uint8_t)lobby->vote_map_c);
+    w_u32(&p, lobby->vote_mask_a);
+    w_u32(&p, lobby->vote_mask_b);
+    w_u32(&p, lobby->vote_mask_c);
+    uint32_t u; memcpy(&u, &lobby->vote_remaining, 4);
+    w_u32(&p, u);
+    ENetPacket *pkt = enet_packet_create(buf, CAP, ENET_PACKET_FLAG_RELIABLE);
+    enet_host_broadcast((ENetHost *)ns->enet_host, NET_CH_LOBBY, pkt);
+    ns->bytes_sent += CAP;
+    ns->packets_sent++;
+}
+
+void net_server_broadcast_countdown(NetState *ns, float remaining,
+                                    uint8_t reason)
+{
+    if (!ns || ns->role != NET_ROLE_SERVER) return;
+    enum { CAP = 1 + 4 + 1 };
+    uint8_t buf[CAP];
+    uint8_t *p = buf;
+    w_u8(&p, NET_MSG_LOBBY_COUNTDOWN);
+    uint32_t u; memcpy(&u, &remaining, 4); w_u32(&p, u);
+    w_u8(&p, reason);
+    ENetPacket *pkt = enet_packet_create(buf, CAP, ENET_PACKET_FLAG_RELIABLE);
+    enet_host_broadcast((ENetHost *)ns->enet_host, NET_CH_LOBBY, pkt);
+    ns->bytes_sent += CAP;
+    ns->packets_sent++;
+}
+
+/* ---- Client outgoing helpers -------------------------------------- */
+
+void net_client_send_loadout(NetState *ns, MechLoadout lo) {
+    if (!ns || ns->role != NET_ROLE_CLIENT || !ns->connected) return;
+    uint8_t buf[8]; uint8_t *p = buf;
+    w_u8(&p, NET_MSG_LOBBY_LOADOUT);
+    w_u8(&p, (uint8_t)lo.chassis_id);
+    w_u8(&p, (uint8_t)lo.primary_id);
+    w_u8(&p, (uint8_t)lo.secondary_id);
+    w_u8(&p, (uint8_t)lo.armor_id);
+    w_u8(&p, (uint8_t)lo.jetpack_id);
+    enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
+                 buf, (int)(p - buf));
+}
+
+void net_client_send_ready(NetState *ns, bool ready) {
+    if (!ns || ns->role != NET_ROLE_CLIENT || !ns->connected) return;
+    uint8_t buf[2] = { NET_MSG_LOBBY_READY, ready ? 1u : 0u };
+    enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
+                 buf, 2);
+}
+
+void net_client_send_team_change(NetState *ns, int team) {
+    if (!ns || ns->role != NET_ROLE_CLIENT || !ns->connected) return;
+    uint8_t buf[2] = { NET_MSG_LOBBY_TEAM_CHANGE, (uint8_t)team };
+    enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
+                 buf, 2);
+}
+
+void net_client_send_chat(NetState *ns, const char *text) {
+    if (!ns || !text || ns->role != NET_ROLE_CLIENT || !ns->connected) return;
+    int n = (int)strlen(text);
+    if (n <= 0) return;
+    if (n > LOBBY_CHAT_BYTES - 1) n = LOBBY_CHAT_BYTES - 1;
+    uint8_t buf[1 + LOBBY_CHAT_BYTES];
+    buf[0] = NET_MSG_LOBBY_CHAT;
+    memcpy(buf + 1, text, (size_t)n);
+    enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
+                 buf, 1 + n);
+}
+
+void net_client_send_map_vote(NetState *ns, int choice) {
+    if (!ns || ns->role != NET_ROLE_CLIENT || !ns->connected) return;
+    if (choice < 0 || choice > 2) return;
+    uint8_t buf[2] = { NET_MSG_LOBBY_MAP_VOTE, (uint8_t)choice };
+    enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
+                 buf, 2);
+}
+
+void net_client_send_kick(NetState *ns, int target_slot) {
+    if (!ns || ns->role != NET_ROLE_CLIENT || !ns->connected) return;
+    uint8_t buf[2] = { NET_MSG_LOBBY_KICK, (uint8_t)target_slot };
+    enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
+                 buf, 2);
+}
+
+void net_client_send_ban(NetState *ns, int target_slot) {
+    if (!ns || ns->role != NET_ROLE_CLIENT || !ns->connected) return;
+    uint8_t buf[2] = { NET_MSG_LOBBY_BAN, (uint8_t)target_slot };
+    enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
+                 buf, 2);
+}
+
 /* ---- Server: spawn slot helper (used by handshake) ----------------- */
 
 /* Pick a spawn position for a new peer. Stays inside the tutorial map
  * (built by main.c via level_build_tutorial). We stagger horizontally
- * so peers don't telefrag. */
+ * so peers don't telefrag. (Legacy from M2; map_spawn_point in maps.c
+ * is the M4 path.) */
 Vec2 net_default_spawn_for_slot(World *w, int peer_index) {
     const float feet_below_pelvis = 36.0f;
     const float foot_clearance    = 4.0f;

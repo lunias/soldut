@@ -1,0 +1,33 @@
+# 2p_motion — host runs RIGHT and JET so we can see whether the
+# client's view of the host's mech tracks the snapshot stream.
+#
+# At 1280x720 with the FFA-spawn fix, host spawns at lane 16 and
+# client at lane 80 — far enough apart that a moving host should
+# visibly approach the client over the course of a 6s match.
+
+window 1280 720
+out build/shots/net/host_motion
+network host 24011
+name HostA
+
+# Match starts at ~tick 130. Host walks RIGHT and jets up to
+# clear the col-55 wall. Pairs with 2p_motion.client.shot which
+# walks LEFT — they meet near the middle of the map.
+at 150 press right
+at 200 press jet
+at 260 release jet
+at 350 press jet
+at 410 release jet
+
+at 150 shot match_start_t150
+at 250 shot walking_t250
+at 360 shot midway_t360
+at 460 shot meeting_t460
+at 530 release right
+at 560 shot together_t560
+at 720 shot summary_t720
+at 780 end
+
+contact_sheet sheet cols 3 cell 320 180
+
+contact_sheet sheet cols 3 cell 320 180

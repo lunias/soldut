@@ -1,0 +1,23 @@
+# 2-player basic networking test — CLIENT side.
+#
+# Pairs with 2p_basic.host.shot. Run via tests/shots/net/run.sh.
+#
+# Same tick layout as the host script. Screenshots from the client's
+# perspective — the most important shots are match_t200..380 because
+# they show whether the client is actually rendering the world (i.e.
+# the M4 black-screen-on-client bug doesn't recur).
+
+window 1280 720
+out build/shots/net/client
+network connect 127.0.0.1:24001
+name ClientB
+
+at 60   shot lobby_full
+at 200  shot match_t200
+at 260  shot match_t260
+at 320  shot match_t320
+at 380  shot match_t380
+at 540  shot summary
+at 600  end
+
+contact_sheet sheet cols 3 cell 320 180

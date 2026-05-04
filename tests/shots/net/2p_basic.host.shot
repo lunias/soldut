@@ -1,0 +1,27 @@
+# 2-player basic networking test — HOST side.
+#
+# Pairs with 2p_basic.client.shot. Run via tests/shots/net/run.sh.
+#
+# Tick budget at 60 Hz:
+#   t=0..120     bootstrap + lobby (auto-start armed at 1s, fires at ~60)
+#   t=120..180   countdown phase (1s in shotmode)
+#   t=180..540   match (~6s)
+#   t=540+       summary
+#
+# Screenshots track each phase so the contact sheet shows the full
+# round flow from the host's perspective.
+
+window 1280 720
+out build/shots/net/host
+network host 24001
+name HostA
+
+at 60   shot lobby_full
+at 200  shot match_t200
+at 260  shot match_t260
+at 320  shot match_t320
+at 380  shot match_t380
+at 540  shot summary
+at 600  end
+
+contact_sheet sheet cols 3 cell 320 180

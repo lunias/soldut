@@ -1,6 +1,8 @@
 #pragma once
 
 #include "input.h"
+#include "match.h"
+#include "mech.h"
 #include "version.h"
 
 #include <stdbool.h>
@@ -57,6 +59,23 @@ enum {
     NET_MSG_CHAT               = 10,    /* both directions   (CHAT) */
     NET_MSG_DISCOVERY_QUERY    = 11,    /* connectionless broadcast */
     NET_MSG_DISCOVERY_REPLY    = 12,    /* connectionless reply    */
+
+    /* M4 lobby + match flow. All ride NET_CH_LOBBY (reliable, ordered)
+     * unless noted. */
+    NET_MSG_LOBBY_LIST         = 20,    /* server → client: full slot table   */
+    NET_MSG_LOBBY_SLOT_UPDATE  = 21,    /* server → client: one slot delta    */
+    NET_MSG_LOBBY_LOADOUT      = 22,    /* client → server: pick loadout      */
+    NET_MSG_LOBBY_READY        = 23,    /* client → server: toggle ready      */
+    NET_MSG_LOBBY_TEAM_CHANGE  = 24,    /* client → server                    */
+    NET_MSG_LOBBY_CHAT         = 25,    /* both directions; server fan-outs   */
+    NET_MSG_LOBBY_MAP_VOTE     = 26,    /* client → server: vote for map a/b/c*/
+    NET_MSG_LOBBY_VOTE_STATE   = 27,    /* server → client: vote candidates + tallies */
+    NET_MSG_LOBBY_KICK         = 28,    /* host → server (host only)          */
+    NET_MSG_LOBBY_BAN          = 29,    /* host → server (host only)          */
+    NET_MSG_LOBBY_COUNTDOWN    = 30,    /* server → client: auto-start tick   */
+    NET_MSG_LOBBY_ROUND_START  = 31,    /* server → client: enter MATCH       */
+    NET_MSG_LOBBY_ROUND_END    = 32,    /* server → client: enter SUMMARY     */
+    NET_MSG_LOBBY_MATCH_STATE  = 33,    /* server → client: MatchState delta  */
 };
 
 /* Reject reasons sent in NET_MSG_REJECT body. */
@@ -211,6 +230,45 @@ void net_client_send_input(NetState *ns, ClientInput in);
  * kill feed. Server-only. */
 void net_server_broadcast_kill(NetState *ns, int killer_mech_id,
                                int victim_mech_id, int weapon_id);
+
+/* ---- M4 lobby/match outgoing -------------------------------------- */
+
+/* Server → all clients: ship the full slot table. Called whenever the
+ * lobby state has been mutated (a join, leave, ready, loadout change,
+ * team change). */
+struct LobbyState;
+struct MatchState;
+void net_server_broadcast_lobby_list(NetState *ns,
+                                     const struct LobbyState *lobby);
+
+/* Server → all clients: fan-out one new chat line. */
+void net_server_broadcast_chat(NetState *ns, int sender_slot, uint8_t team,
+                               const char *text);
+
+/* Server → all clients: announce that the round transition fires now.
+ * Carries the new MatchState (mode, map, limits) so clients can update
+ * their HUDs immediately. */
+void net_server_broadcast_round_start(NetState *ns,
+                                      const struct MatchState *match);
+void net_server_broadcast_round_end  (NetState *ns,
+                                      const struct MatchState *match);
+void net_server_broadcast_match_state(NetState *ns,
+                                      const struct MatchState *match);
+void net_server_broadcast_vote_state (NetState *ns,
+                                      const struct LobbyState *lobby);
+void net_server_broadcast_countdown  (NetState *ns, float remaining,
+                                      uint8_t reason);
+
+/* Client → server: notify of loadout / ready / team / chat / vote /
+ * kick / ban changes. The server validates and (where applicable) fans
+ * out the result. */
+void net_client_send_loadout    (NetState *ns, MechLoadout lo);
+void net_client_send_ready      (NetState *ns, bool ready);
+void net_client_send_team_change(NetState *ns, int team);
+void net_client_send_chat       (NetState *ns, const char *text);
+void net_client_send_map_vote   (NetState *ns, int choice /*0/1/2*/);
+void net_client_send_kick       (NetState *ns, int target_slot);
+void net_client_send_ban        (NetState *ns, int target_slot);
 
 /* ---- LAN discovery ----------------------------------------------- */
 

@@ -62,19 +62,35 @@ static void shot_dump_tick(const World *w) {
         }
     }
 
+    /* Per-tick pelvis dump for EVERY alive mech, not just the local
+     * one. This catches remote-mech jitter — if mech 0's pelvis_x
+     * oscillates rather than monotonically increases when the host is
+     * walking right, the snapshot apply path is fighting prediction.
+     * Cheap (a couple lines per mech per tick) and only fires in shot
+     * mode. */
+    const ParticlePool *pp = &w->particles;
+    for (int i = 0; i < w->mech_count; ++i) {
+        const Mech *mi = &w->mechs[i];
+        if (!mi->alive) continue;
+        int pelv = mi->particle_base + PART_PELVIS;
+        float px = pp->pos_x[pelv], py = pp->pos_y[pelv];
+        float vx = px - pp->prev_x[pelv];
+        float vy = py - pp->prev_y[pelv];
+        bool is_local = (i == w->local_mech_id);
+        SHOT_LOG("t=%llu mech=%d%s pelv=(%.1f,%.1f) v=(%.2f,%.2f)",
+                 (unsigned long long)w->tick, i, is_local ? "*" : "",
+                 px, py, vx, vy);
+    }
+
     int lid = w->local_mech_id;
     if (lid < 0) return;
     const Mech *m = &w->mechs[lid];
-    const ParticlePool *pp = &w->particles;
     int pelv = m->particle_base + PART_PELVIS;
-    float px = pp->pos_x[pelv], py = pp->pos_y[pelv];
-    float vx = px - pp->prev_x[pelv];
-    float vy = py - pp->prev_y[pelv];
-    SHOT_LOG("t=%llu anim=%s grnd=%d pelv=(%.1f,%.1f) v=(%.2f,%.2f) "
-             "fuel=%.2f hp=%.0f/%.0f ammo=%d/%d",
+    SHOT_LOG("t=%llu local anim=%s grnd=%d fuel=%.2f hp=%.0f/%.0f ammo=%d/%d",
              (unsigned long long)w->tick, anim_name(m->anim_id),
-             (int)m->grounded, px, py, vx, vy, m->fuel,
+             (int)m->grounded, m->fuel,
              m->health, m->health_max, m->ammo, m->ammo_max);
+    (void)pelv;
 }
 
 void simulate(World *w, ClientInput in, float dt) {
