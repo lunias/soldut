@@ -12,7 +12,13 @@ TP         := $(ROOT)/third_party
 
 CC         ?= cc
 CFLAGS     ?= -std=c11 -O2 -g -Wall -Wextra -Wpedantic -Werror
-WARN       := -Wno-unused-parameter -Wno-unused-function \
+# clang on macOS doesn't recognize all the gcc-specific warning names
+# we suppress here (e.g. -Wno-stringop-truncation, -Wno-format-truncation,
+# -Werror=builtin-declaration-mismatch). -Wno-unknown-warning-option
+# tells the compiler to stay quiet about flags it doesn't know about
+# instead of erroring under -Werror.
+WARN       := -Wno-unknown-warning-option \
+              -Wno-unused-parameter -Wno-unused-function \
               -Wno-missing-field-initializers \
               -Wno-error=builtin-declaration-mismatch \
               -Wno-error=implicit-function-declaration \
@@ -28,7 +34,8 @@ INCLUDES   := -I. -I$(SRC_DIR) -I$(TP) -I$(TP)/raylib/src -I$(TP)/raygui
 # raygui.h has scattered switch statements with implicit fall-through,
 # unchecked fread / fgets, and intentional cast-truncation. Suppress the
 # noisy ones rather than rewriting third-party code.
-GUIWARN := -Wno-implicit-fallthrough -Wno-double-promotion -Wno-cast-qual \
+GUIWARN := -Wno-unknown-warning-option \
+           -Wno-implicit-fallthrough -Wno-double-promotion -Wno-cast-qual \
            -Wno-format-nonliteral -Wno-pedantic -Wno-unused-result \
            -Wno-stringop-truncation
 

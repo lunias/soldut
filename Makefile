@@ -145,21 +145,6 @@ test-editor: editor
 	./build/soldut_editor --shot tools/editor/shots/validate_failures.shot
 	./build/soldut_editor --shot tools/editor/shots/scaling_4k.shot
 
-# End-to-end: editor shotmode builds a .lvl with a known spawn,
-# `./soldut --test-play <lvl>` loads it, soldut.log echoes the spawn
-# coordinates back. Catches breaks in editor save / level_load /
-# map_spawn_point that the unit test (test-spawn) doesn't see end-to-end.
-test-spawn-e2e: $(BIN) editor
-	./tests/spawn_e2e.sh
-
-# Editor regression suite — runs the four primary shot scripts.
-# Each fails the run with a non-zero exit code on any assertion.
-test-editor: editor
-	./build/soldut_editor --shot tools/editor/shots/smoke.shot
-	./build/soldut_editor --shot tools/editor/shots/bugs.shot
-	./build/soldut_editor --shot tools/editor/shots/poly_triangulation.shot
-	./build/soldut_editor --shot tools/editor/shots/validate_failures.shot
-
 # Shot mode — drive a scripted scene through the real renderer and
 # write PNGs. Handy for visual diffs without filming. Override SCRIPT
 # to point at a different .shot file.
