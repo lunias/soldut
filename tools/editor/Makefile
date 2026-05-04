@@ -43,7 +43,7 @@ INCLUDES   := -I. -I$(SRC_DIR) -I$(TP) -I$(TP)/raylib/src -I$(TP)/raygui
 GUIWARN := -Wno-unknown-warning-option \
            -Wno-implicit-fallthrough -Wno-double-promotion -Wno-cast-qual \
            -Wno-format-nonliteral -Wno-pedantic -Wno-unused-result \
-           -Wno-stringop-truncation
+           -Wno-stringop-truncation -Wno-unused-but-set-variable
 
 UNAME_S    := $(shell uname -s 2>/dev/null)
 ifeq ($(OS),Windows_NT)

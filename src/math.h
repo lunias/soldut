@@ -28,6 +28,8 @@
  *
  * gcc on Linux + clang on Linux (zig cc) already see these via the
  * <math.h> include above; the redundant decls are harmless. */
+/* Float versions — used by raymath.h's static-inline functions and
+ * by the editor's polygon math. */
 extern float floorf(float);
 extern float ceilf (float);
 extern float roundf(float);
@@ -44,7 +46,22 @@ extern float acosf (float);
 extern float expf  (float);
 extern float logf  (float);
 extern float powf  (float, float);
+
+/* Double versions — used by poly.c (fabs, sqrt) and by raymath.h's
+ * `tan(fovY*0.5)` projection helper. */
+extern double floor(double);
+extern double ceil (double);
+extern double round(double);
+extern double sqrt (double);
+extern double fabs (double);
+extern double fmax (double, double);
+extern double fmin (double, double);
+extern double sin  (double);
+extern double cos  (double);
 extern double tan  (double);
+extern double atan2(double, double);
+extern double asin (double);
+extern double acos (double);
 
 #include "../third_party/raylib/src/raylib.h"
 #include "../third_party/raylib/src/raymath.h"

@@ -72,6 +72,7 @@ zig cc -target $ZIG_TARGET \
     -Wno-incompatible-function-pointer-types \
     -Wno-format-truncation \
     -Wno-implicit-fallthrough \
+    -Wno-unused-but-set-variable \
     -Wno-error=implicit-function-declaration \
     -Wno-error=builtin-declaration-mismatch \
     -include math.h -include stdio.h \
