@@ -25,6 +25,7 @@ typedef enum {
     PARTICLE_FLAG_ACTIVE   = 1u << 0,
     PARTICLE_FLAG_GROUNDED = 1u << 1,
     PARTICLE_FLAG_PINNED   = 1u << 2,
+    PARTICLE_FLAG_CEILING  = 1u << 3,   /* set when contact normal points downward (ny > 0.5) */
 } ParticleFlags;
 
 typedef struct {
@@ -32,6 +33,16 @@ typedef struct {
     float    *prev_x, *prev_y;
     float    *inv_mass;
     uint8_t  *flags;
+    /* Per-particle most-recent contact data (P02). The contact resolver
+     * writes these on every contact; the gravity pass zeros them at the
+     * start of each tick. Used by slope-aware run velocity + jet thrust
+     * + post-physics anchor to decide whether the foot is on a flat
+     * floor or a slope, and which way the slope tangent goes.
+     *
+     * Q1.7: a value of 127 maps to +1.0; -128 maps to -1.0. */
+    int8_t   *contact_nx_q;
+    int8_t   *contact_ny_q;
+    uint8_t  *contact_kind;     /* TILE_F_* bitmask of the touched surface */
     int       count;       /* high-water mark */
     int       capacity;
 } ParticlePool;
@@ -348,6 +359,27 @@ enum {
     TILE_F_BACKGROUND = 1u << 4,
 };
 
+/* Polygon kinds — small enum stored in LvlPoly.kind. Same vocabulary as
+ * tiles but expressed as values, not bits, since a polygon has exactly
+ * one kind. */
+typedef enum {
+    POLY_KIND_SOLID      = 0,
+    POLY_KIND_ICE        = 1,
+    POLY_KIND_DEADLY     = 2,
+    POLY_KIND_ONE_WAY    = 3,
+    POLY_KIND_BACKGROUND = 4,
+} PolyKind;
+
+/* Ambient zone kinds — small enum stored in LvlAmbi.kind. WIND nudges
+ * particles per tick; ZERO_G zeros the gravity contribution inside the
+ * rect; ACID applies 5 HP/s damage; FOG is render-only. */
+typedef enum {
+    AMBI_WIND   = 0,
+    AMBI_ZERO_G = 1,
+    AMBI_ACID   = 2,
+    AMBI_FOG    = 3,
+} AmbiKind;
+
 typedef struct {
     uint16_t id;                   /* sprite atlas index */
     uint16_t flags;                /* TILE_F_* bitmask */
@@ -433,7 +465,7 @@ _Static_assert(sizeof(LvlAmbi)   == 16, "LvlAmbi must be 16 bytes");
 _Static_assert(sizeof(LvlFlag)   ==  8, "LvlFlag must be 8 bytes");
 _Static_assert(sizeof(LvlMeta)   == 32, "LvlMeta must be 32 bytes");
 
-typedef struct {
+typedef struct Level {
     int       width, height;       /* in tiles */
     int       tile_size;           /* px per tile */
     LvlTile  *tiles;               /* width * height records */

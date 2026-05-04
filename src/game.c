@@ -15,15 +15,22 @@ static bool init_particle_pool(Game *g) {
     int cap = PARTICLES_CAPACITY;
     p->capacity = cap;
     p->count = 0;
-    p->pos_x   = (float    *)arena_alloc(&g->permanent, sizeof(float)   * cap);
-    p->pos_y   = (float    *)arena_alloc(&g->permanent, sizeof(float)   * cap);
-    p->prev_x  = (float    *)arena_alloc(&g->permanent, sizeof(float)   * cap);
-    p->prev_y  = (float    *)arena_alloc(&g->permanent, sizeof(float)   * cap);
-    p->inv_mass= (float    *)arena_alloc(&g->permanent, sizeof(float)   * cap);
-    p->flags   = (uint8_t  *)arena_alloc(&g->permanent, sizeof(uint8_t) * cap);
+    p->pos_x       = (float   *)arena_alloc(&g->permanent, sizeof(float)   * cap);
+    p->pos_y       = (float   *)arena_alloc(&g->permanent, sizeof(float)   * cap);
+    p->prev_x      = (float   *)arena_alloc(&g->permanent, sizeof(float)   * cap);
+    p->prev_y      = (float   *)arena_alloc(&g->permanent, sizeof(float)   * cap);
+    p->inv_mass    = (float   *)arena_alloc(&g->permanent, sizeof(float)   * cap);
+    p->flags       = (uint8_t *)arena_alloc(&g->permanent, sizeof(uint8_t) * cap);
+    p->contact_nx_q = (int8_t  *)arena_alloc(&g->permanent, sizeof(int8_t)  * cap);
+    p->contact_ny_q = (int8_t  *)arena_alloc(&g->permanent, sizeof(int8_t)  * cap);
+    p->contact_kind = (uint8_t *)arena_alloc(&g->permanent, sizeof(uint8_t) * cap);
     if (!p->pos_x || !p->pos_y || !p->prev_x || !p->prev_y ||
-        !p->inv_mass || !p->flags) return false;
-    memset(p->flags, 0, (size_t)cap);
+        !p->inv_mass || !p->flags ||
+        !p->contact_nx_q || !p->contact_ny_q || !p->contact_kind) return false;
+    memset(p->flags,        0, (size_t)cap);
+    memset(p->contact_nx_q, 0, (size_t)cap);
+    memset(p->contact_ny_q, 0, (size_t)cap);
+    memset(p->contact_kind, 0, (size_t)cap);
     return true;
 }
 

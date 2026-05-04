@@ -5,7 +5,7 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-03** (M4 lobby & matches in).
+Last updated: **2026-05-03** (M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver and M5 P02 — polygon collision + slope physics landed same day).
 
 ---
 
@@ -18,7 +18,7 @@ Last updated: **2026-05-03** (M4 lobby & matches in).
 | **M2**    | Foundation lands 2026-05-03. Host/client handshake works locally; per-tick input ship + 30 Hz snapshot broadcast + client-side prediction & replay + per-mech bone history for hitscan lag compensation are wired. LAN-only, full snapshots, no mid-tick interpolation of remote mechs (see TRADE_OFFS.md). Two-laptop bake test still pending. |
 | **M3**    | Combat depth in 2026-05-03. All 5 chassis (Trooper / Scout / Heavy / Sniper / Engineer) with passives. All 8 primaries (Pulse Rifle, Plasma SMG, Riot Cannon, Rail Cannon, Auto-Cannon, Mass Driver, Plasma Cannon, Microgun) and 6 secondaries (Sidearm, Burst SMG, Frag Grenades, Micro-Rockets, Combat Knife, Grappling Hook). Projectile pool with bone + tile collision. Explosions: damage falloff, line-of-sight check, impulse to ragdolls. Per-limb HP and dismemberment of all 5 limbs. Recoil + bink + self-bink fully wired. Friendly-fire toggle (`--ff` server flag). Kill feed with HEADSHOT/GIB/OVERKILL/RAGDOLL/SUICIDE flags. Loadout via CLI flags (`--chassis`, `--primary`, `--secondary`, `--armor`, `--jetpack`). Snapshot wire format widened to carry chassis/armor/jet/secondary; protocol id bumped to `S0LE`. |
 | **M4**    | Lobby & matches in 2026-05-03. Game flow is now title → browser → lobby → countdown → match → summary → next lobby. New modules: `match.{h,c}`, `lobby.{h,c}`, `lobby_ui.{h,c}`, `ui.{h,c}` (small immediate-mode raylib UI helpers, scale-aware for 4K), `config.{h,c}` (`soldut.cfg` key=value parser), `maps.{h,c}` (Foundry / Slipstream / Reactor — three code-built maps for the rotation; `.lvl` loader is M5). LOBBY-channel messages (player list with `mech_id`, slot delta, loadout, ready, team change, chat, vote, kick/ban, countdown, round start/end, match state). Server config file: port, max_players, mode, score_limit, time_limit, friendly_fire, auto_start_seconds, map_rotation, mode_rotation. Single-player flow auto-hosts an offline server and arms a 1s countdown. Protocol id bumped `S0LE` → `S0LF`. Network test scaffold under `tests/net/` runs the host/client end-to-end via real ENet loopback and asserts on log-line milestones. |
-| **M5**    | In progress. **P01 — `.lvl` format + loader/saver** in 2026-05-03. New `src/level_io.{h,c}` (CRC32 + endian-explicit reader/writer; ~600 LOC). `Level` migrated from `uint8_t *tiles` to `LvlTile *tiles` (4 bytes per cell: id + flags). New per-format records `LvlTile / LvlPoly / LvlSpawn / LvlPickup / LvlDeco / LvlAmbi / LvlFlag / LvlMeta` in `world.h`, byte-size-locked via `_Static_assert`. `map_build` now tries `assets/maps/<short>.lvl` first; falls back to the M4 code-built path on any load failure (file not found is the expected case until P17 ships the cooked maps). `make test-level-io` runs a synthetic round-trip + bit-flip + truncation test (25/25 passing on first ship). `tools/cook_maps/cook_maps.c` is a stub for P17. **Pending**: P02 (polygon broadphase + slope physics), P03 (render-side accumulator), P04 (level editor), P05+ (pickups, grapple, CTF, map sharing, controls, art, audio, maps). |
+| **M5**    | In progress. **P01 — `.lvl` format + loader/saver** and **P02 — polygon collision + slope physics + slope-aware anchor** in 2026-05-03. P02: per-particle contact normals (Q1.7 SoA fields + `PARTICLE_FLAG_CEILING`); polygon broadphase grid built at level load (`level_build_poly_broadphase`); `physics_constrain_and_collide` interleaves tile + polygon collision per relaxation iter (closest-point-on-triangle, push-out via pre-baked edge normals); `level_ray_hits` tests segments against polygons too; slope-tangent run velocity, slope-aware friction (`0.99 - 0.07*|ny|`, ICE→0.998), angled-ceiling jet redirection, slope-aware post-physics anchor (skips when `ny_avg > -0.92`); WIND/ZERO_G ambient zones; environmental damage tick for DEADLY tiles+polys+ACID zones. Renderer draws polygons (P02 stopgap, replaced by sprite art at P13). **Pending**: P03 (render-side accumulator + interp alpha), P04 (level editor), P05+ (pickups, grapple, CTF, map sharing, controls, art, audio, maps). |
 
 ---
 
@@ -276,10 +276,66 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
     by allocating a synthetic World per code-built map and calling
     `level_save` to `assets/maps/`.
 
+- **P02 — polygon collision + slope physics + slope-aware anchor** (2026-05-03).
+  - `ParticlePool` extended with per-particle contact data:
+    `contact_nx_q` / `contact_ny_q` (Q1.7 normals) and `contact_kind`
+    (TILE_F_* bitmask). New `PARTICLE_FLAG_CEILING`. Cleared at the
+    start of `physics_apply_gravity`; written by every contact in
+    `contact_with_velocity` / `contact_position_only`.
+  - `level_io.c` builds the polygon broadphase grid
+    (`Level.poly_grid` / `poly_grid_off`) at load time. Two passes over
+    the polygon list: count per-cell, then prefix-sum + write. The
+    helper is exposed as `level_build_poly_broadphase` for code-built
+    maps to call after populating `polys`. The `Level` struct gains a
+    `struct Level` tag so other headers can forward-declare it.
+  - `physics_constrain_and_collide` interleaves `solve_constraints`,
+    `collide_map_one_pass`, `collide_polys_one_pass` per iteration
+    (12 iters). Inline closest-point-on-triangle (Eberly form) plus
+    a separate "particle inside triangle → push out via nearest edge"
+    branch. Polygon kinds map to TILE_F_* via
+    `poly_kind_to_contact_kind` (ICE/DEADLY/ONE_WAY/BACKGROUND).
+  - `level_ray_hits` now tests against polygons too (segment-vs-edge
+    intersection per polygon, take min `t` across all polygons + DDA).
+    BACKGROUND polygons skipped.
+  - `apply_run_velocity` projects the run target onto the slope
+    tangent. Sign chosen by run direction; X set on every particle, Y
+    set on lower chain (knees + feet) only so the upper body keeps
+    its gravity component. No-input + flat-ground = M1 active braking;
+    no-input + sloped = skip (lets passive slide work).
+  - `apply_jet_force` — particles with `PARTICLE_FLAG_CEILING` redirect
+    the upward thrust along the ceiling tangent, sign picked by run
+    input. Other particles get the existing straight-up impulse.
+  - `mech_post_physics_anchor` early-outs when the average foot
+    contact normal is more than ~22° off straight up (`ny_avg >
+    -0.92`). Lets slope physics drive the pose on slopes; flat ground
+    still gets the M1 standing anchor.
+  - `physics_apply_ambient_forces` (called from
+    `physics_apply_gravity`) handles WIND zones (per-tick Verlet prev
+    nudge) and ZERO_G zones (per-particle skip mask). FOG is render-
+    only.
+  - `mech_apply_environmental_damage` (called from `simulate_step`)
+    applies 5 HP/s to PART_PELVIS when any particle is on a DEADLY
+    tile, inside a DEADLY polygon (broadphase + point-in-triangle), or
+    inside an ACID ambient zone. Server-only.
+  - Renderer draws polygons (filled + edge outline, color by kind) so
+    shot tests show the slope test bed. Proper polygon art + halftone
+    lands at P13.
+  - Test scaffolding: `level_build_tutorial` carries three temporary
+    SOLID slope polys (45°/60°/5° at floor-row mid-map) for
+    `tests/shots/m5_slope.shot` to land on. Will be removed when P17
+    ships authored `.lvl` maps. `make test-physics`, `make
+    test-level-io`, and `tests/net/run.sh` all pass post-P02.
+
+  **Tuning caveat**: the starting friction values from the spec
+  (`0.99 - 0.07*|ny|`, range [0.92, 0.99]) leave a 60° slope close to
+  the equilibrium where a planted foot doesn't passively slide as
+  dramatically as the spec's English text describes. The slope physics
+  pipeline is wired end-to-end (broadphase + closest-point + tangent
+  projection + ceiling redirect + anchor gating); per-angle tuning is
+  P02 §"Out of scope" → playtest after maps land.
+
 ### Pending
 
-- **P02** — polygon collision + slope physics. `poly_grid` /
-  `poly_grid_off` already declared on `Level`; populate at load time.
 - **P03** — render-side accumulator + interp alpha + reconcile
   visual offset + two-snapshot remote-mech buffer.
 - **P04** — level editor (`tools/editor/`).

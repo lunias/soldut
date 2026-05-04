@@ -179,6 +179,15 @@ void simulate_step(World *w, float dt) {
         mech_post_physics_anchor(w, i);
     }
 
+    /* P02: environmental damage tick — DEADLY tiles, DEADLY polygons,
+     * ACID ambient zones. Server-only (clients receive HP via
+     * snapshots). */
+    if (w->authoritative) {
+        for (int i = 0; i < w->mech_count; ++i) {
+            mech_apply_environmental_damage(w, i, dt);
+        }
+    }
+
     /* Projectiles — integrate, collide, detonate. Runs after the mech
      * physics pass so projectiles see the just-settled bone positions
      * (matters for hit attribution on a shot that lands on the same

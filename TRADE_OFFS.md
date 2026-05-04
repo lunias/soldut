@@ -22,9 +22,12 @@ Last updated: **2026-05-03**.
 ### Post-physics kinematic anchor for standing pose
 
 - **What we did** — `mech_post_physics_anchor()` runs after the physics
-  step. When a mech is grounded and in `ANIM_STAND`, it lifts the
-  pelvis + upper body + knees to their standing positions and **zeroes
-  Y-velocity** (`prev_y = pos_y`).
+  step. When a mech is grounded *on a flat surface* (`ny_avg <
+  -0.92`, ~22° from vertical) and in `ANIM_STAND` / `ANIM_RUN`, it
+  lifts the pelvis + upper body + knees to their standing positions and
+  **zeroes Y-velocity** (`prev_y = pos_y`). On slopes, the anchor early-
+  outs and the slope-tangent run velocity + slope-aware friction drive
+  the pose instead.
 - **Why** — Verlet's constraint solver moves position but not `prev`,
   so any non-trivial constraint correction injects velocity. Combined
   with gravity adding velocity each tick, this creates a positive
@@ -32,7 +35,9 @@ Last updated: **2026-05-03**.
   faster than the solver corrected it), hardening the pose drive
   (pumped velocity through constraints), and pinning feet
   (`inv_mass=0`, body explodes upward at run start). The post-physics
-  anchor was the only thing that produced rock-solid standing.
+  anchor was the only thing that produced rock-solid standing on flat
+  ground. P02 added the slope-gating because zeroing Y-velocity on a
+  slope kills passive downhill slide.
 - **Revisit when** —
   - We add a crouch animation. The anchor's knee-snap will break
     crouch transitions; right now we gate by `ANIM_STAND` and skip
@@ -42,6 +47,9 @@ Last updated: **2026-05-03**.
   - We discover the anchor is masking a deeper bug. Symptom would be:
     behavior in run/jump/jet that hints at energy that should have
     been bled off but wasn't.
+  - The slope-gating threshold (`-0.92`, ~22° from vertical) feels
+    wrong in playtest — body either fails to hold on shallow slopes
+    or anchors too aggressively on moderate ones.
 
 ### No angle constraints in active use
 
@@ -235,22 +243,59 @@ Last updated: **2026-05-03**.
 
 ## World / level
 
-### Only a tile grid; no per-tile polygons
-
-- **What we did** — `level.c` builds a 100×40 tile grid; collision is
-  particle-vs-tile-rect.
-- **Why** — Fast to ship. The design doc
-  ([07-level-design.md](documents/07-level-design.md)) calls for tile
-  grids with optional polygons per tile. We need polygons for slopes,
-  ramps, and one-way platforms; none of those are in the tutorial map.
-- **Revisit when** — Map content with slopes (M5), or earlier if we
-  want to test a slope-physics feel sooner.
-
 ### Hard-coded tutorial map
 
 - **What we did** — `level_build_tutorial()` builds the M1 map in code.
 - **Why** — No editor yet (M5).
 - **Revisit when** — M5 level editor lands.
+
+### Slope-physics tuning numbers are starting values
+
+- **What we did** — P02 ships the friction formula
+  `friction = 0.99 - 0.07 * |ny|` (clamped to `[0.92, 0.998]`, ICE→0.998)
+  and the post-physics-anchor slope cutoff `ny_avg > -0.92` (~22° from
+  vertical). Body lands on slopes via the polygon collision +
+  closest-point + push-out path; running projects velocity onto the
+  slope tangent.
+- **Why** — These are the values the spec doc gives. The English text
+  in `documents/m5/03-collision-polygons.md` describes a 60° slope as
+  "slide freely" but the formula puts 60° at friction 0.955, which
+  combined with the existing pose drive holds the body roughly in
+  place rather than producing a dramatic slide. The slope physics is
+  wired correctly; the *numeric tuning* needs playtest data we won't
+  have until authored maps land.
+- **Revisit when** —
+  - P17 / P18 ship authored maps with real slope-vocab geometry and a
+    bake-test bot that walks slopes; mismatch between intended feel
+    and observed behavior triggers tuning.
+  - We replace the post-physics anchor with PBD/XPBD (the proper
+    solver doesn't fight the slope-tangent run code as hard).
+
+### Renderer draws polygons as flat triangles (P02 stopgap)
+
+- **What we did** — `render.c::draw_level` draws each polygon as a
+  filled triangle (color by kind) plus a thin edge outline so shot
+  tests see the slope test bed. No texture, no halftone, no parallax
+  layering.
+- **Why** — P02 needs *some* polygon rendering for visual verification.
+  The proper polygon visual lives in P13 (parallax + HUD final art +
+  TTF + halftone post + decal chunking) and would be wasted work to
+  build twice.
+- **Revisit when** — P13 (rendering kit). At that point the stopgap is
+  replaced by the sprite-atlas + halftone path; the temporary
+  triangle-fill code is deleted.
+
+### Slope test bed is hardcoded in `level_build_tutorial`
+
+- **What we did** — `level.c::level_build_tutorial` allocates 3 SOLID
+  polys (45° / 60° / 5° slopes at floor-row mid-map) for shot mode +
+  the headless harness to land on. The runtime `map_build` path used
+  by real matches doesn't carry these.
+- **Why** — Without authored `.lvl` maps (P17), there's no other way
+  to get polygons in front of the physics for testing.
+- **Revisit when** — P17 / P18 ship authored maps. At that point the
+  test bed is removed from `level_build_tutorial` and shot tests use
+  the authored `.lvl` files directly.
 
 ### `.lvl` v1 format is locked in
 
@@ -507,12 +552,6 @@ Last updated: **2026-05-03**.
 - **Revisit when** — We add bots (M3 stretch) or any non-input-driven
   entity. At that point we either widen state_bits to a uint16, add
   a separate flags byte, or remove dummies in favor of bots.
-
-### Loadouts ship per-mech but no lobby UI ~~(M3)~~ — RESOLVED M4
-
-The M3 entry that "the local mech reads its loadout from CLI flags"
-is now obsolete. The lobby UI (`src/lobby_ui.c`) cycles loadout
-slots; CLI flags pre-fill them as a test escape hatch.
 
 ---
 

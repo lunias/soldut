@@ -283,6 +283,97 @@ static void encode_meta(uint8_t *p, const LvlMeta *m) {
     for (int i = 0; i < 9; ++i) w_u16(p + 14 + i * 2, m->reserved[i]);
 }
 
+/* ---- Polygon broadphase grid (P02) -------------------------------- */
+/*
+ * For each tile, store the indices of polygons whose AABB overlaps it.
+ * At collision time, particle->tile gives O(1) access to the small
+ * candidate list (typically <=4 polys per tile in playtest maps).
+ *
+ * Two passes over the polygon list: first counts per-cell entries to
+ * size the flat poly_grid, then writes them. Both arrays live in the
+ * level arena (reset on level reload).
+ */
+LvlResult level_build_poly_broadphase(struct Level *level, struct Arena *arena) {
+    Level *L = level;
+    if (!L || L->poly_count == 0 || L->width <= 0 || L->height <= 0) return LVL_OK;
+    int W = L->width, H = L->height;
+    int ts = L->tile_size;
+    int n_cells = W * H;
+
+    int *off = (int *)arena_alloc(arena, sizeof(int) * (size_t)(n_cells + 1));
+    if (!off) return LVL_ERR_OOM;
+    memset(off, 0, sizeof(int) * (size_t)(n_cells + 1));
+
+    /* Pass 1: count. off[c+1] holds count of cell c. */
+    for (int i = 0; i < L->poly_count; ++i) {
+        const LvlPoly *poly = &L->polys[i];
+        int min_x = poly->v_x[0], max_x = poly->v_x[0];
+        int min_y = poly->v_y[0], max_y = poly->v_y[0];
+        for (int k = 1; k < 3; ++k) {
+            if (poly->v_x[k] < min_x) min_x = poly->v_x[k];
+            if (poly->v_x[k] > max_x) max_x = poly->v_x[k];
+            if (poly->v_y[k] < min_y) min_y = poly->v_y[k];
+            if (poly->v_y[k] > max_y) max_y = poly->v_y[k];
+        }
+        int tx0 = min_x / ts, tx1 = max_x / ts;
+        int ty0 = min_y / ts, ty1 = max_y / ts;
+        if (tx0 < 0) tx0 = 0;
+        if (tx1 >= W) tx1 = W - 1;
+        if (ty0 < 0) ty0 = 0;
+        if (ty1 >= H) ty1 = H - 1;
+        if (tx0 > tx1 || ty0 > ty1) continue;
+        for (int ty = ty0; ty <= ty1; ++ty) {
+            for (int tx = tx0; tx <= tx1; ++tx) {
+                off[ty * W + tx + 1]++;
+            }
+        }
+    }
+
+    /* Prefix sum: off[c] = total entries in cells [0, c). */
+    for (int c = 1; c <= n_cells; ++c) off[c] += off[c - 1];
+    int total = off[n_cells];
+
+    int grid_alloc = total > 0 ? total : 1;
+    int *grid = (int *)arena_alloc(arena, sizeof(int) * (size_t)grid_alloc);
+    if (!grid) return LVL_ERR_OOM;
+
+    /* Cursor copy so pass 2 doesn't trash off[]. */
+    int *cursor = (int *)arena_alloc(arena, sizeof(int) * (size_t)n_cells);
+    if (!cursor) return LVL_ERR_OOM;
+    memcpy(cursor, off, sizeof(int) * (size_t)n_cells);
+
+    /* Pass 2: write polygon ids into the buckets. */
+    for (int i = 0; i < L->poly_count; ++i) {
+        const LvlPoly *poly = &L->polys[i];
+        int min_x = poly->v_x[0], max_x = poly->v_x[0];
+        int min_y = poly->v_y[0], max_y = poly->v_y[0];
+        for (int k = 1; k < 3; ++k) {
+            if (poly->v_x[k] < min_x) min_x = poly->v_x[k];
+            if (poly->v_x[k] > max_x) max_x = poly->v_x[k];
+            if (poly->v_y[k] < min_y) min_y = poly->v_y[k];
+            if (poly->v_y[k] > max_y) max_y = poly->v_y[k];
+        }
+        int tx0 = min_x / ts, tx1 = max_x / ts;
+        int ty0 = min_y / ts, ty1 = max_y / ts;
+        if (tx0 < 0) tx0 = 0;
+        if (tx1 >= W) tx1 = W - 1;
+        if (ty0 < 0) ty0 = 0;
+        if (ty1 >= H) ty1 = H - 1;
+        if (tx0 > tx1 || ty0 > ty1) continue;
+        for (int ty = ty0; ty <= ty1; ++ty) {
+            for (int tx = tx0; tx <= tx1; ++tx) {
+                grid[cursor[ty * W + tx]++] = i;
+            }
+        }
+    }
+
+    L->poly_grid     = grid;
+    L->poly_grid_off = off;
+    LOG_I("level: built poly broadphase (%d polys, %d entries across %d cells)",
+          L->poly_count, total, n_cells);
+    return LVL_OK;
+}
+
 /* ---- Lump lookup -------------------------------------------------- */
 
 typedef struct {
@@ -468,6 +559,13 @@ LvlResult level_load(struct World *world, struct Arena *arena,
                 }
             }
         }
+    }
+
+    /* P02: build the polygon broadphase grid. Skipped when poly_count
+     * is zero. */
+    {
+        LvlResult r = level_build_poly_broadphase(L, arena);
+        if (r != LVL_OK) return r;
     }
 
     /* PICK — optional. */

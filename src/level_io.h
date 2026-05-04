@@ -54,3 +54,11 @@ const char *level_io_result_str(LvlResult r);
 /* Public CRC32 helper — table-based, polynomial 0xEDB88320. Exposed so
  * the editor / cook tool can verify a buffer without re-saving. */
 uint32_t level_crc32(const uint8_t *data, int n);
+
+struct Level;
+
+/* Build the per-tile polygon broadphase from the level's existing
+ * `polys` array. level_load() calls this internally; code-built maps
+ * (src/maps.c) must call it manually after populating `polys` /
+ * `poly_count` so the runtime collision pass sees the polygons. */
+LvlResult level_build_poly_broadphase(struct Level *level, struct Arena *arena);

@@ -88,6 +88,38 @@ static void draw_level(const Level *L) {
                                (int)ts, (int)ts, edge);
         }
     }
+
+    /* P02: temporary polygon renderer. Draws each free polygon as a
+     * filled triangle plus an edge outline so the slope test bed (in
+     * level_build_tutorial) shows up in shot tests. The proper art
+     * pass (sprite atlas + halftone) lands at P13. */
+    Color poly_solid = (Color){ 50, 70, 100, 255 };
+    Color poly_ice   = (Color){180, 220, 240, 255 };
+    Color poly_dead  = (Color){140,  40,  40, 255 };
+    Color poly_one   = (Color){ 90, 110,  60, 255 };
+    Color poly_back  = (Color){ 28,  32,  40, 200 };
+    Color poly_edge  = (Color){180, 200, 230, 255 };
+    for (int i = 0; i < L->poly_count; ++i) {
+        const LvlPoly *poly = &L->polys[i];
+        Color fill;
+        switch ((PolyKind)poly->kind) {
+            case POLY_KIND_ICE:        fill = poly_ice;   break;
+            case POLY_KIND_DEADLY:     fill = poly_dead;  break;
+            case POLY_KIND_ONE_WAY:    fill = poly_one;   break;
+            case POLY_KIND_BACKGROUND: fill = poly_back;  break;
+            case POLY_KIND_SOLID:
+            default:                   fill = poly_solid; break;
+        }
+        Vector2 v0 = { (float)poly->v_x[0], (float)poly->v_y[0] };
+        Vector2 v1 = { (float)poly->v_x[1], (float)poly->v_y[1] };
+        Vector2 v2 = { (float)poly->v_x[2], (float)poly->v_y[2] };
+        /* DrawTriangle is CCW-only; our authoring is screen-CW so flip
+         * the order to keep the fill visible. */
+        DrawTriangle(v0, v2, v1, fill);
+        DrawLineEx(v0, v1, 2.0f, poly_edge);
+        DrawLineEx(v1, v2, 2.0f, poly_edge);
+        DrawLineEx(v2, v0, 2.0f, poly_edge);
+    }
 }
 
 static void draw_bone(const ParticlePool *p, int a, int b, float thick, Color c) {
