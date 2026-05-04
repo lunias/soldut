@@ -176,12 +176,14 @@ static int constraints_reserve(World *w, int n) {
 
 static void set_particle(World *w, int idx, Vec2 pos, float inv_mass) {
     ParticlePool *p = &w->particles;
-    p->pos_x   [idx] = pos.x;
-    p->pos_y   [idx] = pos.y;
-    p->prev_x  [idx] = pos.x;
-    p->prev_y  [idx] = pos.y;
-    p->inv_mass[idx] = inv_mass;
-    p->flags   [idx] = PARTICLE_FLAG_ACTIVE;
+    p->pos_x        [idx] = pos.x;
+    p->pos_y        [idx] = pos.y;
+    p->prev_x       [idx] = pos.x;
+    p->prev_y       [idx] = pos.y;
+    p->render_prev_x[idx] = pos.x;
+    p->render_prev_y[idx] = pos.y;
+    p->inv_mass     [idx] = inv_mass;
+    p->flags        [idx] = PARTICLE_FLAG_ACTIVE;
 }
 
 static void add_distance(World *w, int *next, int a, int b, float rest) {
@@ -796,10 +798,25 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
             apply_jump(w, m, JUMP_IMPULSE_PXS * ch->jump_mult, dt);
         }
 
-        if (jetting)        m->anim_id = ANIM_JET;
-        else if (!grounded) m->anim_id = ANIM_FALL;
-        else if (moving)    m->anim_id = ANIM_RUN;
-        else                m->anim_id = ANIM_STAND;
+        /* For REMOTE mechs on a non-authoritative side (= client),
+         * the snapshot already set anim_id (snapshot.c derives RUN
+         * from velocity since the input bitmask doesn't ride the
+         * wire). Overriding here with input-based logic would
+         * always pick STAND (in.buttons=0 for remote mechs on the
+         * client), which freezes the leg-swing cycle and makes the
+         * mech appear to slide across the ground instead of walk.
+         *
+         * On the server, every mech has authoritative input — the
+         * host's own keyboard for slot 0, the per-peer NET_MSG_INPUT
+         * latched on each remote slot — so we always run the
+         * input-based path there. */
+        bool input_drives_anim = w->authoritative || mid == w->local_mech_id;
+        if (input_drives_anim) {
+            if (jetting)        m->anim_id = ANIM_JET;
+            else if (!grounded) m->anim_id = ANIM_FALL;
+            else if (moving)    m->anim_id = ANIM_RUN;
+            else                m->anim_id = ANIM_STAND;
+        }
 
     } else if (m->alive && m->is_dummy) {
         m->anim_id = ANIM_STAND;
@@ -1350,6 +1367,27 @@ bool mech_apply_damage(World *w, int mid, int part, float dmg, Vec2 dir,
     Vec2 hp = part_pos(w, m, part);
     for (int k = 0; k < 8; ++k) fx_spawn_blood(&w->fx, hp, dir, w->rng);
     for (int k = 0; k < 4; ++k) fx_spawn_spark(&w->fx, hp, dir, w->rng);
+
+    /* Queue a hit event for clients (server-only — clients re-spawn
+     * the same FX from the broadcast). main.c drains the queue post-
+     * simulate and broadcasts via NET_MSG_HIT_EVENT. */
+    if (w->authoritative) {
+        int slot = w->hitfeed_count % HITFEED_CAPACITY;
+        if (slot < 0) slot += HITFEED_CAPACITY;
+        int dmg_byte = (int)(final_dmg + 0.5f);
+        if (dmg_byte < 0) dmg_byte = 0;
+        if (dmg_byte > 255) dmg_byte = 255;
+        w->hitfeed[slot] = (HitFeedEntry){
+            .victim_mech_id = (int16_t)mid,
+            .hit_part       = (uint8_t)part,
+            .damage         = (uint8_t)dmg_byte,
+            .pos_x          = hp.x,
+            .pos_y          = hp.y,
+            .dir_x          = dir.x,
+            .dir_y          = dir.y,
+        };
+        w->hitfeed_count++;
+    }
 
     if (m->health <= 0.0f) {
         mech_kill(w, mid, part, dir, 90.0f, shooter_mech_id,

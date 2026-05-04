@@ -38,6 +38,10 @@ int projectile_spawn(World *w, ProjectileSpawn s) {
     p->owner_team    [i] = (int8_t)s.owner_team;
     p->pos_x         [i] = s.origin.x;
     p->pos_y         [i] = s.origin.y;
+    /* P03: seed render_prev to spawn pos so the first rendered frame
+     * doesn't lerp from (0,0) → spawn. */
+    p->render_prev_x [i] = s.origin.x;
+    p->render_prev_y [i] = s.origin.y;
     p->vel_x         [i] = s.velocity.x;
     p->vel_y         [i] = s.velocity.y;
     p->life          [i] = s.life;
@@ -299,12 +303,16 @@ static float proj_size(uint8_t kind) {
     }
 }
 
-void projectile_draw(const ProjectilePool *p) {
+void projectile_draw(const ProjectilePool *p, float alpha) {
     for (int i = 0; i < p->count; ++i) {
         if (!p->alive[i]) continue;
         Color c = proj_color(p->kind[i]);
         float sz = proj_size(p->kind[i]);
-        Vec2 pos = { p->pos_x[i], p->pos_y[i] };
+        /* P03: lerp between start-of-tick pos and latest physics pos. */
+        Vec2 pos = {
+            p->render_prev_x[i] + (p->pos_x[i] - p->render_prev_x[i]) * alpha,
+            p->render_prev_y[i] + (p->pos_y[i] - p->render_prev_y[i]) * alpha,
+        };
         DrawCircleV(pos, sz, c);
         /* Trailing line for fast projectiles so they read at speed. */
         float vx = p->vel_x[i], vy = p->vel_y[i];

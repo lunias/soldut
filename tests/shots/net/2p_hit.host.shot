@@ -1,0 +1,26 @@
+# 2p_hit — host. Teleports both mechs onto the dummy platform side
+# (right of the col-55 wall) so the client has clear LOS for hits.
+# Pairs with 2p_hit.client.shot.
+#
+# Both views should show blood at the SAME world position with
+# similar spray direction. Host's view: server-side mech_apply_damage
+# spawns FX. Client's view: NET_MSG_HIT_EVENT broadcast does it.
+
+window 1280 720
+out build/shots/net/hit_host
+network host 24071
+name HostA
+
+# Place host (slot 0) at world (2300, 1112) — on the dummy platform.
+spawn_at 2300 1112
+# Place client (slot 1) at world (2700, 1112) — same row, ~400 px away.
+peer_spawn 1 2700 1112
+
+# Aim at client so the host faces RIGHT (host's facing is bullet
+# direction-derived, but for visual clarity).
+aim 2700 1080
+
+at 200 shot before_hit
+at 350 shot mid_hit
+at 500 shot after_hit
+at 700 end

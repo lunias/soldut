@@ -1,6 +1,6 @@
 # M5 implementation prompts
 
-19 prompts, executed sequentially, that ship M5. Each is a self-contained brief for a fresh Claude Code session — you paste the prompt, Claude reads the listed context, then implements that one chunk of work.
+18 implementation prompts (P01–P18), executed sequentially, that ship M5 — plus a P00 prologue to read first. Each is a self-contained brief for a fresh Claude Code session — you paste the prompt, Claude reads the listed context, then implements that one chunk of work.
 
 ## How to use
 

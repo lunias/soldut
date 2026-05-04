@@ -56,6 +56,8 @@ enum {
     NET_MSG_INPUT              =  7,    /* client → server (STATE) */
     NET_MSG_SNAPSHOT           =  8,    /* server → client (STATE) */
     NET_MSG_KILL_EVENT         =  9,    /* server → client (EVENT) */
+    NET_MSG_HIT_EVENT          = 13,    /* server → client (EVENT) — hit pos+dir+part for blood/spark FX */
+    NET_MSG_FIRE_EVENT         = 14,    /* server → client (EVENT) — fire origin+dir+weapon for tracer/projectile FX */
     NET_MSG_CHAT               = 10,    /* both directions   (CHAT) */
     NET_MSG_DISCOVERY_QUERY    = 11,    /* connectionless broadcast */
     NET_MSG_DISCOVERY_REPLY    = 12,    /* connectionless reply    */
@@ -182,7 +184,23 @@ typedef struct NetState {
      * delta encoding: for each peer, the most recent snapshot the
      * client has acked. */
     void    *baseline_snapshots;  /* pointer into permanent arena, sized at start */
+
+    /* P03 — client-side render clock for snapshot interpolation. Tracks
+     * the server's `server_time_ms` axis. We render remote mechs at
+     * `client_render_time_ms`, advanced each sim tick by exactly
+     * TICK_DT*1000 (in double precision — uint32 truncation drifts
+     * 0.67 ms/tick = 40 ms/sec, which silently put us hundreds of ms
+     * behind the server in P03's first ship). Initialized on the
+     * first received snapshot to `server_time_ms - INTERP_DELAY_MS`. */
+    double   client_render_time_ms;
+    uint32_t client_latest_server_time_ms;
+    bool     client_render_clock_armed;
 } NetState;
+
+/* Render-time delay for remote-mech interpolation. 100 ms covers a
+ * 30 Hz snapshot stream comfortably (3 snapshot intervals of buffer)
+ * and matches the design canon ([documents/05-networking.md] §4). */
+#define NET_INTERP_DELAY_MS 100u
 
 /* ---- Lifecycle (process global) ----------------------------------- */
 
@@ -230,6 +248,26 @@ void net_client_send_input(NetState *ns, ClientInput in);
  * kill feed. Server-only. */
 void net_server_broadcast_kill(NetState *ns, int killer_mech_id,
                                int victim_mech_id, int weapon_id);
+
+/* A hit event — broadcast on every damage application so clients can
+ * spawn blood / sparks at the actual hit position with the actual
+ * shot direction. Without this the client falls back to spawning
+ * blood at PART_CHEST with a facing-derived direction (snapshot.c),
+ * which renders visibly differently from the server view. */
+struct Vec2;
+void net_server_broadcast_hit(NetState *ns, int victim_mech_id, int hit_part,
+                              float pos_x, float pos_y, float dir_x, float dir_y,
+                              int damage);
+
+/* A fire event — broadcast on every weapon discharge so clients can
+ * spawn matching tracers (hitscan) and visual-only projectiles
+ * (everything else). Without this, clients see NOTHING when remote
+ * players fire — only the local shooter's predict path puts a
+ * tracer / projectile in front of them, leaving an asymmetric
+ * "host fires but client sees no muzzle FX or projectile" feel. */
+void net_server_broadcast_fire(NetState *ns, int shooter_mech_id, int weapon_id,
+                               float origin_x, float origin_y,
+                               float dir_x, float dir_y);
 
 /* ---- M4 lobby/match outgoing -------------------------------------- */
 

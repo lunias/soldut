@@ -46,8 +46,11 @@ int  projectile_spawn(World *w, ProjectileSpawn s);
  * collision, decrement fuses, detonate AOE on hit / fuse expiry. */
 void projectile_step(World *w, float dt);
 
-/* Render — draw each live projectile (caller is inside BeginMode2D). */
-void projectile_draw(const ProjectilePool *p);
+/* Render — draw each live projectile (caller is inside BeginMode2D).
+ * `alpha` is the in-between-ticks fraction in [0,1] used to lerp
+ * between the projectile's start-of-tick position and its latest
+ * physics result (P03 render-side accumulator). */
+void projectile_draw(const ProjectilePool *p, float alpha);
 
 /* Spawn an explosion at `pos`. Walks every alive mech and applies
  * falloff'd damage + impulse to every particle inside `radius`. Casts a

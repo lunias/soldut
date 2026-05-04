@@ -1,0 +1,22 @@
+# 2p_legs — client. Stays put and watches the host walk past.
+# In the screenshots, the host's mech should be in a clear
+# stride pose (one leg forward, one back, slight Y on the
+# leading foot for the lift_h arc) when the host log shows
+# ANIM_RUN — not stuck in a static legs-together STAND pose
+# while sliding sideways.
+
+window 1280 720
+out build/shots/net/legs_client
+network connect 127.0.0.1:24091
+name ClientB
+
+spawn_at 2400 1112
+
+aim 2300 1080
+
+at 140 shot t140_running_right
+at 260 shot t260_running_left
+at 400 shot t400_running_right
+at 520 shot t520_running_left
+at 650 shot t650_stopped
+at 750 end

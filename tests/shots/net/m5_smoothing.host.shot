@@ -1,0 +1,21 @@
+# m5_smoothing — host. Walks RIGHT for the entire match so the
+# client sees a moving remote mech driven through the new P03
+# two-snapshot interp buffer + alpha lerp render path.
+#
+# Pairs with m5_smoothing.client.shot which sits still and bursts
+# screenshots over the host's walk. A working P03 implementation
+# should show the host's mech moving smoothly across consecutive
+# burst frames — no zigzag, no per-snapshot pop-back, no jitter.
+
+window 1280 720
+out build/shots/net/m5_smoothing_host
+network host 24091
+name HostA
+
+# Start walking RIGHT shortly after match begin (~tick 130). Hold
+# through the burst window so the client always sees lateral motion.
+at 150 press right
+at 150 shot start
+at 400 shot mid
+at 700 shot late
+at 800 end

@@ -1,0 +1,35 @@
+# 2p_sync — host. Spawns near client (foundry FFA lanes 16/24 are
+# adjacent), then jets straight up + comes back down. Pairs with
+# 2p_sync.client.shot which sits still and observes.
+#
+# What we test:
+#   - Host's view of HOST mech (predicted, smooth) vs client's view
+#     of HOST mech (snapshot-driven via P03 interp ring).
+#   - Both views capture the same world ticks so a side-by-side
+#     visual diff is meaningful (camera offsets differ but world
+#     positions of the host's mech should agree).
+#   - At each shot tick, the host's pelvis pos in BOTH logs should
+#     be within ~10 px of each other (one snapshot interval of motion
+#     at jet speed).
+
+window 1280 720
+out build/shots/net/sync_host
+network host 24061
+name HostA
+
+# Match starts ~tick 130 (after 1 s countdown). Skip the first
+# few ticks so spawn settles, then do a clean jet sequence.
+at 200 press jet
+at 280 release jet
+# Land + recover.
+at 330 press jet
+at 360 release jet
+
+at 200 shot pre_jet
+at 240 shot mid_jet_up
+at 280 shot peak
+at 320 shot falling
+at 360 shot mid_jet_down
+at 400 shot landed
+at 700 shot after
+at 750 end

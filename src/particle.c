@@ -45,6 +45,7 @@ int fx_spawn_blood(FxPool *pool, Vec2 pos, Vec2 vel, pcg32_t *rng) {
     float speed = 220.0f + pcg32_float01(rng) * 360.0f;
     float ang   = atan2f(vel.y, vel.x) + (pcg32_float01(rng) - 0.5f) * 1.4f;
     fp->pos     = pos;
+    fp->render_prev_pos = pos;
     fp->vel     = (Vec2){ cosf(ang) * speed, sinf(ang) * speed };
     fp->life    = 0.5f + pcg32_float01(rng) * 1.0f;
     fp->life_max = fp->life;
@@ -66,6 +67,7 @@ int fx_spawn_spark(FxPool *pool, Vec2 pos, Vec2 vel, pcg32_t *rng) {
     float speed = 120.0f + pcg32_float01(rng) * 220.0f;
     float ang   = atan2f(vel.y, vel.x) + (pcg32_float01(rng) - 0.5f) * 2.4f;
     fp->pos      = pos;
+    fp->render_prev_pos = pos;
     fp->vel      = (Vec2){ cosf(ang) * speed, sinf(ang) * speed };
     fp->life     = 0.15f + pcg32_float01(rng) * 0.25f;
     fp->life_max = fp->life;
@@ -81,6 +83,7 @@ int fx_spawn_tracer(FxPool *pool, Vec2 a, Vec2 b) {
     if (idx < 0) return -1;
     FxParticle *fp = &pool->items[idx];
     fp->pos      = a;             /* start point */
+    fp->render_prev_pos = a;
     fp->vel      = (Vec2){ b.x - a.x, b.y - a.y };  /* end-point delta */
     fp->life     = 0.06f;
     fp->life_max = 0.06f;
@@ -142,7 +145,7 @@ void fx_update(World *w, float dt) {
     pool->count = last_alive + 1;
 }
 
-void fx_draw(const FxPool *pool) {
+void fx_draw(const FxPool *pool, float alpha) {
     for (int i = 0; i < pool->count; ++i) {
         const FxParticle *fp = &pool->items[i];
         if (!fp->alive) continue;
@@ -153,25 +156,32 @@ void fx_draw(const FxPool *pool) {
         unsigned char b = (unsigned char)((fp->color >>  8) & 0xFF);
         unsigned char a = (unsigned char)(((fp->color >> 0) & 0xFF) * t);
         Color col = { r, g, b, a };
+        /* P03: lerp between start-of-tick pos and latest pos so FX
+         * motion stays smooth when render rate exceeds sim rate. */
+        Vector2 pos = {
+            fp->render_prev_pos.x + (fp->pos.x - fp->render_prev_pos.x) * alpha,
+            fp->render_prev_pos.y + (fp->pos.y - fp->render_prev_pos.y) * alpha,
+        };
 
         switch ((FxKind)fp->kind) {
             case FX_BLOOD:
-                DrawCircleV(fp->pos, fp->size, col);
+                DrawCircleV(pos, fp->size, col);
                 break;
             case FX_SPARK:
-                DrawCircleV(fp->pos, fp->size, col);
+                DrawCircleV(pos, fp->size, col);
                 break;
             case FX_TRACER:
-                /* tracer's vel is the end-point delta. */
-                DrawLineEx(fp->pos,
-                           (Vector2){ fp->pos.x + fp->vel.x, fp->pos.y + fp->vel.y },
+                /* tracer's vel is the end-point delta — fixed for the
+                 * particle's life, so no interp needed on the endpoint. */
+                DrawLineEx(pos,
+                           (Vector2){ pos.x + fp->vel.x, pos.y + fp->vel.y },
                            1.5f, col);
                 break;
             case FX_SMOKE:
                 /* M3 reserves a slot for smoke; for now we render it as
                  * a darker circle. The proper soft-puff additive
                  * version lands with the M5 art pass. */
-                DrawCircleV(fp->pos, fp->size * 1.4f,
+                DrawCircleV(pos, fp->size * 1.4f,
                     (Color){ 60, 60, 60, (unsigned char)(a / 2) });
                 break;
             case FX_KIND_COUNT: break;

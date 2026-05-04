@@ -90,13 +90,14 @@ void snapshot_capture(const World *w, SnapshotFrame *out, uint16_t ack_input_seq
         e->weapon_id= (uint8_t)m->weapon_id;
         e->ammo     = (uint8_t)(m->ammo > 255 ? 255 : (m->ammo < 0 ? 0 : m->ammo));
 
-        uint8_t bits = 0;
+        uint16_t bits = 0;
         if (m->alive)              bits |= SNAP_STATE_ALIVE;
         if (m->grounded)           bits |= SNAP_STATE_GROUNDED;
         if (m->facing_left)        bits |= SNAP_STATE_FACING_LEFT;
         if (m->anim_id == ANIM_JET)  bits |= SNAP_STATE_JET;
         if (m->anim_id == ANIM_FIRE) bits |= SNAP_STATE_FIRE;
         if (m->reload_timer > 0.0f)  bits |= SNAP_STATE_RELOAD;
+        if (m->is_dummy)           bits |= SNAP_STATE_IS_DUMMY;
         e->state_bits = bits;
 
         e->team      = (uint8_t)m->team;
@@ -165,12 +166,13 @@ int snapshot_encode(const SnapshotFrame *cur,
         /* aim_q(2), torso_q(2) */
         *p++ = (uint8_t)e->aim_q;   *p++ = (uint8_t)(e->aim_q >> 8);
         *p++ = (uint8_t)e->torso_q; *p++ = (uint8_t)(e->torso_q >> 8);
-        /* health, armor, weapon_id, ammo, state_bits, team */
+        /* health, armor, weapon_id, ammo, state_bits(2), team */
         *p++ = e->health;
         *p++ = e->armor;
         *p++ = e->weapon_id;
         *p++ = e->ammo;
-        *p++ = e->state_bits;
+        *p++ = (uint8_t)e->state_bits;
+        *p++ = (uint8_t)(e->state_bits >> 8);
         *p++ = e->team;
         /* limb_bits(2) */
         *p++ = (uint8_t)e->limb_bits; *p++ = (uint8_t)(e->limb_bits >> 8);
@@ -237,7 +239,7 @@ bool snapshot_decode(const uint8_t *buf, int len,
         e->armor    = *p++;
         e->weapon_id= *p++;
         e->ammo     = *p++;
-        e->state_bits = *p++;
+        e->state_bits = (uint16_t)(p[0] | (p[1] << 8)); p += 2;
         e->team       = *p++;
         e->limb_bits  = (uint16_t)(p[0] | (p[1] << 8)); p += 2;
         e->chassis_id     = *p++;
@@ -295,67 +297,78 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
         ParticlePool *pp = &w->particles;
         bool is_local = (mid == local_id);
 
-        /* Translate the whole skeleton kinematically so the mech
-         * "snaps" to the server position.
-         *
-         * For the LOCAL mech: full snap. Reconciliation (in
-         * reconcile.c) then replays unacked inputs to bring the body
-         * forward to "now". Anything else would break that contract.
-         *
-         * For REMOTE mechs: a hard snap every snapshot looks like
-         * visible jitter to the user (each snapshot is ~33 ms apart;
-         * gravity + stale-input simulation between snapshots drifts
-         * the body, then we snap it back). Smooth the correction
-         * with a 35% lerp toward the server position — the body
-         * still tracks the server but without the per-snapshot
-         * pop. Over a few snapshots we converge. This is a poor-
-         * man's snapshot interpolation; full
-         * "render-100-ms-in-the-past" interp is M2 carry-forward
-         * (see TRADE_OFFS.md → "no client-side mid-tick interp").
-         *
-         * Spawn case: when ensure_mech_slot has just created this
-         * mech, the existing position equals new_px/new_py so dx/dy
-         * are zero — no lerp damping concern. */
-        float old_px = pp->pos_x[m->particle_base + PART_PELVIS];
-        float old_py = pp->pos_y[m->particle_base + PART_PELVIS];
         float new_px = dequant_pos(e->pos_x_q);
         float new_py = dequant_pos(e->pos_y_q);
-        float dx_full = new_px - old_px;
-        float dy_full = new_py - old_py;
-        float lerp = is_local ? 1.0f : 0.35f;
-        /* For very large remote-mech corrections (>200 px — likely a
-         * teleport / round-start respawn) skip the lerp and snap
-         * fully. Without this a respawn would take seconds to slide
-         * into position. */
-        if (!is_local && (dx_full * dx_full + dy_full * dy_full) > 200.0f * 200.0f) {
-            lerp = 1.0f;
-        }
-        float dx = dx_full * lerp;
-        float dy = dy_full * lerp;
-        for (int part = 0; part < PART_COUNT; ++part) {
-            int idx = m->particle_base + part;
-            physics_translate_kinematic(pp, idx, dx, dy);
-        }
+        float vx     = dequant_vel(e->vel_x_q);
+        float vy     = dequant_vel(e->vel_y_q);
 
-        /* Per-tick velocity. We set EVERY particle (not just the
-         * pelvis) to the snapshot's pelvis velocity. The old code
-         * only touched the pelvis, leaving the rest of the skeleton
-         * with whatever velocity it had before the snap — the
-         * mismatch made the constraint solver fight to reconcile
-         * shapes between particles moving at different rates, which
-         * the user saw as a per-tick jitter. With every particle
-         * synced to the same body-frame velocity the skeleton moves
-         * as a rigid unit between snapshots and the constraints
-         * just maintain shape, not bleed energy. (The local-mech
-         * pose drive in mech_step_drive will overwrite per-particle
-         * velocities for the next tick anyway, so there's no
-         * downstream side effect.) */
-        float vx = dequant_vel(e->vel_x_q);
-        float vy = dequant_vel(e->vel_y_q);
-        for (int part = 0; part < PART_COUNT; ++part) {
-            int idx = m->particle_base + part;
-            physics_set_velocity_x(pp, idx, vx);
-            physics_set_velocity_y(pp, idx, vy);
+        if (is_local) {
+            /* Full snap. Reconciliation (in reconcile.c) replays
+             * unacked inputs after this call to bring the body
+             * forward to "now". Anything else would break that
+             * contract.
+             *
+             * Spawn case: when ensure_mech_slot just created this
+             * mech, existing pos equals new_px/new_py so the
+             * translate is a no-op — no concern. */
+            float old_px = pp->pos_x[m->particle_base + PART_PELVIS];
+            float old_py = pp->pos_y[m->particle_base + PART_PELVIS];
+            float dx = new_px - old_px;
+            float dy = new_py - old_py;
+            for (int part = 0; part < PART_COUNT; ++part) {
+                int idx = m->particle_base + part;
+                physics_translate_kinematic(pp, idx, dx, dy);
+                physics_set_velocity_x(pp, idx, vx);
+                physics_set_velocity_y(pp, idx, vy);
+            }
+        } else {
+            /* P03 — push to the per-mech snapshot ring; the actual
+             * particle write happens each tick in
+             * snapshot_interp_remotes, lerping between bracketing
+             * ring entries at `render_time - INTERP_DELAY_MS`. The
+             * per-particle velocity matches the snapshot's velocity
+             * so the constraint solver doesn't fight body-frame
+             * velocity mismatches between snapshots.
+             *
+             * Large corrections (>200 px — respawn, teleport) clear
+             * the ring and snap fully so we don't slide across the
+             * level for a hundred ms. */
+            float old_px = pp->pos_x[m->particle_base + PART_PELVIS];
+            float old_py = pp->pos_y[m->particle_base + PART_PELVIS];
+            float dx_full = new_px - old_px;
+            float dy_full = new_py - old_py;
+            bool big_correction = (dx_full * dx_full + dy_full * dy_full)
+                                  > 200.0f * 200.0f;
+            if (big_correction) {
+                /* Snap fully + clear ring; the next snapshot lands
+                 * fresh and interp picks back up from the new
+                 * position. */
+                for (int part = 0; part < PART_COUNT; ++part) {
+                    int idx = m->particle_base + part;
+                    physics_translate_kinematic(pp, idx, dx_full, dy_full);
+                    physics_set_velocity_x(pp, idx, vx);
+                    physics_set_velocity_y(pp, idx, vy);
+                }
+                m->remote_snap_count = 0;
+                m->remote_snap_head  = 0;
+                for (int s = 0; s < REMOTE_SNAP_RING; ++s)
+                    m->remote_snap_ring[s].valid = false;
+            }
+            /* Push the snapshot into the ring (always, including the
+             * just-snapped case — the next tick's interp will see the
+             * fresh entry and stay put on it). */
+            int slot = m->remote_snap_head;
+            m->remote_snap_ring[slot] = (RemoteSnapBuf){
+                .server_time_ms = frame->header.server_time_ms,
+                .pelvis_x       = new_px,
+                .pelvis_y       = new_py,
+                .vel_x          = vx,
+                .vel_y          = vy,
+                .valid          = true,
+            };
+            m->remote_snap_head = (slot + 1) % REMOTE_SNAP_RING;
+            if (m->remote_snap_count < REMOTE_SNAP_RING)
+                m->remote_snap_count++;
         }
 
         /* Aim: reconstruct from the angle. The pose drive needs an
@@ -364,13 +377,13 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
         m->aim_world = (Vec2){ new_px + cosf(ang) * 200.0f,
                                new_py + sinf(ang) * 200.0f };
 
-        /* Combat & state. Capture pre-snapshot health so we can
-         * spawn local FX (blood / sparks) when the server reports a
-         * hit — those FX live in the client's local fx pool and
-         * aren't carried in the snapshot wire format. Without this
-         * the client sees no blood when remote players are damaged
-         * (only the host's view shows hits). */
-        float prev_health = m->health;
+        /* Combat & state. Per-hit blood / sparks ride NET_MSG_HIT_EVENT
+         * (broadcast by the server from mech_apply_damage) — the
+         * client spawns FX at the actual hit point with the actual
+         * hit direction. Spawning blood here from snapshot
+         * health-decrease would double-up (HIT_EVENT already fired)
+         * AND show wrong position (we'd default to chest +
+         * facing-derived spray). */
         m->health      = (e->health  / 255.0f) * m->health_max;
         if (m->armor_hp_max > 0.0f) {
             m->armor_hp = (e->armor / 255.0f) * m->armor_hp_max;
@@ -386,31 +399,30 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
         m->alive       = (e->state_bits & SNAP_STATE_ALIVE) != 0;
         m->grounded    = (e->state_bits & SNAP_STATE_GROUNDED) != 0;
         m->facing_left = (e->state_bits & SNAP_STATE_FACING_LEFT) != 0;
-        if (e->state_bits & SNAP_STATE_JET) m->anim_id = ANIM_JET;
-        else if (m->grounded)               m->anim_id = ANIM_STAND;
-        else                                 m->anim_id = ANIM_FALL;
-
-        /* Health decreased → server registered a hit; mirror the
-         * blood/spark FX locally so the client sees the same visual
-         * feedback as the host. Spawn count scales loosely with
-         * damage (~4 blood per ~5 % health lost), capped to keep
-         * the fx pool from saturating on multi-hit bursts.
-         *
-         * Position: at the chest, with a small spray direction (we
-         * don't know which side the bullet came from on the wire,
-         * so default upward + outward is a reasonable proxy). */
-        if (m->alive && m->health < prev_health) {
-            float dmg = prev_health - m->health;
-            int n_blood = (int)(dmg / 4.0f) + 2;
-            if (n_blood > 12) n_blood = 12;
-            int chest = m->particle_base + PART_CHEST;
-            Vec2 at = { pp->pos_x[chest], pp->pos_y[chest] };
-            Vec2 spray = { (m->facing_left ? 60.0f : -60.0f), -40.0f };
-            for (int k = 0; k < n_blood; ++k)
-                fx_spawn_blood(&w->fx, at, spray, w->rng);
-            for (int k = 0; k < 2; ++k)
-                fx_spawn_spark(&w->fx, at, spray, w->rng);
+        m->is_dummy    = (e->state_bits & SNAP_STATE_IS_DUMMY) != 0;
+        if (e->state_bits & SNAP_STATE_JET) {
+            m->anim_id = ANIM_JET;
+        } else if (m->grounded) {
+            /* Derive RUN from velocity. The server-side anim_id is
+             * computed from BTN_LEFT/RIGHT input bits which don't ride
+             * the snapshot — without this fallback the client sees the
+             * remote mech in STAND mode regardless of motion, so its
+             * legs don't swing in the run cycle and the body appears
+             * to SLIDE across the ground instead of walking.
+             *
+             * Threshold 2 px/tick (~120 px/s) is comfortably below
+             * intentional run (~4.66 px/tick at standard RUN_SPEED)
+             * but above incidental drift, post-impact slide, or
+             * floating-point settle noise. */
+            float vx = dequant_vel(e->vel_x_q);
+            if (fabsf(vx) > 2.0f) m->anim_id = ANIM_RUN;
+            else                  m->anim_id = ANIM_STAND;
+        } else {
+            m->anim_id = ANIM_FALL;
         }
+
+        /* (per-hit blood/sparks now ride NET_MSG_HIT_EVENT — see
+         * the long comment above where prev_health is captured) */
 
         if (was_alive && !m->alive) {
             /* Local cosmetic kill — drop the pose drive so render
@@ -436,6 +448,81 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
     for (int i = 0; i < w->mech_count; ++i) {
         if (!seen[i]) {
             w->mechs[i].alive = false;
+        }
+    }
+}
+
+/* ---- Remote-mech interpolation ----------------------------------- */
+
+/* Pick the bracket pair around `t` from the per-mech ring. Returns
+ * indices into the ring or sets *a == *b for clamp cases. */
+static void pick_bracket(const Mech *m, uint32_t t, int *out_a, int *out_b) {
+    /* Walk the ring in chronological order (oldest first). */
+    int newest = -1; uint32_t newest_t = 0;
+    int oldest = -1; uint32_t oldest_t = (uint32_t)-1;
+    for (int i = 0; i < REMOTE_SNAP_RING; ++i) {
+        if (!m->remote_snap_ring[i].valid) continue;
+        uint32_t st = m->remote_snap_ring[i].server_time_ms;
+        if (newest < 0 || st > newest_t) { newest = i; newest_t = st; }
+        if (oldest < 0 || st < oldest_t) { oldest = i; oldest_t = st; }
+    }
+    if (newest < 0) { *out_a = -1; *out_b = -1; return; }
+    if (t <= oldest_t) { *out_a = oldest; *out_b = oldest; return; }
+    if (t >= newest_t) { *out_a = newest; *out_b = newest; return; }
+    /* Find the pair (ai, bi) with ai.t <= t <= bi.t. */
+    int   best_a = oldest;
+    uint32_t best_a_t = oldest_t;
+    int   best_b = newest;
+    uint32_t best_b_t = newest_t;
+    for (int i = 0; i < REMOTE_SNAP_RING; ++i) {
+        if (!m->remote_snap_ring[i].valid) continue;
+        uint32_t st = m->remote_snap_ring[i].server_time_ms;
+        if (st <= t && st > best_a_t) { best_a = i; best_a_t = st; }
+        if (st >= t && st < best_b_t) { best_b = i; best_b_t = st; }
+    }
+    *out_a = best_a;
+    *out_b = best_b;
+}
+
+void snapshot_interp_remotes(World *w, uint32_t render_time_ms) {
+    int local_id = w->local_mech_id;
+    ParticlePool *pp = &w->particles;
+    for (int mi = 0; mi < w->mech_count; ++mi) {
+        if (mi == local_id) continue;
+        Mech *m = &w->mechs[mi];
+        if (m->remote_snap_count <= 0) continue;
+
+        int ai, bi;
+        pick_bracket(m, render_time_ms, &ai, &bi);
+        if (ai < 0) continue;
+
+        const RemoteSnapBuf *a = &m->remote_snap_ring[ai];
+        const RemoteSnapBuf *b = &m->remote_snap_ring[bi];
+
+        float t = 0.0f;
+        if (a != b) {
+            uint32_t span = b->server_time_ms - a->server_time_ms;
+            if (span > 0u) {
+                t = (float)((double)(render_time_ms - a->server_time_ms) /
+                            (double)span);
+            }
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+        }
+
+        float target_x = a->pelvis_x + (b->pelvis_x - a->pelvis_x) * t;
+        float target_y = a->pelvis_y + (b->pelvis_y - a->pelvis_y) * t;
+        float target_vx = a->vel_x + (b->vel_x - a->vel_x) * t;
+        float target_vy = a->vel_y + (b->vel_y - a->vel_y) * t;
+
+        int pelv = m->particle_base + PART_PELVIS;
+        float dx = target_x - pp->pos_x[pelv];
+        float dy = target_y - pp->pos_y[pelv];
+        for (int part = 0; part < PART_COUNT; ++part) {
+            int idx = m->particle_base + part;
+            physics_translate_kinematic(pp, idx, dx, dy);
+            physics_set_velocity_x(pp, idx, target_vx);
+            physics_set_velocity_y(pp, idx, target_vy);
         }
     }
 }

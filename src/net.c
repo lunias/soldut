@@ -30,6 +30,8 @@
 #include "match.h"
 #include "maps.h"
 #include "mech.h"
+#include "particle.h"
+#include "projectile.h"
 #include "reconcile.h"
 #include "snapshot.h"
 #include "weapons.h"
@@ -899,9 +901,32 @@ static void client_handle_snapshot(NetState *ns, const uint8_t *body,
         LOG_I("client: first snapshot — %d ents, mech_count=%d, local_slot=%d",
               snap.ent_count, g->world.mech_count, g->local_slot_id);
     }
+    /* P03 — advance the client render clock toward the snapshot's
+     * server_time_ms. On the first snapshot, jam the clock to
+     * `server_time_ms - INTERP_DELAY_MS` so we render at "100 ms in
+     * the past" right away. On subsequent snapshots, only update
+     * `latest_server_time_ms` (the per-tick advance in main.c keeps
+     * `client_render_time_ms` moving smoothly). */
+    if (snap.header.server_time_ms > ns->client_latest_server_time_ms) {
+        ns->client_latest_server_time_ms = snap.header.server_time_ms;
+    }
+    if (!ns->client_render_clock_armed) {
+        /* render_time stays double-precision and CAN go negative —
+         * if first_snap.server_time < INTERP_DELAY_MS we want to be
+         * "100 ms before snapshot 1 exists" so the offset to server
+         * time is preserved. Clamping here would make render_time
+         * track server_time directly (only ~16 ms behind in practice)
+         * and snapshot_interp_remotes would always clamp to newest. */
+        ns->client_render_time_ms =
+            (double)snap.header.server_time_ms - (double)NET_INTERP_DELAY_MS;
+        ns->client_render_clock_armed = true;
+    }
     /* The snapshot's ack_input_seq tells us how far the server has
      * processed our inputs. Hand off to reconcile, which will
-     * overwrite world state and replay subsequent inputs. */
+     * overwrite local-mech state and replay subsequent inputs.
+     * Remote mechs are pushed to per-mech rings inside snapshot_apply
+     * (called by reconcile_apply_snapshot) — they're written to the
+     * particle pool each sim tick by snapshot_interp_remotes. */
     reconcile_apply_snapshot(&g->reconcile, &g->world, &snap,
                              snap.header.ack_input_seq, 1.0f / 60.0f);
 }
@@ -920,6 +945,116 @@ static void client_handle_kill_event(NetState *ns, const uint8_t *body, int blen
     snprintf(g->world.last_event, sizeof g->world.last_event,
              "[KILL] mech #%u → mech #%u", (unsigned)killer, (unsigned)victim);
     g->world.last_event_time = 0.0f;
+}
+
+static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen, Game *g) {
+    (void)ns;
+    if (blen < 11) return;
+    const uint8_t *r = body;
+    uint16_t shooter = r_u16(&r);
+    uint8_t  weapon  = r_u8 (&r);
+    int16_t  oxq     = (int16_t)r_u16(&r);
+    int16_t  oyq     = (int16_t)r_u16(&r);
+    int16_t  dxq     = (int16_t)r_u16(&r);
+    int16_t  dyq     = (int16_t)r_u16(&r);
+
+    /* Skip our own fires — local predict path already spawned the
+     * tracer / spark FX for them. Replaying here would double up. */
+    if ((int)shooter == g->world.local_mech_id) return;
+
+    Vec2 origin = { (float)oxq / 8.0f, (float)oyq / 8.0f };
+    Vec2 dir    = { (float)dxq / 32767.0f, (float)dyq / 32767.0f };
+
+    const Weapon *wpn = weapon_def((int)weapon);
+    if (!wpn) return;
+
+    /* Tracer + sparks at the muzzle for every shot — gives the client
+     * a visible "muzzle flash" for remote players regardless of fire
+     * kind. The HIT_EVENT path handles blood/sparks at the hit end. */
+    for (int k = 0; k < 3; ++k) {
+        fx_spawn_spark(&g->world.fx, origin,
+            (Vec2){ dir.x * 350.0f, dir.y * 350.0f }, g->world.rng);
+    }
+
+    if (wpn->fire == WFIRE_HITSCAN) {
+        /* Tracer to the wall (or full range if open air). The actual
+         * hit point lands via HIT_EVENT (blood/sparks at target);
+         * the tracer just needs to look like the bullet's flight
+         * path, so a level ray-cast is good enough. */
+        float t_max = wpn->range_px;
+        float wall_t;
+        if (level_ray_hits(&g->world.level, origin,
+                (Vec2){ origin.x + dir.x * wpn->range_px,
+                        origin.y + dir.y * wpn->range_px },
+                &wall_t)) {
+            t_max = wall_t * wpn->range_px;
+        }
+        Vec2 end = { origin.x + dir.x * t_max,
+                     origin.y + dir.y * t_max };
+        fx_spawn_tracer(&g->world.fx, origin, end);
+    } else if (wpn->fire == WFIRE_PROJECTILE ||
+               wpn->fire == WFIRE_SPREAD     ||
+               wpn->fire == WFIRE_BURST      ||
+               wpn->fire == WFIRE_THROW)
+    {
+        /* Spawn a visual-only projectile. w->authoritative is false
+         * on the client so projectile_step won't apply damage when
+         * it hits a mech; it just renders + leaves sparks at impact. */
+        int sm = (int)shooter;
+        ProjectileSpawn ps = {
+            .kind          = wpn->projectile_kind,
+            .weapon_id     = (int)weapon,
+            .owner_mech_id = sm,
+            .owner_team    = (sm < g->world.mech_count)
+                              ? g->world.mechs[sm].team : 0,
+            .origin        = origin,
+            .velocity      = (Vec2){ dir.x * wpn->projectile_speed_pxs,
+                                     dir.y * wpn->projectile_speed_pxs },
+            .damage        = wpn->damage,
+            .aoe_radius    = wpn->aoe_radius,
+            .aoe_damage    = wpn->aoe_damage,
+            .aoe_impulse   = wpn->aoe_impulse,
+            .life          = wpn->projectile_life_sec,
+            .gravity_scale = wpn->projectile_grav_scale,
+            .drag          = wpn->projectile_drag,
+            .bouncy        = wpn->bouncy,
+        };
+        projectile_spawn(&g->world, ps);
+        /* Short muzzle tracer so the launch reads cleanly. */
+        Vec2 spark_end = { origin.x + dir.x * 80.0f,
+                           origin.y + dir.y * 80.0f };
+        fx_spawn_tracer(&g->world.fx, origin, spark_end);
+    } else if (wpn->fire == WFIRE_MELEE) {
+        Vec2 end = { origin.x + dir.x * wpn->range_px,
+                     origin.y + dir.y * wpn->range_px };
+        fx_spawn_tracer(&g->world.fx, origin, end);
+    }
+}
+
+static void client_handle_hit_event(NetState *ns, const uint8_t *body, int blen, Game *g) {
+    (void)ns;
+    if (blen < 12) return;
+    const uint8_t *r = body;
+    uint16_t victim = r_u16(&r);
+    uint8_t  part   = r_u8 (&r);
+    int16_t  pxq    = (int16_t)r_u16(&r);
+    int16_t  pyq    = (int16_t)r_u16(&r);
+    int16_t  dxq    = (int16_t)r_u16(&r);
+    int16_t  dyq    = (int16_t)r_u16(&r);
+    uint8_t  dmg    = r_u8 (&r);
+    /* Dequant. */
+    Vec2 hp  = { (float)pxq / 8.0f, (float)pyq / 8.0f };
+    Vec2 dir = { (float)dxq / 32767.0f, (float)dyq / 32767.0f };
+    /* Spawn FX. Same shape as mech_apply_damage on the server: 8
+     * blood + 4 sparks per hit, scaled lightly with damage so a
+     * heavy shot reads more visibly. */
+    int n_blood = 8 + (int)(dmg / 16);
+    if (n_blood > 16) n_blood = 16;
+    int n_sparks = 4 + (int)(dmg / 32);
+    if (n_sparks > 8) n_sparks = 8;
+    for (int k = 0; k < n_blood; ++k) fx_spawn_blood(&g->world.fx, hp, dir, g->world.rng);
+    for (int k = 0; k < n_sparks; ++k) fx_spawn_spark(&g->world.fx, hp, dir, g->world.rng);
+    (void)victim; (void)part;   /* reserved for future per-limb visual variation */
 }
 
 static void client_handle_reject(NetState *ns, const uint8_t *body, int blen) {
@@ -1183,6 +1318,10 @@ static void client_dispatch_event(NetState *ns, Game *g, ENetEvent *ev) {
                     client_handle_snapshot(ns, body, blen, g); break;
                 case NET_MSG_KILL_EVENT:
                     client_handle_kill_event(ns, body, blen, g); break;
+                case NET_MSG_HIT_EVENT:
+                    client_handle_hit_event(ns, body, blen, g); break;
+                case NET_MSG_FIRE_EVENT:
+                    client_handle_fire_event(ns, body, blen, g); break;
                 case NET_MSG_LOBBY_LIST:
                     client_handle_lobby_list(body, blen, g); break;
                 case NET_MSG_LOBBY_SLOT_UPDATE:
@@ -1319,6 +1458,95 @@ void net_server_broadcast_kill(NetState *ns, int killer_mech_id,
     w_u16(&p, (uint16_t)killer_mech_id);
     w_u16(&p, (uint16_t)victim_mech_id);
     w_u16(&p, (uint16_t)weapon_id);
+    ENetPacket *pkt = enet_packet_create(buf, (size_t)(p - buf),
+                                          ENET_PACKET_FLAG_RELIABLE);
+    enet_host_broadcast((ENetHost *)ns->enet_host, NET_CH_EVENT, pkt);
+}
+
+/* FIRE_EVENT wire layout (12 bytes):
+ *   u8  type = NET_MSG_FIRE_EVENT
+ *   u16 shooter_mech_id
+ *   u8  weapon_id
+ *   i16 origin_x_q  (1/8 px, same quant as snapshot pos)
+ *   i16 origin_y_q
+ *   i16 dir_x_q     (Q1.15 normalized direction)
+ *   i16 dir_y_q
+ */
+void net_server_broadcast_fire(NetState *ns, int shooter_mech_id, int weapon_id,
+                               float origin_x, float origin_y,
+                               float dir_x, float dir_y)
+{
+    if (ns->role != NET_ROLE_SERVER) return;
+    float qx = origin_x * 8.0f;
+    float qy = origin_y * 8.0f;
+    if (qx >  32760.0f) qx =  32760.0f;
+    if (qx < -32760.0f) qx = -32760.0f;
+    if (qy >  32760.0f) qy =  32760.0f;
+    if (qy < -32760.0f) qy = -32760.0f;
+    int16_t origin_x_q = (int16_t)(qx < 0 ? qx - 0.5f : qx + 0.5f);
+    int16_t origin_y_q = (int16_t)(qy < 0 ? qy - 0.5f : qy + 0.5f);
+    if (dir_x >  1.0f) dir_x =  1.0f;
+    if (dir_x < -1.0f) dir_x = -1.0f;
+    if (dir_y >  1.0f) dir_y =  1.0f;
+    if (dir_y < -1.0f) dir_y = -1.0f;
+    int16_t dir_x_q = (int16_t)(dir_x * 32767.0f);
+    int16_t dir_y_q = (int16_t)(dir_y * 32767.0f);
+
+    uint8_t buf[16]; uint8_t *p = buf;
+    w_u8 (&p, NET_MSG_FIRE_EVENT);
+    w_u16(&p, (uint16_t)shooter_mech_id);
+    w_u8 (&p, (uint8_t)weapon_id);
+    w_u16(&p, (uint16_t)origin_x_q);
+    w_u16(&p, (uint16_t)origin_y_q);
+    w_u16(&p, (uint16_t)dir_x_q);
+    w_u16(&p, (uint16_t)dir_y_q);
+    ENetPacket *pkt = enet_packet_create(buf, (size_t)(p - buf),
+                                          ENET_PACKET_FLAG_RELIABLE);
+    enet_host_broadcast((ENetHost *)ns->enet_host, NET_CH_EVENT, pkt);
+}
+
+/* HIT_EVENT wire layout (14 bytes):
+ *   u8  type = NET_MSG_HIT_EVENT
+ *   u16 victim_mech_id
+ *   u8  hit_part (PART_*)
+ *   i16 pos_x_q  (1/8 px, same quant as snapshot pos)
+ *   i16 pos_y_q
+ *   i16 dir_x_q  (Q1.15 — multiply by 32767, normalized direction)
+ *   i16 dir_y_q
+ *   u8  damage   (clamped to 255 — final dmg after armor)
+ */
+void net_server_broadcast_hit(NetState *ns, int victim_mech_id, int hit_part,
+                              float pos_x, float pos_y, float dir_x, float dir_y,
+                              int damage)
+{
+    if (ns->role != NET_ROLE_SERVER) return;
+    /* Quantize pos at 1/8 px (matches snapshot pos_q). */
+    float qx = pos_x * 8.0f;
+    float qy = pos_y * 8.0f;
+    if (qx >  32760.0f) qx =  32760.0f;
+    if (qx < -32760.0f) qx = -32760.0f;
+    if (qy >  32760.0f) qy =  32760.0f;
+    if (qy < -32760.0f) qy = -32760.0f;
+    int16_t pos_x_q = (int16_t)(qx < 0 ? qx - 0.5f : qx + 0.5f);
+    int16_t pos_y_q = (int16_t)(qy < 0 ? qy - 0.5f : qy + 0.5f);
+    /* Quantize dir as Q1.15 (signed fraction of [-1, 1]). */
+    if (dir_x > 1.0f) dir_x = 1.0f;
+    if (dir_x < -1.0f) dir_x = -1.0f;
+    if (dir_y > 1.0f) dir_y = 1.0f;
+    if (dir_y < -1.0f) dir_y = -1.0f;
+    int16_t dir_x_q = (int16_t)(dir_x * 32767.0f);
+    int16_t dir_y_q = (int16_t)(dir_y * 32767.0f);
+    int dmg_clamped = damage < 0 ? 0 : (damage > 255 ? 255 : damage);
+
+    uint8_t buf[16]; uint8_t *p = buf;
+    w_u8 (&p, NET_MSG_HIT_EVENT);
+    w_u16(&p, (uint16_t)victim_mech_id);
+    w_u8 (&p, (uint8_t)hit_part);
+    w_u16(&p, (uint16_t)pos_x_q);
+    w_u16(&p, (uint16_t)pos_y_q);
+    w_u16(&p, (uint16_t)dir_x_q);
+    w_u16(&p, (uint16_t)dir_y_q);
+    w_u8 (&p, (uint8_t)dmg_clamped);
     ENetPacket *pkt = enet_packet_create(buf, (size_t)(p - buf),
                                           ENET_PACKET_FLAG_RELIABLE);
     enet_host_broadcast((ENetHost *)ns->enet_host, NET_CH_EVENT, pkt);

@@ -1,0 +1,28 @@
+# 2p_hit — client. Faces LEFT and fires bursts at the host.
+# Client's view of host should show blood/sparks matching what the
+# host sees of itself (P03 NET_MSG_HIT_EVENT path).
+
+window 1280 720
+out build/shots/net/hit_client
+network connect 127.0.0.1:24071
+name ClientB
+
+# Match host's spawn_at — note: client's spawn_at only positions
+# its own mech locally (cosmetic). The authoritative server's
+# peer_spawn is what really matters.
+spawn_at 2700 1112
+
+# Aim at host's chest (~52 above pelvis y=1112, so y=1060).
+aim 2300 1060
+
+# Fire 3 separate single shots so we get distinct hit events.
+at 200 tap fire
+at 260 tap fire
+at 320 tap fire
+at 380 tap fire
+at 440 tap fire
+
+at 200 shot before_hit
+at 350 shot mid_hit
+at 500 shot after_hit
+at 700 end

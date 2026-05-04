@@ -17,6 +17,7 @@
 #include "reconcile.h"
 #include "render.h"
 #include "simulate.h"
+#include "snapshot.h"
 #include "version.h"
 #include "weapons.h"
 
@@ -1149,6 +1150,14 @@ int shotmode_run(const char *script_path) {
                 }
                 if (game.net.role == NET_ROLE_CLIENT) {
                     simulate_step(&game.world, TICK_DT);
+                    /* P03: same as main.c — pull remote mechs to the
+                     * interpolated server position after physics. */
+                    if (game.net.client_render_clock_armed) {
+                        game.net.client_render_time_ms += TICK_DT * 1000.0;
+                        double rt = game.net.client_render_time_ms;
+                        uint32_t rt_u32 = (rt > 0.0) ? (uint32_t)rt : 0u;
+                        snapshot_interp_remotes(&game.world, rt_u32);
+                    }
                     reconcile_push_input(&game.reconcile, nin);
                     net_client_send_input(&game.net, nin);
                     reconcile_tick_smoothing(&game.reconcile);
@@ -1205,7 +1214,8 @@ int shotmode_run(const char *script_path) {
             if (game.mode == MODE_SUMMARY) overlay = summary_overlay_draw_thunk;
             renderer_draw_frame(&rd_n, &game.world,
                                 GetScreenWidth(), GetScreenHeight(),
-                                0.0f, cursor, overlay, &octx);
+                                0.0f, (Vec2){0.0f, 0.0f},
+                                cursor, overlay, &octx);
             if (game.mode == MODE_LOBBY) {
                 BeginDrawing();
                 lobby_screen_run(&ui_n, &game,
@@ -1401,6 +1411,7 @@ int shotmode_run(const char *script_path) {
         renderer_draw_frame(&rd, &game.world,
                             GetScreenWidth(), GetScreenHeight(),
                             /*alpha*/ 0.0f,
+                            /*local_visual_offset*/ (Vec2){0.0f, 0.0f},
                             cursor_screen,
                             /*overlay*/ NULL, NULL);
 

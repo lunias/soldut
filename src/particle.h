@@ -27,5 +27,6 @@ int fx_spawn_tracer(FxPool *pool, Vec2 a, Vec2 b);
 void fx_update(World *w, float dt);
 
 /* Render the live FX particles in their current state.
- * Caller is responsible for being inside BeginMode2D(...). */
-void fx_draw(const FxPool *pool);
+ * Caller is responsible for being inside BeginMode2D(...).
+ * `alpha` is the in-between-ticks fraction in [0,1] (P03). */
+void fx_draw(const FxPool *pool, float alpha);
