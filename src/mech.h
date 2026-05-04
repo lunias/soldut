@@ -180,6 +180,12 @@ void mech_step_drive(World *w, int mech_id, ClientInput in, float dt);
  * works. */
 void mech_post_physics_anchor(World *w, int mech_id);
 
+/* Per-tick environmental damage check: DEADLY tiles, DEADLY polygons,
+ * ACID ambient zones. Applies 5 HP/s × dt to PART_PELVIS when any of
+ * the mech's particles overlap a hazard. Called from simulate_step
+ * after the physics pass. */
+void mech_apply_environmental_damage(World *w, int mech_id, float dt);
+
 /* Trigger a single weapon fire (button edge). Schedules recoil, reads
  * weapon table, performs the hitscan, applies damage to whatever it
  * hits. Returns true if a shot left the barrel. */

@@ -31,10 +31,10 @@ The game is decomposed into modules. Each module is **one `.h` + one `.c`**. The
 
 ```
 src/
-├── main.c                  # entry point, top-level loop
+├── main.c                  # entry point, top-level loop, 60 Hz accumulator
 ├── platform.{c,h}          # window, input, time — wraps raylib for our use
 ├── game.{c,h}              # top-level Game struct, init/shutdown
-├── world.{c,h}             # World struct, the entire simulation state
+├── world.h                 # World struct + all simulation-state typedefs (header-only)
 ├── simulate.{c,h}          # the pure simulate() function
 ├── physics.{c,h}           # Verlet, constraints, collision
 ├── mech.{c,h}              # Mech struct, chassis, animation
@@ -42,24 +42,26 @@ src/
 ├── projectile.{c,h}        # bullets, grenades, rockets
 ├── particle.{c,h}          # blood, sparks, smoke
 ├── decal.{c,h}             # splat layer
-├── pickup.{c,h}            # map pickups
-├── level.{c,h}             # .lvl loader, tile grid, polygons
+├── level.{c,h}             # tile grid + ray helpers
+├── level_io.{c,h}          # `.lvl` binary format loader/saver + CRC32 (M5 P01)
+├── maps.{c,h}              # code-built map fallbacks + `map_build` dispatcher
+├── match.{c,h}             # match phases, scoring, mode rules
 ├── render.{c,h}            # high-level draw orchestration
-├── hud.{c,h}               # screen-space UI
-├── lobby.{c,h}             # waiting room, chat, ready-up
-├── server_browser.{c,h}    # discovery + direct connect
-├── net.{c,h}               # ENet wrapper, packet schemas
+├── hud.{c,h}               # screen-space UI (HP/jet/ammo/kill feed)
+├── ui.{c,h}                # small immediate-mode raylib UI helpers (4K-aware scaling)
+├── lobby.{c,h}             # lobby state, slot table, chat, ready-up
+├── lobby_ui.{c,h}          # title / server browser / lobby / summary screens
+├── net.{c,h}               # ENet wrapper, packet schemas, LAN discovery
 ├── snapshot.{c,h}          # snapshot encode/decode + delta + interp
 ├── reconcile.{c,h}         # client prediction + reconciliation
-├── input.{c,h}             # input bitmask + buffer
-├── audio.{c,h}             # sound aliases, attenuation, mix
+├── input.h                 # input bitmask (header-only)
+├── config.{c,h}            # `soldut.cfg` key=value parser
 ├── arena.{c,h}             # arena allocator
 ├── pool.{c,h}              # fixed-size pool allocator
-├── log.{c,h}               # logger
-├── math.{c,h}              # math helpers beyond raymath (rare)
+├── log.{c,h}               # logger (incl. SHOT_LOG())
+├── math.h                  # math helpers beyond raymath (header-only, mostly inline)
 ├── hash.{c,h}              # PCG, FNV, simple hash table
 ├── ds.c                    # one .c that #defines STB_DS_IMPLEMENTATION
-├── hotreload.{c,h}         # mtime watcher
 ├── shotmode.{c,h}          # scriptable scene runner that drives the real
 │                           #   sim + renderer and writes PNG + log pairs
 │                           #   for visual debugging — see CLAUDE.md
@@ -67,6 +69,13 @@ src/
 ```
 
 That is the entire public structure. Anything we want to add asks: which existing module owns this? If none, it gets a new `name.{c,h}` pair, never a folder.
+
+Modules that the design canon expects but that haven't shipped yet:
+- `pickup.{c,h}` — lands at M5 P05 (per `documents/m5/04-pickups.md`).
+- `audio.{c,h}` — lands at M5 P14 (per `documents/m5/09-audio.md`).
+- `hotreload.{c,h}` — never built; data hot-reload is deferred indefinitely.
+
+`server_browser.{c,h}` was originally planned as its own module; LAN discovery folded into `net.{c,h}` and the browser screen lives in `lobby_ui.{c,h}`.
 
 ## `Game *g` — the spine
 
@@ -167,8 +176,8 @@ Each module's `.h` declares what it depends on. The dependency graph is a DAG; w
                          game
                        /       \
                     world      platform
-                    /  \           ↓
-              simulate  net    audio
+                    /  \
+              simulate  net
                 |        ↓
               physics  snapshot
               mech     reconcile
@@ -176,17 +185,21 @@ Each module's `.h` declares what it depends on. The dependency graph is a DAG; w
               projectile
               particle
               decal
-              pickup
               level
+              level_io
+              maps
+              match
               render
                 ↑
               hud
+              ui
               lobby
-              server_browser
+              lobby_ui
                 ↑
               input
 
-              arena, pool, log, math, hash, ds   (leaf utilities)
+              arena, pool, log, math, hash, ds, config   (leaf utilities)
+              shotmode                                    (test harness; see CLAUDE.md)
 ```
 
 `render`, `hud`, `lobby`, `server_browser` are *consumers* of `world` and `net`; they never write to authoritative state.
@@ -331,37 +344,45 @@ We do **not** integrate Tracy or Optick at v1. If we need deep traces, we add th
 
 ## File size targets
 
-| Module | Approx LOC at v1 | Notes |
+| Module | Current LOC (post-M4 + M5 P01) | Notes |
 |---|---|---|
-| platform.c | 200 | thin raylib wrapper |
-| game.c | 300 | top-level loop |
-| world.c | 200 | data definitions |
-| simulate.c | 600 | the pure step |
-| physics.c | 1100 | Verlet + constraints + collision |
-| mech.c | 800 | chassis + animation drive |
-| weapons.c | 700 | weapon table + fire logic |
-| projectile.c | 400 | bullets/grenades |
-| particle.c | 300 | pool + draw |
-| decal.c | 200 | splat layer |
-| level.c | 500 | loader + grid |
-| render.c | 800 | orchestration |
-| hud.c | 600 | screen-space UI |
-| lobby.c | 700 | waiting room |
-| server_browser.c | 400 | LAN discovery |
-| net.c | 800 | ENet wrap + packet codec |
-| snapshot.c | 700 | encode/decode |
-| reconcile.c | 300 | predict + replay |
-| input.c | 200 | bitmask |
-| audio.c | 400 | mix + aliases |
-| arena.c | 80 | |
-| pool.c | 150 | |
-| log.c | 100 | |
-| hash.c | 200 | |
-| ds.c | 5 | one #define |
-| hotreload.c | 200 | |
-| **Total** | **~10,800 LOC** | comfortable for one or two engineers |
+| main.c | 867 | top-level loop + accumulator + CLI |
+| platform.c | 99 | thin raylib wrapper |
+| game.c | 111 | Game lifecycle |
+| simulate.c | 214 | the pure step |
+| physics.c | 412 | Verlet + constraints + collision |
+| mech.c | 1181 | chassis + animation drive — close to split threshold |
+| weapons.c | 638 | weapon table + fire logic |
+| projectile.c | 474 | bullets/grenades |
+| particle.c | 180 | pool + draw |
+| decal.c | 80 | splat layer |
+| level.c | 135 | tile-grid helpers + ray queries |
+| level_io.c | 714 | `.lvl` loader/saver + CRC32 (M5 P01) |
+| maps.c | 206 | code-built map fallbacks + `map_build` |
+| match.c | 261 | match phases, scoring, mode rules |
+| render.c | 275 | orchestration |
+| hud.c | 145 | HP / jet / ammo / kill feed |
+| ui.c | 306 | immediate-mode UI helpers |
+| lobby.c | 523 | lobby state, slots, chat, ready-up |
+| lobby_ui.c | 896 | title / browser / lobby / summary screens |
+| net.c | 1523 | ENet wrap + packet codec — past split threshold |
+| snapshot.c | 483 | encode/decode |
+| reconcile.c | 114 | predict + replay |
+| config.c | 171 | `soldut.cfg` parser |
+| arena.c | 51 | |
+| pool.c | 65 | |
+| log.c | 91 | |
+| hash.c | 49 | |
+| ds.c | 20 | one #define |
+| shotmode.c | 1444 | scriptable test runner — past split threshold |
+| **Total .c** | **~11,700 LOC** | + ~3,000 LOC of headers |
 
-If we substantially exceed these, the module is doing too much — we look for an extraction.
+`net.c` is over the ~1500 line split guideline; `shotmode.c` is just under. Watch
+both at the next material change. `audio.{c,h}` and `pickup.{c,h}` are not yet
+built — they land at M5 P14 / P05 and will add to this table.
+
+If a module substantially exceeds the rule of thumb, it's doing too much — we
+look for an extraction.
 
 ## What we are NOT building
 

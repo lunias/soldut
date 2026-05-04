@@ -604,7 +604,7 @@ static void networked_shot_bootstrap(Game *g, const Script *s) {
         }
         /* Pre-build the level so the lobby has something to draw the
          * world frame against. ROUND_START rebuilds for the chosen map. */
-        map_build(MAP_FOUNDRY, &g->world.level, &g->level_arena);
+        map_build(MAP_FOUNDRY, &g->world, &g->level_arena);
         decal_init((int)level_width_px(&g->world.level),
                    (int)level_height_px(&g->world.level));
         g->mode = MODE_LOBBY;
@@ -708,7 +708,7 @@ static void shot_host_flow(Game *g, float dt) {
                 g->world.friendly_fire= g->config.friendly_fire ||
                                         (g->match.mode == MATCH_MODE_FFA);
                 arena_reset(&g->level_arena);
-                map_build((MapId)g->match.map_id, &g->world.level, &g->level_arena);
+                map_build((MapId)g->match.map_id, &g->world, &g->level_arena);
                 decal_init((int)level_width_px(&g->world.level),
                            (int)level_height_px(&g->world.level));
                 lobby_spawn_round_mechs(&g->lobby, &g->world,

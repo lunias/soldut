@@ -1,5 +1,6 @@
 #include "mech.h"
 
+#include "level.h"
 #include "log.h"
 #include "particle.h"
 #include "physics.h"
@@ -529,11 +530,69 @@ static bool any_foot_grounded(const World *w, const Mech *m) {
 
 static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, bool grounded) {
     ParticlePool *p = &w->particles;
-    float vx_per_tick = vx_pxs * dt;
-    if (!grounded) vx_per_tick *= AIR_CONTROL;
+
+    if (!grounded) {
+        /* Air control: keep the existing horizontal-only behavior. */
+        float vx_per_tick = vx_pxs * dt * AIR_CONTROL;
+        for (int part = 0; part < PART_COUNT; ++part) {
+            int idx = m->particle_base + part;
+            physics_set_velocity_x(p, idx, vx_per_tick);
+        }
+        return;
+    }
+
+    /* Read the average foot contact normal from the previous tick's
+     * contact resolver. We use it for two things: (a) deciding
+     * whether the foot is on a slope, so we know whether to brake
+     * (flat) or let gravity-along-tangent run wild (sloped); (b)
+     * projecting the run input onto the slope tangent so a held run
+     * input climbs/descends along the surface instead of dragging
+     * the body horizontally through it. */
+    int lf = m->particle_base + PART_L_FOOT;
+    int rf = m->particle_base + PART_R_FOOT;
+    float nx = (p->contact_nx_q[lf] + p->contact_nx_q[rf]) / 254.0f;
+    float ny = (p->contact_ny_q[lf] + p->contact_ny_q[rf]) / 254.0f;
+    float nlen = sqrtf(nx * nx + ny * ny);
+    bool flat;
+    if (nlen < 0.5f) {
+        /* No fresh contact data — treat as flat floor. */
+        nx = 0.0f; ny = -1.0f;
+        flat = true;
+    } else {
+        nx /= nlen; ny /= nlen;
+        flat = (ny < -0.92f);
+    }
+
+    /* No-input + flat ground: brake horizontal velocity. On a slope,
+     * skip the braking entirely so gravity-along-tangent + slope-aware
+     * friction can drive passive slide. */
+    if (vx_pxs == 0.0f) {
+        if (!flat) return;
+        for (int part = 0; part < PART_COUNT; ++part) {
+            physics_set_velocity_x(p, m->particle_base + part, 0.0f);
+        }
+        return;
+    }
+
+    /* Tangent is normal rotated 90°. Sign chosen to match run direction. */
+    float dir = (vx_pxs > 0.0f) ? 1.0f : -1.0f;
+    float tx  = -ny * dir;
+    float ty  =  nx * dir;
+
+    float speed = fabsf(vx_pxs);
+    float vt_per_tick_x = tx * speed * dt;
+    float vt_per_tick_y = ty * speed * dt;
+
     for (int part = 0; part < PART_COUNT; ++part) {
         int idx = m->particle_base + part;
-        physics_set_velocity_x(p, idx, vx_per_tick);
+        physics_set_velocity_x(p, idx, vt_per_tick_x);
+        /* Y is set on the lower chain only — upper body keeps its
+         * gravity component so the body leans naturally into a slope
+         * instead of being dragged tilted. */
+        if (part == PART_L_FOOT || part == PART_R_FOOT ||
+            part == PART_L_KNEE || part == PART_R_KNEE) {
+            physics_set_velocity_y(p, idx, vt_per_tick_y);
+        }
     }
 }
 
@@ -564,10 +623,38 @@ static void apply_jet_force(World *w, const Mech *m, float thrust_pxs2, float dt
                  (unsigned long long)w->tick, m->id, head_y, scale);
     }
     if (scale <= 0.0f) return;
-    float dy = -thrust_pxs2 * scale * dt * dt;
+    float fy = -thrust_pxs2 * scale * dt * dt;     /* base impulse, straight up */
+
+    /* Run-input sign for ceiling-tangent direction selection. The
+     * latched_input tells us which way the player is leaning; when
+     * jetting against an angled overhang we redirect the upward thrust
+     * sideways along the ceiling tangent in that direction. */
+    float run_sign = 0.0f;
+    if (m->latched_input.buttons & BTN_LEFT)  run_sign = -1.0f;
+    if (m->latched_input.buttons & BTN_RIGHT) run_sign = +1.0f;
+
     for (int part = 0; part < PART_COUNT; ++part) {
         int idx = m->particle_base + part;
-        p->pos_y[idx] += dy;
+        if ((p->flags[idx] & PARTICLE_FLAG_CEILING) && run_sign != 0.0f) {
+            /* Project the (0, fy) impulse onto the ceiling tangent.
+             * For a flat ceiling (n = (0, +1)) the tangent is (1, 0)
+             * and dot is 0 — upward thrust dies, no slide. For an
+             * angled ceiling (n = (-0.7, +0.7)) the tangent is
+             * (-0.7, -0.7); dot picks up a sideways component the
+             * run input chooses the sign of. */
+            float nx = p->contact_nx_q[idx] / 127.0f;
+            float ny = p->contact_ny_q[idx] / 127.0f;
+            float tx = -ny;
+            float ty =  nx;
+            /* Pick the tangent direction matching the run input. */
+            if (tx * run_sign < 0.0f) { tx = -tx; ty = -ty; }
+            float mag = fabsf(fy);     /* magnitude of original upward thrust */
+            p->pos_x[idx] += tx * mag;
+            p->pos_y[idx] += ty * mag;
+            /* Vertical component eaten by the ceiling — no upward push. */
+        } else {
+            p->pos_y[idx] += fy;
+        }
     }
 }
 
@@ -780,6 +867,19 @@ void mech_post_physics_anchor(World *w, int mid) {
     if (!grounded) return;
     if (m->anim_id != ANIM_STAND && m->anim_id != ANIM_RUN) return;
 
+    /* P02: slope-aware gating. If either foot's contact normal is
+     * tilted more than ~22° off straight-up, the mech is on a slope —
+     * skip the standing anchor and let slope physics (slope-tangent
+     * run velocity + slope-aware friction) drive pose. Without this,
+     * the anchor zeros Y-velocity every tick and kills passive
+     * downhill slide. */
+    int lf = b + PART_L_FOOT;
+    int rf = b + PART_R_FOOT;
+    float ny_l = p->contact_ny_q[lf] / 127.0f;
+    float ny_r = p->contact_ny_q[rf] / 127.0f;
+    float ny_avg = (ny_l + ny_r) * 0.5f;
+    if (ny_avg > -0.92f) return;       /* sloped or no contact — skip anchor */
+
     const Chassis *ch = mech_chassis((ChassisId)m->chassis_id);
     float foot_y = (p->pos_y[b + PART_L_FOOT] + p->pos_y[b + PART_R_FOOT]) * 0.5f;
 
@@ -816,6 +916,88 @@ void mech_post_physics_anchor(World *w, int mid) {
         physics_translate_kinematic(p, b + PART_R_KNEE, 0.0f, dy_knee_r);
         p->prev_y[b + PART_L_KNEE] = p->pos_y[b + PART_L_KNEE];
         p->prev_y[b + PART_R_KNEE] = p->pos_y[b + PART_R_KNEE];
+    }
+}
+
+/* ---- Environmental damage (P02) ----------------------------------- */
+/*
+ * 5 HP/s damage tick when a mech is touching a DEADLY tile, a DEADLY
+ * polygon, or inside an ACID ambient zone. Per the design canon
+ * (documents/m5/03-collision-polygons.md §"DEADLY tiles + ACID ambient
+ * zones"). Called from simulate_step after the physics pass.
+ */
+
+static bool point_in_tri(float px, float py,
+                         float ax, float ay,
+                         float bx, float by,
+                         float cx, float cy)
+{
+    float d = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+    if (fabsf(d) < 1e-6f) return false;
+    float u = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / d;
+    float v = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / d;
+    return u >= 0.0f && v >= 0.0f && (u + v) <= 1.0f;
+}
+
+void mech_apply_environmental_damage(World *w, int mid, float dt) {
+    Mech *m = &w->mechs[mid];
+    if (!m->alive || m->is_dummy) return;
+
+    const ParticlePool *p = &w->particles;
+    const Level        *L = &w->level;
+    int   ts = L->tile_size;
+    bool  in_hazard = false;
+
+    for (int part = 0; part < PART_COUNT && !in_hazard; ++part) {
+        int idx = m->particle_base + part;
+        float px = p->pos_x[idx];
+        float py = p->pos_y[idx];
+
+        /* Tile DEADLY check. */
+        int tx = (int)(px / (float)ts);
+        int ty = (int)(py / (float)ts);
+        if (level_flags_at(L, tx, ty) & TILE_F_DEADLY) {
+            in_hazard = true;
+            break;
+        }
+
+        /* Polygon DEADLY check via broadphase. */
+        if (L->poly_grid_off && L->poly_count > 0 &&
+            tx >= 0 && tx < L->width && ty >= 0 && ty < L->height) {
+            int cell = ty * L->width + tx;
+            int s = L->poly_grid_off[cell];
+            int e = L->poly_grid_off[cell + 1];
+            for (int k = s; k < e; ++k) {
+                const LvlPoly *poly = &L->polys[L->poly_grid[k]];
+                if ((PolyKind)poly->kind != POLY_KIND_DEADLY) continue;
+                if (point_in_tri(px, py,
+                                 (float)poly->v_x[0], (float)poly->v_y[0],
+                                 (float)poly->v_x[1], (float)poly->v_y[1],
+                                 (float)poly->v_x[2], (float)poly->v_y[2])) {
+                    in_hazard = true;
+                    break;
+                }
+            }
+        }
+
+        /* ACID ambient zone check. */
+        if (!in_hazard && L->ambi_count > 0) {
+            for (int z = 0; z < L->ambi_count; ++z) {
+                const LvlAmbi *a = &L->ambis[z];
+                if (a->kind != AMBI_ACID) continue;
+                if (px < (float)a->rect_x ||
+                    px > (float)(a->rect_x + a->rect_w)) continue;
+                if (py < (float)a->rect_y ||
+                    py > (float)(a->rect_y + a->rect_h)) continue;
+                in_hazard = true;
+                break;
+            }
+        }
+    }
+
+    if (in_hazard) {
+        mech_apply_damage(w, mid, PART_PELVIS, 5.0f * dt,
+                          (Vec2){0.0f, -1.0f}, /*shooter*/-1);
     }
 }
 

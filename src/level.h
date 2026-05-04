@@ -23,13 +23,20 @@ void level_build_tutorial(Level *level, Arena *level_arena);
  * particles don't escape forever — we treat the map's edges as walls. */
 TileKind level_tile_at(const Level *level, int tx, int ty);
 
+/* Read a tile's full TILE_F_* bitmask. Out-of-bounds tiles read as
+ * TILE_F_SOLID. Used by the slope-aware contact resolver to decide
+ * friction (ICE) and persist the kind on the per-particle contact
+ * record. */
+uint16_t level_flags_at(const Level *level, int tx, int ty);
+
 /* World-space helpers. */
 int  level_world_to_tile(const Level *level, float x);
 bool level_point_solid(const Level *level, Vec2 p);
 
-/* Test a swept ray against the tile grid; returns the closest hit
- * parameter t in (0, 1]. Used for the hitscan path that doesn't cross
- * a mech. Returns false if the ray is unobstructed. */
+/* Test a swept ray against the tile grid AND the free-polygon set;
+ * returns the closest hit parameter t in (0, 1]. Used for the hitscan
+ * path that doesn't cross a mech. Returns false if the ray is
+ * unobstructed. BACKGROUND polygons are skipped. */
 bool level_ray_hits(const Level *level, Vec2 a, Vec2 b, float *out_t);
 
 /* World-space bounds. */

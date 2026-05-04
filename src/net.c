@@ -818,7 +818,7 @@ static void client_handle_round_start(const uint8_t *body, int blen, Game *g) {
     /* Rebuild the level for the chosen map. Reset the level arena so
      * we don't leak across rounds. */
     arena_reset(&g->level_arena);
-    map_build((MapId)g->match.map_id, &g->world.level, &g->level_arena);
+    map_build((MapId)g->match.map_id, &g->world, &g->level_arena);
     decal_init((int)level_width_px(&g->world.level),
                (int)level_height_px(&g->world.level));
     /* Pools cleared so the snapshot stream can spawn mechs from

@@ -2,9 +2,11 @@
 
 #include "arena.h"
 #include "level.h"
+#include "level_io.h"
 #include "log.h"
 #include "match.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 
@@ -41,7 +43,8 @@ int map_id_from_name(const char *name) {
 
 static void set_tile(Level *l, int x, int y, TileKind k) {
     if (x < 0 || x >= l->width || y < 0 || y >= l->height) return;
-    l->tiles[y * l->width + x] = (uint8_t)k;
+    uint16_t f = (k == TILE_SOLID) ? TILE_F_SOLID : TILE_F_EMPTY;
+    l->tiles[y * l->width + x] = (LvlTile){ .id = 0, .flags = f };
 }
 
 static void fill_rect(Level *l, int x0, int y0, int x1, int y1, TileKind k) {
@@ -56,12 +59,13 @@ static void map_alloc_tiles(Level *level, Arena *arena, int w, int h) {
     level->tile_size = TILE_PX;
     level->gravity   = (Vec2){0.0f, 1080.0f};
     int n = w * h;
-    level->tiles = (uint8_t *)arena_alloc(arena, (size_t)n);
+    level->tiles = (LvlTile *)arena_alloc(arena, sizeof(LvlTile) * (size_t)n);
     if (!level->tiles) {
-        LOG_E("map_alloc_tiles: arena out of memory (%dx%d=%d bytes)", w, h, n);
+        LOG_E("map_alloc_tiles: arena out of memory (%dx%d=%zu bytes)",
+              w, h, sizeof(LvlTile) * (size_t)n);
         return;
     }
-    memset(level->tiles, TILE_EMPTY, (size_t)n);
+    memset(level->tiles, 0, sizeof(LvlTile) * (size_t)n);
 }
 
 /* ---- MAP_FOUNDRY -------------------------------------------------- */
@@ -132,13 +136,36 @@ static void build_reactor(Level *L, Arena *arena) {
     LOG_I("map: reactor built (%dx%d)", L->width, L->height);
 }
 
-void map_build(MapId id, Level *level, Arena *arena) {
+static void build_fallback(MapId id, Level *level, Arena *arena) {
     switch (id) {
         case MAP_FOUNDRY:    build_foundry(level, arena);    break;
         case MAP_SLIPSTREAM: build_slipstream(level, arena); break;
         case MAP_REACTOR:    build_reactor(level, arena);    break;
         default:             build_foundry(level, arena);    break;
     }
+}
+
+void map_build(MapId id, World *world, Arena *arena) {
+    const MapDef *def = map_def(id);
+    char path[256];
+    snprintf(path, sizeof path, "assets/maps/%s.lvl", def->short_name);
+
+    LvlResult r = level_load(world, arena, path);
+    if (r == LVL_OK) return;
+
+    /* P17 will produce assets/maps/<short>.lvl from the code-built maps;
+     * until then a fresh checkout has no .lvl files and we always end up
+     * here. Use LOG_W only when the file existed but failed validation —
+     * "file not found" is the expected case at M5 ship and shouldn't
+     * pollute logs. */
+    if (r == LVL_ERR_FILE_NOT_FOUND) {
+        LOG_I("map_build(%s): no .lvl on disk — using code-built fallback",
+              def->short_name);
+    } else {
+        LOG_W("map_build(%s): level_load failed (%s) — using code-built fallback",
+              def->short_name, level_io_result_str(r));
+    }
+    build_fallback(id, &world->level, arena);
 }
 
 /* ---- Spawn-point selection --------------------------------------- */

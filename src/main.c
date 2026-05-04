@@ -212,7 +212,7 @@ static void start_round(Game *g) {
 
     /* Build map. */
     arena_reset(&g->level_arena);
-    map_build((MapId)g->match.map_id, &g->world.level, &g->level_arena);
+    map_build((MapId)g->match.map_id, &g->world, &g->level_arena);
     decal_init((int)level_width_px(&g->world.level),
                (int)level_height_px(&g->world.level));
 
@@ -426,7 +426,7 @@ static bool bootstrap_host(Game *g, const LaunchArgs *args, bool offline) {
 
     /* Pre-build the level so the first-time lobby has *something* to
      * draw under the UI. ROUND_START rebuilds it for the chosen map. */
-    map_build(MAP_FOUNDRY, &g->world.level, &g->level_arena);
+    map_build(MAP_FOUNDRY, &g->world, &g->level_arena);
     decal_init((int)level_width_px(&g->world.level),
                (int)level_height_px(&g->world.level));
     return true;

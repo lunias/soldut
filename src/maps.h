@@ -31,10 +31,13 @@ typedef struct MapDef {
 const MapDef *map_def(int id);
 int           map_id_from_name(const char *name);
 
-/* Build the chosen map into `level`, allocating tiles from `arena`. The
- * arena should be reset (level_arena) before this call so successive
- * map loads don't accumulate. */
-void map_build(MapId id, Level *level, Arena *arena);
+/* Build the chosen map into `world->level`, allocating from `arena`.
+ * The arena should be reset (level_arena) before this call so successive
+ * map loads don't accumulate. M5: tries to load assets/maps/<short>.lvl
+ * via level_io first; on any load failure (file missing, bad CRC, etc.)
+ * falls back to the code-built layout so a fresh checkout without
+ * shipped .lvl files still boots. */
+void map_build(MapId id, World *world, Arena *arena);
 
 /* World-space spawn point picker. `slot_index` is the lobby slot id
  * (0..MAX_LOBBY_SLOTS-1) so successive spawns don't telefrag. team is

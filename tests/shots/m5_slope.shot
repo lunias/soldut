@@ -1,0 +1,45 @@
+# P02 — slope physics smoke test.
+#
+# level_build_tutorial has a temporary slope test bed at floor-row mid-map:
+#   - 45° slope at x=1500..1628 (hypotenuse from upper-left to lower-right)
+#   - 60° slope at x=1700..1774
+#   - 5°  slope at x=1850..1987
+#
+# This script lands the player above the 60° slope. Headline test:
+# without any input, the mech should slide downhill (slope friction
+# 0.955 isn't enough to overcome gravity-along-tangent at 60°).
+#
+# Tick layout:
+#   60   — landed on slope, no input yet
+#   180  — passive slide ~2s in (compare pelvis x to t=60)
+#   240  — kicked input RIGHT (running downhill) — tangent-projected
+#          velocity should outpace passive slide
+#   300  — release; observe coast then settle
+#
+# A "settled" mech without input that slid downhill noticeably between
+# t=60 and t=180 confirms the slope physics path is alive end-to-end:
+# slope-aware friction + slope-tangent velocity + slope-aware anchor
+# all firing.
+
+window 1280 720
+seed 1 0
+out build/shots
+spawn_at 1740 800
+aim 1840 1000
+
+# Land + passive slide.
+at 60  shot landed_t060
+at 120 shot slide_t120
+at 180 shot slide_t180
+
+# Run downhill (right).
+at 200 press right
+at 240 shot running_t240
+
+# Coast.
+at 270 release right
+at 360 shot settled_t360
+
+contact_sheet sheet cols 5
+
+at 420 end

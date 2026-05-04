@@ -7,7 +7,7 @@ Run this once. After it, run P01.
 ## What to paste into Claude Code
 
 ```
-We are starting M5 of the Soldut project — the "Maps & content" milestone. M5 is broken down into 14 sub-documents under documents/m5/. The work is sequenced as 18 implementation prompts in documents/m5/prompts/, which I will run one at a time over multiple sessions.
+We are continuing M5 of the Soldut project — the "Maps & content" milestone. M5 is broken down into 14 sub-documents under documents/m5/. The work is sequenced as 18 implementation prompts in documents/m5/prompts/, which I will run one at a time over multiple sessions.
 
 This is the orientation pass. Do NOT write any code yet. Your job in this session:
 
@@ -32,11 +32,11 @@ This is the orientation pass. Do NOT write any code yet. Your job in this sessio
    - Which trade-off entries M5 is supposed to resolve (delete on land) versus which it explicitly keeps.
    - Any inconsistencies, ambiguities, or contradictions between the docs and the code that you noticed during the read pass.
 
-4. Do NOT open any subdoc beyond what's listed above. P01 onward will tell you exactly which subdoc to read for each implementation pass.
+4. Do NOT open any subdoc beyond what's listed above. P03 onward will tell you exactly which subdoc to read for each implementation pass.
 
 5. Do NOT write code. Do NOT run the build. Do NOT modify any file. This is read-only orientation.
 
-When you've reported your findings, the session ends. I'll start P01 in a new session.
+When you've reported your findings, the session ends. I'll start P03 in a new session.
 ```
 
 ## What good looks like at the end of this session
