@@ -1,0 +1,34 @@
+# 2p_legs — host. Spawns next to client and walks left/right
+# repeatedly at close range. Pairs with 2p_legs.client.shot.
+# Verifies the host mech's leg-swing animation is visible in
+# the client's view (regression test for the snapshot anim_id
+# bug where the client always saw remote mechs as ANIM_STAND
+# regardless of motion → mechs slid instead of walked).
+
+window 1280 720
+out build/shots/net/legs_host
+network host 24091
+name HostA
+
+spawn_at 2300 1112
+peer_spawn 1 2400 1112
+
+aim 2400 1080
+
+# Walk back and forth several times. Each press should produce
+# clear leg-swing animation visible from the client's view.
+at 100 press right
+at 180 release right
+at 200 press left
+at 320 release left
+at 340 press right
+at 460 release right
+at 480 press left
+at 580 release left
+
+at 140 shot t140_running_right
+at 260 shot t260_running_left
+at 400 shot t400_running_right
+at 520 shot t520_running_left
+at 650 shot t650_stopped
+at 750 end

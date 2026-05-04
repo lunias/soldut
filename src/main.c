@@ -14,6 +14,7 @@
 #include "render.h"
 #include "shotmode.h"
 #include "simulate.h"
+#include "snapshot.h"
 #include "version.h"
 #include "weapons.h"
 
@@ -162,7 +163,54 @@ static int resolve_jetpack_id(const char *name, int default_id) {
 /* Walk newly-recorded killfeed entries and credit the lobby slots. We
  * track how many we've consumed so subsequent ticks pick up only the
  * new ones. */
-static int g_killfeed_processed = 0;
+static int g_killfeed_processed  = 0;
+static int g_hitfeed_processed   = 0;
+static int g_firefeed_processed  = 0;
+
+/* Server: walk new hit events from the world's hitfeed queue and
+ * broadcast each one to clients so they can spawn matching blood/spark
+ * FX (without this, the client falls back to chest-pos blood from
+ * snapshot health-decrease which renders visibly different). */
+static void broadcast_new_hits(Game *g) {
+    if (g->net.role != NET_ROLE_SERVER) return;
+    int cur = g->world.hitfeed_count;
+    int begin = g_hitfeed_processed;
+    if (cur - begin > HITFEED_CAPACITY) {
+        /* Fell behind by more than the ring; skip the lost ones. */
+        begin = cur - HITFEED_CAPACITY;
+    }
+    for (int n = begin; n < cur; ++n) {
+        int idx = n % HITFEED_CAPACITY;
+        if (idx < 0) idx += HITFEED_CAPACITY;
+        const HitFeedEntry *h = &g->world.hitfeed[idx];
+        net_server_broadcast_hit(&g->net,
+            (int)h->victim_mech_id, (int)h->hit_part,
+            h->pos_x, h->pos_y, h->dir_x, h->dir_y, (int)h->damage);
+    }
+    g_hitfeed_processed = cur;
+}
+
+/* Server: walk new fire events and broadcast so clients can spawn
+ * matching tracer (hitscan) or visual-only projectile (everything
+ * else). Without this, remote players' shots are invisible on the
+ * client — only the local shooter's predict path puts FX on screen. */
+static void broadcast_new_fires(Game *g) {
+    if (g->net.role != NET_ROLE_SERVER) return;
+    int cur = g->world.firefeed_count;
+    int begin = g_firefeed_processed;
+    if (cur - begin > FIREFEED_CAPACITY) {
+        begin = cur - FIREFEED_CAPACITY;
+    }
+    for (int n = begin; n < cur; ++n) {
+        int idx = n % FIREFEED_CAPACITY;
+        if (idx < 0) idx += FIREFEED_CAPACITY;
+        const FireFeedEntry *f = &g->world.firefeed[idx];
+        net_server_broadcast_fire(&g->net,
+            (int)f->shooter_mech_id, (int)f->weapon_id,
+            f->origin_x, f->origin_y, f->dir_x, f->dir_y);
+    }
+    g_firefeed_processed = cur;
+}
 
 static void apply_new_kills(Game *g) {
     /* killfeed_count is a monotonic counter; killfeed[] is a CAP-sized
@@ -361,6 +409,8 @@ static void host_match_flow_step(Game *g, float dt) {
             break;
         case MATCH_PHASE_ACTIVE: {
             apply_new_kills(g);
+            broadcast_new_hits(g);
+            broadcast_new_fires(g);
             /* End on score limit (FFA = any per-player slot >= cap). */
             bool end = false;
             if (g->match.mode == MATCH_MODE_FFA) {
@@ -762,6 +812,33 @@ int main(int argc, char **argv) {
                         game.world.mechs[game.world.local_mech_id].latched_input = in;
                     }
                     simulate_step(&game.world, (float)TICK_DT);
+                    /* P03: pull remote mechs back to the interpolated
+                     * server position. Runs after physics so it
+                     * overrides any drift from stale latched_input
+                     * extrapolation. The renderer's prev-frame
+                     * snapshot (taken at the top of the next
+                     * simulate_step) captures this as the new
+                     * "where it was last tick" anchor — yielding
+                     * smooth motion across snapshot intervals.
+                     *
+                     * Advance the clock in double precision —
+                     * (uint32_t)(1/60*1000) truncates to 16, drifts
+                     * 0.67 ms/tick = 40 ms/s = client renders ~270 ms
+                     * behind server after a few seconds. */
+                    if (game.net.client_render_clock_armed) {
+                        game.net.client_render_time_ms += TICK_DT * 1000.0;
+                        /* render_time may be negative early in a
+                         * connection (we init it as
+                         * `first_snap.server_time - INTERP_DELAY_MS`).
+                         * Clamp before casting; snapshot_interp_remotes
+                         * treats render_time <= oldest_t as "clamp to
+                         * oldest snapshot", which is the right thing
+                         * to do when we're conceptually before any
+                         * received data. */
+                        double rt = game.net.client_render_time_ms;
+                        uint32_t rt_u32 = (rt > 0.0) ? (uint32_t)rt : 0u;
+                        snapshot_interp_remotes(&game.world, rt_u32);
+                    }
                     reconcile_push_input(&game.reconcile, in);
                     net_client_send_input(&game.net, in);
                     reconcile_tick_smoothing(&game.reconcile);
@@ -782,11 +859,18 @@ int main(int argc, char **argv) {
             }
 
             /* Render world + HUD + (diag + match banner via draw_diag).
-             * One Begin/EndDrawing pair total per frame. */
+             * One Begin/EndDrawing pair total per frame. The local
+             * mech's visual_offset comes from reconcile (smooths out
+             * server snaps over ~6 frames); the host has no reconcile
+             * state and passes (0,0). */
             OverlayCtx ovc = { .game = &game, .ui = &ui };
+            Vec2 visual_off = (game.net.role == NET_ROLE_CLIENT)
+                            ? game.reconcile.visual_offset
+                            : (Vec2){ 0.0f, 0.0f };
             renderer_draw_frame(&rd, &game.world,
                                 pf.render_w, pf.render_h,
                                 (float)(accum / TICK_DT),
+                                visual_off,
                                 (Vec2){ (float)GetMouseX(), (float)GetMouseY() },
                                 draw_diag, &ovc);
 
@@ -825,7 +909,8 @@ int main(int argc, char **argv) {
              * flicker. */
             OverlayCtx ovc = { .game = &game, .ui = &ui };
             renderer_draw_frame(&rd, &game.world,
-                                pf.render_w, pf.render_h, 0.0f,
+                                pf.render_w, pf.render_h,
+                                0.0f, (Vec2){ 0.0f, 0.0f },
                                 (Vec2){ (float)GetMouseX(), (float)GetMouseY() },
                                 draw_summary_overlay, &ovc);
 

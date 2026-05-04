@@ -117,7 +117,7 @@ Every subsystem document includes its budget: bytes, microseconds, kilobits. (Se
 
 ### Rule 8 — Hot reload of data.
 
-Code does not need to hot-reload (we can recompile in 1 second). **Data must hot-reload.** Maps, weapon stats, mech parameters, audio mix, color palettes — change them on disk, see the change in the running game in under a second. This is the single biggest accelerator of game-feel iteration. We build a tiny file watcher (`src/hotreload.c`) that polls mtimes; we do not pull in a library for this.
+Code does not need to hot-reload (we can recompile in 1 second). **Data should hot-reload when iteration speed makes it worth the build cost** — weapon stats, mech parameters, audio mix, color palettes, maps. The natural pairing is the level editor: F5 test-play wants the editor to write `.lvl` and the game to pick up the change without restart. The intended implementation is a tiny file watcher (`src/hotreload.c`) that polls mtimes; we do not pull in a library for this. Not built at v1 — see `TRADE_OFFS.md` → "No data hot-reload (no `src/hotreload.c`)".
 
 ### Rule 9 — One way to do each thing.
 

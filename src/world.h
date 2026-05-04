@@ -43,6 +43,16 @@ typedef struct {
     int8_t   *contact_nx_q;
     int8_t   *contact_ny_q;
     uint8_t  *contact_kind;     /* TILE_F_* bitmask of the touched surface */
+    /* Render-side prev-frame snapshot (P03). pos_x/pos_y at the start
+     * of the most-recent simulate_step. The renderer lerps between
+     * render_prev and pos by `alpha = accum / TICK_DT` so motion stays
+     * smooth when render rate exceeds sim rate (vsync-fast play on a
+     * 144 Hz display). NOT to be confused with prev_x/prev_y, which is
+     * Verlet's previous-position scratch (`pos - prev = velocity`).
+     * Verlet `prev` updates inside the integrator; `render_prev` only
+     * updates once per simulate tick. */
+    float    *render_prev_x;
+    float    *render_prev_y;
     int       count;       /* high-water mark */
     int       capacity;
 } ParticlePool;
@@ -125,6 +135,29 @@ typedef struct {
     uint64_t tick;                /* world tick this snapshot belongs to */
     bool     valid;
 } BoneHistFrame;
+
+/* P03 — client-side snapshot ring per remote mech. The client renders
+ * remote mechs ~100 ms in the past, lerping between two snapshots that
+ * bracket the render clock. A snapshot only carries pelvis pos + vel;
+ * limb shape is maintained by the local constraint solver as it
+ * applies the same translation to every particle.
+ *
+ * The ring is per-mech so that one peer's snapshot drop doesn't affect
+ * another.
+ *
+ * Sizing: at 30 Hz snapshots (33 ms interval) the ring must span >
+ * NET_INTERP_DELAY_MS (100 ms) — otherwise render_time always falls
+ * before the oldest entry, clamps to oldest, and motion jumps once per
+ * snapshot push instead of interpolating smoothly. 8 entries spans
+ * ~231 ms which gives the 100 ms interp delay comfortable headroom
+ * plus tolerance for a few packet drops. */
+#define REMOTE_SNAP_RING 8
+typedef struct {
+    uint32_t server_time_ms;
+    float    pelvis_x, pelvis_y;
+    float    vel_x, vel_y;
+    bool     valid;
+} RemoteSnapBuf;
 
 typedef struct {
     int       id;                 /* index into world.mechs[] */
@@ -231,6 +264,15 @@ typedef struct {
      * authoritative side (server). Indexed modulo LAG_HIST_TICKS. */
     BoneHistFrame lag_hist[LAG_HIST_TICKS];
     int           lag_hist_head;  /* next slot to write */
+
+    /* P03 — client-side snapshot interp ring for REMOTE mechs.
+     * snapshot_apply pushes here instead of directly translating
+     * particles; snapshot_interp_remotes lerps between bracketing
+     * entries and writes the interpolated pelvis to the particle
+     * pool each tick. Unused on the server / for the local mech. */
+    RemoteSnapBuf remote_snap_ring[REMOTE_SNAP_RING];
+    int           remote_snap_head;
+    int           remote_snap_count;   /* up to REMOTE_SNAP_RING */
 } Mech;
 
 /* ---- Projectiles (SoA, M3+).
@@ -270,6 +312,10 @@ typedef struct {
     float    aoe_impulse[PROJECTILE_CAPACITY];
     float    gravity_scale[PROJECTILE_CAPACITY];
     float    drag      [PROJECTILE_CAPACITY]; /* per-second velocity damping */
+    /* Render-side prev-frame snapshot (P03) — pos at the start of the
+     * most-recent simulate_step, lerped against pos by render alpha. */
+    float    render_prev_x[PROJECTILE_CAPACITY];
+    float    render_prev_y[PROJECTILE_CAPACITY];
     int16_t  owner_mech[PROJECTILE_CAPACITY];
     int8_t   owner_team[PROJECTILE_CAPACITY];
     int8_t   weapon_id[PROJECTILE_CAPACITY];  /* WeaponId — for kill feed */
@@ -279,6 +325,47 @@ typedef struct {
     uint8_t  exploded[PROJECTILE_CAPACITY];   /* set when AOE has been spawned */
     int      count;
 } ProjectilePool;
+
+/* ---- Hit feed: server-side queue of damage events broadcast to
+ * clients so they can spawn blood / sparks at the actual hit pos
+ * with the actual hit direction (rather than the snapshot-apply
+ * fallback that uses chest pos + facing-derived spray, which reads
+ * visibly different from the server view).
+ *
+ * Capacity 64 covers worst-case bursts (32 mechs × 2 hits/tick); main.c
+ * drains the queue every tick after simulate, so it should rarely
+ * approach the cap. monotonic counter pattern matches killfeed. */
+#define HITFEED_CAPACITY 64
+
+typedef struct {
+    int16_t  victim_mech_id;
+    uint8_t  hit_part;          /* PART_* */
+    uint8_t  damage;            /* clamped to 255 */
+    float    pos_x, pos_y;      /* world-space hit point */
+    float    dir_x, dir_y;      /* normalized hit direction */
+} HitFeedEntry;
+
+/* ---- Fire feed: server-side queue of fire events broadcast to
+ * clients so they can spawn matching tracers (hitscan) and visual-
+ * only projectiles (everything else). Without this, clients see
+ * NOTHING when a remote player fires — only the local shooter's
+ * predict path puts a tracer/projectile in front of them.
+ *
+ * One entry per shot (spread weapons fire one entry per pellet;
+ * burst weapons fire one entry per shell). Capacity 128 covers
+ * worst case (microgun spew + multiple shooters per tick).
+ *
+ * Client-side: events where `shooter_mech_id == local_mech_id` are
+ * dropped because the local predict already spawned the visual. */
+#define FIREFEED_CAPACITY 128
+
+typedef struct {
+    int16_t  shooter_mech_id;
+    uint8_t  weapon_id;
+    uint8_t  reserved;
+    float    origin_x, origin_y;     /* muzzle, world-space px */
+    float    dir_x, dir_y;           /* normalized fire direction */
+} FireFeedEntry;
 
 /* ---- Kill feed ring buffer (HUD top-right). Holds the last few kill
  * events for display + fade. */
@@ -313,6 +400,9 @@ typedef enum {
 
 typedef struct {
     Vec2     pos, vel;
+    /* Render-side prev-frame snapshot (P03) — pos at the start of the
+     * most-recent fx_update, lerped against pos by render alpha. */
+    Vec2     render_prev_pos;
     float    life;       /* seconds remaining */
     float    life_max;
     float    size;
@@ -522,6 +612,19 @@ typedef struct World {
      * with a fade-out. */
     KillFeedEntry killfeed[KILLFEED_CAPACITY];
     int           killfeed_count;       /* total kills observed (head index = count % CAP) */
+
+    /* Hit feed — server-side queue of per-hit info that main.c drains
+     * each tick and broadcasts via NET_MSG_HIT_EVENT so clients can
+     * mirror the server's blood/spark FX. Monotonic counter pattern. */
+    HitFeedEntry hitfeed[HITFEED_CAPACITY];
+    int          hitfeed_count;
+
+    /* Fire feed — server-side queue of per-shot info that main.c
+     * drains and broadcasts via NET_MSG_FIRE_EVENT so clients can
+     * mirror the muzzle flash + tracer + projectile spawn for every
+     * remote player's fire. */
+    FireFeedEntry firefeed[FIREFEED_CAPACITY];
+    int           firefeed_count;
 
     /* Server config: friendly-fire toggle. False by default — same-team
      * damage is dropped. Tournament servers can flip this. */

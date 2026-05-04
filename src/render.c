@@ -122,10 +122,24 @@ static void draw_level(const Level *L) {
     }
 }
 
-static void draw_bone(const ParticlePool *p, int a, int b, float thick, Color c) {
-    Vector2 va = { p->pos_x[a], p->pos_y[a] };
-    Vector2 vb = { p->pos_x[b], p->pos_y[b] };
-    DrawLineEx(va, vb, thick, c);
+/* P03: lerp between this tick's start (`render_prev_*`) and the latest
+ * physics result (`pos_*`) by `alpha = accum / TICK_DT`. Decouples
+ * render rate from sim rate — vsync-fast displays no longer accelerate
+ * physics. Anywhere we used to read `p->pos_x[i]/p->pos_y[i]` to draw,
+ * we go through this helper. */
+static inline Vec2 particle_render_pos(const ParticlePool *p, int i, float alpha) {
+    return (Vec2){
+        p->render_prev_x[i] + (p->pos_x[i] - p->render_prev_x[i]) * alpha,
+        p->render_prev_y[i] + (p->pos_y[i] - p->render_prev_y[i]) * alpha,
+    };
+}
+
+static void draw_bone(const ParticlePool *p, int a, int b, float thick, Color c,
+                      float alpha, Vec2 off) {
+    Vec2 va = particle_render_pos(p, a, alpha);
+    Vec2 vb = particle_render_pos(p, b, alpha);
+    DrawLineEx((Vector2){va.x + off.x, va.y + off.y},
+               (Vector2){vb.x + off.x, vb.y + off.y}, thick, c);
 }
 
 /* True if a CSTR_DISTANCE constraint between particles a and b is
@@ -150,9 +164,10 @@ static bool bone_constraint_active(const ConstraintPool *cp, int a, int b) {
 }
 
 static void draw_bone_chk(const ParticlePool *p, const ConstraintPool *cp,
-                          int a, int b, float thick, Color c) {
+                          int a, int b, float thick, Color c,
+                          float alpha, Vec2 off) {
     if (!bone_constraint_active(cp, a, b)) return;
-    draw_bone(p, a, b, thick, c);
+    draw_bone(p, a, b, thick, c, alpha, off);
 }
 
 /* Bone draw that stops at the first solid tile. Used for the rifle
@@ -178,9 +193,16 @@ static void draw_bone_clamped(const Level *L, Vec2 a, Vec2 b, float thick, Color
  * thin solid (e.g., aiming through the col-55 wall). The
  * ConstraintPool lets us skip drawing bones whose distance constraint
  * has been deactivated by dismemberment so the corpse doesn't trail a
- * stretched bone across the level. */
+ * stretched bone across the level.
+ *
+ * P03: `alpha` = sub-tick interp factor (in [0,1)) lerps between the
+ * physics state at the start of the most-recent simulate tick and the
+ * latest result. `visual_offset` is added to every drawn particle —
+ * used by the local mech to smooth out reconciliation snaps over
+ * ~6 frames. Pass {0,0} for non-local mechs. */
 static void draw_mech(const ParticlePool *p, const ConstraintPool *cp,
-                      const Mech *m, const Level *L) {
+                      const Mech *m, const Level *L,
+                      float alpha, Vec2 visual_offset) {
     int b = m->particle_base;
     int idx_head    = b + PART_HEAD;
     int idx_neck    = b + PART_NECK;
@@ -204,20 +226,23 @@ static void draw_mech(const ParticlePool *p, const ConstraintPool *cp,
     int front_leg_knee = m->facing_left ? PART_L_KNEE  : PART_R_KNEE;
     int front_leg_foot = m->facing_left ? PART_L_FOOT  : PART_R_FOOT;
 
-    draw_bone_chk(p, cp, b + back_leg_hip,  b + back_leg_knee, 6.0f, leg_back);
-    draw_bone_chk(p, cp, b + back_leg_knee, b + back_leg_foot, 5.5f, leg_back);
+    draw_bone_chk(p, cp, b + back_leg_hip,  b + back_leg_knee, 6.0f, leg_back, alpha, visual_offset);
+    draw_bone_chk(p, cp, b + back_leg_knee, b + back_leg_foot, 5.5f, leg_back, alpha, visual_offset);
 
     /* Torso — chest to pelvis as a thick beam plus shoulder span. */
-    draw_bone_chk(p, cp, idx_chest, idx_pelvis, 13.0f, body);
-    DrawCircleV((Vector2){ p->pos_x[idx_pelvis], p->pos_y[idx_pelvis] }, 6.0f, body);
+    draw_bone_chk(p, cp, idx_chest, idx_pelvis, 13.0f, body, alpha, visual_offset);
+    {
+        Vec2 pelv = particle_render_pos(p, idx_pelvis, alpha);
+        DrawCircleV((Vector2){ pelv.x + visual_offset.x, pelv.y + visual_offset.y }, 6.0f, body);
+    }
     /* Hip plate. */
-    draw_bone_chk(p, cp, b + PART_L_HIP, b + PART_R_HIP, 10.0f, body);
+    draw_bone_chk(p, cp, b + PART_L_HIP, b + PART_R_HIP, 10.0f, body, alpha, visual_offset);
     /* Shoulder plate. */
-    draw_bone_chk(p, cp, b + PART_L_SHOULDER, b + PART_R_SHOULDER, 10.0f, body);
+    draw_bone_chk(p, cp, b + PART_L_SHOULDER, b + PART_R_SHOULDER, 10.0f, body, alpha, visual_offset);
 
     /* Front leg. */
-    draw_bone_chk(p, cp, b + front_leg_hip,  b + front_leg_knee, 6.5f, leg_front);
-    draw_bone_chk(p, cp, b + front_leg_knee, b + front_leg_foot, 6.0f, leg_front);
+    draw_bone_chk(p, cp, b + front_leg_hip,  b + front_leg_knee, 6.5f, leg_front, alpha, visual_offset);
+    draw_bone_chk(p, cp, b + front_leg_knee, b + front_leg_foot, 6.0f, leg_front, alpha, visual_offset);
 
     /* Back arm (the off-hand). */
     int back_sho = m->facing_left ? PART_R_SHOULDER : PART_L_SHOULDER;
@@ -232,33 +257,43 @@ static void draw_mech(const ParticlePool *p, const ConstraintPool *cp,
      * constraints get deactivated and the bones disappear. The arm
      * particles keep integrating; they're just no longer drawn. */
     Color arm_back = (Color){body.r - 30, body.g - 30, body.b - 30, 255};
-    draw_bone_chk(p, cp, b + back_sho, b + back_elb, 5.0f, arm_back);
+    draw_bone_chk(p, cp, b + back_sho, b + back_elb, 5.0f, arm_back, alpha, visual_offset);
     if (bone_constraint_active(cp, b + back_elb, b + back_hnd)) {
-        Vec2 a = particle_pos(p, b + back_elb);
-        Vec2 c = particle_pos(p, b + back_hnd);
+        Vec2 a = particle_render_pos(p, b + back_elb, alpha);
+        Vec2 c = particle_render_pos(p, b + back_hnd, alpha);
+        a.x += visual_offset.x; a.y += visual_offset.y;
+        c.x += visual_offset.x; c.y += visual_offset.y;
         draw_bone_clamped(L, a, c, 4.5f, arm_back);
     }
 
     /* Head + neck. */
-    draw_bone_chk(p, cp, idx_chest, idx_neck, 7.0f, body);
-    DrawCircleV((Vector2){ p->pos_x[idx_head], p->pos_y[idx_head] }, 9.0f, body);
-    DrawCircleLines((int)p->pos_x[idx_head], (int)p->pos_y[idx_head], 9.0f, edge);
+    draw_bone_chk(p, cp, idx_chest, idx_neck, 7.0f, body, alpha, visual_offset);
+    {
+        Vec2 head = particle_render_pos(p, idx_head, alpha);
+        head.x += visual_offset.x; head.y += visual_offset.y;
+        DrawCircleV((Vector2){ head.x, head.y }, 9.0f, body);
+        DrawCircleLines((int)head.x, (int)head.y, 9.0f, edge);
+    }
 
     /* Front (rifle) arm — forearm and rifle clamped against the level
      * because aim points often lie behind a thin solid. */
     Color arm_front = body;
-    draw_bone_chk(p, cp, b + frnt_sho, b + frnt_elb, 5.5f, arm_front);
+    draw_bone_chk(p, cp, b + frnt_sho, b + frnt_elb, 5.5f, arm_front, alpha, visual_offset);
     if (bone_constraint_active(cp, b + frnt_elb, b + frnt_hnd)) {
-        Vec2 a = particle_pos(p, b + frnt_elb);
-        Vec2 c = particle_pos(p, b + frnt_hnd);
+        Vec2 a = particle_render_pos(p, b + frnt_elb, alpha);
+        Vec2 c = particle_render_pos(p, b + frnt_hnd, alpha);
+        a.x += visual_offset.x; a.y += visual_offset.y;
+        c.x += visual_offset.x; c.y += visual_offset.y;
         draw_bone_clamped(L, a, c, 5.0f, arm_front);
     }
 
     /* Rifle: a small line from R_HAND in aim direction, stopped at
      * the first solid tile so the barrel doesn't draw through walls. */
     if (m->alive) {
-        Vec2 rh = particle_pos(p, b + PART_R_HAND);
-        Vec2 sh = particle_pos(p, b + PART_R_SHOULDER);
+        Vec2 rh = particle_render_pos(p, b + PART_R_HAND, alpha);
+        Vec2 sh = particle_render_pos(p, b + PART_R_SHOULDER, alpha);
+        rh.x += visual_offset.x; rh.y += visual_offset.y;
+        sh.x += visual_offset.x; sh.y += visual_offset.y;
         float dx = rh.x - sh.x, dy = rh.y - sh.y;
         float dl = sqrtf(dx * dx + dy * dy);
         if (dl > 1.0f) { dx /= dl; dy /= dl; }
@@ -270,9 +305,11 @@ static void draw_mech(const ParticlePool *p, const ConstraintPool *cp,
 /* ---- Frame --------------------------------------------------------- */
 
 void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
-                         float alpha, Vec2 cursor_screen,
+                         float alpha, Vec2 local_visual_offset,
+                         Vec2 cursor_screen,
                          RendererOverlayFn overlay_cb, void *overlay_user) {
-    (void)alpha;
+    if (alpha < 0.0f) alpha = 0.0f;
+    if (alpha > 1.0f) alpha = 1.0f;
     float cam_dt = (r->cam_dt_override > 0.0f)
                    ? r->cam_dt_override
                    : (GetFrameTime() > 0 ? GetFrameTime() : 1.0f / 60.0f);
@@ -294,11 +331,17 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
             draw_level(&w->level);
             decal_draw_layer();
             for (int i = 0; i < w->mech_count; ++i) {
+                /* Reconcile-smoothing offset only applies to the local
+                 * mech (the one whose state we predict + replay). For
+                 * everyone else pass {0,0} — remote mechs get smoothed
+                 * via the snapshot interp buffer instead (snapshot.c). */
+                Vec2 off = (i == w->local_mech_id)
+                         ? local_visual_offset : (Vec2){0, 0};
                 draw_mech(&w->particles, &w->constraints,
-                          &w->mechs[i], &w->level);
+                          &w->mechs[i], &w->level, alpha, off);
             }
-            projectile_draw(&w->projectiles);
-            fx_draw(&w->fx);
+            projectile_draw(&w->projectiles, alpha);
+            fx_draw(&w->fx, alpha);
         EndMode2D();
 
         hud_draw(w, sw, sh, cursor_screen);

@@ -344,23 +344,23 @@ We do **not** integrate Tracy or Optick at v1. If we need deep traces, we add th
 
 ## File size targets
 
-| Module | Current LOC (post-M4 + M5 P01) | Notes |
+| Module | Current LOC (post-M4 + M5 P01–P02) | Notes |
 |---|---|---|
 | main.c | 867 | top-level loop + accumulator + CLI |
 | platform.c | 99 | thin raylib wrapper |
-| game.c | 111 | Game lifecycle |
-| simulate.c | 214 | the pure step |
-| physics.c | 412 | Verlet + constraints + collision |
-| mech.c | 1181 | chassis + animation drive — close to split threshold |
+| game.c | 118 | Game lifecycle |
+| simulate.c | 223 | the pure step |
+| physics.c | 728 | Verlet + constraints + tile/poly collision (M5 P02 grew this) |
+| mech.c | 1363 | chassis + animation drive — close to split threshold |
 | weapons.c | 638 | weapon table + fire logic |
 | projectile.c | 474 | bullets/grenades |
 | particle.c | 180 | pool + draw |
 | decal.c | 80 | splat layer |
-| level.c | 135 | tile-grid helpers + ray queries |
-| level_io.c | 714 | `.lvl` loader/saver + CRC32 (M5 P01) |
+| level.c | 260 | tile-grid helpers + ray queries + poly broadphase (M5 P02) |
+| level_io.c | 812 | `.lvl` loader/saver + CRC32 + poly broadphase build (M5 P01–P02) |
 | maps.c | 206 | code-built map fallbacks + `map_build` |
 | match.c | 261 | match phases, scoring, mode rules |
-| render.c | 275 | orchestration |
+| render.c | 307 | orchestration (P02 added polygon stopgap draw) |
 | hud.c | 145 | HP / jet / ammo / kill feed |
 | ui.c | 306 | immediate-mode UI helpers |
 | lobby.c | 523 | lobby state, slots, chat, ready-up |
@@ -375,11 +375,11 @@ We do **not** integrate Tracy or Optick at v1. If we need deep traces, we add th
 | hash.c | 49 | |
 | ds.c | 20 | one #define |
 | shotmode.c | 1444 | scriptable test runner — past split threshold |
-| **Total .c** | **~11,700 LOC** | + ~3,000 LOC of headers |
+| **Total .c** | **~12,500 LOC** | + ~3,000 LOC of headers |
 
-`net.c` is over the ~1500 line split guideline; `shotmode.c` is just under. Watch
-both at the next material change. `audio.{c,h}` and `pickup.{c,h}` are not yet
-built — they land at M5 P14 / P05 and will add to this table.
+`net.c` is over the ~1500 line split guideline; `shotmode.c` and `mech.c` are
+close. Watch each at the next material change. `audio.{c,h}` and `pickup.{c,h}`
+are not yet built — they land at M5 P14 / P05 and will add to this table.
 
 If a module substantially exceeds the rule of thumb, it's doing too much — we
 look for an extraction.

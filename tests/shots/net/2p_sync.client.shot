@@ -1,0 +1,22 @@
+# 2p_sync — client. Stationary observer; screenshots at the same
+# ticks as the host so the host's mech can be compared at
+# matching moments.
+#
+# After P03 (with double-precision render clock + 8-entry snapshot
+# ring), the client's view of the host's mech should track the
+# host's actual pelvis position to within a few px (~100 ms interp
+# delay = 1-2 px at run speed, ~15 px at jet speed).
+
+window 1280 720
+out build/shots/net/sync_client
+network connect 127.0.0.1:24061
+name ClientB
+
+at 200 shot pre_jet
+at 240 shot mid_jet_up
+at 280 shot peak
+at 320 shot falling
+at 360 shot mid_jet_down
+at 400 shot landed
+at 700 shot after
+at 750 end

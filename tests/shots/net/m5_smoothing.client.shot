@@ -1,0 +1,23 @@
+# m5_smoothing — client. Stationary observer; bursts screenshots
+# every 10 ticks while the host walks past. Each consecutive PNG
+# should show the host's mech advancing by a small, consistent
+# amount — no pop-back / zigzag.
+#
+# The new P03 path: snapshot_apply pushes remote-mech pelvis to
+# Mech.remote_snap_ring (no immediate position write); each tick
+# snapshot_interp_remotes lerps between bracketing entries at
+# client_render_time_ms - 100 ms; the renderer's alpha lerp
+# smooths between sim ticks for vsync-fast displays.
+#
+# Burst: every 10 ticks from tick 200 to 600 = 41 PNGs. Plus a
+# contact sheet for at-a-glance review.
+
+window 1280 720
+out build/shots/net/m5_smoothing_client
+network connect 127.0.0.1:24091
+name ClientB
+
+burst smooth from 200 to 600 every 10
+contact_sheet sheet cols 6
+
+at 750 end

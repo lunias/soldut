@@ -24,9 +24,12 @@ static bool init_particle_pool(Game *g) {
     p->contact_nx_q = (int8_t  *)arena_alloc(&g->permanent, sizeof(int8_t)  * cap);
     p->contact_ny_q = (int8_t  *)arena_alloc(&g->permanent, sizeof(int8_t)  * cap);
     p->contact_kind = (uint8_t *)arena_alloc(&g->permanent, sizeof(uint8_t) * cap);
+    p->render_prev_x = (float  *)arena_alloc(&g->permanent, sizeof(float)   * cap);
+    p->render_prev_y = (float  *)arena_alloc(&g->permanent, sizeof(float)   * cap);
     if (!p->pos_x || !p->pos_y || !p->prev_x || !p->prev_y ||
         !p->inv_mass || !p->flags ||
-        !p->contact_nx_q || !p->contact_ny_q || !p->contact_kind) return false;
+        !p->contact_nx_q || !p->contact_ny_q || !p->contact_kind ||
+        !p->render_prev_x || !p->render_prev_y) return false;
     memset(p->flags,        0, (size_t)cap);
     memset(p->contact_nx_q, 0, (size_t)cap);
     memset(p->contact_ny_q, 0, (size_t)cap);

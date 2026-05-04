@@ -1,0 +1,42 @@
+# 2p_combat — client. Walks right (toward where host moves to)
+# briefly, then unloads continuous Pulse Rifle fire at the host
+# until host dies. After kill, walks LEFT over the corpse to test
+# decal visibility and ragdoll position sync.
+#
+# Pairs with 2p_combat.host.shot. Same shot ticks for direct
+# host/client side-by-side visual diff.
+
+window 1280 720
+out build/shots/net/combat_client
+network connect 127.0.0.1:24081
+name ClientB
+
+# Match host's peer_spawn so my own mech starts where the host
+# expects it.
+spawn_at 2500 1112
+
+# Aim at host's chest. Pulse Rifle range = 2400, plenty for ~200 px.
+aim 2300 1080
+
+# Phase 2 (180-260): walk right briefly to test motion sync of
+# the local mech (predicted) AND the remote (host) walking left.
+at 180 press right
+at 220 release right
+
+# Phase 3 (280-580): full-auto Pulse Rifle on the host. Trooper
+# 150 HP / 18 dmg = ~9 hits to drop. Hold fire for ~5 seconds.
+at 280 press fire
+at 580 release fire
+
+# Phase 4 (600+): walk LEFT over the corpse to expose decals.
+at 620 press left
+at 720 release left
+
+# Screenshots — same ticks as host.
+at 100 shot t100_spawn
+at 220 shot t220_walking
+at 320 shot t320_trading
+at 440 shot t440_dying
+at 580 shot t580_dead
+at 750 shot t750_aftermath
+at 900 end

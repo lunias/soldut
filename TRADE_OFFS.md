@@ -13,7 +13,7 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-03**.
+Last updated: **2026-05-04**.
 
 ---
 
@@ -82,44 +82,28 @@ Last updated: **2026-05-03**.
   off the pelvis under heavy lateral force). Right now the existing
   triangulation handles it.
 
-### 60 Hz simulation, not 120 Hz
+### Sim runs at 60 Hz, not 120 Hz
 
-- **What we did** — One physics tick per render frame, vsync-bound to
-  60 Hz on most displays.
-- **Why** — Faster to ship M1. The design doc
-  ([03-physics-and-mechs.md](documents/03-physics-and-mechs.md)) calls
-  for 120 Hz inside a fixed-step accumulator, with render
-  interpolating between the last two simulated states. We didn't build
-  the accumulator yet.
+- **What we did** — Fixed-step accumulator drives `simulate_step` at a
+  hard 60 Hz; the renderer's `alpha = accum / TICK_DT` lerps between
+  the start-of-tick particle snapshot (`render_prev_*`) and the
+  latest physics result. Vsync-fast displays no longer accelerate
+  physics. Per [P03](documents/m5/13-controls-and-residuals.md §B),
+  the *rate* stays at 60 Hz because slope-physics tuning happened
+  against it; only the accumulator infrastructure landed.
+- **Why** — The design doc
+  ([03-physics-and-mechs.md](documents/03-physics-and-mechs.md))
+  calls for 120 Hz inside a fixed-step accumulator. The accumulator is
+  there now; flipping to 120 Hz is `#define SIM_HZ 120` plus a
+  re-tune pass on slope friction + jet thrust + air control. Out of
+  scope for M5; deferred to playtest after authored maps land.
 - **Revisit when** —
-  - Jet/jump arcs feel inconsistent across monitor refresh rates. (We
-    have a hint of this already — see "Vsync / frame-pacing leak".)
-  - Bullet tunneling at high speeds. (Bullets are hitscan, so this
-    isn't a current issue.)
-  - First steps of M2 networking — the snapshot rate (30 Hz server) is
-    independent of the sim rate, but a 60 Hz sim makes input upload
-    less responsive.
-
-### No render-to-sim interpolation alpha
-
-- **What we did** — Render uses the latest sim state directly.
-- **Why** — Same as above: not built yet. With 60 Hz sim and render
-  capped to vsync, this rarely matters.
-- **Revisit when** — We move to fixed-step 120 Hz with a remainder
-  alpha. At that point the renderer needs to lerp between the last two
-  sim states using `alpha = accumulator / dt`, otherwise we get visible
-  judder.
-
-### Vsync / frame-pacing leak
-
-- **What we did** — `simulate()` is called once per render frame.
-  When vsync is fast (small window, fullscreen with G-Sync, etc.),
-  physics runs faster too — `dt` shrinks but the per-tick caps don't.
-- **Why** — Same root cause as the two above: no accumulator.
-- **Revisit when** — As soon as we have time, honestly. This is the
-  most user-visible of the three deferred-physics-architecture items
-  ("jet feels different in fullscreen"). Same fix as 60↔120 Hz: a
-  proper fixed-step accumulator.
+  - Playtest reveals 60 Hz feels chunky on jet/jump arcs at modern
+    refresh rates.
+  - We add bullet tunneling to the table (currently not an issue;
+    hitscan + 60 Hz Verlet rarely tunnel at our particle radius).
+  - The `tick_hz` config field becomes meaningful (see its entry
+    below).
 
 ---
 
@@ -364,19 +348,6 @@ Last updated: **2026-05-03**.
   - Profiling shows the snapshot path consuming >5% of host CPU.
   - We do an internet-public test where uplink is the bottleneck.
 
-### No client-side visual smoothing of reconciliation jumps
-
-- **What we did** — `Reconcile.visual_offset` is computed and
-  decayed but the renderer never reads it. When the server overrules
-  client prediction, the local mech "snaps" to the corrected position.
-- **Why** — On a LAN the corrections are sub-pixel; the snap is
-  invisible. The smoothing only matters on internet connections with
-  sustained 50+ ms RTT. M2 is LAN-only by spec.
-- **Revisit when** — We do an internet test (master server / direct
-  connect over WAN) and corrections become visible. The hook (visual
-  offset + smoothing tick) is already wired; just needs the renderer
-  to read it.
-
 ### No server-side entity culling
 
 - **What we did** — Server sends every mech's snapshot to every
@@ -391,32 +362,6 @@ Last updated: **2026-05-03**.
     can be off-screen from each other.
   - Bandwidth becomes a problem (see "no delta encoding" above).
   - Cheats become a reported issue.
-
-### Snapshot interp is a 35% lerp, not a full two-snapshot buffer
-
-- **What we did** — `snapshot_apply` translates remote-mech
-  particles by 35 % of the (snapshot − current) delta each time a
-  snapshot arrives. Over 3-4 snapshots we converge to the server
-  position without the per-snapshot pop the user saw on the M4
-  initial release. Velocity is set on every particle (not just
-  pelvis) so the constraint solver doesn't fight a velocity
-  mismatch each tick.
-- **Why** — The 05-networking.md design calls for a proper
-  two-snapshot buffer with `t = (now − snap_a.time) /
-  (snap_b.time − snap_a.time)` lerp, rendering ~100 ms in the
-  past. The lerp version is two lines of code and visually
-  indistinguishable on LAN; the full interp adds a per-mech
-  history ring + a render-time clock + a "what if I lose a
-  snapshot" fallback. Defer until we measure the LAN-vs-WAN
-  difference in playtest.
-- **Revisit when** —
-  - WAN testing (RTT > 50 ms) reveals visible drift / lag.
-  - We need lag-compensation accuracy that depends on the client
-    rendering a known-past timeline (so the server can rewind to
-    the SAME past state for hit detection).
-  - Big velocity changes happen rarely enough that the lerp's
-    convergence-over-3-snapshots looks slow (~100 ms) — e.g. a
-    rocket-jump that pings the user across the screen.
 
 ### Shot-mode driving of UI screens is not built
 
@@ -539,20 +484,6 @@ Last updated: **2026-05-03**.
   120 Hz refactor); at that point `tick_hz` becomes a meaningful
   knob.
 
-### Dummy is a non-dummy on the client
-
-- **What we did** — When the client receives INITIAL_STATE and
-  spawns mech 1 (the host's dummy), it spawns it as a regular mech.
-  The `is_dummy` bit isn't carried in the EntitySnapshot.
-- **Why** — One bit, no room in the current state_bits byte. On the
-  client the dummy will try to drive its right arm to its (snapshot-
-  set) aim_world, which looks slightly different from the host's
-  view but is purely cosmetic — it doesn't move, doesn't fire,
-  and the snapshot's pelvis position keeps it where it should be.
-- **Revisit when** — We add bots (M3 stretch) or any non-input-driven
-  entity. At that point we either widen state_bits to a uint16, add
-  a separate flags byte, or remove dummies in favor of bots.
-
 ---
 
 ## Architecture / process
@@ -578,6 +509,27 @@ Last updated: **2026-05-03**.
   regression. Wiring it into CI without that is just running it for
   show.
 - **Revisit when** — `headless_sim` gets assertions.
+
+### No data hot-reload (no `src/hotreload.c`)
+
+- **What we did** — Data files (`.lvl`, `soldut.cfg`, future weapon /
+  mech tunables) are read at process start or at level load. There is
+  no file watcher; in-flight changes need a restart or a level reload.
+- **Why** — `documents/01-philosophy.md` Rule 8 calls for a tiny
+  mtime-polling watcher (`src/hotreload.c`) so iterating on game-feel
+  is fast. We haven't needed it yet — tunables live as `#define`s in C,
+  weapon stats live in the `g_weapons[]` table in C, and maps reload
+  via the lobby flow's map rotation. The cost of NOT having it is paid
+  in iteration time, not in correctness.
+- **Revisit when** —
+  - The level editor (M5 P04) ships F5 test-play. F5-from-editor wants
+    the game to re-read the `.lvl` without a full restart. Either the
+    editor talks to a sibling game process (Plan B in
+    `documents/m5/02-level-editor.md`) or we add the file watcher.
+  - We move weapon / mech tunables out of C into a data file and start
+    tuning game-feel from disk.
+  - A non-engineer designer starts authoring content and the
+    recompile-to-see-change loop becomes the bottleneck.
 
 ---
 

@@ -283,7 +283,10 @@ These remain tolerated. Not load-bearing for the M5 ship.
 
 For honesty: M5 lands several deliberate compromises that should go straight into [TRADE_OFFS.md](../../TRADE_OFFS.md) as new entries when the work ships. Already pre-disclosed in the relevant sub-docs:
 
-- **`.lvl` v1 = lock-in** (per [01-lvl-format.md](01-lvl-format.md)) — bumping versions costs editor + loader churn.
+- **`.lvl` v1 = lock-in** (per [01-lvl-format.md](01-lvl-format.md)) — bumping versions costs editor + loader churn. *Landed at P01.*
+- **Renderer draws polygons as flat triangles** (P02 stopgap; replaced by sprite atlases at P13). *Landed at P02.*
+- **Slope test bed is hardcoded in `level_build_tutorial`** (removed when authored maps land at P17). *Landed at P02.*
+- **Slope-physics tuning numbers are starting values** (per [03-collision-polygons.md](03-collision-polygons.md); tuned after authored maps land). *Landed at P02.*
 - **Editor undo is whole-tile-grid snapshot, not differential** (per [02-level-editor.md](02-level-editor.md)).
 - **Pickup transient state isn't persisted across host restarts** (per [04-pickups.md](04-pickups.md)).
 - **Grapple anchor uses server-current position (no lag comp)** (per [05-grapple.md](05-grapple.md)).

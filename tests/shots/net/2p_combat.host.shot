@@ -1,0 +1,55 @@
+# 2p_combat — host. One comprehensive test that exercises movement,
+# tracers, projectile sync, blood, decals, ragdoll, kill feed, and
+# corpse interaction in a single ~10-second run.
+#
+# Pairs with 2p_combat.client.shot. Both spawn adjacent on the
+# dummy platform (so they're in each other's view from t=0). Host
+# walks left, fires a few aimed shots, takes return fire, dies
+# around tick 500. Then the client (alive) walks past the corpse
+# so decals and ragdoll positioning are visible from both views.
+#
+# What to look for in the screenshots:
+#   - movement smooth in BOTH views (client view of host = host view
+#     of host, modulo ~100 ms interp delay)
+#   - tracers visible from BOTH shooters in BOTH views
+#   - blood splatters at the same hit positions
+#   - kill feed banner on both sides
+#   - ragdoll body in same world position; decals match
+
+window 1280 720
+out build/shots/net/combat_host
+network host 24081
+name HostA
+
+# Place host (slot 0) at world (2300, 1112) — on the dummy platform.
+spawn_at 2300 1112
+# Place client (slot 1) ~200 px right.
+peer_spawn 1 2500 1112
+
+# Aim at the client's chest the whole time.
+aim 2500 1080
+
+# Phase 1 (100-180): just settle.
+
+# Phase 2 (180-260): walk left a bit (host moves away from client
+# to test motion sync of moving remote mech).
+at 180 press left
+at 250 release left
+
+# Phase 3 (260-380): fire a few single shots back at the client.
+# Client retaliates harder so host loses the firefight.
+at 280 tap fire
+at 320 tap fire
+at 360 tap fire
+
+# Phase 4 (380+): host is now under heavy fire from client and dies.
+# No more input — let the kill happen.
+
+# Screenshots:
+at 100 shot t100_spawn
+at 220 shot t220_walking
+at 320 shot t320_trading
+at 440 shot t440_dying
+at 580 shot t580_dead
+at 750 shot t750_aftermath
+at 900 end

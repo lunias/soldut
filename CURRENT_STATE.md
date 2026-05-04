@@ -5,7 +5,7 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-03** (M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver and M5 P02 — polygon collision + slope physics landed same day).
+Last updated: **2026-05-04** (M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver, P02 — polygon collision + slope physics, and P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote interp + `is_dummy` bit in).
 
 ---
 
@@ -18,7 +18,7 @@ Last updated: **2026-05-03** (M4 lobby & matches in; M5 P01 — `.lvl` format + 
 | **M2**    | Foundation lands 2026-05-03. Host/client handshake works locally; per-tick input ship + 30 Hz snapshot broadcast + client-side prediction & replay + per-mech bone history for hitscan lag compensation are wired. LAN-only, full snapshots, no mid-tick interpolation of remote mechs (see TRADE_OFFS.md). Two-laptop bake test still pending. |
 | **M3**    | Combat depth in 2026-05-03. All 5 chassis (Trooper / Scout / Heavy / Sniper / Engineer) with passives. All 8 primaries (Pulse Rifle, Plasma SMG, Riot Cannon, Rail Cannon, Auto-Cannon, Mass Driver, Plasma Cannon, Microgun) and 6 secondaries (Sidearm, Burst SMG, Frag Grenades, Micro-Rockets, Combat Knife, Grappling Hook). Projectile pool with bone + tile collision. Explosions: damage falloff, line-of-sight check, impulse to ragdolls. Per-limb HP and dismemberment of all 5 limbs. Recoil + bink + self-bink fully wired. Friendly-fire toggle (`--ff` server flag). Kill feed with HEADSHOT/GIB/OVERKILL/RAGDOLL/SUICIDE flags. Loadout via CLI flags (`--chassis`, `--primary`, `--secondary`, `--armor`, `--jetpack`). Snapshot wire format widened to carry chassis/armor/jet/secondary; protocol id bumped to `S0LE`. |
 | **M4**    | Lobby & matches in 2026-05-03. Game flow is now title → browser → lobby → countdown → match → summary → next lobby. New modules: `match.{h,c}`, `lobby.{h,c}`, `lobby_ui.{h,c}`, `ui.{h,c}` (small immediate-mode raylib UI helpers, scale-aware for 4K), `config.{h,c}` (`soldut.cfg` key=value parser), `maps.{h,c}` (Foundry / Slipstream / Reactor — three code-built maps for the rotation; `.lvl` loader is M5). LOBBY-channel messages (player list with `mech_id`, slot delta, loadout, ready, team change, chat, vote, kick/ban, countdown, round start/end, match state). Server config file: port, max_players, mode, score_limit, time_limit, friendly_fire, auto_start_seconds, map_rotation, mode_rotation. Single-player flow auto-hosts an offline server and arms a 1s countdown. Protocol id bumped `S0LE` → `S0LF`. Network test scaffold under `tests/net/` runs the host/client end-to-end via real ENet loopback and asserts on log-line milestones. |
-| **M5**    | In progress. **P01 — `.lvl` format + loader/saver** and **P02 — polygon collision + slope physics + slope-aware anchor** in 2026-05-03. P02: per-particle contact normals (Q1.7 SoA fields + `PARTICLE_FLAG_CEILING`); polygon broadphase grid built at level load (`level_build_poly_broadphase`); `physics_constrain_and_collide` interleaves tile + polygon collision per relaxation iter (closest-point-on-triangle, push-out via pre-baked edge normals); `level_ray_hits` tests segments against polygons too; slope-tangent run velocity, slope-aware friction (`0.99 - 0.07*|ny|`, ICE→0.998), angled-ceiling jet redirection, slope-aware post-physics anchor (skips when `ny_avg > -0.92`); WIND/ZERO_G ambient zones; environmental damage tick for DEADLY tiles+polys+ACID zones. Renderer draws polygons (P02 stopgap, replaced by sprite art at P13). **Pending**: P03 (render-side accumulator + interp alpha), P04 (level editor), P05+ (pickups, grapple, CTF, map sharing, controls, art, audio, maps). |
+| **M5**    | In progress. **P01–P03** in. P02: per-particle contact normals (Q1.7 SoA fields + `PARTICLE_FLAG_CEILING`); polygon broadphase grid built at level load (`level_build_poly_broadphase`); `physics_constrain_and_collide` interleaves tile + polygon collision per relaxation iter (closest-point-on-triangle, push-out via pre-baked edge normals); `level_ray_hits` tests segments against polygons too; slope-tangent run velocity, slope-aware friction (`0.99 - 0.07*|ny|`, ICE→0.998), angled-ceiling jet redirection, slope-aware post-physics anchor (skips when `ny_avg > -0.92`); WIND/ZERO_G ambient zones; environmental damage tick for DEADLY tiles+polys+ACID zones. Renderer draws polygons (P02 stopgap, replaced by sprite art at P13). P03: per-particle `render_prev_x/_y` snapshot at the top of each `simulate_step`; renderer lerps `pos` ↔ `render_prev` by `alpha = accum/TICK_DT` (also threaded through projectile + FX draw); reconcile `visual_offset` is now read by `renderer_draw_frame` and applied additively to local-mech draws (decays over ~6 frames so server snaps don't read as glitches); per-mech remote snapshot ring (`remote_snap_ring[3]`) + `snapshot_interp_remotes` lerps remote mechs at `client_render_time_ms - 100ms` between bracketing entries (clamped to nearest if only one entry, snap+clear on >200 px corrections); `state_bits` widened u8→u16, `SNAP_STATE_IS_DUMMY` rides bit 11 so client dummies don't drive arm-aim; protocol id bumped `S0LF` → `S0LG`. **Pending**: P04 (level editor), P05+ (pickups, grapple, CTF, map sharing, controls, art, audio, maps). |
 
 ---
 
@@ -334,10 +334,137 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
   projection + ceiling redirect + anchor gating); per-angle tuning is
   P02 §"Out of scope" → playtest after maps land.
 
+- **P03 — render-side accumulator + interp alpha + reconcile smoothing
+  + remote-mech interp + `is_dummy` bit + hit-event sync** (2026-05-04;
+  three remote-interp bugs + blood/decal sync follow-up landed same day).
+  - **Per-particle prev-frame snapshot.** `ParticlePool` gains
+    `render_prev_x/_y` (parallel SoA arrays) plus matching fields on
+    `ProjectilePool` and `FxParticle`. Seeded to current pos at
+    `set_particle` / `projectile_spawn` / `fx_spawn_*` so first-frame
+    reads aren't garbage. NOT to be confused with Verlet `prev_x/_y`
+    — that's `pos - prev = velocity` and updates inside the
+    integrator; `render_prev_*` only updates once per simulate tick.
+  - **Snapshot at top of `simulate_step`.** One pass copies `pos →
+    render_prev` for every live particle, projectile, and FX particle
+    before any work (including the hit-pause early return path so the
+    renderer always sees consistent anchors). ~30 µs / tick worst
+    case.
+  - **Renderer lerps everything.** `particle_render_pos(p, i, alpha)`
+    helper in `render.c`; threaded through `draw_bone`, `draw_bone_chk`,
+    `draw_mech`, `projectile_draw`, `fx_draw`. The `(void)alpha;`
+    discard in `renderer_draw_frame` is gone; alpha is now used. Vsync-
+    fast displays no longer accelerate physics; sim stays locked at
+    60 Hz regardless of render rate. Camera follow is unchanged
+    (it has its own smoothing).
+  - **Reconcile visual offset** is now passed into `renderer_draw_frame`
+    as `local_visual_offset` and applied additively only to the local
+    mech's particles. The existing `reconcile_tick_smoothing` decay
+    (~6 frames) hides server snaps. Host passes `(0,0)` (no
+    reconcile state).
+  - **Two-snapshot remote-mech interp buffer.** Per-`Mech`
+    `remote_snap_ring[REMOTE_SNAP_RING=8]` of `{server_time_ms,
+    pelvis_x/_y, vel_x/_y}`. `snapshot_apply` pushes to the ring for
+    remote mechs (replacing the old M2 35% lerp); the local mech
+    still snaps fully so reconcile can replay from a known anchor.
+    Per-tick `snapshot_interp_remotes(world, render_time_ms)` finds
+    the bracket pair around `render_time` and writes the lerped
+    pelvis (translates all 16 particles + sets per-particle
+    velocity). `NetState` carries `client_render_time_ms` (double
+    precision so 0.67 ms/tick of integer truncation doesn't drift
+    the client behind the server). Large corrections (>200 px —
+    respawn, teleport) clear the ring and snap fully.
+
+    **Three sync bugs found and fixed after first ship**:
+    1. **Ring size 3 spans only ~66 ms** but `INTERP_DELAY_MS=100`
+       meant render_time always fell BEFORE the oldest entry →
+       clamped to oldest → mech jumped one snapshot per ~33 ms
+       instead of interpolating. Grew ring to 8 (~231 ms span).
+    2. **`(uint32_t)(TICK_DT * 1000.0)` truncates to 16** instead
+       of 16.667, so render_time drifted 0.67 ms/tick = 40 ms/sec
+       behind the server. After a few seconds the client was
+       hundreds of ms behind. Switched render_time to `double`.
+    3. **Init clamped render_time at 0** when `first_snap.server_time
+       < INTERP_DELAY_MS`, losing the "100 ms behind" offset and
+       making render_time track server_time directly (always
+       clamped to NEWEST → frozen-then-jump motion). Now keep
+       render_time as a double that can go negative; clamp to 0
+       only at the cast boundary into pick_bracket.
+
+    Also wired `snapshot_interp_remotes` into `shotmode.c`'s sim
+    loop (it had its own loop separate from main.c, was bypassing
+    the new path entirely). Verification: paired host+client shot
+    test (`tests/shots/net/2p_sync.{host,client}.shot`) shows
+    smooth interpolated motion across consecutive frames; existing
+    `2p_meet`, `2p_jitter`, `m5_smoothing` shot tests pass.
+  - **`SNAP_STATE_IS_DUMMY` (bit 11).** `EntitySnapshot.state_bits`
+    widened u8 → u16. Wire size 27 → 28 bytes per entity. Server
+    `snapshot_capture` sets the bit when `m->is_dummy`; client
+    `snapshot_apply` mirrors it onto the local `m->is_dummy` so
+    `build_pose`'s `if (!m->is_dummy)` arm-aim gate fires correctly
+    on dummies that arrived via the wire.
+  - **`NET_MSG_HIT_EVENT` for blood/decal sync.** Server-side
+    `mech_apply_damage` now appends to a per-`World` `hitfeed[64]`
+    queue; main.c's `broadcast_new_hits` drains the queue each tick
+    and broadcasts each hit (victim_mech, hit_part, pos, dir, dmg)
+    on `NET_CH_EVENT` (reliable). Client's
+    `client_handle_hit_event` mirrors the same blood + spark FX
+    spawn the server did (8 + dmg/16 blood, 4 + dmg/32 sparks at
+    the actual hit point with the actual hit direction). Replaces
+    the speculative blood-from-health-decrease in `snapshot_apply`
+    which spawned at PART_CHEST with a facing-derived spray —
+    visibly different from the server's view. Verified via
+    `tests/shots/net/2p_hit.{host,client}.shot`: both views show
+    matching blood at the head when the client headshots the host.
+  - **Remote-mech leg animation (RUN derivation).** `snapshot_apply`
+    only set `anim_id` to JET / STAND / FALL — never RUN — because
+    server-side RUN is computed from `BTN_LEFT/RIGHT` input bits
+    that don't ride the snapshot wire. Worse, `mech_step_drive`
+    runs for every mech each tick (including remote ones on the
+    client) and OVERWROTE anim_id back to STAND every tick from
+    `in.buttons=0`. Result: client-side host mech rendered in
+    static STAND pose (legs together) while sliding sideways at
+    run speed → looked like skating, not walking. Fix:
+    1. `snapshot_apply` derives RUN from `|vel_x| > 2 px/tick` for
+       grounded mechs (well above incidental drift, well below
+       intentional run at ~4.66 px/tick).
+    2. `mech_step_drive`'s anim_id assignment now gates on
+       `w->authoritative || mid == w->local_mech_id` — server
+       always uses input-based path; client only for its own
+       predicted mech; remote mechs on the client respect the
+       snapshot value. Verified visually via
+       `tests/shots/net/2p_legs.{host,client}.shot`: client view
+       of host clearly shows stride pose (one leg forward, one
+       back) during run, matches host's own view.
+  - **`NET_MSG_FIRE_EVENT` for tracer/projectile sync.** Same
+    pattern: per-`World` `firefeed[128]` queue; `record_fire(...)`
+    helper appends from `weapons_fire_hitscan`,
+    `weapons_fire_hitscan_lag_comp`, `weapons_fire_melee`, and
+    `spawn_one_projectile` (so spread weapons emit one event per
+    pellet); main.c's `broadcast_new_fires` drains and broadcasts
+    on `NET_CH_EVENT` (reliable). Client's `client_handle_fire_event`
+    spawns matching FX based on `weapon_def(weapon_id)->fire`:
+    HITSCAN → tracer + sparks; PROJECTILE / SPREAD / BURST / THROW
+    → projectile via `projectile_spawn` (visual-only because
+    `w->authoritative=false` skips the damage path naturally) plus
+    a short muzzle tracer; MELEE → swing tracer. Skips events where
+    `shooter == local_mech_id` so we don't double up with the local
+    predict path. Without this, remote players' shots were
+    invisible on the client (only the local shooter's predict put
+    FX on screen → asymmetric "host fires but client sees nothing"
+    feel). Verified via `tests/shots/net/2p_combat.{host,client}.shot`
+    — a comprehensive combat test (spawn near each other, both
+    move, trade fire, kill, MVP banner): both views show tracers
+    from each shooter, blood at hit positions, kill feed banner,
+    and matching round-summary scoreboard.
+  - Protocol id bumped `S0LF` → `S0LG`. Version string `0.0.6-m5`.
+  - Verification: `make` clean, `make test-physics` runs without
+    regression, `tests/net/run.sh` 13/13 passing, `tests/net/run_3p.sh`
+    10/10 passing, `make test-level-io` 25/25 passing,
+    `tests/shots/net/run.sh {2p_meet, m5_smoothing, 2p_sync,
+    2p_hit, 2p_combat, 2p_jitter, 2p_legs}` all 12/12 passing each.
+
 ### Pending
 
-- **P03** — render-side accumulator + interp alpha + reconcile
-  visual offset + two-snapshot remote-mech buffer.
 - **P04** — level editor (`tools/editor/`).
 - **P05–P14** — pickups, grapple, CTF, map sharing, controls, mech
   atlas runtime, weapon art, damage feedback, parallax / HUD / TTF /
@@ -894,27 +1021,19 @@ injection. Reverted; the post-physics anchor approach is what shipped.
 
 ## Known issues
 
-These are real and reproducible. They aren't blockers for M1 (the loop
-is playable and the milestone is met), but they're filed for future
-attention. Each links to its longer-form entry in
-[TRADE_OFFS.md](TRADE_OFFS.md).
+These are real and reproducible. They aren't blockers for the current
+milestone, but they're filed for future attention. Each links to its
+longer-form entry in [TRADE_OFFS.md](TRADE_OFFS.md).
 
-- **Vsync / FPS mismatch** — Render runs at vsync rate (often >60 Hz in
-  small windows); the simulation is locked to 60 Hz. The sim looks the
-  same in either mode but jet *feels* different. The fix is render-side
-  (use sim-tick interpolation alpha or accumulator with sub-step), not
-  more physics tuning.
 - **Left arm dangles** — No inverse kinematics yet. The left hand has
   no pose target; the upper-arm + forearm chain hangs from the
-  shoulder. Looks weird with a two-handed rifle.
+  shoulder. Looks weird with a two-handed rifle. *Resolution path:* M5
+  P11 (two-handed foregrip pose for two-handed weapons; one-handed
+  weapons still leave L_HAND dangling per the M5-introduced trade-off).
 - **Knee snap during anchor** — `mech_post_physics_anchor` snaps knees
   to mid-thigh+shin. It's invisible at idle but would break a crouch
-  cycle, which is why the anchor only runs in `ANIM_STAND`.
-- **No render-to-sim interpolation alpha** — When the renderer outpaces
-  the simulator, the latest sim state is drawn N times. A slight
-  judder is visible on close inspection.
-- **Only one chassis, one weapon, one dismemberable limb** — All by
-  design for M1, but worth listing.
+  cycle, which is why the anchor only runs in `ANIM_STAND` / `ANIM_RUN`
+  on flat ground (P02 added the slope-gating).
 
 ---
 

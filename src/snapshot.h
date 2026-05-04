@@ -45,12 +45,18 @@ typedef struct {
 
 #define SNAPSHOT_HEADER_WIRE_BYTES 24
 
-/* Per-mech record. M3 widens this from M2's 22 bytes to 27 bytes to
- * carry the loadout (chassis + armor + jetpack + secondary). The
- * loadout is technically static for the life of a mech, but we ship it
- * every snapshot for simplicity — the bandwidth cost is small (5 bytes
- * × 32 mechs × 30 Hz = 4.8 KB/s) and it lets a mid-stream client see
- * correct stats without waiting on a separate reliable message.
+/* Per-mech record.
+ *   M3 widened to 27 bytes to carry the loadout (chassis + armor +
+ *     jetpack + secondary).
+ *   P03 widens state_bits from u8 → u16 to make room for
+ *     SNAP_STATE_IS_DUMMY at bit 11 (bits 0..7 are the M2 set; bits
+ *     8..15 are P03+). Wire size grows by 1 → 28 bytes.
+ *
+ * The loadout is technically static for the life of a mech, but we
+ * ship it every snapshot for simplicity — the bandwidth cost is small
+ * (~5 bytes × 32 mechs × 30 Hz = 4.8 KB/s) and it lets a mid-stream
+ * client see correct stats without waiting on a separate reliable
+ * message.
  *
  * Quantization:
  *   pos_x_q, pos_y_q   → 1/8 px      (16-bit signed covers ±4096 px)
@@ -61,8 +67,7 @@ typedef struct {
  *   armor              → uint8 (0..255 fraction of armor_max)
  *   weapon_id          → uint8 (active slot's weapon)
  *   ammo               → uint8 (active slot's ammo)
- *   state_bits         → 1 alive | 2 jet | 4 crouch | 8 prone | 16 fire
- *                        | 32 reload | 64 grounded | 128 facing_left
+ *   state_bits         → uint16 (see SNAP_STATE_* below)
  *   team               → uint8
  *   limb_bits          → uint16 (LIMB_* flags)
  *   chassis_id         → uint8
@@ -81,7 +86,7 @@ typedef struct {
     uint8_t  armor;
     uint8_t  weapon_id;
     uint8_t  ammo;
-    uint8_t  state_bits;
+    uint16_t state_bits;
     uint8_t  team;
     uint16_t limb_bits;
     uint8_t  chassis_id;
@@ -91,10 +96,13 @@ typedef struct {
     uint8_t  ammo_secondary;
 } EntitySnapshot;
 
-/* On-wire size of one EntitySnapshot. M3 = 22 (M2 size) + 5 = 27 bytes. */
-#define ENTITY_SNAPSHOT_WIRE_BYTES 27
+/* On-wire size of one EntitySnapshot.
+ *   M3 = 22 (M2 size) + 5 = 27 bytes.
+ *   P03 widens state_bits u8 → u16 = 28 bytes. */
+#define ENTITY_SNAPSHOT_WIRE_BYTES 28
 
 enum {
+    /* Original 8-bit set (M2). */
     SNAP_STATE_ALIVE       = 1u << 0,
     SNAP_STATE_JET         = 1u << 1,
     SNAP_STATE_CROUCH      = 1u << 2,
@@ -103,6 +111,8 @@ enum {
     SNAP_STATE_RELOAD      = 1u << 5,
     SNAP_STATE_GROUNDED    = 1u << 6,
     SNAP_STATE_FACING_LEFT = 1u << 7,
+    /* Upper byte (P03+). */
+    SNAP_STATE_IS_DUMMY    = 1u << 11,    /* practice dummy — skips arm-aim drive */
 };
 
 /* Bits used in the per-entity dirty mask when delta-encoding. (We
@@ -159,13 +169,26 @@ bool snapshot_decode(const uint8_t *buf, int len,
 
 /* Overwrite the world's mech states from `frame`. For mechs we don't
  * have yet locally, spawn them. For mechs in the world that aren't in
- * the frame, mark them dead. The local mech (id == local_mech_id) is
- * also written, but reconcile.c will replay subsequent inputs after
- * this call to bring it up to "now."
+ * the frame, mark them dead.
  *
- * `is_local_predict` should be true for replay calls (do not record
- * lag history); false on a freshly received snapshot. */
+ * The LOCAL mech is fully snapped (reconcile.c replays unacked inputs
+ * after to bring it forward to "now"). REMOTE mechs do NOT snap their
+ * positions here — instead, the snapshot's pelvis pos+vel is pushed to
+ * the per-mech ring (Mech.remote_snap_ring). Position is written each
+ * tick by snapshot_interp_remotes, lerping between the two bracketing
+ * ring entries at `render_time_ms - INTERP_DELAY_MS`. Health, state
+ * bits, ammo, etc. apply to all mechs unconditionally.
+ *
+ * Large remote-mech corrections (>200 px — likely a respawn) clear
+ * the ring and snap fully so we don't slowly slide across the level. */
 void snapshot_apply(World *w, const SnapshotFrame *frame);
+
+/* P03 — interpolate remote mechs between bracketing ring entries.
+ * `render_time_ms` is the client's local render clock — typically
+ * `latest_server_time_ms - INTERP_DELAY_MS`, advanced each tick by
+ * dt_ms to keep motion smooth between snapshot arrivals. Skips the
+ * local mech and any mech whose ring is empty. */
+void snapshot_interp_remotes(World *w, uint32_t render_time_ms);
 
 /* ---- Lag-comp lookup (server-side) ------------------------------- */
 

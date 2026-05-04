@@ -105,6 +105,28 @@ void simulate(World *w, ClientInput in, float dt) {
 }
 
 void simulate_step(World *w, float dt) {
+    /* P03: snapshot pos → render_prev for every live thing the renderer
+     * reads. Done unconditionally at the top of the tick so the
+     * renderer's alpha lerp has a consistent "where it was last tick"
+     * anchor regardless of hit_pause / FX-only paths. ~30 µs at
+     * worst-case (4096 particles + 512 projectiles + 3000 FX). */
+    {
+        ParticlePool *pp = &w->particles;
+        for (int i = 0; i < pp->count; ++i) {
+            pp->render_prev_x[i] = pp->pos_x[i];
+            pp->render_prev_y[i] = pp->pos_y[i];
+        }
+        ProjectilePool *prp = &w->projectiles;
+        for (int i = 0; i < prp->count; ++i) {
+            prp->render_prev_x[i] = prp->pos_x[i];
+            prp->render_prev_y[i] = prp->pos_y[i];
+        }
+        FxPool *fxp = &w->fx;
+        for (int i = 0; i < fxp->count; ++i) {
+            fxp->items[i].render_prev_pos = fxp->items[i].pos;
+        }
+    }
+
     /* Hit-pause: the world clock freezes for a few ticks after a
      * notable kill. We still run FX (so blood keeps falling), but
      * physics and pose drive don't advance. */
