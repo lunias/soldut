@@ -1,0 +1,56 @@
+# M5 P05 — repro for "F5 save fails with BAD_SECTION when pickups are
+# placed". User scenario: a platform in the air with pickups on it.
+#
+# Verifies the editor → level_io → soldut --test-play round-trip:
+#   1. Build a tiny level (floor, raised platform).
+#   2. Drop one of every category of pickup the user might place
+#      (Health, Ammo, Armor, Weapon, Powerup, JetFuel) onto the platform.
+#   3. Add a spawn point so validate doesn't reject the save.
+#   4. Save to a temp .lvl. Failure ⇒ shotmode exits non-zero.
+#
+# If save succeeds, the test asserts on the resulting pickup count and
+# leaves the .lvl on disk under build/shots/editor/pickup_save/.
+
+window 1280 800
+ticks 200
+out build/shots/editor/pickup_save
+new 60 30
+panels off
+
+# A floor at the bottom + a raised platform mid-map.
+at 1 tool tile
+at 1 tile_flags solid
+at 2 tile_fill_rect 0   864 1920 960
+at 3 tile_fill_rect 640 640 1280 672
+
+# One spawn point so validate_doc doesn't reject the save.
+at 5 tool spawn
+at 5 spawn_add 200 832 0
+
+# Place one of every kind on the platform so the save path encodes
+# every category byte. Catches "category too large for u8" or
+# "encode_pickup writes an invalid byte" regressions.
+at 10 tool pickup
+at 11 pickup_add  720 624 health_s
+at 12 pickup_add  780 624 ammo_p
+at 13 pickup_add  840 624 armor_l
+at 14 pickup_add  900 624 rail
+at 15 pickup_add  960 624 berserk
+at 16 pickup_add 1020 624 fuel
+at 17 pickup_add 1080 624 dummy
+at 18 pickup_add  680 624 invis
+
+at 30 dump
+at 30 validate
+at 30 assert pickups       == 8
+at 30 assert spawns        == 1
+at 30 assert validate_problems == 0
+
+# Save to a .lvl in the shot output dir. shotmode's `save` is the same
+# call F5 makes. Failure logs an LVL_ERR_* and the test wrapper exits
+# non-zero — that's the user's reported error path.
+at 40 save build/shots/editor/pickup_save/scratch.lvl
+at 41 dump
+at 41 assert dirty == 0
+at 50 shot final
+at 60 end

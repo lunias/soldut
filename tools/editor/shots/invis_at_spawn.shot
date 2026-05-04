@@ -1,0 +1,28 @@
+# M5 P05 — saves a tiny level where the player spawns ON TOP of an
+# INVIS powerup. Used to bench-test "can the player fire while invis?"
+# via `./soldut --test-play <out>/scratch.lvl`.
+
+window 1280 800
+ticks 200
+out build/shots/editor/invis_at_spawn
+new 60 30
+panels off
+
+at 1 tool tile
+at 1 tile_flags solid
+at 2 tile_fill_rect 0 864 1920 960
+
+# Spawn point + INVIS pickup at the same world coords. Touch radius
+# is 24 px from any of pelvis/chest/feet, so this WILL get grabbed
+# on tick 0 of the round.
+at 5 tool spawn
+at 5 spawn_add 200 832 0
+
+at 10 tool pickup
+at 11 pickup_add 200 832 invis
+
+at 20 dump
+at 20 assert pickups == 1
+at 20 assert validate_problems == 0
+at 30 save build/shots/editor/invis_at_spawn/scratch.lvl
+at 40 end

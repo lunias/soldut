@@ -5,6 +5,7 @@
 #include "level_io.h"
 #include "log.h"
 #include "match.h"
+#include "mech.h"     /* ArmorId values for default-map pickup variants */
 
 #include <stdio.h>
 #include <string.h>
@@ -53,6 +54,32 @@ static void fill_rect(Level *l, int x0, int y0, int x1, int y1, TileKind k) {
             set_tile(l, x, y, k);
 }
 
+/* Allocate a fixed-size pickup array on first use; subsequent calls
+ * append (no-op if the cap is reached). Code-built maps hand-author
+ * spawner positions so the user has something to grab in normal play
+ * before P17 ships authored .lvl maps. Capacity 16 covers what fits
+ * comfortably on the small M4 maps. */
+#define MAP_PICKUP_FALLBACK_CAP 16
+static void add_pickup_to_map(Level *L, Arena *arena, int wx, int wy,
+                              uint8_t kind, uint8_t variant) {
+    if (!L->pickups) {
+        L->pickups = (LvlPickup *)arena_alloc(arena,
+            sizeof(LvlPickup) * MAP_PICKUP_FALLBACK_CAP);
+        if (!L->pickups) return;
+        L->pickup_count = 0;
+    }
+    if (L->pickup_count >= MAP_PICKUP_FALLBACK_CAP) return;
+    L->pickups[L->pickup_count++] = (LvlPickup){
+        .pos_x      = (int16_t)wx,
+        .pos_y      = (int16_t)wy,
+        .category   = kind,
+        .variant    = variant,
+        .respawn_ms = 0,           /* use kind default */
+        .flags      = 0,
+        .reserved   = 0,
+    };
+}
+
 static void map_alloc_tiles(Level *level, Arena *arena, int w, int h) {
     level->width     = w;
     level->height    = h;
@@ -84,7 +111,24 @@ static void build_foundry(Level *L, Arena *arena) {
     fill_rect(L, 55, L->height - 9,  56, L->height - 4, TILE_SOLID);
     /* Right-side dummy platform. */
     fill_rect(L, 70, L->height - 8,  80, L->height - 7, TILE_SOLID);
-    LOG_I("map: foundry built (%dx%d)", L->width, L->height);
+
+    /* Pickups so normal play (no editor-authored .lvl) has something
+     * to grab. P17 replaces this with authored placements; for now we
+     * scatter four representative kinds along the natural traffic
+     * paths. Tile-coord helpers: floor row is `height-4`, spawn
+     * platform top sits at row `height-10`, dummy platform top at
+     * row `height-8`. */
+    int floor_y = (L->height - 4) * 32 - 16;
+    int spawn_top_y = (L->height - 10) * 32 - 16;
+    int dummy_top_y = (L->height - 8)  * 32 - 16;
+    add_pickup_to_map(L, arena,  17 * 32, spawn_top_y, PICKUP_HEALTH,        HEALTH_MEDIUM);
+    add_pickup_to_map(L, arena,  30 * 32, floor_y,     PICKUP_POWERUP,       POWERUP_INVISIBILITY);
+    add_pickup_to_map(L, arena,  45 * 32, floor_y,     PICKUP_AMMO_PRIMARY,  0);
+    add_pickup_to_map(L, arena,  75 * 32, dummy_top_y, PICKUP_POWERUP,       POWERUP_BERSERK);
+    add_pickup_to_map(L, arena,  90 * 32, floor_y,     PICKUP_ARMOR,         ARMOR_LIGHT);
+
+    LOG_I("map: foundry built (%dx%d, %d pickups)",
+          L->width, L->height, L->pickup_count);
 }
 
 /* ---- MAP_SLIPSTREAM ----------------------------------------------- */

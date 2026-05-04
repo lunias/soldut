@@ -1,7 +1,9 @@
 #include "palette.h"
 
 #include "log.h"
+#include "mech.h"        /* ArmorId values for Armor pickup variants */
 #include "poly.h"
+#include "weapons.h"     /* WeaponId values for Weapon pickup variants */
 
 #include "stb_ds.h"
 
@@ -262,35 +264,27 @@ int palette_apply_preset(EditorDoc *d, PresetKind k, int px, int py) {
 }
 
 /* ---- Pickup palette ----------------------------------------------- */
-/* Per documents/m5/04-pickups.md — category enums (PICKUP_CAT_*) live
- * there at P05; until that ships we use the literal numeric values
- * specified by 01-lvl-format.md §PICK. respawn_ms = 0 means use the
- * category default at runtime. */
-
-#define PCAT_HEALTH   0
-#define PCAT_AMMO     1
-#define PCAT_ARMOR    2
-#define PCAT_WEAPON   3
-#define PCAT_POWERUP  4
-#define PCAT_JET_FUEL 5
-#define PCAT_PRACTICE 6      /* per 04-pickups.md §"Practice dummy" */
+/* Categories are the canonical PickupKind enum from src/world.h (M5
+ * P05). Variants are HealthVariant / ArmorId / WeaponId /
+ * PowerupVariant — also from world.h. The editor and runtime share
+ * the enum so the values can never drift again. */
 
 static const PickupEntry g_pickups[] = {
-    { PICK_HEALTH_S,         "Health S",     "Health",  PCAT_HEALTH,  0, 0 },
-    { PICK_HEALTH_M,         "Health M",     "Health",  PCAT_HEALTH,  1, 0 },
-    { PICK_HEALTH_L,         "Health L",     "Health",  PCAT_HEALTH,  2, 0 },
-    { PICK_AMMO_PRIMARY,     "Ammo P",       "Ammo",    PCAT_AMMO,    0, 0 },
-    { PICK_AMMO_SECONDARY,   "Ammo S",       "Ammo",    PCAT_AMMO,    1, 0 },
-    { PICK_ARMOR_LIGHT,      "Armor L",      "Armor",   PCAT_ARMOR,   1, 0 },
-    { PICK_ARMOR_HEAVY,      "Armor H",      "Armor",   PCAT_ARMOR,   2, 0 },
-    { PICK_ARMOR_REACTIVE,   "Armor R",      "Armor",   PCAT_ARMOR,   3, 0 },
-    { PICK_WEAPON_RAIL,      "W: Rail",      "Weapon",  PCAT_WEAPON,  3, 0 },
-    { PICK_WEAPON_MASSDRIVER,"W: Mass Drv.", "Weapon",  PCAT_WEAPON,  5, 0 },
-    { PICK_WEAPON_PLASMA,    "W: Plasma C.", "Weapon",  PCAT_WEAPON,  6, 0 },
-    { PICK_POWERUP_BERSERK,  "P: Berserk",   "Powerup", PCAT_POWERUP, 0, 0 },
-    { PICK_POWERUP_INVIS,    "P: Invis.",    "Powerup", PCAT_POWERUP, 1, 0 },
-    { PICK_JET_FUEL,         "Jet Fuel",     "JetFuel", PCAT_JET_FUEL,0, 0 },
-    { PICK_PRACTICE_DUMMY,   "Pract. Dummy", "Special", PCAT_PRACTICE,0, 0 },
+    { PICK_HEALTH_S,         "Health S",     "Health",  PICKUP_HEALTH,         HEALTH_SMALL,        0 },
+    { PICK_HEALTH_M,         "Health M",     "Health",  PICKUP_HEALTH,         HEALTH_MEDIUM,       0 },
+    { PICK_HEALTH_L,         "Health L",     "Health",  PICKUP_HEALTH,         HEALTH_LARGE,        0 },
+    { PICK_AMMO_PRIMARY,     "Ammo P",       "Ammo",    PICKUP_AMMO_PRIMARY,   0,                   0 },
+    { PICK_AMMO_SECONDARY,   "Ammo S",       "Ammo",    PICKUP_AMMO_SECONDARY, 0,                   0 },
+    { PICK_ARMOR_LIGHT,      "Armor L",      "Armor",   PICKUP_ARMOR,          ARMOR_LIGHT,         0 },
+    { PICK_ARMOR_HEAVY,      "Armor H",      "Armor",   PICKUP_ARMOR,          ARMOR_HEAVY,         0 },
+    { PICK_ARMOR_REACTIVE,   "Armor R",      "Armor",   PICKUP_ARMOR,          ARMOR_REACTIVE,      0 },
+    { PICK_WEAPON_RAIL,      "W: Rail",      "Weapon",  PICKUP_WEAPON,         WEAPON_RAIL_CANNON,  0 },
+    { PICK_WEAPON_MASSDRIVER,"W: Mass Drv.", "Weapon",  PICKUP_WEAPON,         WEAPON_MASS_DRIVER,  0 },
+    { PICK_WEAPON_PLASMA,    "W: Plasma C.", "Weapon",  PICKUP_WEAPON,         WEAPON_PLASMA_CANNON,0 },
+    { PICK_POWERUP_BERSERK,  "P: Berserk",   "Powerup", PICKUP_POWERUP,        POWERUP_BERSERK,     0 },
+    { PICK_POWERUP_INVIS,    "P: Invis.",    "Powerup", PICKUP_POWERUP,        POWERUP_INVISIBILITY,0 },
+    { PICK_JET_FUEL,         "Jet Fuel",     "JetFuel", PICKUP_JET_FUEL,       0,                   0 },
+    { PICK_PRACTICE_DUMMY,   "Pract. Dummy", "Special", PICKUP_PRACTICE_DUMMY, 0,                   0 },
 };
 
 const PickupEntry *palette_pickups(int *n) {

@@ -1,0 +1,33 @@
+# M5 P05 — visual confirmation that firing during invis works.
+# Renders the player firing the Pulse Rifle at the dummy, with invis
+# active throughout the burst. Output PNGs let a human verify the
+# muzzle/tracer/sparks are still visible.
+
+window 1280 720
+seed 11 22
+out build/shots/m5_invis_fire
+spawn_at 800 920
+aim 2400 920
+
+# Settle.
+at 30 shot 010_settled
+
+# Pre-invis fire — sanity, should look normal.
+at 50 press fire
+at 60 shot 020_fire_pre_invis
+at 80 release fire
+
+# Activate invis on the local mech via the shotmode debug directive.
+# Stays on for 8 s ≈ 480 ticks at 60 Hz, well past the test end.
+at 100 give_invis 8.0
+at 110 shot 030_invis_on
+
+# Fire while invis. Capture multiple frames so we can see the muzzle
+# and tracer in different parts of the cycle.
+at 120 press fire
+at 130 shot 040_invis_fire_t130
+at 140 shot 041_invis_fire_t140
+at 150 shot 042_invis_fire_t150
+at 160 shot 043_invis_fire_t160
+at 170 release fire
+at 200 end

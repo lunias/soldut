@@ -13,7 +13,7 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-04**.
+Last updated: **2026-05-04** (post P05).
 
 ---
 
@@ -138,21 +138,6 @@ Last updated: **2026-05-04**.
 
 ## Combat
 
-### Burst SMG fires all rounds on the same tick
-
-- **What we did** — `WFIRE_BURST` (Burst SMG) spawns `burst_rounds`
-  projectiles in a single call, all on the trigger-press tick. The doc
-  describes a 70 ms inter-round cadence.
-- **Why** — Proper queuing needs a per-mech "pending burst" state
-  (next-round tick + remaining count) and a check in mech_step_drive.
-  Acceptable for M3 first pass — the 3-round burst still feels distinct
-  from a sustained weapon; the rounds just fan out spatially via
-  self-bink rather than temporally.
-- **Revisit when** — Playtesting flags the burst as "indistinguishable
-  from a single high-damage shot". Add a `burst_pending_*` field on
-  Mech and step it down in mech_step_drive; spawn the next round when
-  the timer hits zero.
-
 ### Grappling Hook is a stub
 
 - **What we did** — `WFIRE_GRAPPLE` registers the cooldown but doesn't
@@ -166,19 +151,6 @@ Last updated: **2026-05-04**.
 - **Revisit when** — A player wants vertical movement in a chassis
   without a strong jet, OR a map design has a "swing across this gap"
   beat. M5 (level editor + maps) is the natural pairing.
-
-### Engineer ability heals self instead of dropping a deployable
-
-- **What we did** — Engineer chassis's BTN_USE adds 50 HP to the
-  engineer themselves, on a 30s cooldown.
-- **Why** — A "drop a 50-HP repair pack on the ground that allies can
-  pick up" needs the pickup system, which lands at M5
-  (documents/02-game-design.md §Map pickups). For M3 we wanted the
-  ability to *exist* on the chassis so the passive table is real, even
-  if its target is the user.
-- **Revisit when** — M5 pickup system lands. At that point the
-  ability spawns a `PICKUP_REPAIR_PACK` at the engineer's feet with a
-  short lifetime; allies (and the engineer) walking onto it consume it.
 
 ### Projectile vs bone collision is sample-based, not analytic
 
@@ -337,6 +309,72 @@ Last updated: **2026-05-04**.
     file dialog on every other tool they use.
   - We add OS-native asset preview thumbnails (a real picker would
     be a natural carrier for that).
+
+### Pickup transient state isn't persisted across host restarts (P05)
+
+- **What we did** — `World.pickups` lives in process memory. A host
+  who crashes and restarts mid-round resets every spawner to AVAILABLE
+  (level-defined entries) or loses them entirely (engineer-deployed
+  transients). Cooldown timers don't survive. State broadcasts on the
+  next state transition only — a connecting client gets correct
+  state when the next grab happens, but a freshly-restarted host
+  shows everyone's "I held the Mass Driver spot" timing reset.
+- **Why** — Persistence wants either (a) snapshotting `World.pickups`
+  to a local file on every transition (writes per pickup grab, fine),
+  (b) sending an INITIAL_PICKUP_STATE bundle on connect, or both.
+  Both are real work and we don't have a host-restart use case in M5
+  (rounds restart frequently anyway). Spec doc
+  (`documents/m5/04-pickups.md`) called this out as acceptable.
+- **Revisit when** —
+  - Hosts start running long persistent matches where mid-round
+    crashes are a real concern.
+  - We add an INITIAL_PICKUP_STATE message anyway for mid-round
+    join (P05 deferred this; see entry below).
+
+### `NET_MSG_PICKUP_STATE` wire is 20 bytes, not 12 (P05)
+
+- **What we did** — Spec doc 04-pickups.md described a 12-byte
+  pickup-state message (msg_type / spawner_id / state / reserved /
+  available_at_tick). M5 P05 ships 20 bytes, adding pos_x_q / pos_y_q
+  / kind / variant / flags so transient spawners (engineer repair
+  packs) can be replicated to clients — without those fields the
+  client only knows the spawner's INDEX, not where to draw it or what
+  kind of pickup it is.
+- **Why** — Engineer repair packs need cross-network visibility (the
+  prompt's "Done when" requires "allies can grab it"). Two paths
+  considered: (a) extend the existing message to 20 bytes, (b) add a
+  separate NET_MSG_PICKUP_SPAWN for transients. We chose (a) — fewer
+  message types, simpler dispatch, both branches use the same handler.
+  Bandwidth: 20 × ~10 events/min × 16 players ≈ 53 B/s aggregate,
+  trivial vs the 5 KB/s/client budget.
+- **Revisit when** —
+  - We add server-side mid-round-join initial-state shipping (an
+    INITIAL_PICKUP_STATE batch). At that point a 12-byte
+    state-transition message + a separate spawn message becomes
+    cleaner than the unified 20-byte form.
+  - We start optimizing wire bandwidth seriously (delta-encoded
+    snapshots — see "no snapshot delta encoding" entry).
+
+### Initial pickup state for mid-round joiners not shipped (P05)
+
+- **What we did** — Both host and client call `pickup_init_round`
+  on `LOBBY_ROUND_START`, populating their pools identically from
+  the level's PICK records. The first state transition (a grab or
+  respawn) ships the full 20-byte spawner record. **A client that
+  joins after some pickups have already been grabbed sees the wrong
+  state** — the host's COOLDOWN entries remain AVAILABLE on the
+  joining client until the next transition.
+- **Why** — Mid-round join in M4 still parks new connections in the
+  lobby until next ROUND_START (we don't spawn mechs mid-round), so
+  a fresh joiner never enters MATCH with stale pickup state in
+  practice. Shipping a batched INITIAL_PICKUP_STATE in the
+  ACCEPT/INITIAL_STATE flow is straightforward (~30 LOC) but adds
+  complexity we can defer until matchmaking actually allows
+  mid-round join.
+- **Revisit when** —
+  - Round-already-active mid-round join becomes a real flow.
+  - A spectator mode is added (spectators connect mid-round and
+    need correct pickup state from tick 0 of their connection).
 
 ### `.lvl` v1 format is locked in
 
@@ -498,22 +536,6 @@ Last updated: **2026-05-04**.
   a "host controls" panel. At that point: row hover → buttons,
   confirmation modal, plus `bans.txt` read-on-start /
   write-on-update.
-
-### Single-player mode has no practice dummy
-
-- **What we did** — Title screen "Single Player" bootstraps an
-  offline-solo "server" with one slot (the player). Round runs
-  against an empty map; player can move, jet, and shoot at nothing.
-- **Why** — M3 had a hard-coded dummy at `(75, 32)` for visible
-  feedback in shot tests. M4 removed it from the lobby/match flow
-  because a real lobby + auto-spawn would conflict with it. Adding
-  a "spawn a dummy slot" path is M5 work alongside the pickup
-  system (a "Practice" room could spawn a target dummy as a
-  pickup-like entity).
-- **Revisit when** — M5 lands the pickup system; add a
-  `PICKUP_PRACTICE_DUMMY` (or just a special spawn) for the offline-
-  solo path. Until then, shotmode + headless_sim still spawn a
-  dummy directly via `mech_create`.
 
 ### `bans.txt` not persisted
 

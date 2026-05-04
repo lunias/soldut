@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups shot \
         debug gdb gdb-host gdb-client valgrind editor
 
 all: $(BIN)
@@ -118,6 +118,14 @@ $(BUILD_DIR)/level_io_test: tests/level_io_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) 
 test-level-io: $(BUILD_DIR)/level_io_test
 	./$(BUILD_DIR)/level_io_test
 
+# M5 P05 — pickup runtime + powerup wire mirror + Burst SMG cadence.
+# Asserts and returns non-zero on failure; CI-runnable.
+$(BUILD_DIR)/pickup_test: tests/pickup_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/pickup_test.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+test-pickups: $(BUILD_DIR)/pickup_test
+	./$(BUILD_DIR)/pickup_test
+
 # M5 P04 fix verification — map_spawn_point honors level->spawns when
 # the .lvl ships authored SPWN records. Pre-fix, F5 test-play would
 # put the player in g_red_lanes[0] regardless of what the editor saved.
@@ -144,6 +152,7 @@ test-editor: editor
 	./build/soldut_editor --shot tools/editor/shots/poly_triangulation.shot
 	./build/soldut_editor --shot tools/editor/shots/validate_failures.shot
 	./build/soldut_editor --shot tools/editor/shots/scaling_4k.shot
+	./build/soldut_editor --shot tools/editor/shots/pickup_save.shot
 
 # Shot mode — drive a scripted scene through the real renderer and
 # write PNGs. Handy for visual diffs without filming. Override SCRIPT

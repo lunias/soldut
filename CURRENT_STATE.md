@@ -5,7 +5,7 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-04** (M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver, P02 — polygon collision + slope physics, P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote interp + `is_dummy` bit, and P04 — standalone level editor at `tools/editor/` + `--test-play` flag in the game in).
+Last updated: **2026-05-04** (M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver, P02 — polygon collision + slope physics, P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote interp + `is_dummy` bit, P04 — standalone level editor at `tools/editor/` + `--test-play` flag, and P05 — pickup runtime + powerups + Engineer deployable + Burst SMG cadence + practice dummy in).
 
 ---
 
@@ -18,7 +18,7 @@ Last updated: **2026-05-04** (M4 lobby & matches in; M5 P01 — `.lvl` format + 
 | **M2**    | Foundation lands 2026-05-03. Host/client handshake works locally; per-tick input ship + 30 Hz snapshot broadcast + client-side prediction & replay + per-mech bone history for hitscan lag compensation are wired. LAN-only, full snapshots, no mid-tick interpolation of remote mechs (see TRADE_OFFS.md). Two-laptop bake test still pending. |
 | **M3**    | Combat depth in 2026-05-03. All 5 chassis (Trooper / Scout / Heavy / Sniper / Engineer) with passives. All 8 primaries (Pulse Rifle, Plasma SMG, Riot Cannon, Rail Cannon, Auto-Cannon, Mass Driver, Plasma Cannon, Microgun) and 6 secondaries (Sidearm, Burst SMG, Frag Grenades, Micro-Rockets, Combat Knife, Grappling Hook). Projectile pool with bone + tile collision. Explosions: damage falloff, line-of-sight check, impulse to ragdolls. Per-limb HP and dismemberment of all 5 limbs. Recoil + bink + self-bink fully wired. Friendly-fire toggle (`--ff` server flag). Kill feed with HEADSHOT/GIB/OVERKILL/RAGDOLL/SUICIDE flags. Loadout via CLI flags (`--chassis`, `--primary`, `--secondary`, `--armor`, `--jetpack`). Snapshot wire format widened to carry chassis/armor/jet/secondary; protocol id bumped to `S0LE`. |
 | **M4**    | Lobby & matches in 2026-05-03. Game flow is now title → browser → lobby → countdown → match → summary → next lobby. New modules: `match.{h,c}`, `lobby.{h,c}`, `lobby_ui.{h,c}`, `ui.{h,c}` (small immediate-mode raylib UI helpers, scale-aware for 4K), `config.{h,c}` (`soldut.cfg` key=value parser), `maps.{h,c}` (Foundry / Slipstream / Reactor — three code-built maps for the rotation; `.lvl` loader is M5). LOBBY-channel messages (player list with `mech_id`, slot delta, loadout, ready, team change, chat, vote, kick/ban, countdown, round start/end, match state). Server config file: port, max_players, mode, score_limit, time_limit, friendly_fire, auto_start_seconds, map_rotation, mode_rotation. Single-player flow auto-hosts an offline server and arms a 1s countdown. Protocol id bumped `S0LE` → `S0LF`. Network test scaffold under `tests/net/` runs the host/client end-to-end via real ENet loopback and asserts on log-line milestones. |
-| **M5**    | In progress. **P01–P04** in. P02: per-particle contact normals (Q1.7 SoA fields + `PARTICLE_FLAG_CEILING`); polygon broadphase grid built at level load (`level_build_poly_broadphase`); `physics_constrain_and_collide` interleaves tile + polygon collision per relaxation iter (closest-point-on-triangle, push-out via pre-baked edge normals); `level_ray_hits` tests segments against polygons too; slope-tangent run velocity, slope-aware friction (`0.99 - 0.07*|ny|`, ICE→0.998), angled-ceiling jet redirection, slope-aware post-physics anchor (skips when `ny_avg > -0.92`); WIND/ZERO_G ambient zones; environmental damage tick for DEADLY tiles+polys+ACID zones. Renderer draws polygons (P02 stopgap, replaced by sprite art at P13). P03: per-particle `render_prev_x/_y` snapshot at the top of each `simulate_step`; renderer lerps `pos` ↔ `render_prev` by `alpha = accum/TICK_DT` (also threaded through projectile + FX draw); reconcile `visual_offset` is now read by `renderer_draw_frame` and applied additively to local-mech draws (decays over ~6 frames so server snaps don't read as glitches); per-mech remote snapshot ring (`remote_snap_ring[3]`) + `snapshot_interp_remotes` lerps remote mechs at `client_render_time_ms - 100ms` between bracketing entries (clamped to nearest if only one entry, snap+clear on >200 px corrections); `state_bits` widened u8→u16, `SNAP_STATE_IS_DUMMY` rides bit 11 so client dummies don't drive arm-aim; protocol id bumped `S0LF` → `S0LG`. **Pending**: P04 (level editor), P05+ (pickups, grapple, CTF, map sharing, controls, art, audio, maps). |
+| **M5**    | In progress. **P01–P05** in. P02: per-particle contact normals (Q1.7 SoA fields + `PARTICLE_FLAG_CEILING`); polygon broadphase grid built at level load (`level_build_poly_broadphase`); `physics_constrain_and_collide` interleaves tile + polygon collision per relaxation iter (closest-point-on-triangle, push-out via pre-baked edge normals); `level_ray_hits` tests segments against polygons too; slope-tangent run velocity, slope-aware friction (`0.99 - 0.07*|ny|`, ICE→0.998), angled-ceiling jet redirection, slope-aware post-physics anchor (skips when `ny_avg > -0.92`); WIND/ZERO_G ambient zones; environmental damage tick for DEADLY tiles+polys+ACID zones. Renderer draws polygons (P02 stopgap, replaced by sprite art at P13). P03: per-particle `render_prev_x/_y` snapshot at the top of each `simulate_step`; renderer lerps `pos` ↔ `render_prev` by `alpha = accum/TICK_DT` (also threaded through projectile + FX draw); reconcile `visual_offset` is now read by `renderer_draw_frame` and applied additively to local-mech draws (decays over ~6 frames so server snaps don't read as glitches); per-mech remote snapshot ring (`remote_snap_ring[8]`) + `snapshot_interp_remotes` lerps remote mechs at `client_render_time_ms - 100ms` between bracketing entries (clamped to nearest if only one entry, snap+clear on >200 px corrections); `state_bits` widened u8→u16, `SNAP_STATE_IS_DUMMY` rides bit 11 so client dummies don't drive arm-aim; protocol id bumped `S0LF` → `S0LG`. P05: new `src/pickup.{c,h}` with PickupPool (capacity 64) on World; `pickup_init_round` populates from `level->pickups` and spawns practice-dummy mechs on the authoritative side; `pickup_step` (server-only, per tick) does 24 px touch detection + cooldown rollover + transient lifetime expiry; per-kind apply rules with full-state-rejects-grab guards; powerup timers `powerup_berserk/invis/godmode_remaining` on Mech with `SNAP_STATE_BERSERK/INVIS/GODMODE` bits in the snapshot (clients mirror to sentinel timers); berserk doubles outgoing damage and godmode zeroes incoming damage in `mech_apply_damage`; render alpha-mods invis-active mechs (0.2 / 0.5 local). Engineer's `BTN_USE` now spawns a TRANSIENT `PICKUP_REPAIR_PACK` at the engineer's feet (10 s lifetime, 30 s cooldown) instead of self-healing — allies + the engineer can grab it. Burst SMG fires round 1 on press tick + queues `burst_pending_rounds` to fire at `burst_interval_sec` cadence in `mech_step_drive`. New wire message `NET_MSG_PICKUP_STATE = 15` (20 bytes — full spawner data so transients propagate). New world ring `pickupfeed[64]` drained per tick by `broadcast_new_pickups` in main.c. New regression test `tests/pickup_test.c` (32 assertions, `make test-pickups`). Protocol id stays `S0LG` (state_bits already u16 from P03; powerup bits ride bits 8–10). **Pending**: P06+ (grapple, CTF, map sharing, controls, art, audio, maps). |
 
 ---
 
@@ -646,9 +646,85 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
     `.lvl` (load logged at INFO); `./soldut --test-play <lvl>` loads
     the supplied map and arms the auto-start countdown.
 
+- **P05 — pickup runtime + Engineer deployable + Burst SMG cadence +
+  practice dummy** (2026-05-04).
+  - New module `src/pickup.{c,h}`. Public API: `pickup_init_round`,
+    `pickup_spawn_transient`, `pickup_step`, `pickup_default_respawn_ms`,
+    `pickup_kind_color`. Pool `World.pickups` (capacity 64) holds both
+    level-defined spawners and engineer-deployed transients (the
+    `PICKUP_FLAG_TRANSIENT` bit distinguishes them). Per-kind apply
+    rules with the "full-state rejects grab" guard so a player at full
+    HP doesn't waste a HEALTH pack by walking over it.
+  - **Powerups**: three timer fields on Mech (`powerup_berserk_remaining`,
+    `powerup_invis_remaining`, `powerup_godmode_remaining`). Server
+    ticks them in `mech_step_drive`; clients mirror via the new
+    `SNAP_STATE_BERSERK = 1<<8`, `SNAP_STATE_INVIS = 1<<9`,
+    `SNAP_STATE_GODMODE = 1<<10` bits in `EntitySnapshot.state_bits`
+    (already widened to u16 at P03; no new protocol bump). Berserk
+    doubles outgoing damage, godmode zeroes incoming damage — both
+    centralized in `mech_apply_damage`. Invisibility alpha-mods the
+    mech's drawn color (alpha 51 for remote viewers, 128 for the local
+    mech so the player can still see themselves).
+  - **Engineer ability rewrite**: `BTN_USE` on the Engineer chassis
+    spawns a TRANSIENT `PICKUP_REPAIR_PACK` at the engineer's pelvis
+    via `pickup_spawn_transient` (10 s lifetime, 30 s cooldown).
+    Allies + the engineer himself walking onto it consume it for
+    +50 HP. Replaces M3's instant self-heal — the M3 trade-off entry
+    is gone.
+  - **Burst SMG cadence**: new fields `burst_pending_rounds` (u8) +
+    `burst_pending_timer` (float) on Mech. `mech_try_fire` spawns
+    round 1 on the press tick and queues the remaining
+    `burst_rounds-1`. Top of `mech_step_drive` ticks the timer and
+    spawns the next round when it hits zero, repeating at
+    `burst_interval_sec` cadence (70 ms for the Burst SMG). Server-side
+    only — clients receive the per-round NET_MSG_FIRE_EVENT broadcasts
+    and don't predict the trailing rounds. The M3 "all rounds on one
+    tick" trade-off entry is gone.
+  - **Practice dummy**: `pickup_init_round` recognizes the
+    `PICKUP_PRACTICE_DUMMY` kind and spawns a dummy mech at the
+    spawner's position (server-only — clients receive it via the
+    snapshot stream with `SNAP_STATE_IS_DUMMY` set). The spawner is
+    immediately marked `state=COOLDOWN`, `available_at_tick=UINT64_MAX`
+    so it never appears as a pickup. Maps that include a
+    `PICKUP_PRACTICE_DUMMY` spawner work for single-player testing.
+    The M4 "no practice dummy" trade-off entry is gone.
+  - **Wire protocol**: new message `NET_MSG_PICKUP_STATE = 15` on
+    `NET_CH_EVENT` (reliable, ordered). 20 bytes per event:
+    `(spawner_id, state, reserved, available_at_tick, pos_q, kind,
+    variant, flags)`. Spec doc 04-pickups.md called for 12 bytes;
+    M5 P05 widened to 20 to support transient-spawner replication
+    (engineer repair packs need pos/kind on the wire because clients
+    haven't seen them at level-load time). Bandwidth: ~53 B/s
+    aggregate at 16 players, well under budget.
+  - **Per-tick flow** in `simulate_step`: `pickup_step(w, dt)` runs
+    after `mech_apply_environmental_damage`. State changes get queued
+    on `World.pickupfeed[64]` (monotonic counter ring, same shape as
+    HitFeed/FireFeed); main.c's `broadcast_new_pickups` drains it
+    each tick alongside `broadcast_new_hits`/`broadcast_new_fires`
+    and ships a `NET_MSG_PICKUP_STATE` per entry. `pickup_init_round`
+    runs in both `start_round` (host) and `client_handle_round_start`
+    (clients), so both sides populate identically from the level data.
+  - **Renderer**: `draw_pickups(pool, now)` placeholder — colored
+    bobbing circles per `pickup_kind_color` lookup. Replaced by the
+    sprite atlas at P13; PRACTICE_DUMMY entries are skipped (the dummy
+    is a real mech, not a pickup).
+  - **Regression test** `tests/pickup_test.c` (32 assertions,
+    `make test-pickups`): HEALTH grab refills HP + transitions to
+    COOLDOWN; HEALTH grab is REJECTED at full HP; berserk doubles
+    outgoing damage; godmode caps a 9999-dmg headshot at 0 HP loss;
+    invis sentinel timer mirrors the snapshot bit; transient lifetime
+    expiry sets `available_at_tick = UINT64_MAX`; Burst SMG spawns
+    one projectile on the press tick and two more across subsequent
+    ticks at the 70 ms cadence (3 total).
+  - Verification: `make` clean; `make test-physics` ok;
+    `make test-level-io` 25/25; `make test-pickups` 32/32;
+    `make test-spawn` ok; `tests/net/run.sh` 13/13;
+    `tests/net/run_3p.sh` 10/10. Protocol id stays `S0LG` (no wire
+    rev bump beyond P03; powerup bits ride existing reserved bits).
+
 ### Pending
 
-- **P05–P14** — pickups, grapple, CTF, map sharing, controls, mech
+- **P06–P14** — grapple, CTF, map sharing, controls, mech
   atlas runtime, weapon art, damage feedback, parallax / HUD / TTF /
   halftone / decal chunking, audio.
 - **P15–P18** — ComfyUI asset generation + the 8 maps + bake test.

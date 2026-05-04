@@ -98,6 +98,13 @@ void snapshot_capture(const World *w, SnapshotFrame *out, uint16_t ack_input_seq
         if (m->anim_id == ANIM_FIRE) bits |= SNAP_STATE_FIRE;
         if (m->reload_timer > 0.0f)  bits |= SNAP_STATE_RELOAD;
         if (m->is_dummy)           bits |= SNAP_STATE_IS_DUMMY;
+        /* P05 — powerup state. Timers tick down server-side; the bit is
+         * set whenever the timer is positive. Clients mirror to a
+         * sentinel timer in snapshot_apply so render can read
+         * `timer > 0` consistently. */
+        if (m->powerup_berserk_remaining > 0.0f)  bits |= SNAP_STATE_BERSERK;
+        if (m->powerup_invis_remaining   > 0.0f)  bits |= SNAP_STATE_INVIS;
+        if (m->powerup_godmode_remaining > 0.0f)  bits |= SNAP_STATE_GODMODE;
         e->state_bits = bits;
 
         e->team      = (uint8_t)m->team;
@@ -400,6 +407,17 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
         m->grounded    = (e->state_bits & SNAP_STATE_GROUNDED) != 0;
         m->facing_left = (e->state_bits & SNAP_STATE_FACING_LEFT) != 0;
         m->is_dummy    = (e->state_bits & SNAP_STATE_IS_DUMMY) != 0;
+        /* P05 — mirror powerup bits to a local sentinel timer. The
+         * client doesn't know the exact remaining seconds (the server
+         * doesn't ship a float for this), but render and self-modulation
+         * paths only need "is the powerup active?" — which the bit
+         * answers. mech_step_drive ticks the sentinel down each frame;
+         * the next snapshot re-arms it while the host's authoritative
+         * timer is still positive, then clears it when the host's bit
+         * goes 0. */
+        m->powerup_berserk_remaining = (e->state_bits & SNAP_STATE_BERSERK) ? 1.0f : 0.0f;
+        m->powerup_invis_remaining   = (e->state_bits & SNAP_STATE_INVIS)   ? 1.0f : 0.0f;
+        m->powerup_godmode_remaining = (e->state_bits & SNAP_STATE_GODMODE) ? 1.0f : 0.0f;
         if (e->state_bits & SNAP_STATE_JET) {
             m->anim_id = ANIM_JET;
         } else if (m->grounded) {

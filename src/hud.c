@@ -130,6 +130,37 @@ void hud_draw(const World *w, int screen_w, int screen_h, Vec2 cursor) {
     if (bink_total > 1.0f) bink_total = 1.0f;
     draw_crosshair(cursor, bink_total);
 
+    /* P05 — active-powerup indicator (top-center). Removes the "I picked
+     * something up but I don't know what's happening" ambiguity that the
+     * spec's deferred-to-M6 HUD popup would otherwise solve. Show one
+     * pill per active powerup with the remaining seconds; on the local
+     * mech the timer is server-authoritative (or sentinel-ticked from
+     * snapshot bits if we're a pure client). */
+    {
+        int px = screen_w / 2 - 200;
+        int py = 12;
+        if (m->powerup_berserk_remaining > 0.0f) {
+            const char *label = TextFormat("BERSERK %.1fs", (double)m->powerup_berserk_remaining);
+            int tw = MeasureText(label, 18);
+            DrawRectangle(px - 8, py - 4, tw + 16, 26, (Color){80, 0, 20, 220});
+            DrawText(label, px, py, 18, (Color){255, 200, 200, 240});
+            px += tw + 24;
+        }
+        if (m->powerup_invis_remaining > 0.0f) {
+            const char *label = TextFormat("INVIS %.1fs", (double)m->powerup_invis_remaining);
+            int tw = MeasureText(label, 18);
+            DrawRectangle(px - 8, py - 4, tw + 16, 26, (Color){0, 30, 60, 220});
+            DrawText(label, px, py, 18, (Color){180, 220, 255, 240});
+            px += tw + 24;
+        }
+        if (m->powerup_godmode_remaining > 0.0f) {
+            const char *label = TextFormat("GODMODE %.1fs", (double)m->powerup_godmode_remaining);
+            int tw = MeasureText(label, 18);
+            DrawRectangle(px - 8, py - 4, tw + 16, 26, (Color){60, 50, 0, 220});
+            DrawText(label, px, py, 18, (Color){255, 230, 160, 240});
+        }
+    }
+
     /* Kill feed (top-right). */
     draw_kill_feed(w, screen_w);
 

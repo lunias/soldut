@@ -49,6 +49,7 @@ typedef enum {
     EV_MOUSE,
     EV_SHOT,
     EV_END,
+    EV_GIVE_INVIS,    /* P05 debug — set powerup_invis_remaining on local mech */
 } EventKind;
 
 typedef struct {
@@ -365,6 +366,16 @@ static bool parse_script(const char *path, Script *out) {
                 ev.kind = EV_END;
                 script_push(out, ev);
                 if (out->end_tick < 0 || tick < out->end_tick) out->end_tick = tick;
+            } else if (strcmp(ev_kind, "give_invis") == 0) {
+                /* "at <tick> give_invis [seconds]" — sets the local
+                 * mech's powerup_invis_remaining timer. Used to bench
+                 * "fire while invis" without authoring a level + grab
+                 * pass. */
+                float secs = 8.0f;
+                if (args[0]) sscanf(args, "%f", &secs);
+                ev.kind = EV_GIVE_INVIS;
+                ev.ax = secs;
+                script_push(out, ev);
             } else {
                 LOG_E("shotmode: %s:%d unknown event '%s'", path, lineno, ev_kind);
                 ok = false;
@@ -1051,6 +1062,15 @@ int shotmode_run(const char *script_path) {
                     break;
                 case EV_END:     ended_n = true; break;
                 case EV_SHOT:    /* handled after render */ break;
+                case EV_GIVE_INVIS: {
+                    int lid = game.world.local_mech_id;
+                    if (lid >= 0 && lid < game.world.mech_count) {
+                        game.world.mechs[lid].powerup_invis_remaining = ev->ax;
+                        SHOT_LOG("t=%d give_invis local_mech=%d secs=%.2f",
+                                 tick, lid, (double)ev->ax);
+                    }
+                    break;
+                }
                 default:         break;  /* mouse-screen / tap unused here */
                 }
                 ev_idx_n++;
@@ -1348,6 +1368,15 @@ int shotmode_run(const char *script_path) {
             case EV_SHOT:    /* handled after render, see below */         break;
             case EV_END:     ended = true; break;
             case EV_TAP:     break; /* lowered at parse time */
+            case EV_GIVE_INVIS: {
+                int lid = game.world.local_mech_id;
+                if (lid >= 0 && lid < game.world.mech_count) {
+                    game.world.mechs[lid].powerup_invis_remaining = ev->ax;
+                    SHOT_LOG("t=%d give_invis local_mech=%d secs=%.2f",
+                             tick, lid, (double)ev->ax);
+                }
+                break;
+            }
             }
             ev_idx++;
         }

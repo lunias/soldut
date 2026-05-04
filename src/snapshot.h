@@ -111,7 +111,13 @@ enum {
     SNAP_STATE_RELOAD      = 1u << 5,
     SNAP_STATE_GROUNDED    = 1u << 6,
     SNAP_STATE_FACING_LEFT = 1u << 7,
-    /* Upper byte (P03+). */
+    /* Upper byte (P03+). P05 spends bits 8/9/10 on powerup state — the
+     * timer ticks server-side; clients set their local timer to a
+     * sentinel value while the bit is observed so render can read
+     * "alpha-mod for invis", etc. without floats riding the wire. */
+    SNAP_STATE_BERSERK     = 1u <<  8,    /* powerup: 2× outgoing damage */
+    SNAP_STATE_INVIS       = 1u <<  9,    /* powerup: render alpha-mod */
+    SNAP_STATE_GODMODE     = 1u << 10,    /* powerup: ignore incoming damage */
     SNAP_STATE_IS_DUMMY    = 1u << 11,    /* practice dummy — skips arm-aim drive */
 };
 
