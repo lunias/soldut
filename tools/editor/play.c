@@ -10,8 +10,20 @@
 #include <string.h>
 
 #if defined(_WIN32)
+/* raylib defines Rectangle / CloseWindow / ShowCursor as types and
+ * functions that collide with wingdi.h + winuser.h. The lean defines
+ * skip those Win32 headers; we only need kernel32 (CreateProcessA,
+ * CloseHandle, STARTUPINFOA, PROCESS_INFORMATION). */
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOGDI
+#    define NOGDI
+#  endif
+#  ifndef NOUSER
+#    define NOUSER
+#  endif
 #  include <windows.h>
-#  include <shlwapi.h>
 #else
 #  include <spawn.h>
 #  include <sys/types.h>

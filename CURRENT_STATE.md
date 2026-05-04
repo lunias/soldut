@@ -590,6 +590,18 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
     - `tools/editor/shots/help_layout.shot` and
       `help_layout_4k.shot` for visual layout regressions.
     - `make test-editor` runs every editor shot script.
+  - **Cross-platform editor build + CI artifact**: `cross-windows.sh`
+    and `cross-macos.sh` both build `SoldutEditor.exe` /
+    `SoldutEditor` alongside the game. `tools/editor/play.c`
+    guards its `<windows.h>` include with `WIN32_LEAN_AND_MEAN /
+    NOGDI / NOUSER` so raylib's `Rectangle` / `CloseWindow` /
+    `ShowCursor` no longer collide with `wingdi.h` / `winuser.h`.
+    `.github/workflows/ci.yml` now runs `make editor` on Linux
+    + macOS and ships both binaries in each artifact bundle:
+    `soldut-linux-x86_64`, `soldut-windows-x86_64`,
+    `soldut-macos`. The headless tests
+    (`test-physics` / `test-level-io` / `test-spawn`) also run on
+    every Linux + macOS push.
   - **SHOT_LOG-gated test-play diagnostics**: when `--test-play`
     is on, `main.c` flips `g_shot_mode = 1` so the existing
     `SHOT_LOG()` macro fires. Adds a per-second pelvis-pos line

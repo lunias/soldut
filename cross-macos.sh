@@ -66,6 +66,34 @@ build_arch() {
         -framework OpenGL -framework Cocoa -framework IOKit \
         -framework CoreAudio -framework CoreVideo -framework CoreFoundation \
         -o "$out"
+
+    # M5 P04 editor — same engine subset + tools/editor/ + raygui
+    # (header-only). Reuses the just-built libraylib.a; no ENet.
+    # See cross-windows.sh for why we pre-include <math.h>/<stdio.h>.
+    local out_editor="${out%/*}/SoldutEditor-${arch}"
+    echo "[cross-macos] building soldut_editor for $zig_target..."
+    zig cc -target $zig_target -isysroot "$SDK_DIR" \
+        -std=c11 -O2 -g -Wall -Wextra -DNDEBUG \
+        -Wno-unused-parameter -Wno-unused-function \
+        -Wno-missing-field-initializers \
+        -Wno-incompatible-function-pointer-types \
+        -Wno-format-truncation \
+        -Wno-implicit-fallthrough \
+        -Wno-error=implicit-function-declaration \
+        -Wno-error=builtin-declaration-mismatch \
+        -include math.h -include stdio.h \
+        -Ithird_party/raylib/src -Ithird_party/raygui -Ithird_party -Isrc \
+        -Itools/editor \
+        tools/editor/main.c tools/editor/doc.c tools/editor/poly.c \
+        tools/editor/undo.c tools/editor/view.c tools/editor/palette.c \
+        tools/editor/tool.c tools/editor/play.c tools/editor/files.c \
+        tools/editor/render.c tools/editor/editor_ui.c \
+        tools/editor/validate.c tools/editor/shotmode.c \
+        src/arena.c src/log.c src/hash.c src/ds.c src/level_io.c \
+        third_party/raylib/src/libraylib.a \
+        -framework OpenGL -framework Cocoa -framework IOKit \
+        -framework CoreAudio -framework CoreVideo -framework CoreFoundation \
+        -o "$out_editor"
 }
 
 build_arch aarch64 build/macos/Soldut-arm64
@@ -75,9 +103,12 @@ if command -v lipo >/dev/null 2>&1; then
     echo "[cross-macos] lipo combine..."
     lipo -create -output build/macos/Soldut \
         build/macos/Soldut-arm64 build/macos/Soldut-x86_64
+    lipo -create -output build/macos/SoldutEditor \
+        build/macos/SoldutEditor-arm64 build/macos/SoldutEditor-x86_64
 else
     echo "[cross-macos] note: lipo unavailable on host; ship per-arch binaries"
-    cp build/macos/Soldut-arm64 build/macos/Soldut
+    cp build/macos/Soldut-arm64       build/macos/Soldut
+    cp build/macos/SoldutEditor-arm64 build/macos/SoldutEditor
 fi
 
 echo "[cross-macos] packaging Soldut.app..."

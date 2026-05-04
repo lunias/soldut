@@ -28,15 +28,30 @@ jobs:
       - name: Build soldut
         run: make -j$(nproc)
 
-      - name: Show binary
+      - name: Build soldut_editor
+        run: make editor -j$(nproc)
+
+      # Headless / state-only tests run fine in CI (no display needed).
+      # The shot-mode editor tests need a GL context, so they're not
+      # run here yet — the bake-test rig will move them to a
+      # virtual-display job in M5 P18.
+      - name: Run regression tests (test-physics, test-level-io, test-spawn)
         run: |
-          ls -la ./soldut
-          file ./soldut
+          make test-physics
+          make test-level-io
+          make test-spawn
+
+      - name: Show binaries
+        run: |
+          ls -la ./soldut ./build/soldut_editor
+          file ./soldut ./build/soldut_editor
 
       - uses: actions/upload-artifact@v7
         with:
           name: soldut-linux-x86_64
-          path: soldut
+          path: |
+            soldut
+            build/soldut_editor
 
   build-windows:
     name: Windows (zig cc cross)
@@ -49,13 +64,15 @@ jobs:
         with:
           version: 0.13.0
 
-      - name: Cross-build to Windows
+      - name: Cross-build to Windows (game + editor)
         run: ./cross-windows.sh
 
       - uses: actions/upload-artifact@v7
         with:
           name: soldut-windows-x86_64
-          path: build/windows/Soldut.exe
+          path: |
+            build/windows/Soldut.exe
+            build/windows/SoldutEditor.exe
 
   build-macos:
     name: macOS (native clang)
@@ -69,12 +86,23 @@ jobs:
       - name: Build soldut
         run: make -j$(sysctl -n hw.ncpu)
 
-      - name: Show binary
+      - name: Build soldut_editor
+        run: make editor -j$(sysctl -n hw.ncpu)
+
+      - name: Run regression tests
         run: |
-          ls -la ./soldut
-          file ./soldut
+          make test-physics
+          make test-level-io
+          make test-spawn
+
+      - name: Show binaries
+        run: |
+          ls -la ./soldut ./build/soldut_editor
+          file ./soldut ./build/soldut_editor
 
       - uses: actions/upload-artifact@v7
         with:
           name: soldut-macos
-          path: soldut
+          path: |
+            soldut
+            build/soldut_editor
