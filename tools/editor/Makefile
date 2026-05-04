@@ -50,7 +50,8 @@ BUILD_DIR := $(ROOT)/build/editor
 BIN       := $(ROOT)/build/soldut_editor$(EXE)
 
 # Editor source files (this directory).
-ED_SRC := main.c doc.c poly.c undo.c view.c palette.c tool.c play.c files.c validate.c
+ED_SRC := main.c doc.c poly.c undo.c view.c palette.c tool.c play.c files.c \
+          render.c editor_ui.c validate.c shotmode.c
 ED_OBJ := $(ED_SRC:%.c=$(BUILD_DIR)/%.o)
 
 # Subset of src/ we link in. Explicitly LISTED (not wildcard) so

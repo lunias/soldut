@@ -177,6 +177,14 @@ macos:
 editor: $(RAYLIB_LIB)
 	$(MAKE) -C tools/editor
 
+# Run an editor shot script. SCRIPT defaults to the smoke test; pass
+# any other path with `make editor-shot SCRIPT=...`. The runner writes
+# PNG screenshots + a paired .log under build/shots/editor/<scriptname>/
+# and exits non-zero on assertion failure.
+EDITOR_SHOT_SCRIPT ?= tools/editor/shots/smoke.shot
+editor-shot: editor
+	./build/soldut_editor --shot $(EDITOR_SHOT_SCRIPT)
+
 clean:
 	rm -rf $(BUILD_DIR) $(BIN) soldut.exe soldut.log
 	rm -f $(ENET_OBJ)

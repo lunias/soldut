@@ -539,6 +539,32 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
     with sections for Global / View / Tools / Tile / Polygon /
     Objects. Mouse wheel scrolls; `Esc` or `H` again closes.
     Replaces the old "log to console on H" stub.
+  - **Editor shot mode** (post-ship, same day). New
+    `tools/editor/shotmode.{c,h}` + a `--shot <script>` flag.
+    Script grammar mirrors the game's: `at <tick> <directive>`
+    with header lines for `window`, `out`, `ticks`, `panels`,
+    `contact_sheet`. Drives the editor's doc / tool / undo APIs
+    deterministically (so we don't have to synthesize raylib
+    keyboard / mouse events), captures PNG screenshots at marked
+    ticks, and runs assertions that fail the run with non-zero
+    exit. `assert <field> <op> <value>` covers `polys / spawns /
+    pickups / ambis / decos / flags / tiles_solid /
+    validate_problems / active_tool / dirty`.
+    UI rendering extracted into `editor_ui.{c,h}` (UIDims +
+    COL_* + every panel and modal) so shots render the actual
+    editor chrome — toolbars, palettes, status bar, help modal,
+    meta modal — at any window size, not a stub. The full UI
+    shows by default; scripts can pass `panels off` for a
+    canvas-only frame. Contact-sheet directive composites all
+    captured shots into one PNG (configurable `cols` /
+    `cell <W> <H>`). Four regression scripts ship under
+    `tools/editor/shots/`: `smoke.shot` (every primary verb +
+    save/load round-trip + undo/redo + validation),
+    `poly_triangulation.shot` (square/pentagon/L-shape ear-clip
+    counts), `validate_failures.shot` (the validator catches
+    bad inputs), `scaling_4k.shot` (verifies UI fits at 3000×1900).
+    Run via `make editor-shot EDITOR_SHOT_SCRIPT=...`. All four
+    pass with 0 assertion failures.
   - **`src/math.h` reorder** — `<math.h>` now precedes the raylib
     include so the editor's stricter expansion paths see fabsf /
     fmaxf / etc. as proper declarations rather than builtins. Game

@@ -1,0 +1,135 @@
+# tools/editor/shots/smoke.shot — minimum bake test for the editor.
+#
+# Exercises every primary verb at least once: tile paint, polygon
+# (preset + freehand), spawn / pickup / ambient / flag placement,
+# undo, save / load round-trip, and validation. Asserts on doc state
+# at key beats so a regression in any of these aborts the run.
+
+window 1280 800
+new 60 40
+ticks 200
+contact_sheet smoke cols 4 cell 640 400
+
+# ---- tick 0..2: blank canvas baseline ----
+# 60×40 tiles × 32 px = 1920×1280 px world; we want the cover wall +
+# spawn platform + ramps + freehand poly all in frame.
+at 0  camera_target 960 640
+at 0  camera_zoom 0.55
+at 1  shot t01_blank
+at 2  assert polys     == 0
+at 2  assert spawns    == 0
+at 2  assert pickups   == 0
+at 2  assert dirty     == 0
+
+# ---- 5..15: paint a floor strip ----
+at 5  tool tile
+at 5  tile_flags solid
+at 6  tile_paint  64 1100
+at 7  tile_paint  96 1100
+at 8  tile_paint 128 1100
+at 9  tile_paint 160 1100
+at 10 tile_paint 192 1100
+at 11 tile_paint 224 1100
+at 12 tile_paint 256 1100
+at 13 tile_paint 288 1100
+at 14 tile_paint 320 1100
+at 15 tile_paint 352 1100
+at 15 shot t15_floor
+at 15 assert tiles_solid == 10
+
+# ---- 20..30: preset slope + freehand polygon ----
+at 20 tool poly
+at 20 poly_kind solid
+at 21 apply_preset ramp_up_45 800 1024
+at 21 apply_preset ramp_up_45 832 1024
+at 22 shot t22_ramps
+at 22 assert polys == 2
+
+# Freehand triangle
+at 25 poly_begin
+at 26 poly_vertex 1100 900
+at 27 poly_vertex 1200 900
+at 28 poly_vertex 1200 1000
+at 29 poly_close
+at 30 shot t30_freehand
+at 30 assert polys == 3
+
+# ---- 35..45: place objects ----
+at 35 tool spawn
+at 35 spawn_team 1
+at 36 spawn_add 240 1000 1
+at 36 spawn_add 320 1000 1
+at 37 spawn_team 2
+at 38 spawn_add 1500 1000 2
+at 39 shot t39_spawns
+at 39 assert spawns == 3
+
+at 42 tool pickup
+at 42 pickup_variant rail
+at 43 pickup_add 700 980 rail
+at 43 pickup_add 900 980 health_l
+at 44 shot t44_pickups
+at 44 assert pickups == 2
+
+# ---- 50..55: ambient zone + flag ----
+at 50 ambi_add 1300 800 200 200 wind
+at 51 flag_add 200 1000 1
+at 52 flag_add 1700 1000 2
+at 53 shot t53_full
+at 53 assert ambis == 1
+at 53 assert flags == 2
+
+# ---- 60..68: undo / redo verification ----
+# Adds happened in this order: ambi(50), flag1(51), flag2(52). Undo
+# pops in reverse, so:
+#   undo #1: flag2 removed → flags=1, ambis=1
+#   undo #2: flag1 removed → flags=0, ambis=1
+#   undo #3: ambi    removed → flags=0, ambis=0
+# Redo replays forward in the same order.
+at 60 undo
+at 60 assert flags  == 1
+at 60 assert ambis  == 1
+at 61 undo
+at 61 assert flags  == 0
+at 61 assert ambis  == 1
+at 62 undo
+at 62 assert flags  == 0
+at 62 assert ambis  == 0
+at 63 redo
+at 63 assert ambis  == 1
+at 64 redo
+at 64 assert flags  == 1
+at 65 redo
+at 65 assert flags  == 2
+at 65 assert ambis  == 1
+at 66 shot t66_after_undo_redo
+
+# ---- 72..80: save -> new doc -> load -> verify ----
+at 72 save /tmp/editor_smoke.lvl
+at 73 dump
+at 74 new_doc 60 40
+at 74 assert polys   == 0
+at 74 assert spawns  == 0
+at 75 load_file /tmp/editor_smoke.lvl
+at 76 assert polys   == 3
+at 76 assert spawns  == 3
+at 76 assert pickups == 2
+at 76 assert ambis   == 1
+at 76 assert flags   == 2
+at 77 shot t77_reloaded
+
+# ---- 80: validate -> should pass (tiles/spawn/etc all OK) ----
+at 80 validate
+at 80 assert validate_problems == 0
+
+# ---- 85..90: help modal visual check ----
+at 85 open_help
+at 86 shot t86_help_modal
+at 87 close_help
+
+# ---- 90..95: meta modal visual check ----
+at 92 open_meta
+at 93 shot t93_meta_modal
+at 94 close_meta
+
+at 100 end
