@@ -34,6 +34,10 @@ Reference material:
 - [reference/soldat-constants.md](reference/soldat-constants.md) — raw constants pulled from the Soldat source
 - [reference/sources.md](reference/sources.md) — every external URL we cite
 
+Milestone breakdowns (sub-docs that scope a milestone into its tractable pieces):
+
+- [m5/](m5/README.md) — M5 (Maps & content): `.lvl` format, level editor, 8 maps, pickups, CTF, grapple, sprite atlases, audio module, parallax. Read [m5/00-overview.md](m5/00-overview.md) first.
+
 ## Tone of these documents
 
 These are **engineering documents**, not marketing copy. We are explicit about trade-offs. Where two choices are reasonable we say so and pick one with reasons. Where a number is a guess we mark it `[est.]`. Where we are wrong, we will be wrong on the page so the next reader can correct it.

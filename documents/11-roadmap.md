@@ -169,21 +169,35 @@ See [CURRENT_STATE.md](../CURRENT_STATE.md) and [TRADE_OFFS.md](../TRADE_OFFS.md
 
 ## M5 — Maps & content
 
-**Four weeks.**
+**Four weeks (optimistic; six realistic).**
 
 **Goal**: 8 ship-quality maps, art passes, audio mix, polish.
 
-- [ ] Level editor (`tools/editor/`) — tile paint, polygon draw, spawn/pickup placement
-- [ ] 8 maps: Foundry, Slipstream, Concourse, Reactor, Catwalk, Aurora, Crossfire, Citadel
-- [ ] Pickup system: health, ammo, armor, weapon, power-up, jet fuel
-- [ ] Pickup respawn timers, pickup audio
-- [ ] CTF mode + flag mechanics
-- [ ] Background art per map (parallax)
-- [ ] Audio mix pass: gunshots, explosions, footsteps, mech servo loops, environment ambience
-- [ ] Music selection per map
-- [ ] HUD final art
+This milestone is large enough that the breakdown lives in its own folder: [m5/README.md](m5/README.md). Read [m5/00-overview.md](m5/00-overview.md) first for the strategic view, then the per-system sub-docs as you implement each piece.
 
-**Done when**: all 8 maps pass the bake-test (heatmap of fights, no dead zones, no spawn imbalance).
+- [ ] Level editor (`tools/editor/`) — tile paint, polygon draw, spawn/pickup placement → [m5/02-level-editor.md](m5/02-level-editor.md)
+- [ ] 8 maps: Foundry, Slipstream, Concourse, Reactor, Catwalk, Aurora, Crossfire, Citadel → [m5/07-maps.md](m5/07-maps.md)
+- [ ] Pickup system: health, ammo, armor, weapon, power-up, jet fuel → [m5/04-pickups.md](m5/04-pickups.md)
+- [ ] Pickup respawn timers, pickup audio → [m5/04-pickups.md](m5/04-pickups.md), [m5/09-audio.md](m5/09-audio.md)
+- [ ] CTF mode + flag mechanics → [m5/06-ctf.md](m5/06-ctf.md)
+- [ ] Background art per map (parallax) → [m5/08-rendering.md](m5/08-rendering.md)
+- [ ] Audio mix pass: gunshots, explosions, footsteps, mech servo loops, environment ambience → [m5/09-audio.md](m5/09-audio.md)
+- [ ] Music selection per map → [m5/09-audio.md](m5/09-audio.md)
+- [ ] HUD final art → [m5/08-rendering.md](m5/08-rendering.md)
+
+Picked up alongside the roadmap items (carry-forwards from M1–M4 + design fills surfaced during M5 planning):
+
+- [ ] `.lvl` binary format + loader → [m5/01-lvl-format.md](m5/01-lvl-format.md)
+- [ ] Per-tile polygons / slopes / hills / valleys / angled ceilings — Soldat-style run-up-slow / slide-down-fast → [m5/03-collision-polygons.md](m5/03-collision-polygons.md)
+- [ ] Caves and alcoves on every map for hidden pickup nooks → [m5/07-maps.md](m5/07-maps.md)
+- [ ] Server → client streaming of custom `.lvl` files (network map sharing) → [m5/10-map-sharing.md](m5/10-map-sharing.md)
+- [ ] "Industrial Service Manual" art direction recipe via ComfyUI (AI-assisted with anti-AI-feel discipline) → [m5/11-art-direction.md](m5/11-art-direction.md)
+- [ ] Per-part sprite rigging + per-chassis bone-length distinctness + per-weapon visible art + two-handed foregrip + dismemberment + damage feedback (hit-flash, damage decals, smoke from damaged limbs) → [m5/12-rigging-and-damage.md](m5/12-rigging-and-damage.md)
+- [ ] `BTN_FIRE_SECONDARY` (RMB), updated keybinds, trade-off sweep with concrete pickups (slope-aware anchor, render-side accumulator + interp alpha, snapshot smoothing) → [m5/13-controls-and-residuals.md](m5/13-controls-and-residuals.md)
+- [ ] Grappling Hook implementation → [m5/05-grapple.md](m5/05-grapple.md)
+- [ ] Engineer deployable repair pack, Burst SMG cadence, vote picker UI, host-controls (kick/ban) UI, `bans.txt` persistence, solo practice dummy, TTF font — see [m5/00-overview.md](m5/00-overview.md) §"Why M5 is large".
+
+**Done when**: all 8 maps pass the bake-test (heatmap of fights, no dead zones, no spawn imbalance), every map ships with the slope vocabulary specified in m5/07-maps.md, and a stranger can join a server hosting a custom map without already having that map on disk.
 
 ## M6 — Stability & ship prep
 
