@@ -11,7 +11,13 @@ SRC_DIR    := $(ROOT)/src
 TP         := $(ROOT)/third_party
 
 CC         ?= cc
-CFLAGS     ?= -std=c11 -O2 -g -Wall -Wextra -Wpedantic -Werror
+# -std=gnu11 instead of -std=c11. Apple's clang 16+ in strict-ANSI mode
+# (`-std=c11` sets __STRICT_ANSI__) hides float versions of <math.h>
+# functions like floorf / sqrtf / fabsf, which raymath.h's static-inline
+# functions then can't see. gnu11 is the same C11 language with GNU
+# extensions enabled — equivalent to gcc's default mode and doesn't
+# break Linux gcc / Linux zig-cc / Windows zig-cc behavior.
+CFLAGS     ?= -std=gnu11 -O2 -g -Wall -Wextra -Wpedantic -Werror
 # clang on macOS doesn't recognize all the gcc-specific warning names
 # we suppress here (e.g. -Wno-stringop-truncation, -Wno-format-truncation,
 # -Werror=builtin-declaration-mismatch). -Wno-unknown-warning-option

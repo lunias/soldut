@@ -66,7 +66,7 @@ zig cc -target $ZIG_TARGET \
 # mismatch. The pre-include puts the prototypes in scope first.
 echo "[cross-windows] building soldut_editor..."
 zig cc -target $ZIG_TARGET \
-    -std=c11 -O2 -g -Wall -Wextra -DNDEBUG \
+    -std=gnu11 -O2 -g -Wall -Wextra -DNDEBUG \
     -Wno-unused-parameter -Wno-unused-function \
     -Wno-missing-field-initializers \
     -Wno-incompatible-function-pointer-types \

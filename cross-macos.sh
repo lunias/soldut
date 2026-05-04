@@ -73,7 +73,7 @@ build_arch() {
     local out_editor="${out%/*}/SoldutEditor-${arch}"
     echo "[cross-macos] building soldut_editor for $zig_target..."
     zig cc -target $zig_target -isysroot "$SDK_DIR" \
-        -std=c11 -O2 -g -Wall -Wextra -DNDEBUG \
+        -std=gnu11 -O2 -g -Wall -Wextra -DNDEBUG \
         -Wno-unused-parameter -Wno-unused-function \
         -Wno-missing-field-initializers \
         -Wno-incompatible-function-pointer-types \
