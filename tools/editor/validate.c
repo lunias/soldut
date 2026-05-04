@@ -161,13 +161,11 @@ int validate_doc(const EditorDoc *d, char *out_buf, int out_cap) {
 
     /* Pickup spawners must not sit inside SOLID tiles. */
     int pn = (int)arrlen(d->pickups);
-    int bad_pickups = 0;
     for (int i = 0; i < pn; ++i) {
         const LvlPickup *p = &d->pickups[i];
         int tx = p->pos_x / d->tile_size;
         int ty = p->pos_y / d->tile_size;
         if (has_solid_at(d, tx, ty)) {
-            ++bad_pickups;
             emitf(out_buf, out_cap, &used,
                   "Pickup #%d at (%d,%d) sits inside a SOLID tile.",
                   i, p->pos_x, p->pos_y);
