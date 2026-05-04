@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor shot \
         debug gdb gdb-host gdb-client valgrind editor
 
 all: $(BIN)
@@ -117,6 +117,48 @@ $(BUILD_DIR)/level_io_test: tests/level_io_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) 
 
 test-level-io: $(BUILD_DIR)/level_io_test
 	./$(BUILD_DIR)/level_io_test
+
+# M5 P04 fix verification — map_spawn_point honors level->spawns when
+# the .lvl ships authored SPWN records. Pre-fix, F5 test-play would
+# put the player in g_red_lanes[0] regardless of what the editor saved.
+$(BUILD_DIR)/spawn_test: tests/spawn_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/spawn_test.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+test-spawn: $(BUILD_DIR)/spawn_test
+	./$(BUILD_DIR)/spawn_test
+
+# End-to-end: editor shotmode authors a .lvl with a platform + spawn,
+# `./soldut --test-play <lvl>` loads it, soldut.log records the spawn
+# coords AND the post-physics pelvis position. The test grep checks
+# both — catches breakage in editor save / level_load decode /
+# map_spawn_point / runtime physics integration end-to-end.
+test-spawn-e2e: $(BIN) editor
+	./tests/spawn_e2e.sh
+
+# Editor shot-mode regression suite — runs every shot script under
+# tools/editor/shots/. Each script asserts on doc state at its
+# checkpoints; failures bubble up as a non-zero exit.
+test-editor: editor
+	./build/soldut_editor --shot tools/editor/shots/smoke.shot
+	./build/soldut_editor --shot tools/editor/shots/bugs.shot
+	./build/soldut_editor --shot tools/editor/shots/poly_triangulation.shot
+	./build/soldut_editor --shot tools/editor/shots/validate_failures.shot
+	./build/soldut_editor --shot tools/editor/shots/scaling_4k.shot
+
+# End-to-end: editor shotmode builds a .lvl with a known spawn,
+# `./soldut --test-play <lvl>` loads it, soldut.log echoes the spawn
+# coordinates back. Catches breaks in editor save / level_load /
+# map_spawn_point that the unit test (test-spawn) doesn't see end-to-end.
+test-spawn-e2e: $(BIN) editor
+	./tests/spawn_e2e.sh
+
+# Editor regression suite — runs the four primary shot scripts.
+# Each fails the run with a non-zero exit code on any assertion.
+test-editor: editor
+	./build/soldut_editor --shot tools/editor/shots/smoke.shot
+	./build/soldut_editor --shot tools/editor/shots/bugs.shot
+	./build/soldut_editor --shot tools/editor/shots/poly_triangulation.shot
+	./build/soldut_editor --shot tools/editor/shots/validate_failures.shot
 
 # Shot mode — drive a scripted scene through the real renderer and
 # write PNGs. Handy for visual diffs without filming. Override SCRIPT

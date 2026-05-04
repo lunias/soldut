@@ -57,10 +57,12 @@ void ui_draw_top_bar     (const EditorDoc *d, const UIDims *D);
 void ui_draw_status_bar  (const EditorDoc *d, const EditorView *v,
                           const UIDims *D, ToolKind active_tool);
 
-/* Returns the (possibly new) active tool when the user clicks a
- * button. In shot mode the return is ignored — the script picks the
- * active tool directly. */
-ToolKind ui_draw_tool_buttons(ToolKind active, const UIDims *D);
+/* Draws the toolbar's seven tool buttons. If the user clicked a
+ * button this frame, *active is updated and the function returns
+ * the clicked tool (so the caller can fire side effects like opening
+ * the META modal even when the active tool was already TOOL_META).
+ * Returns -1 if no button was clicked this frame. */
+int ui_draw_tool_buttons(ToolKind *active, const UIDims *D);
 
 void ui_draw_tile_palette  (ToolCtx *c, const UIDims *D);
 void ui_draw_poly_palette  (ToolCtx *c, const UIDims *D);
@@ -90,4 +92,5 @@ typedef struct HelpModal { bool open; float scroll; } HelpModal;
 
 void ui_help_open       (HelpModal *h);
 void ui_help_close      (HelpModal *h);
+void ui_help_toggle     (HelpModal *h);
 void ui_help_modal_draw (HelpModal *h, const UIDims *D);

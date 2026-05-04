@@ -33,6 +33,7 @@
  *
  *   at <tick> tile_paint <wx> <wy>    stamp the active tile-flags at world coords
  *   at <tick> tile_erase <wx> <wy>
+ *   at <tick> tile_fill_rect <x0> <y0> <x1> <y1>   fill a world-pixel rectangle
  *
  *   at <tick> apply_preset <name> <wx> <wy>   drop a slope/alcove preset
  *
@@ -55,8 +56,11 @@
  *
  *   at <tick> open_help               toggle the help modal on
  *   at <tick> close_help
+ *   at <tick> toggle_help             same as ui_help_toggle()
  *   at <tick> open_meta
  *   at <tick> close_meta
+ *   at <tick> click_tool_button <name>  mirrors a real toolbar click
+ *                                      (always opens meta when name=meta)
  *
  *   at <tick> mouse <sx> <sy>         set cursor for overlay rendering
  *   at <tick> camera_target <wx> <wy>
@@ -67,7 +71,8 @@
  *   at <tick> validate                run validate_doc; log results
  *
  *   at <tick> assert polys|spawns|pickups|ambis|decos|flags|tiles_solid|
- *                    validate_problems|active_tool|dirty <op> <value>
+ *                    validate_problems|active_tool|dirty|help_open|meta_open
+ *                    <op> <value>
  *      <op> ∈ { ==, !=, >, >=, <, <= }
  *
  *   at <tick> end                     exit successfully

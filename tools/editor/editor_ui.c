@@ -107,7 +107,7 @@ void ui_draw_status_bar(const EditorDoc *d, const EditorView *v,
                  D->font_sm, COL_TEXT);
 }
 
-ToolKind ui_draw_tool_buttons(ToolKind active, const UIDims *D) {
+int ui_draw_tool_buttons(ToolKind *active, const UIDims *D) {
     int sh = GetScreenHeight();
     DrawRectangle(0, D->top_h, D->left_w, sh - D->top_h - D->bottom_h, COL_PANEL);
     DrawRectangle(D->left_w - 1, D->top_h, 1, sh - D->top_h - D->bottom_h,
@@ -122,6 +122,7 @@ ToolKind ui_draw_tool_buttons(ToolKind active, const UIDims *D) {
         { TOOL_META,   "Meta",    "M" },
     };
     int n = (int)(sizeof btns / sizeof btns[0]);
+    int clicked = -1;
     for (int i = 0; i < n; ++i) {
         char label[40];
         snprintf(label, sizeof label, "%s  [%s]", btns[i].label, btns[i].hk);
@@ -129,14 +130,17 @@ ToolKind ui_draw_tool_buttons(ToolKind active, const UIDims *D) {
                         (float)(D->top_h + D->pad + i * (D->row_h + D->pad/2)),
                         (float)(D->left_w - D->pad * 2),
                         (float)D->row_h };
-        bool was_active = (btns[i].k == active);
+        bool was_active = (btns[i].k == *active);
         if (was_active) {
             DrawRectangleRec(r, COL_ACCENT_LO);
             DrawRectangleLinesEx(r, 2.0f, COL_ACCENT);
         }
-        if (GuiButton(r, label)) active = btns[i].k;
+        if (GuiButton(r, label)) {
+            *active = btns[i].k;
+            clicked = (int)btns[i].k;
+        }
     }
-    return active;
+    return clicked;
 }
 
 static void draw_panel_title(const char *text, int x, int y,
@@ -159,9 +163,18 @@ void ui_draw_tile_palette(ToolCtx *c, const UIDims *D) {
     const TileFlagEntry *flags = palette_tile_flags(&n);
     int row_top = D->top_h + D->pad + D->font_lg + D->pad;
     int row_h   = D->palette_row_h + D->pad / 2;
+    /* GuiCheckBox draws the label OUTSIDE bounds.x + bounds.width. So
+     * `bounds` is the small square; the label trails it within the
+     * panel. Earlier code passed the whole row as bounds, which sent
+     * the labels off the right edge of the panel. */
+    int chk = D->palette_row_h - D->pad / 2;
+    if (chk > D->font_base + 6) chk = D->font_base + 6;
+    if (chk < 12) chk = 12;
     for (int i = 0; i < n; ++i) {
-        Rectangle r = { (float)(x + D->pad), (float)(row_top + i * row_h),
-                        (float)(D->right_w - D->pad * 2), (float)D->palette_row_h };
+        int row_y = row_top + i * row_h;
+        Rectangle r = { (float)(x + D->pad),
+                        (float)(row_y + (D->palette_row_h - chk) / 2),
+                        (float)chk, (float)chk };
         bool on = (c->tile_flags & flags[i].flag) != 0;
         GuiCheckBox(r, flags[i].name, &on);
         if (on) c->tile_flags |=  flags[i].flag;
@@ -448,8 +461,9 @@ static const HelpSection g_help_sections[HELP_SECTIONS_N] = {
     { "Polygon tool", g_help_poly,    (int)(sizeof g_help_poly    / sizeof g_help_poly[0])    },
 };
 
-void ui_help_open (HelpModal *h) { h->open = true;  h->scroll = 0.0f; }
-void ui_help_close(HelpModal *h) { h->open = false; }
+void ui_help_open  (HelpModal *h) { h->open = true;  h->scroll = 0.0f; }
+void ui_help_close (HelpModal *h) { h->open = false; }
+void ui_help_toggle(HelpModal *h) { if (h->open) ui_help_close(h); else ui_help_open(h); }
 
 static int help_total_rows(void) {
     int rows = 0;
@@ -488,8 +502,11 @@ void ui_help_modal_draw(HelpModal *h, const UIDims *D) {
         ui_help_close(h);
     }
 
+    /* Reserve space at the bottom for the footer hint so body rows
+     * never overlap it. footer_h = font_sm + pad (top) + pad/2 (gap). */
+    int footer_h = D->font_sm + D->pad + D->pad / 2;
     int body_y0 = dlg_y + title_h + D->pad;
-    int body_y1 = dlg_y + dlg_h - D->pad;
+    int body_y1 = dlg_y + dlg_h - footer_h - D->pad;
     int key_x   = dlg_x + D->pad * 2;
     int key_col_w = ui_scl(220, D->scale);
     int desc_x  = key_x + key_col_w + D->pad;

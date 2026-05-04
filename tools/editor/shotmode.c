@@ -51,6 +51,7 @@ typedef enum {
     /* Direct doc mutations. */
     EV_TILE_PAINT,
     EV_TILE_ERASE,
+    EV_TILE_FILL_RECT,
     EV_APPLY_PRESET,
     EV_POLY_BEGIN,
     EV_POLY_VERTEX,
@@ -68,8 +69,10 @@ typedef enum {
     /* Modal / cursor / camera. */
     EV_OPEN_HELP,
     EV_CLOSE_HELP,
+    EV_TOGGLE_HELP,
     EV_OPEN_META,
     EV_CLOSE_META,
+    EV_CLICK_TOOL_BUTTON,    /* mirrors main.c's "user clicked tool btn" handler */
     EV_MOUSE,
     EV_CAM_TARGET,
     EV_CAM_ZOOM,
@@ -329,6 +332,12 @@ static int parse_script(const char *path, ScriptHeader *hdr,
         char *l = trim(line);
         if (!*l || *l == '#') continue;
 
+        /* Strip trailing comments. We don't have quoted-string support
+         * in directives, so any `#` after the directive is a comment.
+         * Handles `at 5 tool tile  # comment` correctly. */
+        char *hash = strchr(l, '#');
+        if (hash) { *hash = 0; l = trim(l); if (!*l) continue; }
+
         char copy[1024];
         snprintf(copy, sizeof copy, "%s", l);
         char *toks[16] = {0};
@@ -436,6 +445,13 @@ static int parse_script(const char *path, ScriptHeader *hdr,
             ev.kind = EV_TILE_ERASE;
             ev.i1 = atoi(toks[3]); ev.i2 = atoi(toks[4]);
         }
+        else if (strieq(cmd, "tile_fill_rect") && nt == 7) {
+            ev.kind = EV_TILE_FILL_RECT;
+            ev.i1 = atoi(toks[3]);   /* x0 in world pixels */
+            ev.i2 = atoi(toks[4]);   /* y0 */
+            ev.i3 = atoi(toks[5]);   /* x1 (exclusive) */
+            ev.i4 = atoi(toks[6]);   /* y1 (exclusive) */
+        }
         else if (strieq(cmd, "apply_preset") && nt == 6) {
             ev.kind = EV_APPLY_PRESET;
             int p = parse_preset(toks[3]);
@@ -489,10 +505,17 @@ static int parse_script(const char *path, ScriptHeader *hdr,
         }
         else if (strieq(cmd, "undo")) { ev.kind = EV_UNDO; }
         else if (strieq(cmd, "redo")) { ev.kind = EV_REDO; }
-        else if (strieq(cmd, "open_help"))  { ev.kind = EV_OPEN_HELP;  }
-        else if (strieq(cmd, "close_help")) { ev.kind = EV_CLOSE_HELP; }
-        else if (strieq(cmd, "open_meta"))  { ev.kind = EV_OPEN_META;  }
-        else if (strieq(cmd, "close_meta")) { ev.kind = EV_CLOSE_META; }
+        else if (strieq(cmd, "open_help"))   { ev.kind = EV_OPEN_HELP;   }
+        else if (strieq(cmd, "close_help"))  { ev.kind = EV_CLOSE_HELP;  }
+        else if (strieq(cmd, "toggle_help")) { ev.kind = EV_TOGGLE_HELP; }
+        else if (strieq(cmd, "open_meta"))   { ev.kind = EV_OPEN_META;   }
+        else if (strieq(cmd, "close_meta"))  { ev.kind = EV_CLOSE_META;  }
+        else if (strieq(cmd, "click_tool_button") && nt == 4) {
+            ev.kind = EV_CLICK_TOOL_BUTTON;
+            int t = parse_tool(toks[3]);
+            if (t < 0) { fprintf(stderr, "shotmode: bad tool: %s\n", toks[3]); ++errors; continue; }
+            ev.i1 = t;
+        }
         else if (strieq(cmd, "mouse") && nt == 5) {
             ev.kind = EV_MOUSE;
             ev.i1 = atoi(toks[3]); ev.i2 = atoi(toks[4]);
@@ -661,6 +684,8 @@ static int doc_field_value(const ShotState *s, const char *field) {
     if (strieq(field, "flags"))      return (int)arrlen(s->doc.flags);
     if (strieq(field, "active_tool"))return s->active_tool;
     if (strieq(field, "dirty"))      return s->doc.dirty ? 1 : 0;
+    if (strieq(field, "help_open"))  return s->help.open ? 1 : 0;
+    if (strieq(field, "meta_open"))  return s->meta.open ? 1 : 0;
     if (strieq(field, "tiles_solid")) {
         int n = 0;
         int total = s->doc.width * s->doc.height;
@@ -714,6 +739,32 @@ static void apply_event(ShotState *s, const ShotEvent *e) {
                 d->tiles[ty * d->width + tx] = empty;
                 undo_record_tile(u, tx, ty, before, empty);
                 d->dirty = true;
+            }
+            undo_end_tile_stroke(u, d);
+            break;
+        }
+        case EV_TILE_FILL_RECT: {
+            /* Stamp every tile inside [x0,y0)..[x1,y1) world-pixel
+             * rect with the current tile_flags. Saves writing 100+
+             * tile_paint lines for floors and platforms. */
+            int x0 = e->i1 / d->tile_size;
+            int y0 = e->i2 / d->tile_size;
+            int x1 = (e->i3 + d->tile_size - 1) / d->tile_size;
+            int y1 = (e->i4 + d->tile_size - 1) / d->tile_size;
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (x1 > d->width)  x1 = d->width;
+            if (y1 > d->height) y1 = d->height;
+            LvlTile t = { .id = c->tile_id, .flags = c->tile_flags };
+            undo_begin_tile_stroke(u);
+            for (int ty = y0; ty < y1; ++ty) {
+                for (int tx = x0; tx < x1; ++tx) {
+                    LvlTile before = d->tiles[ty * d->width + tx];
+                    if (before.id == t.id && before.flags == t.flags) continue;
+                    d->tiles[ty * d->width + tx] = t;
+                    undo_record_tile(u, tx, ty, before, t);
+                    d->dirty = true;
+                }
             }
             undo_end_tile_stroke(u, d);
             break;
@@ -837,10 +888,20 @@ static void apply_event(ShotState *s, const ShotEvent *e) {
         case EV_UNDO: undo_pop (u, d); break;
         case EV_REDO: undo_redo(u, d); break;
 
-        case EV_OPEN_HELP:  ui_help_open(&s->help);  break;
-        case EV_CLOSE_HELP: ui_help_close(&s->help); break;
-        case EV_OPEN_META:  ui_meta_open(&s->meta, &s->doc); break;
-        case EV_CLOSE_META: s->meta.open = false;   break;
+        case EV_OPEN_HELP:   ui_help_open  (&s->help); break;
+        case EV_CLOSE_HELP:  ui_help_close (&s->help); break;
+        case EV_TOGGLE_HELP: ui_help_toggle(&s->help); break;
+        case EV_OPEN_META:   ui_meta_open  (&s->meta, &s->doc); break;
+        case EV_CLOSE_META:  s->meta.open = false; break;
+        case EV_CLICK_TOOL_BUTTON: {
+            /* Mirrors main.c's "user clicked a toolbar button" logic.
+             * Always opens meta on click — that's bug 4's fix. */
+            ToolKind tk = (ToolKind)e->i1;
+            s->active_tool = tk;
+            s->ctx.kind = tk;
+            if (tk == TOOL_META) ui_meta_open(&s->meta, &s->doc);
+            break;
+        }
 
         case EV_MOUSE:
             s->cursor_screen = (Vector2){(float)e->i1, (float)e->i2};
@@ -999,7 +1060,8 @@ int editor_shotmode_run(const char *script_path) {
 
         if (s.draw_panels) {
             ui_draw_top_bar(&s.doc, &D);
-            (void)ui_draw_tool_buttons((ToolKind)s.active_tool, &D);
+            ToolKind tk = (ToolKind)s.active_tool;
+            (void)ui_draw_tool_buttons(&tk, &D);
             switch (s.active_tool) {
                 case TOOL_TILE:   ui_draw_tile_palette  (&s.ctx, &D); break;
                 case TOOL_POLY:   ui_draw_poly_palette  (&s.ctx, &D); break;

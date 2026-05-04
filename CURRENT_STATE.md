@@ -539,7 +539,65 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
     with sections for Global / View / Tools / Tile / Polygon /
     Objects. Mouse wheel scrolls; `Esc` or `H` again closes.
     Replaces the old "log to console on H" stub.
-  - **Editor shot mode** (post-ship, same day). New
+  - **Bug-fix round** (post-ship, same day, prompted by playtest):
+    five user-reported issues caught and patched, with regression
+    tests for each.
+    1. Tile-flag checkbox labels were rendering off the right edge
+       of the panel (raygui's `GuiCheckBox` uses `bounds` as the
+       checkbox square — the label trails it. Earlier code passed
+       the full row width as bounds, sending labels offscreen).
+       Fix: small-square bounds + auto-trailing label.
+       (`editor_ui.c::ui_draw_tile_palette`)
+    2. `H` key didn't close the help modal. raylib's
+       `EndDrawing()` calls `PollInputEvents()` at its tail, so
+       any `IsKeyPressed` check AFTER `EndDrawing` reads the
+       NEXT frame's edge state. Fix: process modal key toggles
+       at the very top of the frame, in the same input window
+       the open-on-H check uses; new `ui_help_toggle()` helper.
+       (`main.c`, `editor_ui.{c,h}`)
+    3. Help modal body text was overlapping the footer hint at
+       the bottom — `body_y1` didn't reserve footer space.
+       Fix: `body_y1 = dlg_y + dlg_h - footer_h - pad`.
+       (`editor_ui.c::ui_help_modal_draw`)
+    4. Meta button only opened the modal on tool TRANSITION; if
+       you closed meta and clicked the button again, no-op
+       because `picked == active_tool`. Fix: `ui_draw_tool_buttons`
+       now returns the actually-clicked tool (vs. -1 for no
+       click), and `main.c` always opens meta on a real click.
+    5. F5 test-play ignored the `.lvl`'s authored spawn points —
+       `map_spawn_point` always returned the M4-era hardcoded
+       `g_*_lanes`. Fix: when `level->spawn_count > 0`, prefer
+       the authored spawns (FFA round-robin / TDM team affinity).
+       (`src/maps.c::map_spawn_point`)
+  - **Regression infrastructure for the bug fixes**:
+    - `tests/spawn_test.c` (14 unit assertions on
+      `map_spawn_point` covering FFA round-robin, TDM team
+      affinity, team=0 wildcard, and the empty-spawns
+      fallback). `make test-spawn`.
+    - `tests/spawn_e2e.sh` — end-to-end pipe: editor shot
+      mode authors a `.lvl` with a floor + raised platform
+      and a spawn ON THE PLATFORM, `./soldut --test-play
+      <lvl>` loads it, `soldut.log` records both the spawn
+      coords AND the post-physics pelvis position. The test
+      asserts both — `grounded=1` after settle proves the
+      mech actually landed on the platform (not the bottom
+      floor, which would happen pre-fix). `make test-spawn-e2e`.
+    - `tools/editor/shots/bugs.shot` — covers bugs 1, 2, 3, 4
+      via `tile_flags`, `toggle_help`, layout shots, and
+      `click_tool_button meta` directives. New shotmode events:
+      `EV_TOGGLE_HELP`, `EV_CLICK_TOOL_BUTTON`, `EV_TILE_FILL_RECT`.
+      Asserts on `help_open` / `meta_open` state (new fields).
+    - `tools/editor/shots/help_layout.shot` and
+      `help_layout_4k.shot` for visual layout regressions.
+    - `make test-editor` runs every editor shot script.
+  - **SHOT_LOG-gated test-play diagnostics**: when `--test-play`
+    is on, `main.c` flips `g_shot_mode = 1` so the existing
+    `SHOT_LOG()` macro fires. Adds a per-second pelvis-pos line
+    in `main.c`'s MATCH branch and converts the per-slot lobby
+    spawn line to SHOT_LOG. **Production play paths emit none
+    of these lines** — the macro is a one-branch no-op when
+    `g_shot_mode == 0`.
+  - **Editor shot mode** (same day). New
     `tools/editor/shotmode.{c,h}` + a `--shot <script>` flag.
     Script grammar mirrors the game's: `at <tick> <directive>`
     with header lines for `window`, `out`, `ticks`, `panels`,

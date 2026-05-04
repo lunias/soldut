@@ -131,6 +131,22 @@ int main(int argc, char **argv) {
         GuiSetStyle(DEFAULT, TEXT_SIZE,    D.font_base);
         GuiSetStyle(DEFAULT, TEXT_SPACING, 1);
 
+        /* ---- Modal toggles processed BEFORE rendering ---------------
+         * EndDrawing() calls PollInputEvents at its tail, which shifts
+         * IsKeyPressed's edge state forward. Checking IsKeyPressed
+         * AFTER EndDrawing reads the state for the *next* frame's
+         * inputs, so a "press H to close" check that lives after
+         * EndDrawing always misses the press that was meant to close.
+         *
+         * Process H + Esc here, at the very top of the frame, so the
+         * input state is the same one the universal verb section
+         * reads (open-on-H worked because it was already up here). */
+        if (!files_dialog_active(&files) && !ctrl_down()) {
+            if (IsKeyPressed(KEY_H)) ui_help_toggle(&help);
+            if (help.open && IsKeyPressed(KEY_ESCAPE)) ui_help_close(&help);
+            if (meta.open && IsKeyPressed(KEY_ESCAPE)) meta.open = false;
+        }
+
         /* ---- File dialog has top priority — eat all input ---------- */
         if (files_dialog_active(&files)) {
             BeginDrawing();
@@ -180,7 +196,6 @@ int main(int argc, char **argv) {
             EndMode2D();
             ui_help_modal_draw(&help, &D);
             EndDrawing();
-            if (IsKeyPressed(KEY_H)) ui_help_close(&help);
             continue;
         }
 
@@ -248,7 +263,8 @@ int main(int argc, char **argv) {
                 active_tool = TOOL_META;
                 ui_meta_open(&meta, &doc);
             }
-            if (IsKeyPressed(KEY_H)) ui_help_open(&help);
+            /* H is handled at the top of the frame via ui_help_toggle
+             * — see the modal-toggles block above. */
         }
 
         /* Tool-specific key forwarding. */
@@ -323,10 +339,14 @@ int main(int argc, char **argv) {
         EndMode2D();
 
         ui_draw_top_bar(&doc, &D);
-        ToolKind picked = ui_draw_tool_buttons(active_tool, &D);
-        if (picked != active_tool) {
-            active_tool = picked;
-            if (active_tool == TOOL_META) ui_meta_open(&meta, &doc);
+        /* Always open the meta modal when the user CLICKS the Meta
+         * button, even if active_tool was already TOOL_META — the
+         * earlier "if (picked != active_tool)" gate meant the second
+         * click silently no-op'd. ui_draw_tool_buttons now reports
+         * the actual click separately from the state update. */
+        int clicked = ui_draw_tool_buttons(&active_tool, &D);
+        if (clicked == TOOL_META) {
+            ui_meta_open(&meta, &doc);
         }
         switch (active_tool) {
             case TOOL_TILE:   ui_draw_tile_palette(&ctx, &D); break;

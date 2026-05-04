@@ -408,8 +408,12 @@ static void host_match_flow_step(Game *g, float dt) {
                 }
             }
             if (lobby_tick(&g->lobby, dt)) {
-                /* Auto-start fired → enter countdown. */
-                match_begin_countdown(&g->match, 5.0f);
+                /* Auto-start fired → enter countdown. test-play uses
+                 * a 1 s countdown (set in match.countdown_default at
+                 * startup) so designers' F5 round-trip stays short. */
+                float secs = g->test_play_lvl[0]
+                                 ? g->match.countdown_default : 5.0f;
+                match_begin_countdown(&g->match, secs);
                 if (g->net.role == NET_ROLE_SERVER) {
                     net_server_broadcast_match_state(&g->net, &g->match);
                 }
@@ -612,10 +616,22 @@ int main(int argc, char **argv) {
         game.config.score_limit        = 50;
         game.config.auto_start_seconds = 1;
         game.config.friendly_fire      = true;
+        /* Turn on the SHOT_LOG sink so test-play emits the diagnostic
+         * trail shipped via the existing `SHOT_LOG()` macro across the
+         * codebase (anim transitions, grounded toggles, hitscan, etc.)
+         * plus the per-second pelvis-pos line in this file's MATCH
+         * branch. SHOT_LOG is a one-branch no-op when g_shot_mode is
+         * 0 — the production code path never sees these messages. */
+        g_shot_mode = 1;
     }
     /* Re-apply MatchState defaults from the loaded config. */
     match_init(&game.match, game.config.mode, game.config.score_limit,
                game.config.time_limit, game.config.friendly_fire);
+    if (args.test_play_lvl[0]) {
+        /* Drop the in-match countdown to 1 s as well so a designer's
+         * F5 round-trip time stays short (default is 5 s). */
+        game.match.countdown_default = 1.0f;
+    }
     game.match.map_id = config_pick_map(&game.config, 0);
     game.lobby.auto_start_default = game.config.auto_start_seconds;
     game.world.friendly_fire = game.config.friendly_fire;
@@ -900,6 +916,27 @@ int main(int argc, char **argv) {
             /* Host: drive match flow (kills → scores → end-of-round). */
             if (game.net.role == NET_ROLE_SERVER || game.offline_solo) {
                 host_match_flow_step(&game, (float)dt);
+            }
+
+            /* Editor F5 test-play: per-second pelvis log so
+             * tests/spawn_e2e.sh can verify the mech settled where
+             * the .lvl said it should. Gated on SHOT_LOG (== `if
+             * (g_shot_mode) ...`), which we toggle on at startup
+             * only when --test-play is set — production play paths
+             * never hit this branch. */
+            if (game.match.phase == MATCH_PHASE_ACTIVE &&
+                game.world.tick > 0 && (game.world.tick % 60) == 0)
+            {
+                int mid = game.world.local_mech_id;
+                if (mid >= 0 && mid < game.world.mech_count) {
+                    const Mech *m = &game.world.mechs[mid];
+                    int pb = m->particle_base + PART_PELVIS;
+                    SHOT_LOG("test-play: tick %llu  pelvis (%.1f, %.1f)  grounded=%d",
+                             (unsigned long long)game.world.tick,
+                             (double)game.world.particles.pos_x[pb],
+                             (double)game.world.particles.pos_y[pb],
+                             (int)m->grounded);
+                }
             }
 
             /* Render world + HUD + (diag + match banner via draw_diag).
