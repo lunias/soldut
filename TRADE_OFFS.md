@@ -229,9 +229,9 @@ Last updated: **2026-05-04**.
 
 ### Hard-coded tutorial map
 
-- **What we did** — `level_build_tutorial()` builds the M1 map in code.
-- **Why** — No editor yet (M5).
-- **Revisit when** — M5 level editor lands.
+- **What we did** — `level_build_tutorial()` builds the M1 map in code. P01 shipped the `.lvl` loader; the runtime `map_build` path tries `assets/maps/<short>.lvl` first and falls back to the code-built map if loading fails. Shot mode + the headless harness still use `level_build_tutorial` directly.
+- **Why** — P01 shipped the loader/saver but no authored `.lvl` files exist yet (those land at P17/P18) and the editor (P04) hasn't shipped, so there's no way to author a real tutorial map.
+- **Revisit when** — P17/P18 ship authored `.lvl` maps. At that point shot tests and the headless harness can load real maps and `level_build_tutorial` can be retired (along with its hardcoded slope test bed — see separate entry).
 
 ### Slope-physics tuning numbers are starting values
 
@@ -280,6 +280,63 @@ Last updated: **2026-05-04**.
 - **Revisit when** — P17 / P18 ship authored maps. At that point the
   test bed is removed from `level_build_tutorial` and shot tests use
   the authored `.lvl` files directly.
+
+### Editor undo is whole-tile-grid snapshot for big strokes
+
+- **What we did** — `tools/editor/undo.c` keeps small strokes as
+  `(x,y,before,after)` deltas (one entry per painted tile). Bucket
+  fills and any other operation that mutates more than a screenful
+  of tiles call `undo_snapshot_tiles()` first, which `malloc`s a copy
+  of the entire grid. Worst-case undo memory: 64 strokes × 80 KB =
+  5 MB on a 200×100 map. Differential per-tile undo is the obvious
+  alternative and is rejected on simplicity grounds.
+- **Why** — Per-tile delta storage on a bucket fill is O(W·H) and
+  needs a custom collapse/coalesce path; the snapshot is a single
+  `memcpy` into the editor's permanent arena and undoes via
+  `memcpy` back. 5 MB is well under the editor's process budget.
+- **Revisit when** —
+  - We support map sizes >300×150 (the snapshot grows linearly).
+  - A designer reports a perceptible hitch on bucket fill on a slow
+    machine (the `memcpy` is fast but not free at very large grids).
+
+### Editor F5 test-play forks a child process
+
+- **What we did** — `tools/editor/play.c` saves the doc to a temp
+  `.lvl` and `posix_spawn`s `./soldut --test-play <abs_path>`. The
+  editor stays interactive; the game runs in its own window. F5
+  always saves to the same fixed temp filename so consecutive
+  presses overwrite.
+- **Why** — Refactoring `src/main.c` to be re-entrant from the
+  editor would require taking apart the `Game` initializer and the
+  one-process-per-platform raylib lifecycle. Forking is ~60 LOC
+  and lets the game stay exactly as-is.
+- **Revisit when** —
+  - We add an in-editor "preview the level without leaving the
+    editor" mode (real-time scrubbing of changes against a running
+    sim). At that point we'd need either an in-process simulate
+    loop or some IPC.
+  - Cold-start cost of the game binary becomes a designer pain
+    point (currently ~1 s on the dev machine).
+
+### Editor file picker is a raygui textbox, not a native dialog
+
+- **What we did** — `tools/editor/files.c` draws an in-app raygui
+  modal with a single text-input field and OK/Cancel buttons. The
+  editor accepts `argv[1]` as the initial open path; Ctrl+S without
+  a known source path or Ctrl+Shift+S opens the modal. No native
+  open-file / save-file dialog.
+- **Why** — `tinyfiledialogs` is what
+  `documents/m5/02-level-editor.md` calls for as the "fourth
+  vendored dependency past raylib + ENet + stb." It's ~3 kLOC of
+  cross-platform shell-out (zenity / kdialog / osascript /
+  GetOpenFileName) that we can replace with a 50-LOC raygui textbox
+  for v1. The editor is single-author at v1; a textbox is enough
+  to type a path or paste one from the shell.
+- **Revisit when** —
+  - We hand the editor to a non-engineer designer who has a real
+    file dialog on every other tool they use.
+  - We add OS-native asset preview thumbnails (a real picker would
+    be a natural carrier for that).
 
 ### `.lvl` v1 format is locked in
 

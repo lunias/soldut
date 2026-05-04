@@ -168,6 +168,19 @@ void map_build(MapId id, World *world, Arena *arena) {
     build_fallback(id, &world->level, arena);
 }
 
+bool map_build_from_path(World *world, Arena *arena, const char *path) {
+    if (!path || !path[0]) return false;
+    LvlResult r = level_load(world, arena, path);
+    if (r == LVL_OK) {
+        LOG_I("map_build_from_path: loaded %s", path);
+        return true;
+    }
+    LOG_E("map_build_from_path(%s): level_load failed (%s) — falling back to Foundry",
+          path, level_io_result_str(r));
+    build_fallback(MAP_FOUNDRY, &world->level, arena);
+    return false;
+}
+
 /* ---- Spawn-point selection --------------------------------------- */
 /* Stagger horizontally so successive spawns from the same team don't
  * telefrag. We pick from a per-map lane table. Y is derived from the

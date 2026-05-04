@@ -9,11 +9,18 @@
  * that we'd rather not duplicate at every call site.
  */
 
-#include "../third_party/raylib/src/raylib.h"
-#include "../third_party/raylib/src/raymath.h"
-
+/* <math.h> first so raymath.h's static-inline functions see fabsf /
+ * fmaxf / etc. as proper declarations rather than builtins-without-
+ * prototypes. The game's compile happens to tolerate the reverse order
+ * (raymath gets a single touch and its inlines aren't all instantiated
+ * for every TU); the editor's stricter raygui pull does instantiate
+ * them all, which trips -Werror=builtin-declaration-mismatch without
+ * this. */
 #include <math.h>
 #include <stdint.h>
+
+#include "../third_party/raylib/src/raylib.h"
+#include "../third_party/raylib/src/raymath.h"
 
 typedef Vector2 Vec2;
 

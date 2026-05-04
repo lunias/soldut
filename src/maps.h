@@ -39,6 +39,12 @@ int           map_id_from_name(const char *name);
  * shipped .lvl files still boots. */
 void map_build(MapId id, World *world, Arena *arena);
 
+/* Load a .lvl directly from an absolute path. Used by the editor's F5
+ * test-play (`./soldut --test-play /path/to/scratch.lvl`). On failure
+ * logs and falls back to MAP_FOUNDRY's code-built layout so the game
+ * still boots. Returns true if the .lvl loaded cleanly. */
+bool map_build_from_path(World *world, Arena *arena, const char *path);
+
 /* World-space spawn point picker. `slot_index` is the lobby slot id
  * (0..MAX_LOBBY_SLOTS-1) so successive spawns don't telefrag. team is
  * MATCH_TEAM_RED / MATCH_TEAM_BLUE / MATCH_TEAM_NONE — used for

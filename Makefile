@@ -49,7 +49,7 @@ RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
 .PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io shot \
-        debug gdb gdb-host gdb-client valgrind
+        debug gdb gdb-host gdb-client valgrind editor
 
 all: $(BIN)
 
@@ -170,9 +170,17 @@ windows:
 macos:
 	./cross-macos.sh
 
+# M5 P04 — level editor. Builds build/soldut_editor by delegating to
+# tools/editor/Makefile. Links a subset of src/ (level_io + arena + log
+# + ds + hash) plus raylib + raygui (header-only, vendored at
+# third_party/raygui/). Does NOT link mech/physics/net.
+editor: $(RAYLIB_LIB)
+	$(MAKE) -C tools/editor
+
 clean:
 	rm -rf $(BUILD_DIR) $(BIN) soldut.exe soldut.log
 	rm -f $(ENET_OBJ)
+	$(MAKE) -C tools/editor clean
 
 distclean: clean
 	$(MAKE) -C third_party/raylib/src clean
@@ -194,6 +202,7 @@ help:
 	@echo "  make distclean   also rebuild third_party libs"
 	@echo "  make shot        run scripted scene → build/shots/*.png"
 	@echo "                   override script: make shot SCRIPT=path/to/x.shot"
+	@echo "  make editor      build the M5 level editor → build/soldut_editor"
 
 -include $(DEP)
 -include $(DBG_DEP)

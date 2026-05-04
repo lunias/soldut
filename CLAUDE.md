@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-Soldut is a 2D side-scrolling multiplayer mech shooter in C, in the lineage of Soldat. The current build is **M4 — Lobby & matches**: full game flow (title → server browser → lobby → countdown → match → summary → next round); FFA + TDM modes (CTF stub); per-slot loadout picker (chassis / primary / secondary / armor / jetpack); ready/team toggles; LAN-broadcast server discovery; `soldut.cfg` for port + match defaults + map/mode rotations; three code-built maps (Foundry / Slipstream / Reactor). Underneath that the **M3** combat layer is intact: Verlet skeleton physics on a 16-particle skeleton; 5 chassis with passives; 8 primaries + 6 secondaries (Grappling Hook is a stub); projectile pool; explosions; per-limb HP and dismemberment; recoil + bink + self-bink; armor + jetpack variants; friendly-fire toggle; kill feed UI. **M2** networking is in (authoritative server, client prediction + reconciliation, hitscan lag comp; LAN bake-test still pending). Map editor + .lvl loader land at M5. See `documents/11-roadmap.md`.
+Soldut is a 2D side-scrolling multiplayer mech shooter in C, in the lineage of Soldat. The current build is **M5 — Maps & content** (in progress; P01–P04 in, P05 next). M4 shipped the lobby & matches layer: full game flow (title → server browser → lobby → countdown → match → summary → next round); FFA + TDM modes (CTF stub); per-slot loadout picker (chassis / primary / secondary / armor / jetpack); ready/team toggles; LAN-broadcast server discovery; `soldut.cfg` for port + match defaults + map/mode rotations; three code-built maps (Foundry / Slipstream / Reactor). Underneath that the **M3** combat layer is intact: Verlet skeleton physics on a 16-particle skeleton; 5 chassis with passives; 8 primaries + 6 secondaries (Grappling Hook is a stub); projectile pool; explosions; per-limb HP and dismemberment; recoil + bink + self-bink; armor + jetpack variants; friendly-fire toggle; kill feed UI. **M2** networking is in (authoritative server, client prediction + reconciliation, hitscan lag comp; LAN bake-test still pending). **M5 progress so far**: P01 — `.lvl` binary format + loader/saver (`src/level_io.{c,h}`); P02 — polygon collision + slope physics + slope-aware post-physics anchor; P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote-mech interp + `is_dummy` wire bit + hit/fire event sync; P04 — standalone level editor at `tools/editor/` (raygui, ear-clipping, slope + alcove presets, undo/redo, save validation, F5 test-play) + game-side `--test-play <path>` flag. Pickups + grapple + CTF + art + audio + 8 authored maps land in P05–P18. See `documents/11-roadmap.md` and `documents/m5/`.
 
 ## Build & run
 
@@ -114,10 +114,11 @@ If the docs disagree with the code about *what* it does, the code wins and the d
 
 The numbers driving feel are `#define`s in `src/physics.h`, `src/mech.c`, and `src/weapons.c`. `CURRENT_STATE.md` mirrors them in a table for quick reference but the C files are authoritative. The simulation runs at **60 Hz**, not 120 Hz as `documents/03-physics-and-mechs.md` specifies — this is a tracked trade-off.
 
-## Vendored dependencies (do not add a fourth without writing it down)
+## Vendored dependencies (do not add a fifth without writing it down)
 
 - `third_party/raylib/` — built into `libraylib.a` per platform via its own Makefile
 - `third_party/enet/` — `*.c` compiled into `libenet.a` by our top-level Makefile
 - `third_party/stb_ds.h` and `third_party/stb_sprintf.h` — header-only; `src/ds.c` is the one file that `#define STB_DS_IMPLEMENTATION`s
+- `third_party/raygui/raygui.h` — header-only immediate-mode UI on top of raylib. Used **only by the level editor** (`tools/editor/`); the game proper does not link it. Vendored at M5 P04. License: zlib/libpng (same as raylib).
 
-The game ships as a single static binary per platform. No DLLs, no plugins, no scripting runtime.
+The game ships as a single static binary per platform. No DLLs, no plugins, no scripting runtime. The level editor ships as a separate binary (`build/soldut_editor`) — same engine, different `main()`.

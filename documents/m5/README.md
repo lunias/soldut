@@ -39,7 +39,8 @@ documents/
 └── m5/                    # this folder — milestone breakdown
     ├── README.md          # ← you are here
     ├── 00-overview.md
-    └── 01..09 …
+    ├── 01..13 …
+    └── prompts/           # P00–P18: implementation briefs, run sequentially
 ```
 
 The canonical design docs (00–11) describe what the game **is**. The M5 sub-docs describe what we **build during M5** so the canon catches up to the code. When M5 ships, the canon docs absorb the relevant facts and these sub-docs become historical.

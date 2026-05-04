@@ -89,6 +89,14 @@ typedef struct Game {
     /* "Host the match without networking" — used by the offline path
      * so the lobby + match flow runs even with no peers. */
     bool         offline_solo;
+
+    /* M5 P04 — editor F5 test-play. When non-empty, both the initial
+     * bootstrap_host and every start_round call load this .lvl file
+     * directly (via map_build_from_path) instead of going through the
+     * MapId rotation. Set in main.c when --test-play <path> is parsed,
+     * cleared at process exit. The path is absolute (the editor runs
+     * realpath() before forking us). */
+    char         test_play_lvl[256];
 } Game;
 
 bool game_init(Game *g);
