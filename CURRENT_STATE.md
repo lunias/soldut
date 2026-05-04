@@ -18,6 +18,7 @@ Last updated: **2026-05-03** (M4 lobby & matches in).
 | **M2**    | Foundation lands 2026-05-03. Host/client handshake works locally; per-tick input ship + 30 Hz snapshot broadcast + client-side prediction & replay + per-mech bone history for hitscan lag compensation are wired. LAN-only, full snapshots, no mid-tick interpolation of remote mechs (see TRADE_OFFS.md). Two-laptop bake test still pending. |
 | **M3**    | Combat depth in 2026-05-03. All 5 chassis (Trooper / Scout / Heavy / Sniper / Engineer) with passives. All 8 primaries (Pulse Rifle, Plasma SMG, Riot Cannon, Rail Cannon, Auto-Cannon, Mass Driver, Plasma Cannon, Microgun) and 6 secondaries (Sidearm, Burst SMG, Frag Grenades, Micro-Rockets, Combat Knife, Grappling Hook). Projectile pool with bone + tile collision. Explosions: damage falloff, line-of-sight check, impulse to ragdolls. Per-limb HP and dismemberment of all 5 limbs. Recoil + bink + self-bink fully wired. Friendly-fire toggle (`--ff` server flag). Kill feed with HEADSHOT/GIB/OVERKILL/RAGDOLL/SUICIDE flags. Loadout via CLI flags (`--chassis`, `--primary`, `--secondary`, `--armor`, `--jetpack`). Snapshot wire format widened to carry chassis/armor/jet/secondary; protocol id bumped to `S0LE`. |
 | **M4**    | Lobby & matches in 2026-05-03. Game flow is now title → browser → lobby → countdown → match → summary → next lobby. New modules: `match.{h,c}`, `lobby.{h,c}`, `lobby_ui.{h,c}`, `ui.{h,c}` (small immediate-mode raylib UI helpers, scale-aware for 4K), `config.{h,c}` (`soldut.cfg` key=value parser), `maps.{h,c}` (Foundry / Slipstream / Reactor — three code-built maps for the rotation; `.lvl` loader is M5). LOBBY-channel messages (player list with `mech_id`, slot delta, loadout, ready, team change, chat, vote, kick/ban, countdown, round start/end, match state). Server config file: port, max_players, mode, score_limit, time_limit, friendly_fire, auto_start_seconds, map_rotation, mode_rotation. Single-player flow auto-hosts an offline server and arms a 1s countdown. Protocol id bumped `S0LE` → `S0LF`. Network test scaffold under `tests/net/` runs the host/client end-to-end via real ENet loopback and asserts on log-line milestones. |
+| **M5**    | In progress. **P01 — `.lvl` format + loader/saver** in 2026-05-03. New `src/level_io.{h,c}` (CRC32 + endian-explicit reader/writer; ~600 LOC). `Level` migrated from `uint8_t *tiles` to `LvlTile *tiles` (4 bytes per cell: id + flags). New per-format records `LvlTile / LvlPoly / LvlSpawn / LvlPickup / LvlDeco / LvlAmbi / LvlFlag / LvlMeta` in `world.h`, byte-size-locked via `_Static_assert`. `map_build` now tries `assets/maps/<short>.lvl` first; falls back to the M4 code-built path on any load failure (file not found is the expected case until P17 ships the cooked maps). `make test-level-io` runs a synthetic round-trip + bit-flip + truncation test (25/25 passing on first ship). `tools/cook_maps/cook_maps.c` is a stub for P17. **Pending**: P02 (polygon broadphase + slope physics), P03 (render-side accumulator), P04 (level editor), P05+ (pickups, grapple, CTF, map sharing, controls, art, audio, maps). |
 
 ---
 
@@ -237,6 +238,55 @@ Run:
 
 The driver always reaps its children, so test runs don't leave
 orphan windows.
+
+## M5 progress
+
+Tracking what's landed vs what's pending in the M5 (Maps & content)
+milestone. Work is sequenced through `documents/m5/prompts/`.
+
+### Done
+
+- **P01 — `.lvl` binary format + loader/saver + tests** (2026-05-03).
+  - New module `src/level_io.{h,c}`. Public API: `level_load(World*,
+    Arena*, path)`, `level_save(const World*, Arena*, path)`,
+    `level_crc32(...)`. Endian-explicit `r_u16/u32/i16` + `w_u16/u32/i16`
+    helpers; little-endian host enforced via `#error`.
+  - File layout per `documents/m5/01-lvl-format.md`: 64-byte header +
+    Quake-WAD-style lump directory + 9 lumps (TILE / POLY / SPWN / PICK
+    / DECO / AMBI / FLAG / META / STRT). CRC32 (poly 0xEDB88320,
+    table-based) over the whole file with the CRC field zeroed during
+    compute.
+  - `Level` struct migrated from `uint8_t *tiles` to `LvlTile *tiles`
+    (4 bytes per cell — id + flags). All Lvl* record types added to
+    `world.h` with `_Static_assert` size locks (4/32/8/12/12/16/8/32).
+    Existing physics/render reads continue to work via `level_tile_at`
+    which now branches on `flags & TILE_F_SOLID`.
+  - `map_build` is now `(MapId, World*, Arena*)` and tries
+    `assets/maps/<short>.lvl` first; falls back to the M4 code-built
+    path on any `level_load` failure. "File not found" logs at INFO
+    (expected until P17); other failures (`BAD_CRC`, `BAD_DIRECTORY`,
+    etc.) log at WARN.
+  - `make test-level-io` builds + runs `tests/level_io_test.c`:
+    synthetic World with one of every section → save → reload →
+    re-save → byte-compare both files. Plus bit-flip → expect
+    `LVL_ERR_BAD_CRC`; truncate-to-half → expect `BAD_DIRECTORY`,
+    `BAD_SECTION`, or `BAD_CRC` (don't crash). 25/25 passing on
+    first ship.
+  - `tools/cook_maps/cook_maps.c` exists as a stub. P17 fills it in
+    by allocating a synthetic World per code-built map and calling
+    `level_save` to `assets/maps/`.
+
+### Pending
+
+- **P02** — polygon collision + slope physics. `poly_grid` /
+  `poly_grid_off` already declared on `Level`; populate at load time.
+- **P03** — render-side accumulator + interp alpha + reconcile
+  visual offset + two-snapshot remote-mech buffer.
+- **P04** — level editor (`tools/editor/`).
+- **P05–P14** — pickups, grapple, CTF, map sharing, controls, mech
+  atlas runtime, weapon art, damage feedback, parallax / HUD / TTF /
+  halftone / decal chunking, audio.
+- **P15–P18** — ComfyUI asset generation + the 8 maps + bake test.
 
 ## Headless test
 

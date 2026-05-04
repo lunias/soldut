@@ -80,7 +80,7 @@ static void draw_level(const Level *L) {
     Color edge    = (Color){ 80,  90, 110, 255 };
     for (int y = 0; y < L->height; ++y) {
         for (int x = 0; x < L->width; ++x) {
-            if (L->tiles[y * L->width + x] != TILE_SOLID) continue;
+            if (!(L->tiles[y * L->width + x].flags & TILE_F_SOLID)) continue;
             Color c = ((x + y) & 1) ? floor_a : floor_b;
             DrawRectangle((int)((float)x * ts), (int)((float)y * ts),
                           (int)ts, (int)ts, c);

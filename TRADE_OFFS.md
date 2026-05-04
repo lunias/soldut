@@ -252,6 +252,32 @@ Last updated: **2026-05-03**.
 - **Why** — No editor yet (M5).
 - **Revisit when** — M5 level editor lands.
 
+### `.lvl` v1 format is locked in
+
+- **What we did** — At P01 we shipped the on-disk `.lvl` format
+  specified in `documents/m5/01-lvl-format.md`: 64-byte header +
+  Quake-WAD-style lump directory + 9 lumps (TILE / POLY / SPWN / PICK
+  / DECO / AMBI / FLAG / META / STRT), CRC32 over the whole file
+  with the CRC field zeroed. Byte sizes are pinned by `_Static_assert`
+  in `world.h` and the wire layout is enforced by explicit `r_u16` /
+  `w_u32` etc. helpers in `src/level_io.c`. `LVL_VERSION_CURRENT = 1`.
+- **Why** — Once we ship maps in the v1 format (P17 / P18) every
+  `.lvl` file we author or hand to a player is locked to the v1
+  schema. Bumping the version means: editor save path (P04) needs an
+  upgrade pass, level_io needs a v0→v1 migrator, and any in-the-wild
+  v1 files load with default-fill for new fields. Forward compat for
+  unknown lumps already works (loaders skip unknown names), but
+  changing an *existing* record's size is a breaking change.
+- **Revisit when** —
+  - We discover a fatal flaw in v1 (a record's size is too small to
+    hold a field we need; an enum value collides; a designer needs
+    something the format can't express). Bump `LVL_VERSION_CURRENT`
+    to 2 and write the migrator.
+  - We add a feature whose data wants to ride alongside the level —
+    e.g., per-mech intro animation positions, scripted events,
+    cutscene markers. That data wants its own *new* lump (additive,
+    so old loaders skip it), not a v1 record widening.
+
 ---
 
 ## Networking

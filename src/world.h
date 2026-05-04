@@ -316,17 +316,159 @@ typedef struct {
     int capacity;
 } FxPool;
 
-/* ---- Tile-grid level (free-poly support deferred past M1). */
+/* ---- Tile / level data ---------------------------------------------
+ *
+ * The on-disk format lives in [documents/m5/01-lvl-format.md]. The Lvl*
+ * record types below are the in-memory representation of those records;
+ * level_io.{c,h} reads/writes them as packed little-endian byte
+ * sequences. The byte layouts MUST match the spec — the static_asserts
+ * at the bottom of this block are the wire-format guarantee.
+ */
+
+/* TileKind: legacy enum kept so existing callers (physics, render) can
+ * keep doing `level_tile_at(...) == TILE_SOLID`. The authoritative bit
+ * is `LvlTile.flags & TILE_F_SOLID` — `level_tile_at()` is now a thin
+ * adapter over the flag check. */
 typedef enum {
     TILE_EMPTY = 0,
     TILE_SOLID,
     TILE_KIND_COUNT
 } TileKind;
 
+/* TILE_F_*: the bit-flag vocabulary that lives in `LvlTile.flags`.
+ * Matches the design canon in 01-lvl-format.md §TILE. The new
+ * collision behaviors (ICE/DEADLY/ONE_WAY/BACKGROUND) are part of P02;
+ * the format reserves them so v1 .lvl files round-trip them. */
+enum {
+    TILE_F_EMPTY      = 0,
+    TILE_F_SOLID      = 1u << 0,
+    TILE_F_ICE        = 1u << 1,
+    TILE_F_DEADLY     = 1u << 2,
+    TILE_F_ONE_WAY    = 1u << 3,
+    TILE_F_BACKGROUND = 1u << 4,
+};
+
+typedef struct {
+    uint16_t id;                   /* sprite atlas index */
+    uint16_t flags;                /* TILE_F_* bitmask */
+} LvlTile;
+
+/* Free polygon — already triangulated by the editor at save time. The
+ * runtime never re-triangulates. P02 fills the broadphase grid; the
+ * record itself round-trips at P01. */
+typedef struct {
+    int16_t  v_x[3];               /* triangle vertices, world-space px */
+    int16_t  v_y[3];
+    int16_t  normal_x[3];          /* edge normals, fixed-point Q1.15 */
+    int16_t  normal_y[3];
+    uint16_t kind;                 /* SOLID/ICE/DEADLY/ONE_WAY/BACKGROUND */
+    uint16_t group_id;             /* destructible group (reserved at v1) */
+    int16_t  bounce_q;             /* restitution Q0.16 */
+    uint16_t reserved;
+} LvlPoly;
+
+typedef struct {
+    int16_t pos_x;
+    int16_t pos_y;
+    uint8_t team;                  /* 0=any, 1=red, 2=blue */
+    uint8_t flags;                 /* PRIMARY=1, FALLBACK=2 */
+    uint8_t lane_hint;             /* designer's lane order */
+    uint8_t reserved;
+} LvlSpawn;
+
+typedef struct {
+    int16_t  pos_x;
+    int16_t  pos_y;
+    uint8_t  category;             /* HEALTH/AMMO/ARMOR/WEAPON/POWERUP/JET_FUEL */
+    uint8_t  variant;              /* small/med/large or weapon_id */
+    uint16_t respawn_ms;           /* 0 = use category default */
+    uint16_t flags;                /* CONTESTED/RARE/HOST_ONLY */
+    uint16_t reserved;
+} LvlPickup;
+
+typedef struct {
+    int16_t  pos_x;
+    int16_t  pos_y;
+    int16_t  scale_q;              /* Q1.15 */
+    int16_t  rot_q;                /* 1/256 turns */
+    uint16_t sprite_str_idx;       /* offset into STRT */
+    uint8_t  layer;                /* 0..3 parallax depth */
+    uint8_t  flags;                /* FLIPPED_X, ADDITIVE */
+} LvlDeco;
+
+typedef struct {
+    int16_t  rect_x, rect_y;       /* top-left, world-space */
+    int16_t  rect_w, rect_h;
+    uint16_t kind;                 /* WIND/ZERO_G/ACID/FOG */
+    int16_t  strength_q;           /* Q1.15, kind-dependent */
+    int16_t  dir_x_q;              /* Q1.15 unit vector */
+    int16_t  dir_y_q;
+} LvlAmbi;
+
+typedef struct {
+    int16_t  pos_x;
+    int16_t  pos_y;
+    uint8_t  team;                 /* 1=red, 2=blue */
+    uint8_t  reserved[3];
+} LvlFlag;
+
+typedef struct {
+    uint16_t name_str_idx;
+    uint16_t blurb_str_idx;
+    uint16_t background_str_idx;
+    uint16_t music_str_idx;
+    uint16_t ambient_loop_str_idx;
+    uint16_t reverb_amount_q;      /* Q0.16 */
+    uint16_t mode_mask;            /* FFA=1, TDM=2, CTF=4 */
+    uint16_t reserved[9];
+} LvlMeta;
+
+/* Wire-format guarantees. If any of these fail the .lvl format breaks. */
+_Static_assert(sizeof(LvlTile)   ==  4, "LvlTile must be 4 bytes");
+_Static_assert(sizeof(LvlPoly)   == 32, "LvlPoly must be 32 bytes");
+_Static_assert(sizeof(LvlSpawn)  ==  8, "LvlSpawn must be 8 bytes");
+_Static_assert(sizeof(LvlPickup) == 12, "LvlPickup must be 12 bytes");
+_Static_assert(sizeof(LvlDeco)   == 12, "LvlDeco must be 12 bytes");
+_Static_assert(sizeof(LvlAmbi)   == 16, "LvlAmbi must be 16 bytes");
+_Static_assert(sizeof(LvlFlag)   ==  8, "LvlFlag must be 8 bytes");
+_Static_assert(sizeof(LvlMeta)   == 32, "LvlMeta must be 32 bytes");
+
 typedef struct {
     int       width, height;       /* in tiles */
     int       tile_size;           /* px per tile */
-    uint8_t  *tiles;               /* width * height kinds */
+    LvlTile  *tiles;               /* width * height records */
+
+    /* Free polygons + section arrays loaded from .lvl. The pointers
+     * are owned by the level arena; on level reload the arena resets
+     * and these zero out together. P02 populates poly_grid; P05/P06/P07
+     * populate the rest. */
+    LvlPoly   *polys;
+    int        poly_count;
+    LvlSpawn  *spawns;
+    int        spawn_count;
+    LvlPickup *pickups;
+    int        pickup_count;
+    LvlDeco   *decos;
+    int        deco_count;
+    LvlAmbi   *ambis;
+    int        ambi_count;
+    LvlFlag   *flags;
+    int        flag_count;
+    LvlMeta    meta;
+
+    /* String table — a blob of zero-terminated UTF-8 owned by the level
+     * arena. LvlMeta and LvlDeco sprite_str_idx index into this by
+     * byte offset (offset 0 is reserved as "empty string"). */
+    const char *string_table;
+    int         string_table_size;
+
+    /* Polygon broadphase index — populated in P02. `poly_grid` is a
+     * flat list of polygon ids per cell; `poly_grid_off[cell + 1]
+     * - poly_grid_off[cell]` is the count for cell #cell. Both are
+     * NULL until P02 lands. */
+    int       *poly_grid;
+    int       *poly_grid_off;
+
     Vec2      ambient_light;       /* unused at M1; placeholder */
     Vec2      gravity;             /* per-tick acceleration */
 } Level;

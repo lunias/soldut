@@ -8,7 +8,8 @@
 
 static void set_tile(Level *l, int x, int y, TileKind k) {
     if (x < 0 || x >= l->width || y < 0 || y >= l->height) return;
-    l->tiles[y * l->width + x] = (uint8_t)k;
+    uint16_t f = (k == TILE_SOLID) ? TILE_F_SOLID : TILE_F_EMPTY;
+    l->tiles[y * l->width + x] = (LvlTile){ .id = 0, .flags = f };
 }
 
 static void fill_rect(Level *l, int x0, int y0, int x1, int y1, TileKind k) {
@@ -27,12 +28,12 @@ void level_build_tutorial(Level *level, Arena *arena) {
     level->gravity   = (Vec2){0.0f, 1080.0f};   /* px/s^2 */
 
     int n = level->width * level->height;
-    level->tiles = (uint8_t *)arena_alloc(arena, (size_t)n);
+    level->tiles = (LvlTile *)arena_alloc(arena, sizeof(LvlTile) * (size_t)n);
     if (!level->tiles) {
         LOG_E("level_build_tutorial: arena out of memory");
         return;
     }
-    memset(level->tiles, TILE_EMPTY, (size_t)n);
+    memset(level->tiles, 0, sizeof(LvlTile) * (size_t)n);
 
     /* Floor: bottom 4 rows. */
     fill_rect(level, 0, level->height - 4, level->width, level->height, TILE_SOLID);
@@ -53,13 +54,13 @@ void level_build_tutorial(Level *level, Arena *arena) {
      * itself is fine for it; this gives some vertical interest). */
     fill_rect(level, 70, level->height - 8, 80, level->height - 7, TILE_SOLID);
 
-    LOG_I("level: tutorial built %dx%d (tile=%dpx, %d solid)",
+    LOG_I("level: tutorial built %dx%d (tile=%dpx, %d cells)",
           level->width, level->height, level->tile_size, n);
 }
 
 TileKind level_tile_at(const Level *l, int tx, int ty) {
     if (tx < 0 || tx >= l->width || ty < 0 || ty >= l->height) return TILE_SOLID;
-    return (TileKind)l->tiles[ty * l->width + tx];
+    return (l->tiles[ty * l->width + tx].flags & TILE_F_SOLID) ? TILE_SOLID : TILE_EMPTY;
 }
 
 int level_world_to_tile(const Level *l, float x) {

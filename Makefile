@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io shot \
         debug gdb gdb-host gdb-client valgrind
 
 all: $(BIN)
@@ -109,6 +109,14 @@ $(BUILD_DIR)/headless_sim: tests/headless_sim.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(
 
 test-physics: $(BUILD_DIR)/headless_sim
 	./$(BUILD_DIR)/headless_sim
+
+# .lvl format round-trip + corruption test. Asserts and returns
+# non-zero on failure (unlike headless_sim, which is human-read).
+$(BUILD_DIR)/level_io_test: tests/level_io_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/level_io_test.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+test-level-io: $(BUILD_DIR)/level_io_test
+	./$(BUILD_DIR)/level_io_test
 
 # Shot mode — drive a scripted scene through the real renderer and
 # write PNGs. Handy for visual diffs without filming. Override SCRIPT
