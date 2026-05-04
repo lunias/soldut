@@ -6,7 +6,7 @@ This document specifies the **layout** of the source: folders, modules, what eac
 
 ```
 soldut/
-├── src/                    # game source — about 50 .c/.h files at v1
+├── src/                    # game source — 60 .c/.h files (30 modules) post-M5 P01
 ├── tools/                  # support utilities (level cooker, replay extractor)
 ├── assets/                 # ships with the binary
 ├── third_party/

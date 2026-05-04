@@ -56,10 +56,42 @@ zig cc -target $ZIG_TARGET \
     -lopengl32 -lgdi32 -lwinmm -lws2_32 \
     -o build/windows/Soldut.exe
 
+# ---- Editor (M5 P04) -------------------------------------------------
+# Same engine code (a subset of src/) + tools/editor/ + raygui (header-
+# only). Reuses the same libraylib.a we just built. No ENet — the editor
+# doesn't talk to a network. The `-include math.h -include stdio.h`
+# pre-include matches tools/editor/Makefile's PREINC: raygui/raymath
+# both call libm functions in static-inline bodies without including
+# <math.h> themselves, and clang 16+ flags that as a builtin-decl
+# mismatch. The pre-include puts the prototypes in scope first.
+echo "[cross-windows] building soldut_editor..."
+zig cc -target $ZIG_TARGET \
+    -std=gnu11 -O2 -g -Wall -Wextra -DNDEBUG \
+    -Wno-unused-parameter -Wno-unused-function \
+    -Wno-missing-field-initializers \
+    -Wno-incompatible-function-pointer-types \
+    -Wno-format-truncation \
+    -Wno-implicit-fallthrough \
+    -Wno-unused-but-set-variable \
+    -Wno-error=implicit-function-declaration \
+    -Wno-error=builtin-declaration-mismatch \
+    -include math.h -include stdio.h \
+    -Ithird_party/raylib/src -Ithird_party/raygui -Ithird_party -Isrc \
+    -Itools/editor \
+    tools/editor/main.c tools/editor/doc.c tools/editor/poly.c \
+    tools/editor/undo.c tools/editor/view.c tools/editor/palette.c \
+    tools/editor/tool.c tools/editor/play.c tools/editor/files.c \
+    tools/editor/render.c tools/editor/editor_ui.c \
+    tools/editor/validate.c tools/editor/shotmode.c \
+    src/arena.c src/log.c src/hash.c src/ds.c src/level_io.c \
+    third_party/raylib/src/libraylib.a \
+    -lopengl32 -lgdi32 -lwinmm \
+    -o build/windows/SoldutEditor.exe
+
 if command -v zip >/dev/null 2>&1; then
-    (cd build/windows && zip -r Soldut-windows.zip Soldut.exe >/dev/null)
+    (cd build/windows && zip -r Soldut-windows.zip Soldut.exe SoldutEditor.exe >/dev/null)
 fi
-echo "[cross-windows] -> build/windows/Soldut.exe"
+echo "[cross-windows] -> build/windows/Soldut.exe + SoldutEditor.exe"
 
 # Restore native raylib build so subsequent `make` works on the host.
 # Local-dev convenience only — skipped on CI, where the runner is

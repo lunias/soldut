@@ -1,0 +1,15 @@
+# Same as help_layout but at a simulated 4K window size to verify the
+# modal scales and the scrollbar/footer/title still sit where they
+# should at 3.0× UI scale.
+
+window 3000 1900
+new 60 40
+ticks 60
+panels on
+contact_sheet help_layout_4k cols 1 cell 3000 1900
+
+at 0  spawn_add 320 1000 0
+at 1  open_help
+at 5  shot t05_help_modal_at_4k
+
+at 10 end

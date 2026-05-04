@@ -1,0 +1,62 @@
+# tools/editor/shots/poly_triangulation.shot — verify the polygon
+# tool's ear-clipping math is right.
+#
+# Drops a few polygon shapes and asserts the resulting triangle count
+# matches Eberly's expected output (n - 2 for an n-vertex simple polygon).
+
+window 1280 800
+new 80 50
+ticks 100
+contact_sheet poly_triangulation
+
+at 0 camera_target 1280 800
+at 0 camera_zoom 0.5
+
+# Required spawn so save validation passes. (Not strictly needed for
+# this script, but lets us round-trip through doc_save / doc_load.)
+at 1 spawn_add 100 1000 0
+
+# ---- A square (4 verts → 2 triangles) ----
+at 5  tool poly
+at 5  poly_kind solid
+at 6  poly_begin
+at 7  poly_vertex 200 600
+at 8  poly_vertex 300 600
+at 9  poly_vertex 300 700
+at 10 poly_vertex 200 700
+at 11 poly_close
+at 12 assert polys == 2
+at 12 shot t12_square
+
+# ---- A pentagon (5 verts → 3 triangles) ----
+at 15 poly_begin
+at 16 poly_vertex 500 700
+at 17 poly_vertex 580 670
+at 18 poly_vertex 600 600
+at 19 poly_vertex 540 540
+at 20 poly_vertex 460 580
+at 21 poly_close
+at 22 assert polys == 5
+at 22 shot t22_pentagon
+
+# ---- A concave "L" shape (6 verts → 4 triangles) ----
+at 25 poly_begin
+at 26 poly_vertex 800 600
+at 27 poly_vertex 1000 600
+at 28 poly_vertex 1000 700
+at 29 poly_vertex 900 700
+at 30 poly_vertex 900 800
+at 31 poly_vertex 800 800
+at 32 poly_close
+at 33 assert polys == 9
+at 33 shot t33_lshape
+
+# ---- Save + reload round-trip preserves triangle count ----
+at 40 save /tmp/editor_poly_test.lvl
+at 41 new_doc 80 50
+at 41 assert polys == 0
+at 42 load_file /tmp/editor_poly_test.lvl
+at 43 assert polys == 9
+at 44 shot t44_reloaded
+
+at 50 end

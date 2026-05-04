@@ -1,0 +1,99 @@
+# tools/editor/shots/bugs.shot — regression suite for the bugs the
+# user reported on 2026-05-04 (all five must pass).
+#
+# Bugs covered:
+#   1. Tile flags off-screen / not visible          → visual + state
+#   2. H key doesn't close help modal               → toggle_help state
+#   3. Help modal text overlap at footer            → visual
+#   4. Meta modal doesn't reopen on second click    → click_tool_button state
+#   5. F5 doesn't spawn at the .lvl spawn point     → covered by
+#      tools/editor/shots/spawn_from_lvl.sh (game-side test)
+
+window 1280 800
+new 80 50
+ticks 200
+panels on
+contact_sheet bugs cols 4 cell 640 400
+
+at 0 camera_target 1280 800
+at 0 camera_zoom 0.5
+at 0 spawn_add 320 1000 0
+
+# ---- Bug 1: Tile flags must be visible ----
+at 5  tool tile
+at 5  tile_flags solid
+at 6  shot t06_tile_palette_solid
+at 6  assert active_tool == tile
+
+at 8  tile_flags solid,ice
+at 9  shot t09_tile_palette_solid_ice
+
+at 12 tile_flags deadly
+at 13 tile_paint 200 1100
+at 14 shot t14_deadly_tile
+
+# ---- Bug 2: Help modal toggle via H ----
+# ui_help_toggle is the function main.c's H key calls. Toggling twice
+# must end up where we started; that proves the state machine is right
+# (the IsKeyPressed-after-EndDrawing timing fix is in main.c).
+at 18 assert help_open == 0
+at 19 toggle_help
+at 19 assert help_open == 1
+at 20 shot t20_help_after_toggle
+at 21 toggle_help
+at 21 assert help_open == 0
+at 22 toggle_help
+at 22 assert help_open == 1
+at 23 close_help
+at 23 assert help_open == 0
+
+# ---- Bug 3: Help modal layout ----
+at 26 open_help
+at 28 shot t28_help_layout_default
+at 29 close_help
+
+# ---- Bug 4: Meta modal must reopen on every click ----
+# click_tool_button mirrors the real toolbar-button click handler.
+# The first click opens meta; close it; the SECOND click must reopen.
+at 32 click_tool_button meta
+at 32 assert meta_open == 1
+at 33 close_meta
+at 33 assert meta_open == 0
+at 34 click_tool_button meta
+at 34 assert meta_open == 1     # must reopen even though active_tool == meta already
+at 35 shot t35_meta_reopened
+at 36 close_meta
+at 37 click_tool_button meta
+at 37 assert meta_open == 1
+at 38 close_meta
+
+# ---- Active tool must reset on click_tool_button ----
+at 42 click_tool_button tile
+at 42 assert active_tool == tile
+at 43 click_tool_button poly
+at 43 assert active_tool == poly
+
+# ---- Layout: every tool's right palette must render w/o clipping ----
+at 50 tool tile
+at 51 shot t51_tool_tile
+
+at 55 tool poly
+at 56 shot t56_tool_poly
+
+at 60 tool spawn
+at 61 shot t61_tool_spawn
+
+at 65 tool pickup
+at 66 shot t66_tool_pickup
+
+at 70 tool ambi
+at 71 shot t71_tool_ambi
+
+at 75 tool deco
+at 76 shot t76_tool_deco
+
+# ---- Validation still works on a minimal valid doc ----
+at 80 validate
+at 80 assert validate_problems == 0
+
+at 90 end

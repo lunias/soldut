@@ -168,6 +168,19 @@ void map_build(MapId id, World *world, Arena *arena) {
     build_fallback(id, &world->level, arena);
 }
 
+bool map_build_from_path(World *world, Arena *arena, const char *path) {
+    if (!path || !path[0]) return false;
+    LvlResult r = level_load(world, arena, path);
+    if (r == LVL_OK) {
+        LOG_I("map_build_from_path: loaded %s", path);
+        return true;
+    }
+    LOG_E("map_build_from_path(%s): level_load failed (%s) — falling back to Foundry",
+          path, level_io_result_str(r));
+    build_fallback(MAP_FOUNDRY, &world->level, arena);
+    return false;
+}
+
 /* ---- Spawn-point selection --------------------------------------- */
 /* Stagger horizontally so successive spawns from the same team don't
  * telefrag. We pick from a per-map lane table. Y is derived from the
@@ -183,6 +196,40 @@ Vec2 map_spawn_point(MapId id, const Level *level, int slot_index,
     (void)id;
     const float feet_below_pelvis = 36.0f;
     const float foot_clearance    = 4.0f;
+
+    /* M5 P04+: prefer the .lvl's authored SPWN points when present.
+     * Each `LvlSpawn` already specifies its world-pixel coords + team
+     * affinity, so the runtime doesn't need to re-derive lanes.
+     *
+     * Match logic:
+     *   - FFA: any spawn matches; sort by lane_hint and round-robin
+     *     across slot_index.
+     *   - TDM/CTF: prefer same-team or team=0 (any). If none match,
+     *     fall back to the first authored spawn so the round still
+     *     starts (better than the M4 hardcoded-lanes fallback). */
+    if (level->spawn_count > 0 && level->spawns) {
+        int n = level->spawn_count;
+        int eligible[64];        /* small map cap; we have no map with >64 spawns */
+        int e_count = 0;
+        for (int i = 0; i < n && e_count < (int)(sizeof eligible / sizeof eligible[0]); ++i) {
+            const LvlSpawn *s = &level->spawns[i];
+            if (mode == MATCH_MODE_FFA ||
+                s->team == 0 ||
+                (int)s->team == team) {
+                eligible[e_count++] = i;
+            }
+        }
+        if (e_count == 0) {
+            /* No team-matching spawn — accept the first one. */
+            const LvlSpawn *s = &level->spawns[0];
+            return (Vec2){ (float)s->pos_x, (float)s->pos_y };
+        }
+        const LvlSpawn *s = &level->spawns[eligible[slot_index % e_count]];
+        return (Vec2){ (float)s->pos_x, (float)s->pos_y };
+    }
+
+    /* Pre-M5 / fallback: hardcoded per-team lane tables on top of the
+     * (height - 4) floor row. */
     float floor_y = (float)(level->height - 4) * (float)level->tile_size
                   - feet_below_pelvis - foot_clearance;
 

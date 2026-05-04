@@ -2,18 +2,26 @@
 
 A 2D side-scrolling multiplayer mech shooter in C, in the lineage of Soldat.
 
-The project is in **M4 — Lobby & matches**: full game flow (title →
-server browser → lobby → countdown → match → summary → next round),
-FFA + TDM modes (CTF stub), per-slot loadout picker, ready/team
-toggles, LAN-broadcast server discovery, `soldut.cfg` for port +
-match defaults + map/mode rotations, three code-built maps (Foundry
-/ Slipstream / Reactor). Built on top of **M3** (combat depth: 5
-chassis, 8 primaries + 6 secondaries, projectile pool, explosions,
-per-limb HP + dismemberment, recoil + bink + self-bink, friendly-
-fire), **M2** (authoritative server / client prediction +
-reconciliation / hitscan lag comp / blood + decal sync), and **M1**
-(Verlet skeleton physics + ragdoll). Map editor + .lvl loader land
-at M5. See [documents/11-roadmap.md](documents/11-roadmap.md).
+The project is in **M5 — Maps & content** (in progress; P01–P04 in,
+P05 next). M4 shipped the lobby & matches layer: full game flow
+(title → server browser → lobby → countdown → match → summary →
+next round), FFA + TDM modes (CTF stub), per-slot loadout picker,
+ready/team toggles, LAN-broadcast server discovery, `soldut.cfg`
+for port + match defaults + map/mode rotations, three code-built
+maps (Foundry / Slipstream / Reactor). Built on top of **M3**
+(combat depth: 5 chassis, 8 primaries + 6 secondaries, projectile
+pool, explosions, per-limb HP + dismemberment, recoil + bink +
+self-bink, friendly-fire), **M2** (authoritative server / client
+prediction + reconciliation / hitscan lag comp / blood + decal
+sync), and **M1** (Verlet skeleton physics + ragdoll). M5 so far:
+**P01** — `.lvl` binary format + loader/saver
+(`src/level_io.{c,h}`); **P02** — polygon collision + slope physics
++ slope-aware post-physics anchor; **P03** — render-side
+accumulator + interp alpha + reconcile smoothing + two-snapshot
+remote-mech interp + hit/fire event sync. Editor (P04) + pickups +
+grapple + CTF + sprite atlases + audio + 8 authored maps land in
+P04–P18. See [documents/11-roadmap.md](documents/11-roadmap.md)
+and [documents/m5/](documents/m5/).
 
 For the *current behavior* of the build (vs the design intent in
 [documents/](documents/)) see [CURRENT_STATE.md](CURRENT_STATE.md) and
@@ -167,7 +175,7 @@ breakpoint at `snapshot_apply`).
 
 ```
 soldut/
-├── src/                 # game source (~30 .c/.h files at M4)
+├── src/                 # game source (~30 modules / 60 .c+.h files post-M5 P01)
 ├── third_party/
 │   ├── raylib/          # vendored, built into libraylib.a per platform
 │   ├── enet/            # vendored, built into libenet.a
@@ -270,6 +278,30 @@ order — they cross-reference each other.
 - [x] Log-driven network smoke tests (`tests/net/run.sh`, `tests/net/run_3p.sh`) — 13 + 10 assertions covering the full round flow
 - [x] gdb workflow: `make debug`/`gdb`/`gdb-host`/`gdb-client`/`valgrind` + project-specific helpers in `tools/gdb/init.gdb`
 - [x] Protocol bumped `S0LE` → `S0LF` for the M4 lobby flow
+
+### M5 — Maps & content (in progress)
+
+Sequenced through 18 implementation prompts under
+[documents/m5/prompts/](documents/m5/prompts/). Read
+[documents/m5/00-overview.md](documents/m5/00-overview.md) for the
+strategic view.
+
+- [x] **P01** — `.lvl` binary format + loader/saver + CRC32 + tests (`src/level_io.{c,h}`; `make test-level-io` 25/25 passing). 64-byte header + WAD-style lump directory + 9 lumps; `_Static_assert` size locks on every record type.
+- [x] **P02** — Polygon collision + slope physics + slope-aware post-physics anchor. Per-particle Q1.7 contact normals + `PARTICLE_FLAG_CEILING`; polygon broadphase grid built at level load; tile + polygon collision interleaved per relaxation iter; slope-tangent run velocity + slope-aware friction; angled-ceiling jet redirection; WIND/ZERO_G ambient zones; DEADLY/ACID environmental damage.
+- [x] **P03** — Render-side accumulator + interp alpha + reconcile smoothing + remote-mech interp. Per-particle `render_prev_*` snapshot at top of `simulate_step`; renderer lerps by `alpha = accum/TICK_DT`; reconcile `visual_offset` decays over ~6 frames; per-mech `remote_snap_ring[8]` interp at `now − 100 ms`; `SNAP_STATE_IS_DUMMY` bit; `NET_MSG_HIT_EVENT` + `NET_MSG_FIRE_EVENT` for blood/spark/tracer/projectile sync. Protocol bumped `S0LF` → `S0LG`.
+- [x] **P04** — Standalone level editor (`tools/editor/`) + game-side `--test-play <path>` flag. `make editor` → `build/soldut_editor`. Tile paint, polygon draw with ear-clipping triangulation (Eberly), spawn / pickup / ambient / decoration placement, slope + alcove presets, undo/redo (64-stroke ring + tile-grid snapshot for big ops), save-time validation (alcove sizing per the maps spec), F5 forks the game with the saved `.lvl`. raygui (header-only, vendored at `third_party/raygui/`) for the UI; in-app textbox modal in lieu of a native file picker. Editor links a subset of `src/` (level_io / arena / log / hash / ds) — no mech / physics / net.
+- [ ] **P05** — Pickup system + Engineer repair pack + Burst SMG cadence + practice dummy
+- [ ] **P06** — Grappling hook
+- [ ] **P07** — CTF mode
+- [ ] **P08** — Map sharing across the network
+- [ ] **P09** — `BTN_FIRE_SECONDARY` (RMB) + keybinds + UI controls panel
+- [ ] **P10** — Mech sprite atlas runtime + per-chassis bone distinctness
+- [ ] **P11** — Per-weapon visible art + two-handed foregrip
+- [ ] **P12** — Damage feedback (hit-flash, decals, stump caps, smoke)
+- [ ] **P13** — Parallax + HUD final art + TTF font + halftone post + decal chunking
+- [ ] **P14** — Audio module (`src/audio.{c,h}`)
+- [ ] **P15–P16** — ComfyUI asset generation (chassis, weapons, HUD icons)
+- [ ] **P17–P18** — Author 8 `.lvl` maps + bake-test harness
 
 ## License
 

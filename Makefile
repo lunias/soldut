@@ -48,8 +48,8 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io shot \
-        debug gdb gdb-host gdb-client valgrind
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor shot \
+        debug gdb gdb-host gdb-client valgrind editor
 
 all: $(BIN)
 
@@ -118,6 +118,33 @@ $(BUILD_DIR)/level_io_test: tests/level_io_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) 
 test-level-io: $(BUILD_DIR)/level_io_test
 	./$(BUILD_DIR)/level_io_test
 
+# M5 P04 fix verification — map_spawn_point honors level->spawns when
+# the .lvl ships authored SPWN records. Pre-fix, F5 test-play would
+# put the player in g_red_lanes[0] regardless of what the editor saved.
+$(BUILD_DIR)/spawn_test: tests/spawn_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/spawn_test.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+test-spawn: $(BUILD_DIR)/spawn_test
+	./$(BUILD_DIR)/spawn_test
+
+# End-to-end: editor shotmode authors a .lvl with a platform + spawn,
+# `./soldut --test-play <lvl>` loads it, soldut.log records the spawn
+# coords AND the post-physics pelvis position. The test grep checks
+# both — catches breakage in editor save / level_load decode /
+# map_spawn_point / runtime physics integration end-to-end.
+test-spawn-e2e: $(BIN) editor
+	./tests/spawn_e2e.sh
+
+# Editor shot-mode regression suite — runs every shot script under
+# tools/editor/shots/. Each script asserts on doc state at its
+# checkpoints; failures bubble up as a non-zero exit.
+test-editor: editor
+	./build/soldut_editor --shot tools/editor/shots/smoke.shot
+	./build/soldut_editor --shot tools/editor/shots/bugs.shot
+	./build/soldut_editor --shot tools/editor/shots/poly_triangulation.shot
+	./build/soldut_editor --shot tools/editor/shots/validate_failures.shot
+	./build/soldut_editor --shot tools/editor/shots/scaling_4k.shot
+
 # Shot mode — drive a scripted scene through the real renderer and
 # write PNGs. Handy for visual diffs without filming. Override SCRIPT
 # to point at a different .shot file.
@@ -170,9 +197,25 @@ windows:
 macos:
 	./cross-macos.sh
 
+# M5 P04 — level editor. Builds build/soldut_editor by delegating to
+# tools/editor/Makefile. Links a subset of src/ (level_io + arena + log
+# + ds + hash) plus raylib + raygui (header-only, vendored at
+# third_party/raygui/). Does NOT link mech/physics/net.
+editor: $(RAYLIB_LIB)
+	$(MAKE) -C tools/editor
+
+# Run an editor shot script. SCRIPT defaults to the smoke test; pass
+# any other path with `make editor-shot SCRIPT=...`. The runner writes
+# PNG screenshots + a paired .log under build/shots/editor/<scriptname>/
+# and exits non-zero on assertion failure.
+EDITOR_SHOT_SCRIPT ?= tools/editor/shots/smoke.shot
+editor-shot: editor
+	./build/soldut_editor --shot $(EDITOR_SHOT_SCRIPT)
+
 clean:
 	rm -rf $(BUILD_DIR) $(BIN) soldut.exe soldut.log
 	rm -f $(ENET_OBJ)
+	$(MAKE) -C tools/editor clean
 
 distclean: clean
 	$(MAKE) -C third_party/raylib/src clean
@@ -194,6 +237,7 @@ help:
 	@echo "  make distclean   also rebuild third_party libs"
 	@echo "  make shot        run scripted scene → build/shots/*.png"
 	@echo "                   override script: make shot SCRIPT=path/to/x.shot"
+	@echo "  make editor      build the M5 level editor → build/soldut_editor"
 
 -include $(DEP)
 -include $(DBG_DEP)

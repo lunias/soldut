@@ -5,7 +5,7 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-04** (M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver, P02 — polygon collision + slope physics, and P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote interp + `is_dummy` bit in).
+Last updated: **2026-05-04** (M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver, P02 — polygon collision + slope physics, P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote interp + `is_dummy` bit, and P04 — standalone level editor at `tools/editor/` + `--test-play` flag in the game in).
 
 ---
 
@@ -18,7 +18,7 @@ Last updated: **2026-05-04** (M4 lobby & matches in; M5 P01 — `.lvl` format + 
 | **M2**    | Foundation lands 2026-05-03. Host/client handshake works locally; per-tick input ship + 30 Hz snapshot broadcast + client-side prediction & replay + per-mech bone history for hitscan lag compensation are wired. LAN-only, full snapshots, no mid-tick interpolation of remote mechs (see TRADE_OFFS.md). Two-laptop bake test still pending. |
 | **M3**    | Combat depth in 2026-05-03. All 5 chassis (Trooper / Scout / Heavy / Sniper / Engineer) with passives. All 8 primaries (Pulse Rifle, Plasma SMG, Riot Cannon, Rail Cannon, Auto-Cannon, Mass Driver, Plasma Cannon, Microgun) and 6 secondaries (Sidearm, Burst SMG, Frag Grenades, Micro-Rockets, Combat Knife, Grappling Hook). Projectile pool with bone + tile collision. Explosions: damage falloff, line-of-sight check, impulse to ragdolls. Per-limb HP and dismemberment of all 5 limbs. Recoil + bink + self-bink fully wired. Friendly-fire toggle (`--ff` server flag). Kill feed with HEADSHOT/GIB/OVERKILL/RAGDOLL/SUICIDE flags. Loadout via CLI flags (`--chassis`, `--primary`, `--secondary`, `--armor`, `--jetpack`). Snapshot wire format widened to carry chassis/armor/jet/secondary; protocol id bumped to `S0LE`. |
 | **M4**    | Lobby & matches in 2026-05-03. Game flow is now title → browser → lobby → countdown → match → summary → next lobby. New modules: `match.{h,c}`, `lobby.{h,c}`, `lobby_ui.{h,c}`, `ui.{h,c}` (small immediate-mode raylib UI helpers, scale-aware for 4K), `config.{h,c}` (`soldut.cfg` key=value parser), `maps.{h,c}` (Foundry / Slipstream / Reactor — three code-built maps for the rotation; `.lvl` loader is M5). LOBBY-channel messages (player list with `mech_id`, slot delta, loadout, ready, team change, chat, vote, kick/ban, countdown, round start/end, match state). Server config file: port, max_players, mode, score_limit, time_limit, friendly_fire, auto_start_seconds, map_rotation, mode_rotation. Single-player flow auto-hosts an offline server and arms a 1s countdown. Protocol id bumped `S0LE` → `S0LF`. Network test scaffold under `tests/net/` runs the host/client end-to-end via real ENet loopback and asserts on log-line milestones. |
-| **M5**    | In progress. **P01–P03** in. P02: per-particle contact normals (Q1.7 SoA fields + `PARTICLE_FLAG_CEILING`); polygon broadphase grid built at level load (`level_build_poly_broadphase`); `physics_constrain_and_collide` interleaves tile + polygon collision per relaxation iter (closest-point-on-triangle, push-out via pre-baked edge normals); `level_ray_hits` tests segments against polygons too; slope-tangent run velocity, slope-aware friction (`0.99 - 0.07*|ny|`, ICE→0.998), angled-ceiling jet redirection, slope-aware post-physics anchor (skips when `ny_avg > -0.92`); WIND/ZERO_G ambient zones; environmental damage tick for DEADLY tiles+polys+ACID zones. Renderer draws polygons (P02 stopgap, replaced by sprite art at P13). P03: per-particle `render_prev_x/_y` snapshot at the top of each `simulate_step`; renderer lerps `pos` ↔ `render_prev` by `alpha = accum/TICK_DT` (also threaded through projectile + FX draw); reconcile `visual_offset` is now read by `renderer_draw_frame` and applied additively to local-mech draws (decays over ~6 frames so server snaps don't read as glitches); per-mech remote snapshot ring (`remote_snap_ring[3]`) + `snapshot_interp_remotes` lerps remote mechs at `client_render_time_ms - 100ms` between bracketing entries (clamped to nearest if only one entry, snap+clear on >200 px corrections); `state_bits` widened u8→u16, `SNAP_STATE_IS_DUMMY` rides bit 11 so client dummies don't drive arm-aim; protocol id bumped `S0LF` → `S0LG`. **Pending**: P04 (level editor), P05+ (pickups, grapple, CTF, map sharing, controls, art, audio, maps). |
+| **M5**    | In progress. **P01–P04** in. P02: per-particle contact normals (Q1.7 SoA fields + `PARTICLE_FLAG_CEILING`); polygon broadphase grid built at level load (`level_build_poly_broadphase`); `physics_constrain_and_collide` interleaves tile + polygon collision per relaxation iter (closest-point-on-triangle, push-out via pre-baked edge normals); `level_ray_hits` tests segments against polygons too; slope-tangent run velocity, slope-aware friction (`0.99 - 0.07*|ny|`, ICE→0.998), angled-ceiling jet redirection, slope-aware post-physics anchor (skips when `ny_avg > -0.92`); WIND/ZERO_G ambient zones; environmental damage tick for DEADLY tiles+polys+ACID zones. Renderer draws polygons (P02 stopgap, replaced by sprite art at P13). P03: per-particle `render_prev_x/_y` snapshot at the top of each `simulate_step`; renderer lerps `pos` ↔ `render_prev` by `alpha = accum/TICK_DT` (also threaded through projectile + FX draw); reconcile `visual_offset` is now read by `renderer_draw_frame` and applied additively to local-mech draws (decays over ~6 frames so server snaps don't read as glitches); per-mech remote snapshot ring (`remote_snap_ring[3]`) + `snapshot_interp_remotes` lerps remote mechs at `client_render_time_ms - 100ms` between bracketing entries (clamped to nearest if only one entry, snap+clear on >200 px corrections); `state_bits` widened u8→u16, `SNAP_STATE_IS_DUMMY` rides bit 11 so client dummies don't drive arm-aim; protocol id bumped `S0LF` → `S0LG`. **Pending**: P04 (level editor), P05+ (pickups, grapple, CTF, map sharing, controls, art, audio, maps). |
 
 ---
 
@@ -463,9 +463,191 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
     `tests/shots/net/run.sh {2p_meet, m5_smoothing, 2p_sync,
     2p_hit, 2p_combat, 2p_jitter, 2p_legs}` all 12/12 passing each.
 
+- **P04 — standalone level editor + `--test-play` game flag** (2026-05-04).
+  - New `tools/editor/` with `main.c`, `doc.{c,h}`, `poly.{c,h}`,
+    `undo.{c,h}`, `view.{c,h}`, `palette.{c,h}`, `tool.{c,h}`,
+    `play.{c,h}`, `files.{c,h}`, `validate.{c,h}` + a `Makefile`.
+    Top-level `make editor` delegates and produces
+    `build/soldut_editor`.
+  - Editor links a SUBSET of `src/` (arena, log, hash, ds, level_io)
+    plus raylib + raygui (header-only, vendored at
+    `third_party/raygui/raygui.h`). Does **not** link mech / physics /
+    net / simulate. Inspect the linker line: 0 references to combat
+    code from the editor.
+  - `EditorDoc` mirrors `Level`; resizable arrays via `stb_ds`
+    `arrput` (only place outside the runtime that uses stb_ds).
+    `doc_load` / `doc_save` route through the runtime's `level_io`
+    so the editor speaks the exact same on-disk format.
+  - 7 tools (Tile / Polygon / Spawn / Pickup / Ambient / Deco / Meta)
+    with a small vtable. Universal verbs (`Ctrl+Z/Y/S/O/N`, `F5`,
+    `Space`-pan, `Ctrl`-scroll-zoom, `G`/`Shift+G` grids, `H`-help)
+    handled in `main.c` before tool dispatch. Right-click on objects
+    deletes the nearest within 24 px.
+  - **Polygon ear-clipping** (Eberly form) in `poly.c`. Validates
+    `≥3 verts`, `≥8 px edges`, no self-intersection, non-degenerate
+    area; flips CCW→CW automatically before triangulation. Edge
+    normals pre-baked in Q1.15 so the runtime never normalizes at
+    load.
+  - **Slope + alcove presets** (`palette.c`): `ramp_up_30/45/60`,
+    `ramp_dn_30/45/60`, `bowl_30/45`, `overhang_30/45/60`,
+    `alcove_edge` (4 pieces), `alcove_jetpack` (4 pieces),
+    `alcove_slope_roof` (floor + 45° slope roof), `cave_block`
+    (alias of edge alcove). Each preset emits 1–8 LvlPoly triangles
+    via `poly_triangulate`.
+  - **Undo/redo**: two stacks of 64 commands. Tile-paint commands
+    batch into strokes (mouse-press to mouse-release); object commands
+    are atomic. Big tile ops snapshot the whole grid before mutation
+    via `undo_snapshot_tiles`. New actions clear the redo stack.
+  - **Save-time validation** (`validate.c`): ≥1 spawn, CTF flag bases
+    matched by team-sided spawns, polygons in-bounds and non-degenerate,
+    pickups not inside SOLID tiles, META display name non-empty, **alcove
+    sizing** per `documents/m5/07-maps.md` — pickups in enclosed
+    neighborhoods (≥3 SOLID walls within 96 px) must have ≥3 tiles
+    interior height × ≥2 tiles depth × ≥16 px wall clearance. Failures
+    pop a raygui message-box modal listing each problem on its own line.
+  - **F5 test-play** (`play.c`): saves to
+    `$TMPDIR/soldut-editor-test.lvl`, then `posix_spawn`s
+    `./soldut --test-play <abs_path>` (or `CreateProcess` on Windows).
+    Editor stays interactive while the child runs.
+  - **Game-side `--test-play <path>` flag** (`src/main.c`): forces
+    LAUNCH_HOST + offline + skip_title; configures FFA / 60 s round /
+    1 s auto-start; stashes the path on `Game.test_play_lvl`. Both
+    `bootstrap_host`'s pre-build and `start_round`'s rebuild route
+    through the new `map_build_from_path` (`src/maps.c`) which calls
+    `level_load` directly (no MapId rotation).
+  - **File picker is a raygui textbox modal**, not vendored
+    `tinyfiledialogs`. The editor accepts `argv[1]` as an initial
+    open path and auto-fills `assets/maps/scratch.lvl` for first
+    Save. Logged as a trade-off (see `TRADE_OFFS.md`).
+  - **4K / hi-DPI scaling** (post-ship polish, same day). Editor
+    sets `FLAG_WINDOW_HIGHDPI` + bilinear-filters the default font.
+    `editor_scale(GetScreenHeight())` mirrors the game's
+    `ui_compute_scale` (1.0× at 720p → 3.0× at 4K, snapping in 0.25
+    steps); a `UIDims` struct computed each frame holds scaled
+    `left_w`/`right_w`/`top_h`/`bottom_h`/`row_h`/`font_*` values
+    that every panel + palette + modal reads. raygui's
+    `GuiSetStyle(DEFAULT, TEXT_SIZE, ...)` is bumped each frame to
+    match. Initial window opens at 80% of the primary monitor
+    (clamped to ≥1280×800), so a 4K monitor lands a usable
+    ~3000×1700 window instead of a tiny 1280×800 fixed box.
+    `files.c` and the meta modal scale themselves the same way.
+    All panels use a dedicated high-contrast color set
+    (`COL_TEXT` / `COL_TEXT_DIM` / `COL_TEXT_HIGH` / `COL_ACCENT`)
+    so labels stay legible against the dark panel background.
+  - **Keyboard-shortcut help modal** (same polish). Pressing `H`
+    opens a scrollable two-column reference (key | description)
+    with sections for Global / View / Tools / Tile / Polygon /
+    Objects. Mouse wheel scrolls; `Esc` or `H` again closes.
+    Replaces the old "log to console on H" stub.
+  - **Bug-fix round** (post-ship, same day, prompted by playtest):
+    five user-reported issues caught and patched, with regression
+    tests for each.
+    1. Tile-flag checkbox labels were rendering off the right edge
+       of the panel (raygui's `GuiCheckBox` uses `bounds` as the
+       checkbox square — the label trails it. Earlier code passed
+       the full row width as bounds, sending labels offscreen).
+       Fix: small-square bounds + auto-trailing label.
+       (`editor_ui.c::ui_draw_tile_palette`)
+    2. `H` key didn't close the help modal. raylib's
+       `EndDrawing()` calls `PollInputEvents()` at its tail, so
+       any `IsKeyPressed` check AFTER `EndDrawing` reads the
+       NEXT frame's edge state. Fix: process modal key toggles
+       at the very top of the frame, in the same input window
+       the open-on-H check uses; new `ui_help_toggle()` helper.
+       (`main.c`, `editor_ui.{c,h}`)
+    3. Help modal body text was overlapping the footer hint at
+       the bottom — `body_y1` didn't reserve footer space.
+       Fix: `body_y1 = dlg_y + dlg_h - footer_h - pad`.
+       (`editor_ui.c::ui_help_modal_draw`)
+    4. Meta button only opened the modal on tool TRANSITION; if
+       you closed meta and clicked the button again, no-op
+       because `picked == active_tool`. Fix: `ui_draw_tool_buttons`
+       now returns the actually-clicked tool (vs. -1 for no
+       click), and `main.c` always opens meta on a real click.
+    5. F5 test-play ignored the `.lvl`'s authored spawn points —
+       `map_spawn_point` always returned the M4-era hardcoded
+       `g_*_lanes`. Fix: when `level->spawn_count > 0`, prefer
+       the authored spawns (FFA round-robin / TDM team affinity).
+       (`src/maps.c::map_spawn_point`)
+  - **Regression infrastructure for the bug fixes**:
+    - `tests/spawn_test.c` (14 unit assertions on
+      `map_spawn_point` covering FFA round-robin, TDM team
+      affinity, team=0 wildcard, and the empty-spawns
+      fallback). `make test-spawn`.
+    - `tests/spawn_e2e.sh` — end-to-end pipe: editor shot
+      mode authors a `.lvl` with a floor + raised platform
+      and a spawn ON THE PLATFORM, `./soldut --test-play
+      <lvl>` loads it, `soldut.log` records both the spawn
+      coords AND the post-physics pelvis position. The test
+      asserts both — `grounded=1` after settle proves the
+      mech actually landed on the platform (not the bottom
+      floor, which would happen pre-fix). `make test-spawn-e2e`.
+    - `tools/editor/shots/bugs.shot` — covers bugs 1, 2, 3, 4
+      via `tile_flags`, `toggle_help`, layout shots, and
+      `click_tool_button meta` directives. New shotmode events:
+      `EV_TOGGLE_HELP`, `EV_CLICK_TOOL_BUTTON`, `EV_TILE_FILL_RECT`.
+      Asserts on `help_open` / `meta_open` state (new fields).
+    - `tools/editor/shots/help_layout.shot` and
+      `help_layout_4k.shot` for visual layout regressions.
+    - `make test-editor` runs every editor shot script.
+  - **Cross-platform editor build + CI artifact**: `cross-windows.sh`
+    and `cross-macos.sh` both build `SoldutEditor.exe` /
+    `SoldutEditor` alongside the game. `tools/editor/play.c`
+    guards its `<windows.h>` include with `WIN32_LEAN_AND_MEAN /
+    NOGDI / NOUSER` so raylib's `Rectangle` / `CloseWindow` /
+    `ShowCursor` no longer collide with `wingdi.h` / `winuser.h`.
+    `.github/workflows/ci.yml` now runs `make editor` on Linux
+    + macOS and ships both binaries in each artifact bundle:
+    `soldut-linux-x86_64`, `soldut-windows-x86_64`,
+    `soldut-macos`. The headless tests
+    (`test-physics` / `test-level-io` / `test-spawn`) also run on
+    every Linux + macOS push.
+  - **SHOT_LOG-gated test-play diagnostics**: when `--test-play`
+    is on, `main.c` flips `g_shot_mode = 1` so the existing
+    `SHOT_LOG()` macro fires. Adds a per-second pelvis-pos line
+    in `main.c`'s MATCH branch and converts the per-slot lobby
+    spawn line to SHOT_LOG. **Production play paths emit none
+    of these lines** — the macro is a one-branch no-op when
+    `g_shot_mode == 0`.
+  - **Editor shot mode** (same day). New
+    `tools/editor/shotmode.{c,h}` + a `--shot <script>` flag.
+    Script grammar mirrors the game's: `at <tick> <directive>`
+    with header lines for `window`, `out`, `ticks`, `panels`,
+    `contact_sheet`. Drives the editor's doc / tool / undo APIs
+    deterministically (so we don't have to synthesize raylib
+    keyboard / mouse events), captures PNG screenshots at marked
+    ticks, and runs assertions that fail the run with non-zero
+    exit. `assert <field> <op> <value>` covers `polys / spawns /
+    pickups / ambis / decos / flags / tiles_solid /
+    validate_problems / active_tool / dirty`.
+    UI rendering extracted into `editor_ui.{c,h}` (UIDims +
+    COL_* + every panel and modal) so shots render the actual
+    editor chrome — toolbars, palettes, status bar, help modal,
+    meta modal — at any window size, not a stub. The full UI
+    shows by default; scripts can pass `panels off` for a
+    canvas-only frame. Contact-sheet directive composites all
+    captured shots into one PNG (configurable `cols` /
+    `cell <W> <H>`). Four regression scripts ship under
+    `tools/editor/shots/`: `smoke.shot` (every primary verb +
+    save/load round-trip + undo/redo + validation),
+    `poly_triangulation.shot` (square/pentagon/L-shape ear-clip
+    counts), `validate_failures.shot` (the validator catches
+    bad inputs), `scaling_4k.shot` (verifies UI fits at 3000×1900).
+    Run via `make editor-shot EDITOR_SHOT_SCRIPT=...`. All four
+    pass with 0 assertion failures.
+  - **`src/math.h` reorder** — `<math.h>` now precedes the raylib
+    include so the editor's stricter expansion paths see fabsf /
+    fmaxf / etc. as proper declarations rather than builtins. Game
+    behavior unchanged; the headless and level-io tests still pass
+    (25/25 + headless run-through).
+  - Verification: `make` clean, `make editor` builds without errors,
+    `make test-physics` and `make test-level-io` (25/25) pass,
+    `tests/net/run.sh` 13/13 still passing. Editor opens an existing
+    `.lvl` (load logged at INFO); `./soldut --test-play <lvl>` loads
+    the supplied map and arms the auto-start countdown.
+
 ### Pending
 
-- **P04** — level editor (`tools/editor/`).
 - **P05–P14** — pickups, grapple, CTF, map sharing, controls, mech
   atlas runtime, weapon art, damage feedback, parallax / HUD / TTF /
   halftone / decal chunking, audio.

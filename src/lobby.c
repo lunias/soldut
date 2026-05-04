@@ -487,6 +487,11 @@ void lobby_spawn_round_mechs(LobbyState *L, World *world,
         }
         Vec2 spawn = map_spawn_point((MapId)map_id, &world->level,
                                      i, s->team, mode);
+        /* Per-slot spawn coordinates — diagnostic only (e2e tests use
+         * this to verify F5 test-play picked the .lvl spawn point).
+         * SHOT_LOG is a no-op in production play. */
+        SHOT_LOG("lobby: slot %d team %d -> spawn (%.1f, %.1f)",
+                 i, (int)s->team, (double)spawn.x, (double)spawn.y);
         int mid = mech_create_loadout(world, s->loadout, spawn,
                                       s->team, /*is_dummy*/false);
         if (mid < 0) {

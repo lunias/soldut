@@ -1,0 +1,35 @@
+# tools/editor/shots/validate_failures.shot — verify that the save-time
+# validator catches the bad inputs it claims to catch.
+#
+# Each beat sets up an invalid state and asserts validate_problems > 0.
+# This run is EXPECTED to record validation problems (those aren't
+# assert failures of our own — they're the validator doing its job).
+
+window 1280 800
+new 60 40
+ticks 100
+contact_sheet validate_failures
+
+# ---- 5..10: empty doc fails (no spawns) ----
+at 5  validate
+at 5  assert validate_problems >= 1
+at 6  shot t06_empty
+
+# ---- 15..20: add a spawn AND a meta name → should pass ----
+at 15 tool spawn
+at 16 spawn_add 320 1000 0
+at 17 validate
+at 17 assert validate_problems == 0
+at 18 shot t18_minimal_valid
+
+# ---- 25..35: pickup inside a SOLID tile → should fail ----
+at 25 tool tile
+at 25 tile_flags solid
+at 26 tile_paint 640 640
+at 27 tool pickup
+at 28 pickup_add 640 640 health_s
+at 29 validate
+at 29 assert validate_problems >= 1
+at 30 shot t30_pickup_in_solid
+
+at 50 end

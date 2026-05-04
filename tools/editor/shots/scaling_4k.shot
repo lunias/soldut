@@ -1,0 +1,45 @@
+# tools/editor/shots/scaling_4k.shot — verify the UI scales for 4K.
+#
+# Opens a window at a 4K-ish height (2160p) so ui_compute_dims picks
+# the 3.0× scale factor. Captures the editor with full panels in
+# several states; the test passes if all the chrome fits without
+# clipping and the text is legible.
+
+window 3000 1900
+new 80 50
+ticks 60
+panels on
+contact_sheet scaling_4k cols 2 cell 1500 950
+
+# A floor + a few features so the canvas isn't empty.
+at 0 camera_target 1280 800
+at 0 camera_zoom 0.4
+at 1 spawn_add 320 1000 0
+at 2 tool tile
+at 2 tile_flags solid
+at 3 tile_paint 200 1100
+at 3 tile_paint 232 1100
+at 3 tile_paint 264 1100
+at 4 tool poly
+at 5 apply_preset ramp_up_45 600 1024
+at 6 apply_preset alcove_edge 1100 1024
+
+# Tile palette open, polygon tool active for shot 1
+at 8  tool poly
+at 10 shot t10_4k_poly_palette
+
+# Pickup tool palette is the longest — make sure all 15 entries fit
+at 15 tool pickup
+at 17 shot t17_4k_pickup_palette
+
+# Help modal — most layout-sensitive
+at 25 open_help
+at 27 shot t27_4k_help_modal
+at 28 close_help
+
+# Meta modal
+at 30 open_meta
+at 32 shot t32_4k_meta_modal
+at 33 close_meta
+
+at 40 end

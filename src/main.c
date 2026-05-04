@@ -60,6 +60,7 @@ typedef struct {
     char        secondary[24];
     char        armor[16];
     char        jetpack[16];
+    char        test_play_lvl[256];   /* M5 P04 — editor F5 hands us a .lvl path */
     bool        friendly_fire;
     bool        skip_title;
     bool        ff_set;
@@ -116,6 +117,15 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
         }
         else if (strcmp(argv[i], "--ff") == 0) {
             out->friendly_fire = true; out->ff_set = true;
+        }
+        /* M5 P04 — editor F5 test-play. Boots into an offline-solo round
+         * on the supplied .lvl file. We force LAUNCH_HOST + skip_title;
+         * the main flow detects test_play_lvl[0] and switches to offline
+         * + FFA + 1 s auto-start. */
+        else if (strcmp(argv[i], "--test-play") == 0 && i + 1 < argc) {
+            snprintf(out->test_play_lvl, sizeof out->test_play_lvl, "%s", argv[++i]);
+            out->mode = LAUNCH_HOST;
+            out->skip_title = true;
         }
     }
 }
@@ -258,9 +268,15 @@ static void start_round(Game *g) {
     g->world.friendly_fire= g->config.friendly_fire ||
                             (g->match.mode == MATCH_MODE_FFA);
 
-    /* Build map. */
+    /* Build map. M5 P04: in test-play mode, ignore the rotation and
+     * reload the scratch .lvl so successive rounds keep using the
+     * editor's map. */
     arena_reset(&g->level_arena);
-    map_build((MapId)g->match.map_id, &g->world, &g->level_arena);
+    if (g->test_play_lvl[0]) {
+        map_build_from_path(&g->world, &g->level_arena, g->test_play_lvl);
+    } else {
+        map_build((MapId)g->match.map_id, &g->world, &g->level_arena);
+    }
     decal_init((int)level_width_px(&g->world.level),
                (int)level_height_px(&g->world.level));
 
@@ -392,8 +408,12 @@ static void host_match_flow_step(Game *g, float dt) {
                 }
             }
             if (lobby_tick(&g->lobby, dt)) {
-                /* Auto-start fired → enter countdown. */
-                match_begin_countdown(&g->match, 5.0f);
+                /* Auto-start fired → enter countdown. test-play uses
+                 * a 1 s countdown (set in match.countdown_default at
+                 * startup) so designers' F5 round-trip stays short. */
+                float secs = g->test_play_lvl[0]
+                                 ? g->match.countdown_default : 5.0f;
+                match_begin_countdown(&g->match, secs);
                 if (g->net.role == NET_ROLE_SERVER) {
                     net_server_broadcast_match_state(&g->net, &g->match);
                 }
@@ -475,8 +495,16 @@ static bool bootstrap_host(Game *g, const LaunchArgs *args, bool offline) {
     apply_loadout_flags(g, args);
 
     /* Pre-build the level so the first-time lobby has *something* to
-     * draw under the UI. ROUND_START rebuilds it for the chosen map. */
-    map_build(MAP_FOUNDRY, &g->world, &g->level_arena);
+     * draw under the UI. ROUND_START rebuilds it for the chosen map.
+     *
+     * M5 P04 — when the editor's F5 forks us with --test-play, load the
+     * scratch .lvl directly; subsequent start_round calls also pick this
+     * path up via g->test_play_lvl. */
+    if (g->test_play_lvl[0]) {
+        map_build_from_path(&g->world, &g->level_arena, g->test_play_lvl);
+    } else {
+        map_build(MAP_FOUNDRY, &g->world, &g->level_arena);
+    }
     decal_init((int)level_width_px(&g->world.level),
                (int)level_height_px(&g->world.level));
     return true;
@@ -577,9 +605,33 @@ int main(int argc, char **argv) {
     config_load(&game.config, "soldut.cfg");
     if (args.mode == LAUNCH_HOST && args.port != 0) game.config.port = args.port;
     if (args.ff_set) game.config.friendly_fire = args.friendly_fire;
+    /* M5 P04 — editor test-play overrides match config: FFA, 60 s round,
+     * 1 s auto-start, no networking. Stash the .lvl path on Game so
+     * bootstrap_host + start_round can find it. */
+    if (args.test_play_lvl[0]) {
+        snprintf(game.test_play_lvl, sizeof game.test_play_lvl, "%s",
+                 args.test_play_lvl);
+        game.config.mode               = MATCH_MODE_FFA;
+        game.config.time_limit         = 60;
+        game.config.score_limit        = 50;
+        game.config.auto_start_seconds = 1;
+        game.config.friendly_fire      = true;
+        /* Turn on the SHOT_LOG sink so test-play emits the diagnostic
+         * trail shipped via the existing `SHOT_LOG()` macro across the
+         * codebase (anim transitions, grounded toggles, hitscan, etc.)
+         * plus the per-second pelvis-pos line in this file's MATCH
+         * branch. SHOT_LOG is a one-branch no-op when g_shot_mode is
+         * 0 — the production code path never sees these messages. */
+        g_shot_mode = 1;
+    }
     /* Re-apply MatchState defaults from the loaded config. */
     match_init(&game.match, game.config.mode, game.config.score_limit,
                game.config.time_limit, game.config.friendly_fire);
+    if (args.test_play_lvl[0]) {
+        /* Drop the in-match countdown to 1 s as well so a designer's
+         * F5 round-trip time stays short (default is 5 s). */
+        game.match.countdown_default = 1.0f;
+    }
     game.match.map_id = config_pick_map(&game.config, 0);
     game.lobby.auto_start_default = game.config.auto_start_seconds;
     game.world.friendly_fire = game.config.friendly_fire;
@@ -605,10 +657,18 @@ int main(int argc, char **argv) {
     /* Initial mode: title (unless CLI shortcut). */
     if (args.skip_title) {
         if (args.mode == LAUNCH_HOST) {
-            if (!bootstrap_host(&game, &args, false)) {
+            /* test-play forces offline-solo so we don't bind a UDP port
+             * the user's running game might already be using. */
+            bool offline = (args.test_play_lvl[0] != 0);
+            if (!bootstrap_host(&game, &args, offline)) {
                 game_shutdown(&game); log_shutdown(); return EXIT_FAILURE;
             }
             game.mode = MODE_LOBBY;
+            if (args.test_play_lvl[0]) {
+                /* Arm the round immediately — test-play wants to skip
+                 * the lobby UX and drop the player into the map. */
+                lobby_auto_start_arm(&game.lobby, 1.0f);
+            }
         } else if (args.mode == LAUNCH_CLIENT) {
             if (!bootstrap_client(&game, &args)) {
                 game_shutdown(&game); log_shutdown(); return EXIT_FAILURE;
@@ -856,6 +916,27 @@ int main(int argc, char **argv) {
             /* Host: drive match flow (kills → scores → end-of-round). */
             if (game.net.role == NET_ROLE_SERVER || game.offline_solo) {
                 host_match_flow_step(&game, (float)dt);
+            }
+
+            /* Editor F5 test-play: per-second pelvis log so
+             * tests/spawn_e2e.sh can verify the mech settled where
+             * the .lvl said it should. Gated on SHOT_LOG (== `if
+             * (g_shot_mode) ...`), which we toggle on at startup
+             * only when --test-play is set — production play paths
+             * never hit this branch. */
+            if (game.match.phase == MATCH_PHASE_ACTIVE &&
+                game.world.tick > 0 && (game.world.tick % 60) == 0)
+            {
+                int mid = game.world.local_mech_id;
+                if (mid >= 0 && mid < game.world.mech_count) {
+                    const Mech *m = &game.world.mechs[mid];
+                    int pb = m->particle_base + PART_PELVIS;
+                    SHOT_LOG("test-play: tick %llu  pelvis (%.1f, %.1f)  grounded=%d",
+                             (unsigned long long)game.world.tick,
+                             (double)game.world.particles.pos_x[pb],
+                             (double)game.world.particles.pos_y[pb],
+                             (int)m->grounded);
+                }
             }
 
             /* Render world + HUD + (diag + match banner via draw_diag).
