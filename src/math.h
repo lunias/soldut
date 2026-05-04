@@ -19,6 +19,33 @@
 #include <math.h>
 #include <stdint.h>
 
+/* Apple's <math.h> on Xcode 16+ hides the C99 float versions of math
+ * functions (floorf, sqrtf, fabsf, etc.) under feature-test macros
+ * that -std=c11 / -std=gnu11 don't trigger reliably across all CI
+ * targets. raymath.h's static-inline functions reference them
+ * unconditionally, so we force-declare them here. The `extern "C"`
+ * dance isn't needed because soldut is C-only.
+ *
+ * gcc on Linux + clang on Linux (zig cc) already see these via the
+ * <math.h> include above; the redundant decls are harmless. */
+extern float floorf(float);
+extern float ceilf (float);
+extern float roundf(float);
+extern float sqrtf (float);
+extern float fabsf (float);
+extern float fmaxf (float, float);
+extern float fminf (float, float);
+extern float sinf  (float);
+extern float cosf  (float);
+extern float tanf  (float);
+extern float atan2f(float, float);
+extern float asinf (float);
+extern float acosf (float);
+extern float expf  (float);
+extern float logf  (float);
+extern float powf  (float, float);
+extern double tan  (double);
+
 #include "../third_party/raylib/src/raylib.h"
 #include "../third_party/raylib/src/raymath.h"
 
