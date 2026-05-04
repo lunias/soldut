@@ -31,6 +31,7 @@
 #include "maps.h"
 #include "mech.h"
 #include "particle.h"
+#include "pickup.h"
 #include "projectile.h"
 #include "reconcile.h"
 #include "snapshot.h"
@@ -830,6 +831,13 @@ static void client_handle_round_start(const uint8_t *body, int blen, Game *g) {
     g->world.projectiles.count = 0;
     g->world.mech_count        = 0;
     g->world.local_mech_id     = -1;
+    g->world.dummy_mech_id     = -1;
+    /* P05 — populate the spawner pool from the just-loaded level.
+     * world.authoritative is false on the client, so practice-dummy
+     * mechs aren't spawned here; the host's snapshot stream creates
+     * them with SNAP_STATE_IS_DUMMY set. Subsequent transient pickups
+     * (engineer repair packs) arrive via NET_MSG_PICKUP_STATE. */
+    pickup_init_round(&g->world);
     g->mode = MODE_MATCH;
     LOG_I("client: ROUND_START map=%d mode=%s",
           g->match.map_id, match_mode_name(g->match.mode));
@@ -1029,6 +1037,56 @@ static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen
                      origin.y + dir.y * wpn->range_px };
         fx_spawn_tracer(&g->world.fx, origin, end);
     }
+}
+
+/* PICKUP_STATE — apply a server-side state transition to the client's
+ * local pool. Mirrors the 20-byte wire format from
+ * net_server_broadcast_pickup_state. The client never initiates; it only
+ * applies what the server reports.
+ *
+ * Two cases:
+ *  - spawner_id < pool.count: existing entry. Update state +
+ *    available_at_tick. Pos/kind/variant/flags should already match
+ *    (level-defined entries are populated identically on both sides via
+ *    pickup_init_round). We trust the wire and overwrite anyway —
+ *    cheap, defends against any divergence.
+ *  - spawner_id >= pool.count: new transient (engineer repair pack).
+ *    Backfill entries up to spawner_id-1 with empty/consumed sentinels
+ *    so the indexing stays in sync, then write the new spawner. */
+static void client_handle_pickup_state(NetState *ns, const uint8_t *body, int blen, Game *g) {
+    (void)ns;
+    if (blen < 18) return;
+    const uint8_t *r = body;
+    uint8_t  spawner_id = r_u8 (&r);
+    uint8_t  state      = r_u8 (&r);
+    (void)r_u8(&r);                          /* reserved */
+    uint64_t avail_tick = r_u64(&r);
+    int16_t  pxq        = (int16_t)r_u16(&r);
+    int16_t  pyq        = (int16_t)r_u16(&r);
+    uint8_t  kind       = r_u8 (&r);
+    uint8_t  variant    = r_u8 (&r);
+    uint16_t flags      = r_u16(&r);
+
+    PickupPool *p = &g->world.pickups;
+    if ((int)spawner_id >= PICKUP_CAPACITY) {
+        LOG_W("client: PICKUP_STATE id=%u out of range", (unsigned)spawner_id);
+        return;
+    }
+    /* Backfill any missing entries up to spawner_id with consumed
+     * sentinels — keeps the index alignment with the server. */
+    while (p->count <= (int)spawner_id) {
+        p->items[p->count++] = (PickupSpawner){
+            .state             = PICKUP_STATE_COOLDOWN,
+            .available_at_tick = (uint64_t)-1,
+        };
+    }
+    PickupSpawner *s = &p->items[spawner_id];
+    s->pos               = (Vec2){ (float)pxq / 8.0f, (float)pyq / 8.0f };
+    s->kind              = kind;
+    s->variant           = variant;
+    s->state             = state;
+    s->available_at_tick = avail_tick;
+    s->flags             = flags;
 }
 
 static void client_handle_hit_event(NetState *ns, const uint8_t *body, int blen, Game *g) {
@@ -1322,6 +1380,8 @@ static void client_dispatch_event(NetState *ns, Game *g, ENetEvent *ev) {
                     client_handle_hit_event(ns, body, blen, g); break;
                 case NET_MSG_FIRE_EVENT:
                     client_handle_fire_event(ns, body, blen, g); break;
+                case NET_MSG_PICKUP_STATE:
+                    client_handle_pickup_state(ns, body, blen, g); break;
                 case NET_MSG_LOBBY_LIST:
                     client_handle_lobby_list(body, blen, g); break;
                 case NET_MSG_LOBBY_SLOT_UPDATE:
@@ -1550,6 +1610,59 @@ void net_server_broadcast_hit(NetState *ns, int victim_mech_id, int hit_part,
     ENetPacket *pkt = enet_packet_create(buf, (size_t)(p - buf),
                                           ENET_PACKET_FLAG_RELIABLE);
     enet_host_broadcast((ENetHost *)ns->enet_host, NET_CH_EVENT, pkt);
+}
+
+/* PICKUP_STATE wire layout (20 bytes):
+ *   u8  type = NET_MSG_PICKUP_STATE
+ *   u8  spawner_id           (index into world.pickups.items)
+ *   u8  state                (PickupState)
+ *   u8  reserved
+ *   u64 available_at_tick    (server tick when COOLDOWN expires;
+ *                             UINT64_MAX = permanently consumed)
+ *   i16 pos_x_q              (1/8 px — only meaningful for transients
+ *                             but always shipped so the client can
+ *                             populate fresh entries uniformly)
+ *   i16 pos_y_q
+ *   u8  kind                 (PickupKind)
+ *   u8  variant              (HealthVariant / PowerupVariant / weapon_id / armor_id)
+ *   u16 flags                (CONTESTED / RARE / HOST_ONLY / TRANSIENT bit 8)
+ *
+ * Spec doc 04-pickups.md called for 12 bytes (state-only). M5 P05
+ * widened to 20 to support transient-spawner replication for the
+ * engineer's deployable repair pack — clients allocating new pool
+ * entries need pos/kind/variant/flags. Bandwidth still trivial:
+ * 20 bytes × ~10 events/min × 16 players ≈ 53 B/s aggregate, well
+ * under the 5 KB/s/client budget. */
+void net_server_broadcast_pickup_state(NetState *ns, int spawner_id,
+                                       const struct PickupSpawner *s)
+{
+    if (!ns || !s || ns->role != NET_ROLE_SERVER) return;
+    if (spawner_id < 0 || spawner_id > 255) return;
+    float qx = s->pos.x * 8.0f;
+    float qy = s->pos.y * 8.0f;
+    if (qx >  32760.0f) qx =  32760.0f;
+    if (qx < -32760.0f) qx = -32760.0f;
+    if (qy >  32760.0f) qy =  32760.0f;
+    if (qy < -32760.0f) qy = -32760.0f;
+    int16_t pos_x_q = (int16_t)(qx < 0 ? qx - 0.5f : qx + 0.5f);
+    int16_t pos_y_q = (int16_t)(qy < 0 ? qy - 0.5f : qy + 0.5f);
+
+    uint8_t buf[24]; uint8_t *p = buf;
+    w_u8 (&p, NET_MSG_PICKUP_STATE);
+    w_u8 (&p, (uint8_t)spawner_id);
+    w_u8 (&p, s->state);
+    w_u8 (&p, 0);
+    w_u64(&p, s->available_at_tick);
+    w_u16(&p, (uint16_t)pos_x_q);
+    w_u16(&p, (uint16_t)pos_y_q);
+    w_u8 (&p, s->kind);
+    w_u8 (&p, s->variant);
+    w_u16(&p, s->flags);
+    ENetPacket *pkt = enet_packet_create(buf, (size_t)(p - buf),
+                                          ENET_PACKET_FLAG_RELIABLE);
+    enet_host_broadcast((ENetHost *)ns->enet_host, NET_CH_EVENT, pkt);
+    ns->bytes_sent += (uint32_t)(p - buf);
+    ns->packets_sent++;
 }
 
 /* ---- Stats ---------------------------------------------------------- */

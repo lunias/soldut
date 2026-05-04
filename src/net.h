@@ -58,6 +58,7 @@ enum {
     NET_MSG_KILL_EVENT         =  9,    /* server → client (EVENT) */
     NET_MSG_HIT_EVENT          = 13,    /* server → client (EVENT) — hit pos+dir+part for blood/spark FX */
     NET_MSG_FIRE_EVENT         = 14,    /* server → client (EVENT) — fire origin+dir+weapon for tracer/projectile FX */
+    NET_MSG_PICKUP_STATE       = 15,    /* server → client (EVENT) — pickup spawner state transition (P05) */
     NET_MSG_CHAT               = 10,    /* both directions   (CHAT) */
     NET_MSG_DISCOVERY_QUERY    = 11,    /* connectionless broadcast */
     NET_MSG_DISCOVERY_REPLY    = 12,    /* connectionless reply    */
@@ -268,6 +269,14 @@ void net_server_broadcast_hit(NetState *ns, int victim_mech_id, int hit_part,
 void net_server_broadcast_fire(NetState *ns, int shooter_mech_id, int weapon_id,
                                float origin_x, float origin_y,
                                float dir_x, float dir_y);
+
+/* Pickup state event (P05) — full spawner data so clients can both
+ * mirror state transitions on level-defined pickups AND learn about
+ * transient spawners (engineer-deployed repair packs). 20 bytes.
+ * Reliable on NET_CH_EVENT. */
+struct PickupSpawner;
+void net_server_broadcast_pickup_state(NetState *ns, int spawner_id,
+                                       const struct PickupSpawner *s);
 
 /* ---- M4 lobby/match outgoing -------------------------------------- */
 

@@ -6,7 +6,7 @@ This document specifies the **layout** of the source: folders, modules, what eac
 
 ```
 soldut/
-├── src/                    # game source — 60 .c/.h files (30 modules) post-M5 P01
+├── src/                    # game source — 62 .c/.h files (31 modules) post-M5 P05
 ├── tools/                  # support utilities (level cooker, replay extractor)
 ├── assets/                 # ships with the binary
 ├── third_party/
@@ -71,9 +71,10 @@ src/
 That is the entire public structure. Anything we want to add asks: which existing module owns this? If none, it gets a new `name.{c,h}` pair, never a folder.
 
 Modules that the design canon expects but that haven't shipped yet:
-- `pickup.{c,h}` — lands at M5 P05 (per `documents/m5/04-pickups.md`).
 - `audio.{c,h}` — lands at M5 P14 (per `documents/m5/09-audio.md`).
 - `hotreload.{c,h}` — never built; data hot-reload is deferred indefinitely.
+
+Shipped at M5: `level_io.{c,h}` (P01), `pickup.{c,h}` (P05).
 
 `server_browser.{c,h}` was originally planned as its own module; LAN discovery folded into `net.{c,h}` and the browser screen lives in `lobby_ui.{c,h}`.
 
@@ -344,42 +345,43 @@ We do **not** integrate Tracy or Optick at v1. If we need deep traces, we add th
 
 ## File size targets
 
-| Module | Current LOC (post-M4 + M5 P01–P02) | Notes |
+| Module | Current LOC (post-M4 + M5 P01–P05) | Notes |
 |---|---|---|
-| main.c | 867 | top-level loop + accumulator + CLI |
+| main.c | 1070 | top-level loop + accumulator + CLI + P03 event broadcast loops + P04 `--test-play` + P05 `broadcast_new_pickups` |
 | platform.c | 99 | thin raylib wrapper |
-| game.c | 118 | Game lifecycle |
-| simulate.c | 223 | the pure step |
+| game.c | 121 | Game lifecycle |
+| simulate.c | 251 | the pure step (P03 render_prev snapshot, P05 pickup_step hook) |
 | physics.c | 728 | Verlet + constraints + tile/poly collision (M5 P02 grew this) |
-| mech.c | 1363 | chassis + animation drive — close to split threshold |
-| weapons.c | 638 | weapon table + fire logic |
-| projectile.c | 474 | bullets/grenades |
-| particle.c | 180 | pool + draw |
+| mech.c | 1485 | chassis + animation drive — close to split threshold (P05 added powerup ticks + Engineer deployable + Burst SMG cadence) |
+| weapons.c | 663 | weapon table + fire logic + P03 fire-event recording |
+| projectile.c | 482 | bullets/grenades |
+| particle.c | 190 | pool + draw |
 | decal.c | 80 | splat layer |
 | level.c | 260 | tile-grid helpers + ray queries + poly broadphase (M5 P02) |
-| level_io.c | 812 | `.lvl` loader/saver + CRC32 + poly broadphase build (M5 P01–P02) |
-| maps.c | 206 | code-built map fallbacks + `map_build` |
+| level_io.c | 821 | `.lvl` loader/saver + CRC32 + poly broadphase build (M5 P01–P02) |
+| maps.c | 297 | code-built map fallbacks + `map_build` + `map_build_from_path` + P05 default pickups |
 | match.c | 261 | match phases, scoring, mode rules |
-| render.c | 307 | orchestration (P02 added polygon stopgap draw) |
-| hud.c | 145 | HP / jet / ammo / kill feed |
+| render.c | 386 | orchestration (P02 polygon stopgap, P03 alpha-lerp threading, P05 invis alpha-mod + pickup placeholder) |
+| hud.c | 176 | HP / jet / ammo / kill feed + P05 active-powerup pill |
 | ui.c | 306 | immediate-mode UI helpers |
-| lobby.c | 523 | lobby state, slots, chat, ready-up |
+| lobby.c | 528 | lobby state, slots, chat, ready-up |
 | lobby_ui.c | 896 | title / browser / lobby / summary screens |
-| net.c | 1523 | ENet wrap + packet codec — past split threshold |
-| snapshot.c | 483 | encode/decode |
+| net.c | 1864 | ENet wrap + packet codec + P03 hit/fire events + P05 pickup-state — well past split threshold |
+| snapshot.c | 588 | encode/decode + per-mech remote interp ring (P03) + powerup bits (P05) |
 | reconcile.c | 114 | predict + replay |
+| pickup.c | 343 | new at P05 — spawner pool + state machine + per-kind apply |
 | config.c | 171 | `soldut.cfg` parser |
 | arena.c | 51 | |
 | pool.c | 65 | |
 | log.c | 91 | |
 | hash.c | 49 | |
 | ds.c | 20 | one #define |
-| shotmode.c | 1444 | scriptable test runner — past split threshold |
-| **Total .c** | **~12,500 LOC** | + ~3,000 LOC of headers |
+| shotmode.c | 1484 | scriptable test runner + P05 `give_invis` debug directive — past split threshold |
+| **Total .c** | **~13,940 LOC** | + ~3,410 LOC of headers |
 
-`net.c` is over the ~1500 line split guideline; `shotmode.c` and `mech.c` are
-close. Watch each at the next material change. `audio.{c,h}` and `pickup.{c,h}`
-are not yet built — they land at M5 P14 / P05 and will add to this table.
+`net.c` is well past the ~1500 line split guideline; `shotmode.c` and `mech.c` are
+close. Watch each at the next material change. `audio.{c,h}` is not yet built —
+it lands at M5 P14 and will add to this table.
 
 If a module substantially exceeds the rule of thumb, it's doing too much — we
 look for an extraction.

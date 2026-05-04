@@ -1,0 +1,42 @@
+# M5 P05 — repro for "can't shoot after invis" using Foundry's
+# default INVIS pickup at (30*32=960, floor_y).
+#
+# Player spawns near (16*32=512, ~924), walks right onto the INVIS
+# pickup, then fires. Captures HP-bar / muzzle / tracer evidence.
+
+window 1280 720
+seed 11 22
+out build/shots/m5_invis_repro
+
+# Aim down-right so any bullet that fires has a long traceable path.
+aim 1800 920
+
+# Phase 1 — settle on the spawn platform.
+at 30 shot 010_settled
+
+# Phase 2 — verify the player can shoot BEFORE picking up invis.
+at 60 press fire
+at 75 shot 020_pre_invis_firing
+at 90 release fire
+
+# Phase 3 — walk right to the INVIS pickup at (960, floor_y).
+at 100 press right
+at 220 shot 030_walking
+at 240 release right
+
+# Phase 4 — sit on the INVIS pickup for a tick to ensure grab.
+at 260 shot 040_grabbed_invis
+
+# Phase 5 — try to fire WHILE invis. This is the failure mode.
+at 280 press fire
+at 290 shot 050_firing_during_invis_t290
+at 300 shot 051_firing_during_invis_t300
+at 320 shot 052_firing_during_invis_t320
+at 360 release fire
+
+# Phase 6 — wait for invis to time out, fire again to confirm recovery.
+at 480 shot 060_invis_should_be_done
+at 500 press fire
+at 520 shot 070_post_invis_firing
+at 540 release fire
+at 600 end

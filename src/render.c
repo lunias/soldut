@@ -5,6 +5,7 @@
 #include "level.h"
 #include "mech.h"
 #include "particle.h"
+#include "pickup.h"
 #include "projectile.h"
 
 #include <math.h>
@@ -201,7 +202,7 @@ static void draw_bone_clamped(const Level *L, Vec2 a, Vec2 b, float thick, Color
  * used by the local mech to smooth out reconciliation snaps over
  * ~6 frames. Pass {0,0} for non-local mechs. */
 static void draw_mech(const ParticlePool *p, const ConstraintPool *cp,
-                      const Mech *m, const Level *L,
+                      const Mech *m, const Level *L, bool is_local,
                       float alpha, Vec2 visual_offset) {
     int b = m->particle_base;
     int idx_head    = b + PART_HEAD;
@@ -215,6 +216,16 @@ static void draw_mech(const ParticlePool *p, const ConstraintPool *cp,
                 : (Color){170, 180, 200, 255};
     if (!m->alive) body = (Color){120, 50, 50, 255};
     Color edge = (Color){ 30,  40,  60, 255};
+
+    /* P05 — invisibility powerup: alpha-mod the entire body. The local
+     * mech keeps a stronger alpha (0.5) so the player can still play —
+     * the wholly-faded look (alpha 0.2) is for OTHER players seeing
+     * this mech. Skipped for ragdolls (corpses don't go invisible). */
+    if (m->alive && m->powerup_invis_remaining > 0.0f) {
+        uint8_t a = is_local ? (uint8_t)128 : (uint8_t)51;
+        body.a = a;
+        edge.a = a;
+    }
 
     /* Back leg first, then front, head last — see [06-rendering-audio.md]. */
     Color leg_back  = (Color){ body.r - 20, body.g - 20, body.b - 20, 255 };
@@ -302,6 +313,29 @@ static void draw_mech(const ParticlePool *p, const ConstraintPool *cp,
     }
 }
 
+/* P05 — placeholder pickup sprite. Bobs at 0.5 Hz / ±4 px for
+ * available pickups; cooldown entries draw nothing. The "real" sprite
+ * art lands at P13 with the atlas pipeline. PRACTICE_DUMMY entries
+ * aren't drawn either (the dummy is a real mech, not a pickup). */
+static void draw_pickups(const PickupPool *pool, double now_s) {
+    for (int i = 0; i < pool->count; ++i) {
+        const PickupSpawner *s = &pool->items[i];
+        if (s->state != PICKUP_STATE_AVAILABLE) continue;
+        if (s->kind == PICKUP_PRACTICE_DUMMY)   continue;
+        uint32_t rgba = pickup_kind_color(s->kind);
+        Color c = (Color){
+            (uint8_t)(rgba & 0xff),
+            (uint8_t)((rgba >> 8) & 0xff),
+            (uint8_t)((rgba >> 16) & 0xff),
+            (uint8_t)((rgba >> 24) & 0xff),
+        };
+        float bob = 4.0f * sinf((float)now_s * 3.14159f);
+        DrawCircle((int)s->pos.x, (int)(s->pos.y + bob), 12.0f, c);
+        DrawCircleLines((int)s->pos.x, (int)(s->pos.y + bob), 12.0f,
+                        (Color){20, 20, 20, 255});
+    }
+}
+
 /* ---- Frame --------------------------------------------------------- */
 
 void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
@@ -330,6 +364,7 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
         BeginMode2D(r->camera);
             draw_level(&w->level);
             decal_draw_layer();
+            draw_pickups(&w->pickups, GetTime());
             for (int i = 0; i < w->mech_count; ++i) {
                 /* Reconcile-smoothing offset only applies to the local
                  * mech (the one whose state we predict + replay). For
@@ -337,8 +372,9 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
                  * via the snapshot interp buffer instead (snapshot.c). */
                 Vec2 off = (i == w->local_mech_id)
                          ? local_visual_offset : (Vec2){0, 0};
+                bool is_local = (i == w->local_mech_id);
                 draw_mech(&w->particles, &w->constraints,
-                          &w->mechs[i], &w->level, alpha, off);
+                          &w->mechs[i], &w->level, is_local, alpha, off);
             }
             projectile_draw(&w->projectiles, alpha);
             fx_draw(&w->fx, alpha);

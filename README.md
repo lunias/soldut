@@ -2,8 +2,8 @@
 
 A 2D side-scrolling multiplayer mech shooter in C, in the lineage of Soldat.
 
-The project is in **M5 — Maps & content** (in progress; P01–P04 in,
-P05 next). M4 shipped the lobby & matches layer: full game flow
+The project is in **M5 — Maps & content** (in progress; P01–P05 in,
+P06 next). M4 shipped the lobby & matches layer: full game flow
 (title → server browser → lobby → countdown → match → summary →
 next round), FFA + TDM modes (CTF stub), per-slot loadout picker,
 ready/team toggles, LAN-broadcast server discovery, `soldut.cfg`
@@ -18,10 +18,15 @@ sync), and **M1** (Verlet skeleton physics + ragdoll). M5 so far:
 (`src/level_io.{c,h}`); **P02** — polygon collision + slope physics
 + slope-aware post-physics anchor; **P03** — render-side
 accumulator + interp alpha + reconcile smoothing + two-snapshot
-remote-mech interp + hit/fire event sync. Editor (P04) + pickups +
-grapple + CTF + sprite atlases + audio + 8 authored maps land in
-P04–P18. See [documents/11-roadmap.md](documents/11-roadmap.md)
-and [documents/m5/](documents/m5/).
+remote-mech interp + hit/fire event sync; **P04** — standalone
+level editor (`tools/editor/`, raygui-based) + game-side
+`--test-play <path>` flag; **P05** — pickup runtime (HEALTH /
+AMMO / ARMOR / WEAPON / POWERUP / JET_FUEL), Engineer's deployable
+repair pack, Burst SMG 70 ms cadence, practice-dummy spawner kind,
+and active-powerup HUD pill. Grapple + CTF + sprite atlases +
+audio + 8 authored maps land in P06–P18. See
+[documents/11-roadmap.md](documents/11-roadmap.md) and
+[documents/m5/](documents/m5/).
 
 For the *current behavior* of the build (vs the design intent in
 [documents/](documents/)) see [CURRENT_STATE.md](CURRENT_STATE.md) and
@@ -53,12 +58,16 @@ Controls:
 | `W`            | Jet (consumes fuel) |
 | `Space`        | Jump (when grounded) |
 | `Shift`        | Dash (Scout chassis) / Burst-jet (Burst Jet module) |
+| `Ctrl` / `S`   | Crouch (drops through ONE_WAY platforms) |
+| `X`            | Prone |
 | `R`            | Reload |
 | `Q`            | Swap primary / secondary weapon |
-| `F`            | Use ability (Engineer self-heal) |
+| `F`            | Melee swing |
+| `E`            | Use ability (Engineer self-heal, etc.) |
 | `Mouse`        | Aim |
 | `Left Mouse`   | Fire |
-| `Right Mouse`  | Melee swing (when knife is active) |
+
+(Right Mouse is currently unbound; `BTN_FIRE_SECONDARY` lands at P09.)
 
 Hit the dummy enough and a) it ragdolls, b) limbs come off as their
 per-limb HP drops to zero (head, both arms, both legs).
@@ -175,7 +184,7 @@ breakpoint at `snapshot_apply`).
 
 ```
 soldut/
-├── src/                 # game source (~30 modules / 60 .c+.h files post-M5 P01)
+├── src/                 # game source (~31 modules / 62 .c+.h files post-M5 P05)
 ├── third_party/
 │   ├── raylib/          # vendored, built into libraylib.a per platform
 │   ├── enet/            # vendored, built into libenet.a
@@ -290,7 +299,7 @@ strategic view.
 - [x] **P02** — Polygon collision + slope physics + slope-aware post-physics anchor. Per-particle Q1.7 contact normals + `PARTICLE_FLAG_CEILING`; polygon broadphase grid built at level load; tile + polygon collision interleaved per relaxation iter; slope-tangent run velocity + slope-aware friction; angled-ceiling jet redirection; WIND/ZERO_G ambient zones; DEADLY/ACID environmental damage.
 - [x] **P03** — Render-side accumulator + interp alpha + reconcile smoothing + remote-mech interp. Per-particle `render_prev_*` snapshot at top of `simulate_step`; renderer lerps by `alpha = accum/TICK_DT`; reconcile `visual_offset` decays over ~6 frames; per-mech `remote_snap_ring[8]` interp at `now − 100 ms`; `SNAP_STATE_IS_DUMMY` bit; `NET_MSG_HIT_EVENT` + `NET_MSG_FIRE_EVENT` for blood/spark/tracer/projectile sync. Protocol bumped `S0LF` → `S0LG`.
 - [x] **P04** — Standalone level editor (`tools/editor/`) + game-side `--test-play <path>` flag. `make editor` → `build/soldut_editor`. Tile paint, polygon draw with ear-clipping triangulation (Eberly), spawn / pickup / ambient / decoration placement, slope + alcove presets, undo/redo (64-stroke ring + tile-grid snapshot for big ops), save-time validation (alcove sizing per the maps spec), F5 forks the game with the saved `.lvl`. raygui (header-only, vendored at `third_party/raygui/`) for the UI; in-app textbox modal in lieu of a native file picker. Editor links a subset of `src/` (level_io / arena / log / hash / ds) — no mech / physics / net.
-- [ ] **P05** — Pickup system + Engineer repair pack + Burst SMG cadence + practice dummy
+- [x] **P05** — Pickup runtime + Engineer deployable repair pack + Burst SMG cadence + practice dummy + powerups (`make test-pickups` 43/43). New module `src/pickup.{c,h}`; `PickupPool` (cap 64) on `World`. Per-kind apply rules (HEALTH / AMMO / ARMOR / WEAPON / POWERUP / JET_FUEL / REPAIR_PACK / PRACTICE_DUMMY) with full-state reject guards. Powerup state on `Mech` (`powerup_berserk/invis/godmode_remaining`); berserk doubles outgoing damage and godmode zeroes incoming damage in `mech_apply_damage`; client mirrors via new `SNAP_STATE_BERSERK/INVIS/GODMODE` bits (no protocol bump — fits in P03's u16). Engineer's `BTN_USE` now spawns a transient repair pack at the engineer's feet (10 s lifetime, 30 s CD). Burst SMG queues round 1 + 2 trailing rounds at 70 ms cadence in `mech_step_drive`. Per-mech 4-anchor (chest/pelvis/feet) touch detection so pickups grab regardless of body height. New 20-byte `NET_MSG_PICKUP_STATE` carries full spawner data so transients (engineer pack) replicate to clients; `pickupfeed[64]` queue drained by `broadcast_new_pickups` in main.c. Foundry default map ships 4 example pickups (HEALTH / INVIS / AMMO / BERSERK / ARMOR). Top-center HUD pill displays each active powerup + remaining seconds. Editor's `palette.c` migrated to canonical `PickupKind` enum (was off-by-one against runtime, caused F5 BAD_SECTION errors); editor `Makefile` now tracks header deps (`-MMD -MP`).
 - [ ] **P06** — Grappling hook
 - [ ] **P07** — CTF mode
 - [ ] **P08** — Map sharing across the network

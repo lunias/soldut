@@ -648,9 +648,18 @@ LvlResult level_save(const struct World *world, struct Arena *scratch,
     if (!world || !scratch || !path) return LVL_ERR_IO;
     const Level *L = &world->level;
 
-    if (L->width  <= 0 || L->width  > 512) return LVL_ERR_BAD_SECTION;
-    if (L->height <= 0 || L->height > 512) return LVL_ERR_BAD_SECTION;
-    if (L->tile_size != 32)                return LVL_ERR_BAD_SECTION;
+    if (L->width  <= 0 || L->width  > 512) {
+        LOG_E("level_save: width %d out of range", L->width);
+        return LVL_ERR_BAD_SECTION;
+    }
+    if (L->height <= 0 || L->height > 512) {
+        LOG_E("level_save: height %d out of range", L->height);
+        return LVL_ERR_BAD_SECTION;
+    }
+    if (L->tile_size != 32) {
+        LOG_E("level_save: tile_size %d (expected 32)", L->tile_size);
+        return LVL_ERR_BAD_SECTION;
+    }
 
     /* String table source. If the level's string_table is NULL/empty
      * we still emit a single zero byte (offset 0 = empty string). */

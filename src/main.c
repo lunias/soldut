@@ -9,6 +9,7 @@
 #include "match.h"
 #include "mech.h"
 #include "net.h"
+#include "pickup.h"
 #include "platform.h"
 #include "reconcile.h"
 #include "render.h"
@@ -176,6 +177,7 @@ static int resolve_jetpack_id(const char *name, int default_id) {
 static int g_killfeed_processed  = 0;
 static int g_hitfeed_processed   = 0;
 static int g_firefeed_processed  = 0;
+static int g_pickupfeed_processed = 0;
 
 /* Server: walk new hit events from the world's hitfeed queue and
  * broadcast each one to clients so they can spawn matching blood/spark
@@ -220,6 +222,30 @@ static void broadcast_new_fires(Game *g) {
             f->origin_x, f->origin_y, f->dir_x, f->dir_y);
     }
     g_firefeed_processed = cur;
+}
+
+/* Server: drain pickup-state events queued by pickup_step /
+ * pickup_spawn_transient. Each event ships the full spawner record
+ * (20 bytes) so clients can both mirror state transitions on level-
+ * defined entries and learn about transient spawners (engineer
+ * repair packs). Same monotonic-counter ring pattern as
+ * broadcast_new_hits / broadcast_new_fires. */
+static void broadcast_new_pickups(Game *g) {
+    if (g->net.role != NET_ROLE_SERVER) return;
+    int cur = g->world.pickupfeed_count;
+    int begin = g_pickupfeed_processed;
+    if (cur - begin > PICKUPFEED_CAPACITY) {
+        begin = cur - PICKUPFEED_CAPACITY;
+    }
+    for (int n = begin; n < cur; ++n) {
+        int idx = n % PICKUPFEED_CAPACITY;
+        if (idx < 0) idx += PICKUPFEED_CAPACITY;
+        int spawner_id = g->world.pickupfeed[idx];
+        if (spawner_id < 0 || spawner_id >= g->world.pickups.count) continue;
+        const PickupSpawner *s = &g->world.pickups.items[spawner_id];
+        net_server_broadcast_pickup_state(&g->net, spawner_id, s);
+    }
+    g_pickupfeed_processed = cur;
 }
 
 static void apply_new_kills(Game *g) {
@@ -290,6 +316,16 @@ static void start_round(Game *g) {
                             g->match.map_id, g->local_slot_id,
                             g->match.mode);
     g->lobby.dirty = true;
+
+    /* P05 — populate spawner pool from the level's PICK records and
+     * spawn any practice-dummy mechs. Server-side; clients call the
+     * same function from client_handle_round_start so the pool indexes
+     * line up. Subsequent transient spawns (engineer repair packs)
+     * propagate via NET_MSG_PICKUP_STATE. Reset feed cursors so the
+     * new round's events index from zero. */
+    pickup_init_round(&g->world);
+    g->world.pickupfeed_count = 0;
+    g_pickupfeed_processed = 0;
 
     match_begin_round(&g->match);
     g->mode = MODE_MATCH;
@@ -431,6 +467,7 @@ static void host_match_flow_step(Game *g, float dt) {
             apply_new_kills(g);
             broadcast_new_hits(g);
             broadcast_new_fires(g);
+            broadcast_new_pickups(g);
             /* End on score limit (FFA = any per-player slot >= cap). */
             bool end = false;
             if (g->match.mode == MATCH_MODE_FFA) {

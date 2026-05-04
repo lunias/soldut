@@ -4,6 +4,7 @@
 #include "log.h"
 #include "particle.h"
 #include "physics.h"
+#include "pickup.h"
 #include "projectile.h"
 #include "weapons.h"
 
@@ -696,6 +697,53 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
     const Armor   *ar = armor_def(m->armor_id);
     const Jetpack *jp = jetpack_def(m->jetpack_id);
 
+    /* Powerup timers (P05). Server-side truth — clients mirror via the
+     * SNAP_STATE_BERSERK / INVIS / GODMODE bits, setting their local
+     * timer to a sentinel value while the bit is observed. */
+    if (m->powerup_berserk_remaining > 0.0f) {
+        m->powerup_berserk_remaining -= dt;
+        if (m->powerup_berserk_remaining < 0.0f) m->powerup_berserk_remaining = 0.0f;
+    }
+    if (m->powerup_invis_remaining > 0.0f) {
+        m->powerup_invis_remaining -= dt;
+        if (m->powerup_invis_remaining < 0.0f) m->powerup_invis_remaining = 0.0f;
+    }
+    if (m->powerup_godmode_remaining > 0.0f) {
+        m->powerup_godmode_remaining -= dt;
+        if (m->powerup_godmode_remaining < 0.0f) m->powerup_godmode_remaining = 0.0f;
+    }
+
+    /* Burst SMG cadence (P05). When mech_try_fire kicked off a burst,
+     * we owe `burst_pending_rounds` more shots one per
+     * `burst_interval_sec`. Authoritative side only — the client's local
+     * predict path doesn't need to schedule the trailing rounds because
+     * the server's NET_MSG_FIRE_EVENT replicates them as they actually
+     * fire. (Trying to spawn from the client predict ahead of the
+     * server's events would double-up the visible rounds.) */
+    if (w->authoritative && m->burst_pending_rounds > 0) {
+        m->burst_pending_timer -= dt;
+        if (m->burst_pending_timer <= 0.0f) {
+            const Weapon *bwpn = weapon_def(m->weapon_id);
+            if (bwpn && bwpn->fire == WFIRE_BURST &&
+                (bwpn->mag_size <= 0 || m->ammo > 0))
+            {
+                weapons_spawn_projectiles(w, mid, m->weapon_id);
+                if (bwpn->mag_size > 0) m->ammo--;
+                if (m->active_slot == 0) m->ammo_primary   = m->ammo;
+                else                     m->ammo_secondary = m->ammo;
+                m->burst_pending_rounds--;
+                m->burst_pending_timer = bwpn->burst_interval_sec;
+                SHOT_LOG("t=%llu mech=%d burst_pending fired (left=%u)",
+                         (unsigned long long)w->tick, mid,
+                         (unsigned)m->burst_pending_rounds);
+            } else {
+                /* Weapon swapped or out of ammo — abort the burst. */
+                m->burst_pending_rounds = 0;
+                m->burst_pending_timer = 0.0f;
+            }
+        }
+    }
+
     if (in.aim_x != 0.0f || in.aim_y != 0.0f) {
         m->aim_world = (Vec2){ in.aim_x, in.aim_y };
     }
@@ -709,15 +757,32 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
 
         if (pressed & BTN_SWAP) swap_weapon(m);
 
-        /* Engineer ability — drop a small repair pack on yourself.
-         * A real "deploy on the ground" pickup wires up at M5; for now
-         * the active ability heals the user. */
-        if ((pressed & BTN_USE) && ch->passive == PASSIVE_ENGINEER_REPAIR
+        /* Engineer ability (P05): drop a deployable repair pack at the
+         * engineer's feet. Lasts 10 s; allies (and the engineer) walking
+         * onto it consume it for +50 HP. Replaces M3's instant self-heal.
+         * Server-only — the client never spawns transient pickups; the
+         * NET_MSG_PICKUP_STATE broadcast replicates the spawn. */
+        if (w->authoritative
+            && (pressed & BTN_USE) && ch->passive == PASSIVE_ENGINEER_REPAIR
             && m->ability_cooldown <= 0.0f) {
-            m->health = fminf(m->health_max, m->health + ENGINEER_HEAL);
-            m->ability_cooldown = ENGINEER_COOLDOWN;
-            SHOT_LOG("t=%llu mech=%d engineer_repair +%.0f hp",
-                     (unsigned long long)w->tick, mid, ENGINEER_HEAL);
+            Vec2 pelv = part_pos(w, m, PART_PELVIS);
+            PickupSpawner s = (PickupSpawner){
+                .pos                = (Vec2){ pelv.x, pelv.y + 24.0f },
+                .kind               = PICKUP_REPAIR_PACK,
+                .variant            = 0,
+                .respawn_ms         = 0,
+                .state              = PICKUP_STATE_AVAILABLE,
+                .reserved           = 0,
+                .available_at_tick  = w->tick + 600,    /* 10 s @ 60 Hz */
+                .flags              = 0,
+            };
+            int idx = pickup_spawn_transient(w, s);
+            if (idx >= 0) {
+                m->ability_cooldown = ENGINEER_COOLDOWN;
+                SHOT_LOG("t=%llu mech=%d engineer_deploy idx=%d at (%.0f,%.0f)",
+                         (unsigned long long)w->tick, mid, idx,
+                         s.pos.x, s.pos.y);
+            }
         }
         if (m->ability_cooldown > 0.0f) m->ability_cooldown -= dt;
 
@@ -1064,18 +1129,21 @@ bool mech_try_fire(World *w, int mid, ClientInput in) {
         if (wpn->mag_size > 0) m->ammo--;
     }
     else if (wpn->fire == WFIRE_BURST) {
-        /* Burst fire: spawn `burst_rounds` projectiles spaced by
-         * burst_interval_sec on the same trigger pull. We fire all of
-         * them on press; the visible cadence comes from the renderer
-         * but for damage purposes they all hit on the same tick. (A
-         * proper implementation would queue rounds for future ticks;
-         * acceptable for M3 first pass.) */
+        /* Burst fire (P05): spawn the first round on the press tick,
+         * queue `burst_rounds - 1` more to land at `burst_interval_sec`
+         * cadence (70 ms for the Burst SMG). mech_step_drive ticks the
+         * pending counter at the top of every tick. Self-bink
+         * accumulates per round, so the trailing rounds fan wider —
+         * matches the design intent in `documents/04-combat.md`. */
         if (!fire_pressed) return false;
-        if (wpn->mag_size > 0 && m->ammo < wpn->burst_rounds) return false;
-        for (int b = 0; b < wpn->burst_rounds; ++b) {
-            weapons_spawn_projectiles(w, mid, m->weapon_id);
+        if (m->burst_pending_rounds > 0) return false;       /* burst already in flight */
+        if (wpn->mag_size > 0 && m->ammo <= 0) return false;
+        weapons_spawn_projectiles(w, mid, m->weapon_id);     /* round 1 of N */
+        if (wpn->mag_size > 0) m->ammo--;
+        if (wpn->burst_rounds > 1) {
+            m->burst_pending_rounds = (uint8_t)(wpn->burst_rounds - 1);
+            m->burst_pending_timer  = wpn->burst_interval_sec;
         }
-        if (wpn->mag_size > 0) m->ammo -= wpn->burst_rounds;
     }
     else if (wpn->fire == WFIRE_THROW) {
         /* Frag grenades: each press throws one. */
@@ -1295,12 +1363,28 @@ bool mech_apply_damage(World *w, int mid, int part, float dmg, Vec2 dir,
     Mech *m = &w->mechs[mid];
     if (!m->alive) return false;
 
+    /* P05 — Godmode powerup: incoming damage is zeroed. Returns false
+     * (no death) so the caller treats the hit as a no-op. Self-damage
+     * still passes through unharmed (no health change either). */
+    if (m->powerup_godmode_remaining > 0.0f) return false;
+
     /* Friendly-fire gating. Self-damage (e.g. own rocket splash) always
      * goes through; friendly damage is dropped when FF is off. */
     if (shooter_mech_id >= 0 && shooter_mech_id != mid) {
         const Mech *shooter = &w->mechs[shooter_mech_id];
         if (shooter->team == m->team && !w->friendly_fire) {
             return false;
+        }
+    }
+
+    /* P05 — Berserk powerup on the shooter doubles outgoing damage.
+     * Centralized here (rather than at every fire path) so hitscan,
+     * projectile direct hits, AOE, and melee all benefit uniformly. */
+    if (shooter_mech_id >= 0 && shooter_mech_id != mid &&
+        shooter_mech_id < w->mech_count) {
+        const Mech *shooter = &w->mechs[shooter_mech_id];
+        if (shooter->powerup_berserk_remaining > 0.0f) {
+            dmg *= 2.0f;
         }
     }
 

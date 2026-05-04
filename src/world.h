@@ -250,6 +250,24 @@ typedef struct {
     /* Engineer: cooldown on the BTN_USE repair pack. */
     float     ability_cooldown;
 
+    /* P05 — Powerup timers (seconds remaining; > 0 = active). Server-side
+     * truth; clients mirror via SNAP_STATE_BERSERK / INVIS / GODMODE bits
+     * on EntitySnapshot, setting the timer to a sentinel value when the
+     * bit is observed and zeroing when it clears. mech_step_drive ticks
+     * down each tick on the authoritative side. */
+    float     powerup_berserk_remaining;
+    float     powerup_invis_remaining;
+    float     powerup_godmode_remaining;
+
+    /* P05 — Burst SMG cadence: WFIRE_BURST queues `burst_pending_rounds`
+     * additional rounds that fire one-per-`burst_pending_timer` until
+     * exhausted. The first round still lands on the trigger-press tick;
+     * the trailing rounds land on subsequent ticks at `burst_interval_sec`
+     * cadence (70 ms for the Burst SMG). Replaces M3's "all 3 rounds on
+     * one tick" stopgap. */
+    uint8_t   burst_pending_rounds;
+    float     burst_pending_timer;
+
     /* Last time this mech took a hit (tracking for "OVERKILL", etc.). */
     float     last_damage_taken;
     int       last_killshot_weapon;
@@ -416,6 +434,73 @@ typedef struct {
     int count;
     int capacity;
 } FxPool;
+
+/* ---- Pickups (M5 P05) -----------------------------------------------
+ *
+ * Map-driven equipment-swap layer. Per `documents/m5/04-pickups.md`, the
+ * spawner is the persistent record (lives in the level); the runtime
+ * keeps one transient `PickupSpawner` entry per spawner that flips
+ * between AVAILABLE and COOLDOWN.
+ *
+ * The level format's `LvlPickup.category` stores the kind directly
+ * (PickupKind values are stable in `documents/m5/01-lvl-format.md`).
+ * Engineer-deployed repair packs and dynamic spawns reuse the same
+ * pool with the TRANSIENT flag set so they auto-remove on grab/expire
+ * instead of cycling through COOLDOWN. */
+typedef enum {
+    PICKUP_HEALTH = 0,
+    PICKUP_AMMO_PRIMARY,
+    PICKUP_AMMO_SECONDARY,
+    PICKUP_ARMOR,
+    PICKUP_WEAPON,
+    PICKUP_POWERUP,
+    PICKUP_JET_FUEL,
+    PICKUP_REPAIR_PACK,
+    PICKUP_PRACTICE_DUMMY,
+    PICKUP_KIND_COUNT
+} PickupKind;
+
+typedef enum {
+    HEALTH_SMALL  = 0,    /* +25 */
+    HEALTH_MEDIUM = 1,    /* +60 */
+    HEALTH_LARGE  = 2,    /* +full */
+} HealthVariant;
+
+typedef enum {
+    POWERUP_BERSERK      = 0,    /* 2× outgoing damage, 15 s */
+    POWERUP_INVISIBILITY = 1,    /* alpha 0.2, 8 s */
+    POWERUP_GODMODE      = 2,    /* incoming damage zeroed, 5 s */
+} PowerupVariant;
+
+typedef enum {
+    PICKUP_STATE_AVAILABLE = 0,
+    PICKUP_STATE_COOLDOWN  = 1,
+} PickupState;
+
+enum {
+    /* Engineer pack / dynamic spawns. Auto-removed on grab or when
+     * `tick >= available_at_tick` (used as a lifetime expiry rather
+     * than a respawn timer). */
+    PICKUP_FLAG_TRANSIENT = 1u << 8,
+};
+
+typedef struct PickupSpawner {
+    Vec2     pos;
+    uint8_t  kind;                  /* PickupKind */
+    uint8_t  variant;               /* HealthVariant / PowerupVariant / WeaponId / ArmorId */
+    uint16_t respawn_ms;            /* 0 = use kind default */
+    uint8_t  state;                 /* PickupState */
+    uint8_t  reserved;
+    uint64_t available_at_tick;     /* COOLDOWN: when AVAILABLE returns. TRANSIENT: lifetime expiry. */
+    uint16_t flags;                 /* CONTESTED / RARE / HOST_ONLY / TRANSIENT (bit 8) */
+} PickupSpawner;
+
+#define PICKUP_CAPACITY 64
+
+typedef struct PickupPool {
+    PickupSpawner items[PICKUP_CAPACITY];
+    int           count;
+} PickupPool;
 
 /* ---- Tile / level data ---------------------------------------------
  *
@@ -607,6 +692,7 @@ typedef struct World {
 
     FxPool         fx;
     ProjectilePool projectiles;
+    PickupPool     pickups;
 
     /* Kill feed — small ring buffer; HUD draws the most recent entries
      * with a fade-out. */
@@ -625,6 +711,16 @@ typedef struct World {
      * remote player's fire. */
     FireFeedEntry firefeed[FIREFEED_CAPACITY];
     int           firefeed_count;
+
+    /* Pickup-event feed (P05). Server-side queue of spawner indices
+     * that changed state this tick (touched / respawned / transient
+     * created). main.c drains and ships NET_MSG_PICKUP_STATE for each
+     * entry so clients update their local pool. Same monotonic-counter
+     * pattern as HitFeed / FireFeed; capacity sized for worst case
+     * (everyone scrambles for a respawn). */
+#define PICKUPFEED_CAPACITY 64
+    int          pickupfeed[PICKUPFEED_CAPACITY];
+    int          pickupfeed_count;
 
     /* Server config: friendly-fire toggle. False by default — same-team
      * damage is dropped. Tournament servers can flip this. */

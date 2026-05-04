@@ -4,6 +4,7 @@
 #include "mech.h"
 #include "particle.h"
 #include "physics.h"
+#include "pickup.h"
 #include "projectile.h"
 #include "snapshot.h"
 #include "weapons.h"
@@ -209,6 +210,11 @@ void simulate_step(World *w, float dt) {
             mech_apply_environmental_damage(w, i, dt);
         }
     }
+
+    /* P05: pickup state machine — touch detection + cooldown rollover +
+     * transient lifetime expiry. Server-only; broadcasts state changes
+     * via the pickupfeed queue (drained in main.c). */
+    pickup_step(w, dt);
 
     /* Projectiles — integrate, collide, detonate. Runs after the mech
      * physics pass so projectiles see the just-settled bone positions
