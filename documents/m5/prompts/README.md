@@ -32,7 +32,7 @@ P06 ─ Grappling hook
 P07 ─ CTF mode
 P08 ─ Map sharing across the network
 P09 ─ BTN_FIRE_SECONDARY + keybinds + UI controls panel
-P09b ─ Custom map registry (scan assets/maps/, surface in lobby UI)
+P08b ─ Custom map registry (scan assets/maps/, surface in lobby UI)
        — independent of P09, can run in either order
 
 P10 ─ Mech sprite atlas runtime + per-chassis bone distinctness
@@ -57,7 +57,7 @@ The runtime work (P01–P14) can be done before any asset work. The asset work (
 | P04 (editor) | 6–10 hours (split across 2 sessions if needed) |
 | P05–P08 | 2–4 hours each |
 | P09 | 1–2 hours |
-| P09b | 2–3 hours |
+| P08b | 2–3 hours |
 | P10–P12 | 2–4 hours each |
 | P13–P14 | 4–6 hours each |
 | P15 | 2–4 hours (plus iteration time you do, not Claude) |

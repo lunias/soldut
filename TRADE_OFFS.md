@@ -13,7 +13,7 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-05** (post P08; map sharing across the network; P09b custom-map-registry trade-off pre-disclosed).
+Last updated: **2026-05-05** (post P08; map sharing across the network; P08b custom-map-registry trade-off pre-disclosed).
 
 ---
 
@@ -468,12 +468,12 @@ Last updated: **2026-05-05** (post P08; map sharing across the network; P09b cus
   content-addressed (CRC) not name-addressed, so the runtime registry
   is purely a host-side UX layer — no protocol changes needed.
 - **Revisit when** — **Now-ish.** A spec for the fix lives at
-  `documents/m5/prompts/P09b-map-registry.md`: replace the static
+  `documents/m5/prompts/P08b-map-registry.md`: replace the static
   `MapId` enum with a runtime `MapRegistry` populated from
   `assets/maps/*.lvl` at process start, point every `MAP_COUNT` walk at
   `g_map_registry.count`, and keep the four named constants
   (MAP_FOUNDRY etc.) as load-bearing reserved indices for
-  `build_fallback`. Delete this entry when P09b lands.
+  `build_fallback`. Delete this entry when P08b lands.
 
 ### `.lvl` v1 format is locked in
 

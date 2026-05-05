@@ -1,4 +1,4 @@
-# P09b — Custom map registry: scan `assets/maps/` and surface user-authored maps in the lobby UI
+# P08b — Custom map registry: scan `assets/maps/` and surface user-authored maps in the lobby UI
 
 ## What this prompt does
 
@@ -89,7 +89,7 @@ extern MapRegistry g_map_registry;
 /* Populate registry: 4 code-built defaults first, then scan
  * assets/maps/*.lvl and append (or override-by-short-name) every file
  * found. Idempotent — safe to call multiple times for hot-reload-style
- * "the editor just saved a file" rescans (P09b ships startup-only;
+ * "the editor just saved a file" rescans (P08b ships startup-only;
  * rescan trigger is a future task). */
 void map_registry_init(void);
 ```
@@ -416,7 +416,7 @@ make && make editor
 
 ## Close-out
 
-1. Update `CURRENT_STATE.md`: P09b — custom map registry shipped; lobby UI cycles arbitrary `assets/maps/*.lvl` files.
+1. Update `CURRENT_STATE.md`: P08b — custom map registry shipped; lobby UI cycles arbitrary `assets/maps/*.lvl` files.
 2. Update `TRADE_OFFS.md`:
    - **Delete** "Custom map names not in lobby rotation (P08 follow-up)".
 3. Don't commit unless explicitly asked.
