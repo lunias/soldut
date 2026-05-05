@@ -139,6 +139,7 @@ bool play_test(EditorDoc *d, const TestPlayLoadout *lo) {
         cmd_append_flag(cmd, sizeof cmd, "--secondary", lo->secondary);
         cmd_append_flag(cmd, sizeof cmd, "--armor",     lo->armor);
         cmd_append_flag(cmd, sizeof cmd, "--jetpack",   lo->jetpack);
+        cmd_append_flag(cmd, sizeof cmd, "--mode",      lo->mode);
     }
     STARTUPINFOA si = { .cb = sizeof si };
     PROCESS_INFORMATION pi = {0};
@@ -153,9 +154,9 @@ bool play_test(EditorDoc *d, const TestPlayLoadout *lo) {
     LOG_I("editor: F5 — spawned %s (test-play %s)", game_bin, abs_lvl);
     return true;
 #else
-    /* Build argv: 3 fixed (binary + --test-play + path) + up to 10
-     * loadout entries (5 flag/value pairs) + NULL terminator. */
-    char *argv[3 + 10 + 1];
+    /* Build argv: 3 fixed (binary + --test-play + path) + up to 12
+     * loadout entries (6 flag/value pairs) + NULL terminator. */
+    char *argv[3 + 12 + 1];
     int n = 0;
     argv[n++] = game_bin;
     argv[n++] = (char *)"--test-play";
@@ -171,6 +172,8 @@ bool play_test(EditorDoc *d, const TestPlayLoadout *lo) {
                     "--armor",     lo->armor);
         append_flag(argv, &n, (int)(sizeof argv / sizeof argv[0]),
                     "--jetpack",   lo->jetpack);
+        append_flag(argv, &n, (int)(sizeof argv / sizeof argv[0]),
+                    "--mode",      lo->mode);
     }
     argv[n] = NULL;
     pid_t pid = 0;
@@ -191,6 +194,7 @@ bool play_test(EditorDoc *d, const TestPlayLoadout *lo) {
         if (lo->secondary[0]) q += snprintf(q, (size_t)(end - q), " secondary=%s", lo->secondary);
         if (lo->armor    [0]) q += snprintf(q, (size_t)(end - q), " armor=%s",     lo->armor);
         if (lo->jetpack  [0]) q += snprintf(q, (size_t)(end - q), " jetpack=%s",   lo->jetpack);
+        if (lo->mode     [0]) q += snprintf(q, (size_t)(end - q), " mode=%s",      lo->mode);
     }
     LOG_I("editor: F5 — spawned %s (pid %d, test-play %s)%s",
           game_bin, (int)pid, abs_lvl, lo_summary);

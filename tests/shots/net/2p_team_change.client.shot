@@ -1,0 +1,19 @@
+# 2p_team_change — client side. Connects, sits, then explicitly sends
+# a team change to BLUE at tick 100 via the team_change shot directive.
+
+window 1280 720
+out build/shots/net/client_team_change
+network connect 127.0.0.1:24025
+name ClientB
+
+at 90  shot t90_before_change
+
+# Send a NET_MSG_LOBBY_TEAM_CHANGE for BLUE (team id 2). Calls the
+# same path the lobby UI's BLUE button does (apply_team_change →
+# net_client_send_team_change for clients). We wait until tick 120 so
+# the connection has fully settled (handshake + first INITIAL_STATE
+# round-trip is well under 1 second on loopback).
+at 120 team_change 2
+
+at 200 shot t200_after_change
+at 600 end

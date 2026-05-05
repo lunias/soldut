@@ -1,0 +1,28 @@
+# 2p_ctf — client side. Stationary observer on the BLUE team.
+# Pairs with 2p_ctf.host.shot. The host arms a BLUE flag carry +
+# captures; the client should mirror the state transitions via
+# NET_MSG_FLAG_STATE and re-render the flag pips accordingly:
+#
+#   t60   — lobby (CTF ready) HOME / HOME pips
+#   t140  — round just started; both flags HOME
+#   t215  — host has carried (BLUE flag pip should pulse alpha)
+#   t280  — capture fired; BLUE flag back HOME, score 5-0 RED
+#   t320  — post-capture stable; both pips solid HOME again
+#
+# We don't move; the only purpose is to verify the wire round-trip.
+
+window 1280 720
+out build/shots/net/client_ctf
+network connect 127.0.0.1:24017
+name ClientBlue
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 60  shot t60_lobby
+at 140 shot t140_round_start
+at 180 shot t180_settled
+at 215 shot t215_host_carries_blue
+at 280 shot t280_post_capture
+at 320 shot t320_settled
+at 700 shot t700_round_end
+at 760 end

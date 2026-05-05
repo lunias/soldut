@@ -119,6 +119,7 @@ int ui_draw_tool_buttons(ToolKind *active, const UIDims *D) {
         { TOOL_PICKUP, "Pickup",  "I" },
         { TOOL_AMBI,   "Ambient", "A" },
         { TOOL_DECO,   "Deco",    "D" },
+        { TOOL_FLAG,   "Flag",    "F" },
         { TOOL_META,   "Meta",    "M" },
     };
     int n = (int)(sizeof btns / sizeof btns[0]);
@@ -427,6 +428,11 @@ static const char *const g_lo_armor    [] = {
 static const char *const g_lo_jetpack  [] = {
     "(default)", "Baseline", "Standard", "Burst", "Glide", "JumpJet",
 };
+/* MODE: index 0 keeps the META auto-detect (CTF if both flags + CTF bit;
+ * else FFA). Picking FFA / TDM / CTF explicitly overrides that. */
+static const char *const g_lo_mode     [] = {
+    "(default)", "FFA", "TDM", "CTF",
+};
 
 #define ARRLEN(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
@@ -437,6 +443,7 @@ static const char *const *lo_table(int slot, int *out_n) {
         case LOADOUT_SLOT_SECONDARY: *out_n = ARRLEN(g_lo_secondary); return g_lo_secondary;
         case LOADOUT_SLOT_ARMOR:     *out_n = ARRLEN(g_lo_armor);     return g_lo_armor;
         case LOADOUT_SLOT_JETPACK:   *out_n = ARRLEN(g_lo_jetpack);   return g_lo_jetpack;
+        case LOADOUT_SLOT_MODE:      *out_n = ARRLEN(g_lo_mode);      return g_lo_mode;
         default:                     *out_n = 0;                       return NULL;
     }
 }
@@ -469,6 +476,7 @@ int ui_loadout_slot_from_name(const char *name) {
     if (strcasecmp(name, "secondary") == 0) return LOADOUT_SLOT_SECONDARY;
     if (strcasecmp(name, "armor"    ) == 0) return LOADOUT_SLOT_ARMOR;
     if (strcasecmp(name, "jetpack"  ) == 0) return LOADOUT_SLOT_JETPACK;
+    if (strcasecmp(name, "mode"     ) == 0) return LOADOUT_SLOT_MODE;
     return -1;
 }
 
@@ -481,11 +489,13 @@ void ui_loadout_open(LoadoutModal *m, const TestPlayLoadout *cur) {
     int is = ui_loadout_slot_idx(LOADOUT_SLOT_SECONDARY, cur ? cur->secondary : "");
     int ia = ui_loadout_slot_idx(LOADOUT_SLOT_ARMOR,     cur ? cur->armor     : "");
     int ij = ui_loadout_slot_idx(LOADOUT_SLOT_JETPACK,   cur ? cur->jetpack   : "");
+    int im = ui_loadout_slot_idx(LOADOUT_SLOT_MODE,      cur ? cur->mode      : "");
     m->idx[LOADOUT_SLOT_CHASSIS]   = (ic >= 0) ? ic : 0;
     m->idx[LOADOUT_SLOT_PRIMARY]   = (ip >= 0) ? ip : 0;
     m->idx[LOADOUT_SLOT_SECONDARY] = (is >= 0) ? is : 0;
     m->idx[LOADOUT_SLOT_ARMOR]     = (ia >= 0) ? ia : 0;
     m->idx[LOADOUT_SLOT_JETPACK]   = (ij >= 0) ? ij : 0;
+    m->idx[LOADOUT_SLOT_MODE]      = (im >= 0) ? im : 0;
     for (int i = 0; i < LOADOUT_SLOT_COUNT; ++i) m->edit[i] = false;
 }
 
@@ -511,6 +521,8 @@ void ui_loadout_apply(const LoadoutModal *m, TestPlayLoadout *out) {
     snprintf(out->armor,     sizeof out->armor,     "%s", n ? n : "");
     n = ui_loadout_slot_name(LOADOUT_SLOT_JETPACK,   m->idx[LOADOUT_SLOT_JETPACK]);
     snprintf(out->jetpack,   sizeof out->jetpack,   "%s", n ? n : "");
+    n = ui_loadout_slot_name(LOADOUT_SLOT_MODE,      m->idx[LOADOUT_SLOT_MODE]);
+    snprintf(out->mode,      sizeof out->mode,      "%s", n ? n : "");
 }
 
 /* Build a ;-separated string from a name array, suitable for
@@ -522,6 +534,7 @@ static const char *lo_raygui_text(int slot) {
     static char secondary_buf[192];
     static char armor_buf    [96];
     static char jetpack_buf  [128];
+    static char mode_buf     [64];
     static bool init = false;
     if (!init) {
         #define BUILD(buf, arr) do {                                     \
@@ -536,6 +549,7 @@ static const char *lo_raygui_text(int slot) {
         BUILD(secondary_buf, g_lo_secondary);
         BUILD(armor_buf,     g_lo_armor);
         BUILD(jetpack_buf,   g_lo_jetpack);
+        BUILD(mode_buf,      g_lo_mode);
         #undef BUILD
         init = true;
     }
@@ -545,6 +559,7 @@ static const char *lo_raygui_text(int slot) {
         case LOADOUT_SLOT_SECONDARY: return secondary_buf;
         case LOADOUT_SLOT_ARMOR:     return armor_buf;
         case LOADOUT_SLOT_JETPACK:   return jetpack_buf;
+        case LOADOUT_SLOT_MODE:      return mode_buf;
         default:                     return "";
     }
 }
@@ -559,7 +574,7 @@ void ui_loadout_modal_draw(LoadoutModal *m, TestPlayLoadout *out,
      * control the contrast: dark COL_PANEL_2 background under the
      * editor's COL_TEXT (light) labels. raygui's default GuiPanel uses
      * a near-white background which made our light labels invisible. */
-    int dlg_w = ui_scl(580, D->scale), dlg_h = ui_scl(420, D->scale);
+    int dlg_w = ui_scl(580, D->scale), dlg_h = ui_scl(470, D->scale);
     int dlg_x = (sw - dlg_w) / 2, dlg_y = (sh - dlg_h) / 2;
     int title_h = ui_scl(36, D->scale);
     DrawRectangle(dlg_x, dlg_y, dlg_w, dlg_h, COL_PANEL_2);
@@ -589,6 +604,7 @@ void ui_loadout_modal_draw(LoadoutModal *m, TestPlayLoadout *out,
 
     static const char *const labels[LOADOUT_SLOT_COUNT] = {
         "Chassis:",   "Primary:",   "Secondary:",   "Armor:",   "Jetpack:",
+        "Mode:",
     };
 
     /* Determine which slot (if any) has its dropdown open. */
@@ -725,6 +741,7 @@ static const HelpRow g_help_tools[] = {
     { "I", "Pickup-spawner tool" },
     { "A", "Ambient-zone tool (drag a rectangle)" },
     { "D", "Decoration tool" },
+    { "F", "CTF flag-base tool (1=Red / 2=Blue; auto-toggles on place)" },
     { "M", "Map metadata modal (name, blurb, modes)" },
 };
 static const HelpRow g_help_tile[] = {
@@ -743,7 +760,8 @@ static const HelpRow g_help_poly[] = {
 static const HelpRow g_help_objects[] = {
     { "Spawn 0 / 1 / 2",  "Set team to Any / Red / Blue" },
     { "Pickup [ / ]",     "Cycle pickup variant down / up" },
-    { "Right mouse",      "Delete nearest object within 24 px (Spawn/Pickup/Deco)" },
+    { "Flag 1 / 2",       "Set CTF flag team to Red / Blue (auto-toggles after place)" },
+    { "Right mouse",      "Delete nearest object within 24 px (Spawn/Pickup/Deco/Flag)" },
     { "Right mouse (Ambi)", "Delete the ambient zone the cursor is inside" },
 };
 

@@ -103,23 +103,28 @@ void ui_help_modal_draw (HelpModal *h, const UIDims *D);
 
 /* ---- Test-play loadout modal (L hotkey or top-bar button) ---------
  *
- * Configures the chassis / primary / secondary / armor / jetpack the
- * F5 test-play child gets. Same content as the editor's --test-*
- * CLI flags, just exposed via dropdowns so a user can set the loadout
- * mid-session without restarting the editor. Apply writes back into
- * the caller's TestPlayLoadout (read by play_test on F5).
+ * Configures the chassis / primary / secondary / armor / jetpack /
+ * match-mode the F5 test-play child gets. Same content as the editor's
+ * --test-* CLI flags, just exposed via dropdowns so a user can set the
+ * loadout mid-session without restarting the editor. Apply writes back
+ * into the caller's TestPlayLoadout (read by play_test on F5).
  *
  * Index 0 in each dropdown is "(default)" — empty string in the
  * TestPlayLoadout, which makes the spawned game fall back to its own
  * defaults. Names are the same display names the game's CLI parser
- * accepts (e.g. "Grappling Hook"). */
+ * accepts (e.g. "Grappling Hook").
+ *
+ * The MODE slot is a special case: "(default)" keeps the runtime's
+ * META auto-detect (the .lvl's mode_mask CTF bit picks CTF, otherwise
+ * FFA). Picking FFA / TDM / CTF explicitly overrides that. */
 enum {
     LOADOUT_SLOT_CHASSIS   = 0,
     LOADOUT_SLOT_PRIMARY   = 1,
     LOADOUT_SLOT_SECONDARY = 2,
     LOADOUT_SLOT_ARMOR     = 3,
     LOADOUT_SLOT_JETPACK   = 4,
-    LOADOUT_SLOT_COUNT     = 5,
+    LOADOUT_SLOT_MODE      = 5,
+    LOADOUT_SLOT_COUNT     = 6,
 };
 
 typedef struct LoadoutModal {

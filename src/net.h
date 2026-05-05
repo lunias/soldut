@@ -59,6 +59,7 @@ enum {
     NET_MSG_HIT_EVENT          = 13,    /* server → client (EVENT) — hit pos+dir+part for blood/spark FX */
     NET_MSG_FIRE_EVENT         = 14,    /* server → client (EVENT) — fire origin+dir+weapon for tracer/projectile FX */
     NET_MSG_PICKUP_STATE       = 15,    /* server → client (EVENT) — pickup spawner state transition (P05) */
+    NET_MSG_FLAG_STATE         = 16,    /* server → client (EVENT) — CTF flag state transition (P07) */
     NET_MSG_CHAT               = 10,    /* both directions   (CHAT) */
     NET_MSG_DISCOVERY_QUERY    = 11,    /* connectionless broadcast */
     NET_MSG_DISCOVERY_REPLY    = 12,    /* connectionless reply    */
@@ -277,6 +278,12 @@ void net_server_broadcast_fire(NetState *ns, int shooter_mech_id, int weapon_id,
 struct PickupSpawner;
 void net_server_broadcast_pickup_state(NetState *ns, int spawner_id,
                                        const struct PickupSpawner *s);
+
+/* Flag state event (P07) — full state for both CTF flags. Sent on every
+ * state transition (pickup / capture / drop / return) and as part of
+ * INITIAL_STATE for joining clients. 26 bytes total: tag + flag_count +
+ * 2 × FlagWire(12 bytes). Reliable on NET_CH_EVENT. */
+void net_server_broadcast_flag_state(NetState *ns, const struct World *w);
 
 /* ---- M4 lobby/match outgoing -------------------------------------- */
 

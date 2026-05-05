@@ -1,0 +1,54 @@
+# 2p_ctf_drop_on_kill — host (RED) kills the BLUE flag carrier.
+# Verifies the carrier-dies-drops-flag rule end-to-end on the wire.
+#
+# Setup: client pre-arms itself as carrier of the RED flag (via the
+# flag_carry debug directive), then sits still. Host fires at the
+# carrier until they die. The host's mech_kill path should call
+# ctf_drop_on_death which transitions flag[0] from CARRIED to
+# DROPPED with a 30 s auto-return timer.
+#
+# Asserted log lines:
+#   - "ctf: drop flag=0 carrier mech=1 at (X, Y)"
+#   - "mech_kill: id=1"
+#   - flag wire broadcast (flag_state_dirty cleared)
+#
+# This is the regression test for "killing a flag carrier should
+# drop the flag" — the unit test (test_carrier_dies_drop in
+# tests/ctf_test.c) covers the function logic; this paired shot
+# covers the full networked round-trip.
+
+window 1280 720
+out build/shots/net/host_ctf_drop
+network host 24029
+name HostRed
+
+# Both bodies near red base, in close range.
+spawn_at 2200 1100
+peer_spawn 1 2400 1100
+
+aim 2400 1070
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 100 shot t100_pre_carry
+
+# Arm the carrier state SERVER-SIDE: flag 0 (RED) carried by mech 1
+# (the client). The companion client script's flag_carry directive
+# only mutates client-local state and never reaches the server, so we
+# arm directly here. arm_carry sets dirty and broadcasts through the
+# main.c match-flow tick.
+at 200 arm_carry 0 1
+
+at 250 shot t250_carrier_carrying
+
+# Kill the carrier (mech 1) via debug directive — sidesteps weapon
+# accuracy quirks (recoil/bink) so the death flow is deterministic.
+# The kill goes through mech_apply_damage → mech_kill, which calls
+# ctf_drop_on_death and transitions the flag to DROPPED at the
+# pelvis position with a 30 s auto-return timer.
+at 300 kill_peer 1
+
+at 350 shot t350_post_kill
+at 480 shot t480_drop_settled
+
+at 600 end

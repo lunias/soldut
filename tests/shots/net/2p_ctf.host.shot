@@ -1,0 +1,46 @@
+# 2p_ctf — host side. Plays the RED team. Uses the Crossfire map's
+# auto-spawn (slot 0 → red side after team auto-balance).
+#
+# Flow:
+#   1. Lobby + countdown (~tick 0–130) — auto_start fires.
+#   2. ROUND_START — host spawns at red lane, client spawns at blue.
+#   3. Host arms a carry of the BLUE flag via the flag_carry debug
+#      directive (would otherwise need ~14 sec of running across the
+#      whole map). The dirty bit is set; main.c broadcasts FLAG_STATE
+#      to the client.
+#   4. Host walks LEFT into the RED home flag at (320, 974). The
+#      both-flags-home capture rule fires: +5 RED team, BLUE flag
+#      sent home. Both flags land HOME again.
+#
+# The shot test pairs with 2p_ctf.client.shot which is a stationary
+# observer that captures the same key moments from the BLUE side. The
+# flag pip on the client should pulse during the carry then return to
+# solid HOME after the capture.
+
+window 1280 720
+out build/shots/net/host_ctf
+network host 24017
+name HostRed
+
+contact_sheet sheet cols 4 cell 320 180
+
+# Host's local mech spawns naturally on the red platform after
+# ROUND_START (~tick 130). Capture pre-round banner.
+at 60  shot t60_lobby
+at 140 shot t140_round_start
+at 180 shot t180_player_settled
+
+# Arm the BLUE-flag carry. Triggers a FLAG_STATE broadcast.
+at 200 flag_carry 1
+at 215 shot t215_carrying_blue
+
+# Walk RIGHT into the RED home flag at x=320 (~130 px from spawn at 192).
+# Capture should fire within ~30 ticks. mech_chest closes on flag.home_pos
+# at run speed (~4.6 px/tick).
+at 220 press right
+at 270 release right
+at 280 shot t280_just_after_capture
+at 320 shot t320_post_capture_settled
+
+at 700 shot t700_round_end
+at 760 end

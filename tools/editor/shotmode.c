@@ -746,6 +746,7 @@ static int doc_field_value(const ShotState *s, const char *field) {
     if (strieq(field, "loadout_secondary_idx")) return s->loadout.idx[LOADOUT_SLOT_SECONDARY];
     if (strieq(field, "loadout_armor_idx"))     return s->loadout.idx[LOADOUT_SLOT_ARMOR];
     if (strieq(field, "loadout_jetpack_idx"))   return s->loadout.idx[LOADOUT_SLOT_JETPACK];
+    if (strieq(field, "loadout_mode_idx"))      return s->loadout.idx[LOADOUT_SLOT_MODE];
     /* Per-slot APPLIED idx — what's stored in test_lo and would be
      * forwarded to the game on F5. Resolves the test_lo string back to
      * the dropdown idx so an integer assert can verify the apply flow.
@@ -756,6 +757,7 @@ static int doc_field_value(const ShotState *s, const char *field) {
     if (strieq(field, "test_lo_secondary_idx")) return ui_loadout_slot_idx(LOADOUT_SLOT_SECONDARY, s->test_lo.secondary);
     if (strieq(field, "test_lo_armor_idx"))     return ui_loadout_slot_idx(LOADOUT_SLOT_ARMOR,     s->test_lo.armor);
     if (strieq(field, "test_lo_jetpack_idx"))   return ui_loadout_slot_idx(LOADOUT_SLOT_JETPACK,   s->test_lo.jetpack);
+    if (strieq(field, "test_lo_mode_idx"))      return ui_loadout_slot_idx(LOADOUT_SLOT_MODE,      s->test_lo.mode);
     if (strieq(field, "tiles_solid")) {
         int n = 0;
         int total = s->doc.width * s->doc.height;
@@ -934,6 +936,19 @@ static void apply_event(ShotState *s, const ShotEvent *e) {
                           .team = (uint8_t)e->i3 };
             arrput(d->flags, f);
             undo_record_obj_add(u, UC_FLAG_ADD, (int)arrlen(d->flags) - 1, &f);
+            /* Mirror tool_flag's behavior: when both team-1 and team-2
+             * flags are present, set the CTF bit on META.mode_mask so
+             * the loader recognises this as a CTF map (and the runtime
+             * --test-play auto-detection picks CTF mode). */
+            int red_n = 0, blue_n = 0;
+            int fn = (int)arrlen(d->flags);
+            for (int k = 0; k < fn; ++k) {
+                if (d->flags[k].team == 1) red_n++;
+                if (d->flags[k].team == 2) blue_n++;
+            }
+            if (red_n > 0 && blue_n > 0) {
+                d->meta.mode_mask |= (uint16_t)(1u << 2);   /* MATCH_MODE_CTF = 2 */
+            }
             d->dirty = true;
             break;
         }
@@ -968,10 +983,10 @@ static void apply_event(ShotState *s, const ShotEvent *e) {
         case EV_LOADOUT_APPLY: {
             ui_loadout_apply(&s->loadout, &s->test_lo);
             ui_loadout_close(&s->loadout);
-            slog("loadout applied: chassis='%s' primary='%s' secondary='%s' armor='%s' jet='%s'",
+            slog("loadout applied: chassis='%s' primary='%s' secondary='%s' armor='%s' jet='%s' mode='%s'",
                  s->test_lo.chassis,   s->test_lo.primary,
                  s->test_lo.secondary, s->test_lo.armor,
-                 s->test_lo.jetpack);
+                 s->test_lo.jetpack,   s->test_lo.mode);
             break;
         }
         case EV_LOADOUT_OPEN_DROPDOWN: {

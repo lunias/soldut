@@ -24,6 +24,7 @@
 typedef enum {
     MODE_BOOT = 0,    /* before init has completed */
     MODE_TITLE,       /* main menu (Single Player / Host / Browse / Connect / Quit) */
+    MODE_HOST_SETUP,  /* pre-lobby: host picks mode / map / limits / friendly-fire */
     MODE_BROWSER,     /* server browser screen */
     MODE_CONNECT,     /* enter host:port to direct-connect */
     MODE_CONNECTING,  /* enet/handshake in flight */

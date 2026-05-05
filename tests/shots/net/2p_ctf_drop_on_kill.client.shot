@@ -1,0 +1,23 @@
+# 2p_ctf_drop_on_kill — client (BLUE) becomes the RED flag carrier
+# and stands still while the host shoots them. Pairs with the host
+# script. The flag_carry directive is the lobby UI's RED flag pickup
+# without requiring a 14-second walk across the arena.
+
+window 1280 720
+out build/shots/net/client_ctf_drop
+network connect 127.0.0.1:24029
+name ClientBlue
+
+spawn_at 2400 1100
+
+# Pre-arm carrier state. flag_carry 0 = the RED flag (idx 0); the
+# directive sets flag.status = CARRIED and carrier_mech = local id.
+# Done at tick 200 so the connection has fully settled and the
+# client's local mech id is resolved.
+at 200 flag_carry 0
+
+at 100 shot t100_pre_carry
+at 250 shot t250_carrying
+at 350 shot t350_being_killed
+at 480 shot t480_dead
+at 600 end

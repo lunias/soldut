@@ -43,6 +43,7 @@ src/
 ├── particle.{c,h}          # blood, sparks, smoke
 ├── decal.{c,h}             # splat layer
 ├── pickup.{c,h}            # pickup spawners + state machine + per-kind apply (M5 P05)
+├── ctf.{c,h}               # CTF flag entities + capture / pickup / return rules (M5 P07)
 ├── level.{c,h}             # tile grid + ray helpers
 ├── level_io.{c,h}          # `.lvl` binary format loader/saver + CRC32 (M5 P01)
 ├── maps.{c,h}              # code-built map fallbacks + `map_build` dispatcher
@@ -75,7 +76,7 @@ Modules that the design canon expects but that haven't shipped yet:
 - `audio.{c,h}` — lands at M5 P14 (per `documents/m5/09-audio.md`).
 - `hotreload.{c,h}` — never built; data hot-reload is deferred indefinitely.
 
-Shipped at M5: `level_io.{c,h}` (P01), `pickup.{c,h}` (P05).
+Shipped at M5: `level_io.{c,h}` (P01), `pickup.{c,h}` (P05), `ctf.{c,h}` (P07).
 
 `server_browser.{c,h}` was originally planned as its own module; LAN discovery folded into `net.{c,h}` and the browser screen lives in `lobby_ui.{c,h}`.
 
@@ -347,43 +348,47 @@ We do **not** integrate Tracy or Optick at v1. If we need deep traces, we add th
 
 ## File size targets
 
-| Module | Current LOC (post-M4 + M5 P01–P05) | Notes |
+| Module | Current LOC (post-M4 + M5 P01–P07) | Notes |
 |---|---|---|
-| main.c | 1070 | top-level loop + accumulator + CLI + P03 event broadcast loops + P04 `--test-play` + P05 `broadcast_new_pickups` |
+| main.c | 1210 | top-level loop + accumulator + CLI + P03 event broadcast loops + P04 `--test-play` + P05 `broadcast_new_pickups` + P07 CTF mode-mask validation + `broadcast_flag_state_if_dirty` + `ctf_step` hookup + TDM/CTF team auto-balance |
 | platform.c | 99 | thin raylib wrapper |
 | game.c | 121 | Game lifecycle |
 | simulate.c | 251 | the pure step (P03 render_prev snapshot, P05 pickup_step hook) |
-| physics.c | 728 | Verlet + constraints + tile/poly collision (M5 P02 grew this) |
-| mech.c | 1485 | chassis + animation drive — close to split threshold (P05 added powerup ticks + Engineer deployable + Burst SMG cadence) |
-| weapons.c | 663 | weapon table + fire logic + P03 fire-event recording |
-| projectile.c | 482 | bullets/grenades |
+| physics.c | 753 | Verlet + constraints + tile/poly collision (M5 P02 grew this; P06 added `solve_fixed_anchor`) |
+| mech.c | 1721 | chassis + animation drive — past split threshold (P05 powerups + Engineer deployable + Burst SMG cadence; P06 grapple lifecycle + ATTACHED retract block; P07 carrier penalties + `ctf_drop_on_death` hook in `mech_kill`) |
+| weapons.c | 672 | weapon table + fire logic + P03 fire-event recording + P06 WFIRE_GRAPPLE branch |
+| projectile.c | 590 | bullets/grenades + P06 `PROJ_GRAPPLE_HEAD` lifecycle |
 | particle.c | 190 | pool + draw |
 | decal.c | 80 | splat layer |
 | level.c | 260 | tile-grid helpers + ray queries + poly broadphase (M5 P02) |
 | level_io.c | 821 | `.lvl` loader/saver + CRC32 + poly broadphase build (M5 P01–P02) |
-| maps.c | 297 | code-built map fallbacks + `map_build` + `map_build_from_path` + P05 default pickups |
+| maps.c | 420 | code-built map fallbacks + `map_build` + `map_build_from_path` + P05 default pickups + P07 `MAP_CROSSFIRE` (CTF arena) + per-map `meta.mode_mask` |
 | match.c | 261 | match phases, scoring, mode rules |
-| render.c | 386 | orchestration (P02 polygon stopgap, P03 alpha-lerp threading, P05 invis alpha-mod + pickup placeholder) |
-| hud.c | 176 | HP / jet / ammo / kill feed + P05 active-powerup pill |
+| render.c | 509 | orchestration (P02 polygon stopgap, P03 alpha-lerp threading, P05 invis alpha-mod + pickup placeholder, P06 `draw_grapple_rope`, P07 `draw_flags`) |
+| hud.c | 283 | HP / jet / ammo / kill feed + P05 active-powerup pill + P07 CTF flag pips + off-screen compass arrows |
 | ui.c | 306 | immediate-mode UI helpers |
 | lobby.c | 528 | lobby state, slots, chat, ready-up |
 | lobby_ui.c | 896 | title / browser / lobby / summary screens |
-| net.c | 1864 | ENet wrap + packet codec + P03 hit/fire events + P05 pickup-state — well past split threshold |
-| snapshot.c | 588 | encode/decode + per-mech remote interp ring (P03) + powerup bits (P05) |
+| net.c | 2011 | ENet wrap + packet codec + P03 hit/fire events + P05 pickup-state + P07 flag-state encode/decode + INITIAL_STATE flag suffix — well past split threshold |
+| snapshot.c | 650 | encode/decode + per-mech remote interp ring (P03) + powerup bits (P05) + P06 `SNAP_STATE_GRAPPLING` trailing suffix |
 | reconcile.c | 114 | predict + replay |
 | pickup.c | 343 | new at P05 — spawner pool + state machine + per-kind apply |
+| ctf.c | 285 | new at P07 — flag entities + capture rule + auto-return + carrier helpers |
 | config.c | 171 | `soldut.cfg` parser |
 | arena.c | 51 | |
 | pool.c | 65 | |
 | log.c | 91 | |
 | hash.c | 49 | |
 | ds.c | 20 | one #define |
-| shotmode.c | 1484 | scriptable test runner + P05 `give_invis` debug directive — past split threshold |
-| **Total .c** | **~13,940 LOC** | + ~3,410 LOC of headers |
+| shotmode.c | 1744 | scriptable test runner + P05 `give_invis` debug directive + P07 `mode`/`map`/`flag_carry` directives + config_load + ctf_init_round/ctf_step hookup — well past split threshold |
+| **Total .c** | **~15,070 LOC** | + ~3,540 LOC of headers |
 
-`net.c` is well past the ~1500 line split guideline; `shotmode.c` and `mech.c` are
-close. Watch each at the next material change. `audio.{c,h}` is not yet built —
-it lands at M5 P14 and will add to this table.
+`net.c` and `mech.c` are well past the ~1500 line split guideline;
+`shotmode.c` is just past. P06 pushed `mech.c` over and P07 added another
+~30 LOC + a bit to `net.c`; the extraction (e.g., `mech_grapple.c` or
+`net_lobby.c` / `net_ctf.c`) is worth scheduling before P08 (map sharing)
+adds another reliable-channel handler to `net.c`. `audio.{c,h}` is not
+yet built — it lands at M5 P14 and will add to this table.
 
 If a module substantially exceeds the rule of thumb, it's doing too much — we
 look for an extraction.

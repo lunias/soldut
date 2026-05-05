@@ -59,7 +59,7 @@ typedef struct {
  * message.
  *
  * Quantization:
- *   pos_x_q, pos_y_q   → 1/8 px      (16-bit signed covers ±4096 px)
+ *   pos_x_q, pos_y_q   → 1/4 px      (16-bit signed covers ±8190 px)
  *   vel_x_q, vel_y_q   → 1/16 px/tick
  *   aim_q              → uint16 fraction of 2π
  *   torso_q            → uint16 fraction of 2π

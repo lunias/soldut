@@ -3,6 +3,7 @@
 #include "decal.h"
 #include "hud.h"
 #include "level.h"
+#include "match.h"
 #include "mech.h"
 #include "particle.h"
 #include "pickup.h"
@@ -361,6 +362,73 @@ static void draw_grapple_rope(const World *w, int mid, float alpha,
                1.5f, (Color){240, 220, 100, 255});
 }
 
+/* P07 — CTF flag. Vertical staff (line) + triangular pennant. Position
+ * is HOME / DROPPED / CARRIED-mech-chest depending on status. The
+ * pennant gets a small sin offset on its tip while carried so it
+ * "waves" — a cheap cue that this flag is currently in motion. The
+ * proper art (sprite + ribbon shader) lands later; this is a
+ * P02-style placeholder that reads cleanly in shot tests. */
+static void draw_flag(const World *w, int f, float alpha) {
+    if (f < 0 || f >= w->flag_count) return;
+    const Flag *fl = &w->flags[f];
+    Color tc = (fl->team == MATCH_TEAM_RED)
+              ? (Color){220,  80,  80, 255}
+              : (Color){ 80, 140, 220, 255};
+    Color staff_c = (Color){ 80,  60,  40, 255};
+
+    /* Resolve render position. CARRIED uses the carrier's interp-lerped
+     * chest so the flag tracks the body smoothly; HOME/DROPPED pull
+     * from the per-flag fields. */
+    Vec2 base;
+    bool wave = false;
+    if (fl->status == FLAG_CARRIED &&
+        fl->carrier_mech >= 0 && fl->carrier_mech < w->mech_count) {
+        const Mech *cm = &w->mechs[fl->carrier_mech];
+        Vec2 chest = particle_render_pos(&w->particles,
+                                         cm->particle_base + PART_CHEST, alpha);
+        /* Carry behind the body — slightly offset to the back side so
+         * the body silhouette stays clean, raised to chest level. */
+        base.x = chest.x + (cm->facing_left ?  10.0f : -10.0f);
+        base.y = chest.y - 6.0f;
+        wave = true;
+    } else if (fl->status == FLAG_DROPPED) {
+        base = fl->dropped_pos;
+    } else {
+        base = fl->home_pos;
+    }
+
+    /* Staff: 28-px line going up. */
+    Vector2 staff_bot = (Vector2){ base.x, base.y };
+    Vector2 staff_top = (Vector2){ base.x, base.y - 28.0f };
+    DrawLineEx(staff_bot, staff_top, 2.0f, staff_c);
+
+    /* Pennant: triangle from staff_top, fanning to the right (or left
+     * for facing_left carrier). Tip wobbles when carried. */
+    float wobble = wave ? sinf((float)w->tick * 0.3f) * 2.0f : 0.0f;
+    bool flip = (fl->status == FLAG_CARRIED &&
+                 fl->carrier_mech >= 0 && fl->carrier_mech < w->mech_count &&
+                 w->mechs[fl->carrier_mech].facing_left);
+    float dx = flip ? -16.0f : 16.0f;
+    Vector2 v0 = staff_top;
+    Vector2 v1 = (Vector2){ staff_top.x + dx, staff_top.y + 6.0f + wobble };
+    Vector2 v2 = (Vector2){ staff_top.x,      staff_top.y + 12.0f };
+    /* DrawTriangle is CCW only — choose the winding by `flip`. */
+    if (flip) DrawTriangle(v0, v1, v2, tc);
+    else      DrawTriangle(v0, v2, v1, tc);
+
+    /* DROPPED highlight: a small base circle so the dropped flag reads
+     * differently from a parked HOME flag. (HOME has no halo; DROPPED
+     * gets one to emphasize urgency.) */
+    if (fl->status == FLAG_DROPPED) {
+        DrawCircleLines((int)base.x, (int)base.y, 14.0f,
+                        (Color){tc.r, tc.g, tc.b, 160});
+    }
+}
+
+static void draw_flags(const World *w, float alpha) {
+    for (int f = 0; f < w->flag_count; ++f) draw_flag(w, f, alpha);
+}
+
 /* P05 — placeholder pickup sprite. Bobs at 0.5 Hz / ±4 px for
  * available pickups; cooldown entries draw nothing. The "real" sprite
  * art lands at P13 with the atlas pipeline. PRACTICE_DUMMY entries
@@ -429,9 +497,13 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
             }
             projectile_draw(&w->projectiles, alpha);
             fx_draw(&w->fx, alpha);
+            /* P07 — CTF flags. Drawn after mechs so a carried flag sits
+             * in front of the body silhouette; before HUD so it stays
+             * inside the world camera transform. */
+            draw_flags(w, alpha);
         EndMode2D();
 
-        hud_draw(w, sw, sh, cursor_screen);
+        hud_draw(w, sw, sh, cursor_screen, r->camera);
         if (overlay_cb) overlay_cb(overlay_user, sw, sh);
     EndDrawing();
 }

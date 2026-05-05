@@ -129,7 +129,10 @@ void title_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
         L->request_single_player = true;
     } by += bh + gap;
     if (ui_button(&L->ui, (Rectangle){bx, by, bw, bh}, "Host Server", true)) {
-        L->request_host = true;
+        /* Goes to the host-setup screen first; the server is created
+         * only after the user confirms mode/map/limits there. */
+        L->setup_initialized = false;       /* re-seed defaults */
+        g->mode = MODE_HOST_SETUP;
     } by += bh + gap;
     if (ui_button(&L->ui, (Rectangle){bx, by, bw, bh}, "Browse Servers (LAN)", true)) {
         L->request_browse = true;
@@ -150,6 +153,251 @@ void title_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     ui_text_input(&L->ui, (Rectangle){nx, ny, nw, nh},
                   L->player_name, LOBBY_UI_NAME_BYTES,
                   UI_ID(), "player");
+
+    ui_end(&L->ui);
+}
+
+/* ---- Host setup screen --------------------------------------------- */
+/*
+ * Pre-lobby config screen the host sees after clicking "Host Server" on
+ * the title. Picks match mode, map, score limit, time limit, and
+ * friendly-fire BEFORE the lobby comes up so the host doesn't have to
+ * fiddle with config files for a one-off CTF round. The choices land in
+ * g->config via main.c when the user clicks "Start Hosting".
+ *
+ * Map cycle is filtered by the current mode's bit in each map's
+ * `meta.mode_mask`. The mode_mask comes from the code-built map's
+ * builder fn (or the .lvl's META lump) — see src/maps.c. If the picked
+ * map doesn't support the picked mode the picker auto-advances to the
+ * next compatible one.
+ */
+
+/* Read mode_mask without building the level. Code-built maps live in
+ * g_maps; we re-create a temporary world's level via map_build to peek
+ * meta. Cheap (small maps) and only happens on host-setup transitions. */
+static uint16_t setup_peek_mode_mask(int map_id, World *w, Arena *arena) {
+    arena_reset(arena);
+    map_build((MapId)map_id, w, arena);
+    return w->level.meta.mode_mask;
+}
+
+static bool setup_map_supports_mode(int map_id, int mode_id,
+                                    World *w, Arena *arena) {
+    uint16_t mm = setup_peek_mode_mask(map_id, w, arena);
+    return (mm & (1u << mode_id)) != 0;
+}
+
+static int setup_next_map_for_mode(int cur_map, int mode_id,
+                                   World *w, Arena *arena) {
+    /* Cycle through maps until we find one that supports `mode_id`.
+     * Falls back to the current pick if NO map supports the mode (which
+     * would be a bug — there's always at least one CTF map post-P07). */
+    for (int step = 1; step <= MAP_COUNT; ++step) {
+        int next = (cur_map + step) % MAP_COUNT;
+        if (setup_map_supports_mode(next, mode_id, w, arena)) return next;
+    }
+    return cur_map;
+}
+
+void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
+    Vec2 mouse = (Vec2){ (float)GetMouseX(), (float)GetMouseY() };
+    ui_begin(&L->ui, mouse, GetFrameTime(), sh);
+
+    ClearBackground((Color){8, 10, 14, 255});
+
+    /* First-entry init: seed the draft from the loaded config so the
+     * defaults are sensible (whatever soldut.cfg says, or built-ins). */
+    if (!L->setup_initialized) {
+        L->setup_mode         = (int)g->config.mode;
+        L->setup_map_id       = (g->config.map_rotation_count > 0)
+                                ? g->config.map_rotation[0] : MAP_FOUNDRY;
+        L->setup_score_limit  = g->config.score_limit;
+        L->setup_time_limit_s = (int)g->config.time_limit;
+        L->setup_friendly_fire= g->config.friendly_fire;
+        /* Fix CTF defaults that the FFA-default config wouldn't reach.
+         * If the user picked CTF on entry, clamp the score limit. */
+        if (L->setup_mode == MATCH_MODE_CTF && L->setup_score_limit >= 25) {
+            L->setup_score_limit = FLAG_CAPTURE_DEFAULT;
+        }
+        /* Validate the seeded map against the seeded mode. If the
+         * default cfg's map doesn't support the desired mode (e.g. user
+         * has mode_rotation=ctf but map_rotation=foundry), step to a
+         * compatible map. */
+        if (!setup_map_supports_mode(L->setup_map_id, L->setup_mode,
+                                     &g->world, &g->level_arena)) {
+            L->setup_map_id = setup_next_map_for_mode(
+                L->setup_map_id, L->setup_mode, &g->world, &g->level_arena);
+        }
+        L->setup_initialized = true;
+    }
+
+    /* Title. */
+    ui_draw_text(&L->ui, "HOST SETUP", S(32), S(24), 32,
+                 (Color){200, 220, 240, 255});
+    ui_draw_text(&L->ui,
+                 "Pick the match settings before opening the server. "
+                 "All players see them in the lobby.",
+                 S(32), S(70), 16, (Color){160, 170, 180, 255});
+
+    /* Layout: vertical stack of labeled rows in a centered panel. */
+    int panel_w = S(560);
+    int panel_x = (sw - panel_w) / 2;
+    int panel_y = S(120);
+    int row_h   = S(48);
+    int gap     = S(12);
+    int label_w = S(160);
+    int btn_w   = panel_w - label_w - S(16);
+
+    Rectangle panel = (Rectangle){ panel_x - S(16), panel_y - S(16),
+                                   panel_w + S(32),
+                                   row_h * 6 + gap * 5 + S(32) };
+    ui_panel_default(&L->ui, panel);
+
+    int y = panel_y;
+
+    /* ---- Mode picker (3-button radio) ---- */
+    ui_draw_text(&L->ui, "Mode", panel_x, y + S(14), 18, (Color){200, 220, 240, 255});
+    int mb_w = (btn_w - S(12)) / 3;
+    Rectangle mb_r[3] = {
+        (Rectangle){panel_x + label_w,                  y, mb_w, row_h},
+        (Rectangle){panel_x + label_w + mb_w + S(6),    y, mb_w, row_h},
+        (Rectangle){panel_x + label_w + (mb_w + S(6))*2,y, mb_w, row_h},
+    };
+    const char *mb_label[3] = { "FFA", "TDM", "CTF" };
+    int         mb_mode [3] = { MATCH_MODE_FFA, MATCH_MODE_TDM, MATCH_MODE_CTF };
+    for (int i = 0; i < 3; ++i) {
+        bool active = (L->setup_mode == mb_mode[i]);
+        bool hover  = ui_point_in_rect(L->ui.mouse, mb_r[i]);
+        Color bg = active ? L->ui.accent
+                          : hover ? L->ui.button_hover : L->ui.button_bg;
+        DrawRectangleRec(mb_r[i], bg);
+        DrawRectangleLinesEx(mb_r[i], L->ui.scale, L->ui.panel_edge);
+        int tw = ui_measure(&L->ui, mb_label[i], 18);
+        ui_draw_text(&L->ui, mb_label[i],
+                     (int)(mb_r[i].x + (mb_r[i].width - tw) * 0.5f),
+                     (int)(mb_r[i].y + (mb_r[i].height - 18 * L->ui.scale) * 0.5f),
+                     18, active ? (Color){12, 18, 26, 255} : L->ui.text_col);
+        if (hover && L->ui.mouse_pressed) {
+            int new_mode = mb_mode[i];
+            if (new_mode != L->setup_mode) {
+                L->setup_mode = new_mode;
+                /* Auto-clamp limits + auto-pick a compatible map. */
+                if (L->setup_mode == MATCH_MODE_CTF &&
+                    L->setup_score_limit >= 25) {
+                    L->setup_score_limit = FLAG_CAPTURE_DEFAULT;
+                }
+                if (!setup_map_supports_mode(L->setup_map_id,
+                                             L->setup_mode,
+                                             &g->world, &g->level_arena)) {
+                    L->setup_map_id = setup_next_map_for_mode(
+                        L->setup_map_id, L->setup_mode,
+                        &g->world, &g->level_arena);
+                }
+            }
+        }
+    }
+    y += row_h + gap;
+
+    /* ---- Map cycle button ---- */
+    ui_draw_text(&L->ui, "Map", panel_x, y + S(14), 18, (Color){200, 220, 240, 255});
+    Rectangle map_r = (Rectangle){panel_x + label_w, y, btn_w, row_h};
+    if (ui_button(&L->ui, map_r,
+                  TextFormat("%s  ▶", map_def(L->setup_map_id)->display_name),
+                  true)) {
+        L->setup_map_id = setup_next_map_for_mode(
+            L->setup_map_id, L->setup_mode, &g->world, &g->level_arena);
+    }
+    y += row_h + gap;
+
+    /* ---- Score limit stepper ---- */
+    ui_draw_text(&L->ui, "Score limit", panel_x, y + S(14), 18,
+                 (Color){200, 220, 240, 255});
+    int step_w = S(48);
+    int sval_w = btn_w - step_w * 2 - S(8);
+    if (ui_button(&L->ui, (Rectangle){panel_x + label_w, y, step_w, row_h},
+                  "−", true) && L->setup_score_limit > 1) {
+        L->setup_score_limit--;
+    }
+    Rectangle sval_r = (Rectangle){panel_x + label_w + step_w + S(4), y,
+                                    sval_w, row_h};
+    DrawRectangleRec(sval_r, (Color){20, 24, 32, 255});
+    DrawRectangleLinesEx(sval_r, L->ui.scale, L->ui.panel_edge);
+    char sbuf[32]; snprintf(sbuf, sizeof sbuf, "%d", L->setup_score_limit);
+    int sw_ = ui_measure(&L->ui, sbuf, 18);
+    ui_draw_text(&L->ui, sbuf,
+                 (int)(sval_r.x + (sval_r.width - sw_) * 0.5f),
+                 (int)(sval_r.y + (sval_r.height - 18*L->ui.scale) * 0.5f),
+                 18, L->ui.text_col);
+    if (ui_button(&L->ui, (Rectangle){panel_x + label_w + step_w + sval_w + S(8),
+                                       y, step_w, row_h}, "+", true)) {
+        L->setup_score_limit++;
+    }
+    y += row_h + gap;
+
+    /* ---- Time limit stepper (10-sec increments) ---- */
+    ui_draw_text(&L->ui, "Time limit (s)", panel_x, y + S(14), 18,
+                 (Color){200, 220, 240, 255});
+    if (ui_button(&L->ui, (Rectangle){panel_x + label_w, y, step_w, row_h},
+                  "−", true) && L->setup_time_limit_s > 10) {
+        L->setup_time_limit_s -= 10;
+    }
+    Rectangle tval_r = (Rectangle){panel_x + label_w + step_w + S(4), y,
+                                    sval_w, row_h};
+    DrawRectangleRec(tval_r, (Color){20, 24, 32, 255});
+    DrawRectangleLinesEx(tval_r, L->ui.scale, L->ui.panel_edge);
+    char tbuf[32]; snprintf(tbuf, sizeof tbuf, "%d s", L->setup_time_limit_s);
+    int tw_ = ui_measure(&L->ui, tbuf, 18);
+    ui_draw_text(&L->ui, tbuf,
+                 (int)(tval_r.x + (tval_r.width - tw_) * 0.5f),
+                 (int)(tval_r.y + (tval_r.height - 18*L->ui.scale) * 0.5f),
+                 18, L->ui.text_col);
+    if (ui_button(&L->ui, (Rectangle){panel_x + label_w + step_w + sval_w + S(8),
+                                       y, step_w, row_h}, "+", true)) {
+        L->setup_time_limit_s += 10;
+    }
+    y += row_h + gap;
+
+    /* ---- Friendly fire toggle ---- */
+    ui_draw_text(&L->ui, "Friendly fire", panel_x, y + S(14), 18,
+                 (Color){200, 220, 240, 255});
+    Rectangle ff_r = (Rectangle){panel_x + label_w, y, btn_w, row_h};
+    if (ui_button(&L->ui, ff_r,
+                  L->setup_friendly_fire ? "ON" : "off",
+                  true)) {
+        L->setup_friendly_fire = !L->setup_friendly_fire;
+    }
+    y += row_h + gap;
+
+    /* ---- Confirm / Cancel buttons ---- */
+    int bw = S(220), bh = S(48);
+    int by = y + S(8);
+    int bx_left  = panel_x;
+    int bx_right = panel_x + panel_w - bw;
+    if (ui_button(&L->ui, (Rectangle){bx_left, by, bw, bh}, "Back", true)) {
+        L->setup_initialized = false;     /* re-seed next time */
+        g->mode = MODE_TITLE;
+    }
+    /* The accent-color button on the right communicates "primary action". */
+    Rectangle start_r = (Rectangle){bx_right, by, bw, bh};
+    bool start_hover = ui_point_in_rect(L->ui.mouse, start_r);
+    Color start_bg = start_hover ? (Color){80, 200, 120, 255}
+                                 : (Color){60, 160, 90, 255};
+    DrawRectangleRec(start_r, start_bg);
+    DrawRectangleLinesEx(start_r, L->ui.scale, L->ui.panel_edge);
+    int sl_w = ui_measure(&L->ui, "Start Hosting", 20);
+    ui_draw_text(&L->ui, "Start Hosting",
+                 (int)(start_r.x + (start_r.width - sl_w) * 0.5f),
+                 (int)(start_r.y + (start_r.height - 20*L->ui.scale) * 0.5f),
+                 20, (Color){12, 22, 14, 255});
+    if (start_hover && L->ui.mouse_pressed) {
+        L->request_start_host = true;
+    }
+
+    /* Footer hint. */
+    ui_draw_text(&L->ui,
+                 "Tip: drop a soldut.cfg next to the binary to skip "
+                 "this screen and pre-set everything.",
+                 S(32), sh - S(28), 14, (Color){90, 100, 120, 255});
 
     ui_end(&L->ui);
 }
@@ -365,15 +613,24 @@ static void sync_loadout_from_server(LobbyUIState *L, const Game *g) {
     if (g->local_slot_id < 0) return;
     const LobbySlot *me = &g->lobby.slots[g->local_slot_id];
     if (!me->in_use) return;
+    /* First-entry: snap the loadout draft to whatever the server has
+     * for our slot (handles re-join / mid-round join). */
     if (!L->lobby_loadout_synced) {
         L->lobby_chassis   = me->loadout.chassis_id;
         L->lobby_primary   = me->loadout.primary_id;
         L->lobby_secondary = me->loadout.secondary_id;
         L->lobby_armor     = me->loadout.armor_id;
         L->lobby_jet       = me->loadout.jetpack_id;
-        L->lobby_team      = me->team;
         L->lobby_loadout_synced = 1;
     }
+    /* Team: ALWAYS sync from server so the TEAM picker reflects the
+     * authoritative state. The local optimistic update in
+     * apply_team_change already set L->lobby_team before the wire
+     * round-trip; the server's confirmation comes back through this
+     * path. If the server force-assigned (e.g., team auto-balance,
+     * future kick-to-team), the picker updates to match without the
+     * user having to click. */
+    L->lobby_team = me->team;
 }
 
 static MechLoadout build_local_loadout(const LobbyUIState *L) {
@@ -510,18 +767,140 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     ClearBackground((Color){10, 12, 16, 255});
     sync_loadout_from_server(L, g);
 
-    /* ---- Top strip: title + match info ---- */
+    /* ---- Top strip: title + MATCH panel ----
+     * Visible to all players. The host gets clickable mode + map
+     * buttons (only between rounds — phase == LOBBY); clients see the
+     * same widgets disabled. Score/time/ff are status text for now. */
     ui_draw_text(&L->ui, "LOBBY", S(32), S(20), 28,
                  (Color){200, 220, 240, 255});
-    char modeline[96];
-    snprintf(modeline, sizeof modeline,
-             "%s · %s · score %d · time %.0fs · ff=%s",
-             match_mode_name(g->match.mode),
+
+    bool is_host = (g->net.role == NET_ROLE_SERVER || g->offline_solo);
+    bool can_change = is_host && (g->match.phase == MATCH_PHASE_LOBBY ||
+                                   g->match.phase == MATCH_PHASE_SUMMARY);
+
+    /* MATCH panel: a small horizontal strip of widgets right under the
+     * LOBBY title. Layout: [Mode buttons] [Map cycle] [score · time · ff]. */
+    int mp_y     = S(60);
+    int mp_h     = S(40);
+    int mp_x     = S(32);
+    int mb_w     = S(58);
+    int mb_gap   = S(4);
+    const struct { int mode; const char *label; } modes[3] = {
+        { MATCH_MODE_FFA, "FFA" },
+        { MATCH_MODE_TDM, "TDM" },
+        { MATCH_MODE_CTF, "CTF" },
+    };
+    for (int i = 0; i < 3; ++i) {
+        Rectangle r = (Rectangle){mp_x + i * (mb_w + mb_gap), mp_y, mb_w, mp_h};
+        bool active = ((int)g->match.mode == modes[i].mode);
+        bool hover  = can_change && ui_point_in_rect(L->ui.mouse, r);
+        Color bg = active ? L->ui.accent
+                          : (hover ? L->ui.button_hover : L->ui.button_bg);
+        DrawRectangleRec(r, bg);
+        DrawRectangleLinesEx(r, L->ui.scale, L->ui.panel_edge);
+        int tw = ui_measure(&L->ui, modes[i].label, 16);
+        Color tc = active ? (Color){12, 18, 26, 255}
+                          : can_change ? L->ui.text_col : L->ui.text_dim;
+        ui_draw_text(&L->ui, modes[i].label,
+                     (int)(r.x + (r.width - tw) * 0.5f),
+                     (int)(r.y + (r.height - 16*L->ui.scale) * 0.5f),
+                     16, tc);
+        if (can_change && hover && L->ui.mouse_pressed && !active) {
+            /* Host mode change. Update local match + broadcast. CTF
+             * needs a compatible map; clamp score limit if jumping
+             * from FFA's 25 to CTF. */
+            g->match.mode = (MatchModeId)modes[i].mode;
+            g->match.friendly_fire = g->config.friendly_fire ||
+                                      (g->match.mode == MATCH_MODE_FFA);
+            g->world.friendly_fire = g->match.friendly_fire;
+            if (g->match.mode == MATCH_MODE_CTF &&
+                g->match.score_limit >= 25) {
+                g->match.score_limit = FLAG_CAPTURE_DEFAULT;
+            }
+            /* Validate map mode_mask. If incompatible, advance to a
+             * supporting map. We have to peek the chosen map's META
+             * which lives on the level we already built — but maps.c
+             * sets meta.mode_mask at build time, so a fresh build is
+             * cheap. Skip if test-play (can't change map there). */
+            if (!g->test_play_lvl[0]) {
+                arena_reset(&g->level_arena);
+                map_build((MapId)g->match.map_id, &g->world, &g->level_arena);
+                if (!(g->world.level.meta.mode_mask & (1u << g->match.mode))) {
+                    for (int step = 1; step <= MAP_COUNT; ++step) {
+                        int next = (g->match.map_id + step) % MAP_COUNT;
+                        arena_reset(&g->level_arena);
+                        map_build((MapId)next, &g->world, &g->level_arena);
+                        if (g->world.level.meta.mode_mask & (1u << g->match.mode)) {
+                            g->match.map_id = next;
+                            break;
+                        }
+                    }
+                }
+            }
+            g->config.mode = g->match.mode;
+            g->config.mode_rotation[0] = g->match.mode;
+            g->config.mode_rotation_count = 1;
+            g->config.map_rotation[0] = g->match.map_id;
+            g->config.map_rotation_count = 1;
+            if (g->net.role == NET_ROLE_SERVER) {
+                net_server_broadcast_match_state(&g->net, &g->match);
+            }
+            LOG_I("host: lobby mode → %s map → %s",
+                  match_mode_name(g->match.mode),
+                  map_def(g->match.map_id)->display_name);
+        }
+    }
+
+    /* Map cycle button — to the right of the mode buttons. */
+    int map_x = mp_x + 3 * (mb_w + mb_gap) + S(12);
+    int map_w = S(180);
+    Rectangle map_r = (Rectangle){map_x, mp_y, map_w, mp_h};
+    char map_label[64];
+    snprintf(map_label, sizeof map_label, "Map: %s%s",
              map_def(g->match.map_id)->display_name,
+             can_change ? "  ▶" : "");
+    {
+        bool hover = can_change && ui_point_in_rect(L->ui.mouse, map_r);
+        Color bg = hover ? L->ui.button_hover : L->ui.button_bg;
+        DrawRectangleRec(map_r, bg);
+        DrawRectangleLinesEx(map_r, L->ui.scale, L->ui.panel_edge);
+        Color tc = can_change ? L->ui.text_col : L->ui.text_dim;
+        int tw = ui_measure(&L->ui, map_label, 16);
+        ui_draw_text(&L->ui, map_label,
+                     (int)(map_r.x + (map_r.width - tw) * 0.5f),
+                     (int)(map_r.y + (map_r.height - 16*L->ui.scale) * 0.5f),
+                     16, tc);
+        if (can_change && hover && L->ui.mouse_pressed && !g->test_play_lvl[0]) {
+            /* Cycle to next map that supports the current mode. */
+            int cur = g->match.map_id;
+            for (int step = 1; step <= MAP_COUNT; ++step) {
+                int next = (cur + step) % MAP_COUNT;
+                arena_reset(&g->level_arena);
+                map_build((MapId)next, &g->world, &g->level_arena);
+                if (g->world.level.meta.mode_mask & (1u << g->match.mode)) {
+                    g->match.map_id = next;
+                    break;
+                }
+            }
+            g->config.map_rotation[0] = g->match.map_id;
+            g->config.map_rotation_count = 1;
+            if (g->net.role == NET_ROLE_SERVER) {
+                net_server_broadcast_match_state(&g->net, &g->match);
+            }
+            LOG_I("host: lobby map → %s",
+                  map_def(g->match.map_id)->display_name);
+        }
+    }
+
+    /* Status text — score / time / ff — to the right of the map. */
+    char stat[96];
+    snprintf(stat, sizeof stat, "score %d  ·  time %.0fs  ·  ff=%s",
              g->match.score_limit,
              (double)g->match.time_limit,
              g->match.friendly_fire ? "ON" : "off");
-    ui_draw_text(&L->ui, modeline, S(32), S(60), 18,
+    int sx_text = map_x + map_w + S(16);
+    int sty = mp_y + (mp_h - (int)(16*L->ui.scale + 0.5f)) / 2;
+    ui_draw_text(&L->ui, stat, sx_text, sty, 16,
                  (Color){180, 200, 220, 255});
 
     /* Auto-start countdown banner — top-right. */
@@ -561,7 +940,7 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
      * +-------------------------------------------+
      */
     int margin    = S(24);
-    int header_h  = S(96);                  /* room for title + modeline + countdown */
+    int header_h  = S(112);                 /* room for title + MATCH panel + countdown */
     int btn_row_h = S(56);                  /* bottom button row */
     int lp_w      = S(320);                 /* loadout panel width */
     int lp_x      = sw - lp_w - margin;
@@ -592,13 +971,88 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     int lx = lp_x;
     int ly = left_top;
     int row_h = S(44), gap = S(8);
-    int rows_total = (g->match.mode == MATCH_MODE_TDM ||
-                      g->match.mode == MATCH_MODE_CTF) ? 7 : 6;
+    /* Always reserve a row for the Team picker (visible in all modes —
+     * TDM/CTF lets the player switch sides, FFA gives them a Spectator
+     * toggle so they can sit a round out without leaving). */
+    int rows_total = 8;     /* TEAM + chassis/primary/secondary/armor/jet + READY (taller) + small headroom */
     int panel_h = row_h * (rows_total + 1) + gap * rows_total + S(28);
     Rectangle lp = (Rectangle){lx - S(12), ly - S(12),
                                (float)(lp_w + S(24)),
                                (float)panel_h};
     ui_panel_default(&L->ui, lp);
+    ui_draw_text(&L->ui, "TEAM", lx, ly - S(2), 18,
+                 (Color){200, 220, 240, 255});
+    ly += S(28);
+
+    /* ---- Team picker (always shown, mode-aware) ----
+     * TDM/CTF: side-by-side RED / BLUE / SPEC — the player taps the
+     * one they want. The press goes through net_client_send_team_change
+     * (clients) or lobby_set_team (host); the server broadcasts the
+     * updated lobby_list so other peers see the change.
+     * FFA: a single "Playing / Spectator" toggle — there's only one
+     * team in FFA, so the meaningful axis is "in" vs "sitting out". */
+    {
+        bool in_match = (g->match.mode == MATCH_MODE_TDM ||
+                          g->match.mode == MATCH_MODE_CTF);
+        if (in_match) {
+            int slot_w = (lp_w - 2 * gap) / 3;
+            const struct { int team; const char *label; Color col; } tslot[3] = {
+                { MATCH_TEAM_RED,  "RED",  (Color){220, 80,  80,  255} },
+                { MATCH_TEAM_BLUE, "BLUE", (Color){ 80, 140, 220, 255} },
+                { MATCH_TEAM_NONE, "Spec", (Color){140, 140, 150, 255} },
+            };
+            for (int i = 0; i < 3; ++i) {
+                Rectangle r = (Rectangle){lx + i * (slot_w + gap), ly,
+                                           slot_w, row_h};
+                bool active = (L->lobby_team == tslot[i].team);
+                bool hover  = ui_point_in_rect(L->ui.mouse, r);
+                Color bg = active ? tslot[i].col
+                                  : hover ? L->ui.button_hover : L->ui.button_bg;
+                DrawRectangleRec(r, bg);
+                DrawRectangleLinesEx(r, L->ui.scale, L->ui.panel_edge);
+                int tw = ui_measure(&L->ui, tslot[i].label, 18);
+                Color tc = active ? (Color){12, 18, 26, 255} : L->ui.text_col;
+                ui_draw_text(&L->ui, tslot[i].label,
+                             (int)(r.x + (r.width - tw) * 0.5f),
+                             (int)(r.y + (r.height - 18*L->ui.scale) * 0.5f),
+                             18, tc);
+                if (hover && L->ui.mouse_pressed && !active) {
+                    apply_team_change(L, g, tslot[i].team);
+                }
+            }
+        } else {
+            /* FFA: Playing / Spectator. */
+            int slot_w = (lp_w - gap) / 2;
+            bool playing = (L->lobby_team != MATCH_TEAM_NONE);
+            const struct { bool play; const char *label; } cells[2] = {
+                { true,  "Playing" }, { false, "Spectator" }
+            };
+            for (int i = 0; i < 2; ++i) {
+                Rectangle r = (Rectangle){lx + i * (slot_w + gap), ly,
+                                           slot_w, row_h};
+                bool active = (cells[i].play == playing);
+                bool hover  = ui_point_in_rect(L->ui.mouse, r);
+                Color bg = active ? L->ui.accent
+                                  : hover ? L->ui.button_hover : L->ui.button_bg;
+                DrawRectangleRec(r, bg);
+                DrawRectangleLinesEx(r, L->ui.scale, L->ui.panel_edge);
+                int tw = ui_measure(&L->ui, cells[i].label, 18);
+                Color tc = active ? (Color){12, 18, 26, 255} : L->ui.text_col;
+                ui_draw_text(&L->ui, cells[i].label,
+                             (int)(r.x + (r.width - tw) * 0.5f),
+                             (int)(r.y + (r.height - 18*L->ui.scale) * 0.5f),
+                             18, tc);
+                if (hover && L->ui.mouse_pressed && !active) {
+                    apply_team_change(L, g, cells[i].play
+                                            ? MATCH_TEAM_FFA
+                                            : MATCH_TEAM_NONE);
+                }
+            }
+        }
+    }
+    ly += row_h + gap;
+
+    /* ---- LOADOUT subheader ---- */
     ui_draw_text(&L->ui, "LOADOUT", lx, ly - S(2), 18,
                  (Color){200, 220, 240, 255});
     ly += S(28);
@@ -647,17 +1101,6 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                                      (int)(sizeof g_jet_choices / sizeof g_jet_choices[0]));
         apply_loadout_change(L, g);
     } ly += row_h + gap;
-
-    if (g->match.mode == MATCH_MODE_TDM || g->match.mode == MATCH_MODE_CTF) {
-        if (ui_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
-                      TextFormat("Team: %s", team_name(L->lobby_team)), true))
-        {
-            int next = (L->lobby_team == MATCH_TEAM_RED) ? MATCH_TEAM_BLUE :
-                       (L->lobby_team == MATCH_TEAM_BLUE) ? MATCH_TEAM_NONE :
-                                                             MATCH_TEAM_RED;
-            apply_team_change(L, g, next);
-        } ly += row_h + gap;
-    }
 
     /* Ready button — taller + accent color. */
     bool me_ready = (g->local_slot_id >= 0) ?

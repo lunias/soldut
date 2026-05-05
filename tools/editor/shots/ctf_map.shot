@@ -1,0 +1,72 @@
+# tools/editor/shots/ctf_map.shot
+#
+# Programmatically authors a small CTF arena via the editor's tool
+# dispatcher and saves it to assets/maps/ctf_test.lvl. The companion
+# game shot tests/shots/m5_ctf_editor_map.shot loads this .lvl via
+# `--shot ... load_lvl` and exercises:
+#   - the runtime mode-mask auto-detect (CTF bit present → run CTF)
+#   - the flag positions saved by the editor (touch-driven pickup)
+#   - the both-flags-home capture rule (carrier on own home flag)
+#
+# Layout (50×16 tiles = 1600×512 px world):
+#   - Floor:     rows 12..15, full width                (y=384..512)
+#   - Side walls: x=0..32 and x=1568..1600, full height
+#   - Red base:  flag at (200, 332)  + team-1 spawn at (150, 348)
+#   - Blue base: flag at (1400, 332) + team-2 spawn at (1450, 348)
+#
+# Flag y = 332 (chest height of a standing mech, since the floor's
+# top edge is at y=384 — pelvis at 348, chest at 318). The 36-px
+# touch radius in ctf_step covers a standing mech's chest brushing
+# past the flag.
+#
+# Map width is intentionally compact so the game-shot capture flow
+# (pickup → walk back → score) wraps in <8 seconds.
+
+window 1280 800
+new 50 16
+ticks 30
+out build/shots/editor/ctf_map
+
+# ---- Outer shell ---------------------------------------------------
+at 0 tool tile
+at 0 tile_flags solid
+at 0 tile_fill_rect 0    384 1600 512    # floor (full width, 4 rows)
+at 0 tile_fill_rect 0    0   32   384    # left wall
+at 0 tile_fill_rect 1568 0   1600 384    # right wall
+
+# ---- Spawn points (one per team) -----------------------------------
+# Red on the left, Blue on the right. seed_world (single-player
+# shotmode) and lobby_spawn_round_mechs both prefer team-matching
+# spawns over the hardcoded lane fallback.
+at 1 spawn_add  150 348 1
+at 1 spawn_add 1450 348 2
+
+# ---- Flags (the test's whole point) --------------------------------
+# flag_add auto-sets META.mode_mask CTF bit when both teams have a
+# flag, so the runtime --test-play auto-detect picks CTF mode on
+# this map without a separate meta_set step.
+at 2 flag_add  200 332 1
+at 2 flag_add 1400 332 2
+
+# ---- Sanity-assert + save -----------------------------------------
+# 4 means CTF bit (1u << MATCH_MODE_CTF=2).
+at 3 dump
+at 3 validate
+at 3 assert spawns == 2
+at 3 assert flags  == 2
+at 3 assert validate_problems == 0
+at 3 shot t3_authored
+
+at 4 save assets/maps/ctf_test.lvl
+
+# Re-open the freshly-saved file from disk and verify the round-trip
+# preserved the flags + mode_mask. Catches regressions in level_io's
+# FLAG / META lump encoders.
+at 5 new_doc 50 16
+at 5 assert flags == 0
+at 6 load_file assets/maps/ctf_test.lvl
+at 6 assert flags  == 2
+at 6 assert spawns == 2
+at 7 shot t7_reloaded
+
+at 10 end

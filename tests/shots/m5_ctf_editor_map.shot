@@ -1,0 +1,52 @@
+# M5 P07 — End-to-end CTF flow on a map authored in the level editor.
+#
+# Pairs with tools/editor/shots/ctf_map.shot (which wrote the .lvl).
+# Verifies:
+#   1. The .lvl loads, flags are populated by ctf_init_round.
+#   2. Touch-driven pickup fires when the player walks into the
+#      enemy (BLUE) flag.
+#   3. Walking the picked-up flag back to the home (RED) flag
+#      triggers the both-flags-home capture rule.
+#   4. The capture awards score (R 5 - B 0 since CTF score limit
+#      clamps to 5).
+#
+# Map layout (from ctf_map.shot — 50×16 tiles = 1600×512 px):
+#   Red flag  at (200, 332), Red spawn  at (150, 348)
+#   Blue flag at (1400, 332), Blue spawn at (1450, 348)
+#
+# We `spawn_at` the player just east of the BLUE flag so the test
+# completes in ~5 seconds: walk LEFT into Blue flag (pickup), keep
+# walking LEFT all the way back to Red flag (capture).
+
+window 1280 720
+out build/shots/m5_ctf_editor_map
+seed 1 2
+
+load_lvl assets/maps/ctf_test.lvl
+mode ctf
+
+# Park the player just east of the BLUE flag (x=1400). The dummy
+# (team 2, BLUE) spawns at the level's authored spawn (1450, 348)
+# and stays put. Walking LEFT brings us within touch radius (36 px).
+spawn_at 1480 332
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 1   shot t1_round_start
+at 30  shot t30_settled
+
+# Walk LEFT to grab the BLUE flag. ~80 px traversal at 4.66 px/tick
+# means pickup fires around tick 50. Continue holding LEFT all the
+# way back across the map to the RED flag at x=200; ~1280 px takes
+# ~275 ticks.
+at 35  press left
+at 60  shot t60_after_pickup
+
+# Keep holding LEFT until the player reaches the RED home flag.
+at 350 release left
+
+at 200 shot t200_running_home
+at 320 shot t320_capturing
+at 360 shot t360_post_capture
+
+at 420 end

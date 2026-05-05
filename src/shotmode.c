@@ -1,6 +1,7 @@
 #include "shotmode.h"
 
 #include "config.h"
+#include "ctf.h"
 #include "decal.h"
 #include "game.h"
 #include "input.h"
@@ -12,6 +13,7 @@
 #include "match.h"
 #include "mech.h"
 #include "net.h"
+#include "pickup.h"
 #include "platform.h"
 #include "physics.h"
 #include "reconcile.h"
@@ -50,6 +52,10 @@ typedef enum {
     EV_SHOT,
     EV_END,
     EV_GIVE_INVIS,    /* P05 debug — set powerup_invis_remaining on local mech */
+    EV_FLAG_CARRY,    /* P07 debug — force flag_idx (ax) into CARRIED state by local mech */
+    EV_TEAM_CHANGE,   /* lobby UX test — send/apply team-change for the local slot */
+    EV_KILL_PEER,     /* P07 host-only — directly mech_kill the named peer (ax = mech_id) */
+    EV_ARM_CARRY,     /* P07 host-only — arm flag (ax) with carrier mech (ay) on the server */
 } EventKind;
 
 typedef struct {
@@ -103,6 +109,18 @@ typedef struct {
      * grapple/swing tests that need ceilings or other geometry the
      * tutorial doesn't have. */
     char     load_lvl[256];
+
+    /* P07 — optional code-built map override. When `map_id` >= 0,
+     * seed_world calls map_build(map_id, ...) instead of tutorial /
+     * load_lvl. Lets a CTF shot test pull in the in-binary Crossfire
+     * arena without authoring a `.lvl` first. -1 = unset. */
+    int      map_id;
+
+    /* P07 — match mode for the local-only shot path. seed_world copies
+     * this into game.match.mode and runs ctf_init_round when set to
+     * CTF. Has no effect on the networked NETMODE_HOST/CONNECT paths
+     * (those pick mode from config_pick_mode). */
+    int      match_mode;        /* MatchModeId; -1 = leave as default */
 
     Event   *events;
     int      event_count, event_capacity;
@@ -250,6 +268,8 @@ static bool parse_script(const char *path, Script *out) {
     out->seed_override = false;
     snprintf(out->out_dir, sizeof(out->out_dir), "build/shots");
     out->end_tick = -1;
+    out->map_id = -1;       /* P07 — only set when `map <name>` directive parsed */
+    out->match_mode = -1;   /* P07 — only set when `mode <name>` directive parsed */
 
     char line[512];
     int lineno = 0;
@@ -283,6 +303,27 @@ static bool parse_script(const char *path, Script *out) {
              * via map_build_from_path instead of the hardcoded
              * tutorial. Path can be relative to cwd. */
             snprintf(out->load_lvl, sizeof(out->load_lvl), "%s", rest);
+        } else if (strcmp(tok, "map") == 0) {
+            /* `map <short_name>` — load a code-built map instead of
+             * the tutorial. Wins over load_lvl when both are set.
+             * Useful for CTF shot tests that need Crossfire's flag
+             * geometry without authoring a .lvl. */
+            int mid = map_id_from_name(rest);
+            if (mid < 0) {
+                LOG_E("shotmode: %s:%d unknown map '%s'", path, lineno, rest);
+                ok = false;
+            } else {
+                out->map_id = mid;
+            }
+        } else if (strcmp(tok, "mode") == 0) {
+            /* `mode <ffa|tdm|ctf>` — overrides match.mode in
+             * seed_world. Triggers ctf_init_round when mode == ctf and
+             * the loaded map has 2 flag records. No-op for the
+             * networked NETMODE_HOST/CONNECT paths (those pick from
+             * config; soldut.cfg in the test cwd is the override
+             * mechanism for those). */
+            MatchModeId m = match_mode_from_name(rest);
+            out->match_mode = (int)m;
         } else if (strcmp(tok, "loadout") == 0) {
             char chassis[32], primary[32], secondary[32], armor[32], jetpack[32];
             char *q = rest;
@@ -387,6 +428,57 @@ static bool parse_script(const char *path, Script *out) {
                 if (args[0]) sscanf(args, "%f", &secs);
                 ev.kind = EV_GIVE_INVIS;
                 ev.ax = secs;
+                script_push(out, ev);
+            } else if (strcmp(ev_kind, "arm_carry") == 0) {
+                /* "at <tick> arm_carry <flag_idx> <mech_id>" — host-only.
+                 * Forces the server's flag state to CARRIED with the
+                 * named mech as carrier so the drop-on-kill flow can
+                 * be exercised end-to-end. flag_carry on a CLIENT only
+                 * mutates the client's local state; the server stays
+                 * unaware. This directive does the server-side mutation
+                 * directly + sets dirty so the broadcast goes out. */
+                int fidx = -1, mid = -1;
+                if (sscanf(args, "%d %d", &fidx, &mid) != 2) {
+                    LOG_E("shotmode: %s:%d 'arm_carry' needs <flag_idx> <mech_id>",
+                          path, lineno); ok = false; continue;
+                }
+                ev.kind = EV_ARM_CARRY;
+                ev.ax = (float)fidx;
+                ev.ay = (float)mid;
+                script_push(out, ev);
+            } else if (strcmp(ev_kind, "kill_peer") == 0) {
+                /* "at <tick> kill_peer <mech_id>" — host-side debug
+                 * that directly invokes mech_kill on the named mech.
+                 * Lets a CTF drop-on-kill shot test bench the death
+                 * flow without requiring perfect weapons aim across
+                 * the recoil-and-bink window. The directive is a no-op
+                 * for clients (mech_kill is server-authoritative). */
+                int mid = -1;
+                if (args[0]) sscanf(args, "%d", &mid);
+                ev.kind = EV_KILL_PEER;
+                ev.ax = (float)mid;
+                script_push(out, ev);
+            } else if (strcmp(ev_kind, "team_change") == 0) {
+                /* "at <tick> team_change <team_id>" — drives the same
+                 * codepath as the lobby UI's TEAM picker. Used by
+                 * tests/shots/net/2p_team_change.* to verify the wire
+                 * round-trip without requiring real mouse simulation. */
+                int team = MATCH_TEAM_NONE;
+                if (args[0]) sscanf(args, "%d", &team);
+                ev.kind = EV_TEAM_CHANGE;
+                ev.ax = (float)team;
+                script_push(out, ev);
+            } else if (strcmp(ev_kind, "flag_carry") == 0) {
+                /* "at <tick> flag_carry <flag_idx>" — force flag
+                 * `flag_idx` into CARRIED state with carrier_mech =
+                 * local_mech_id. Lets a CTF shot test bench the
+                 * capture-flow (carrier touches own home flag) without
+                 * having to walk across the entire arena to grab the
+                 * enemy flag first. flag_idx 0 = RED, 1 = BLUE. */
+                int fidx = 1;
+                if (args[0]) sscanf(args, "%d", &fidx);
+                ev.kind = EV_FLAG_CARRY;
+                ev.ax = (float)fidx;
                 script_push(out, ev);
             } else {
                 LOG_E("shotmode: %s:%d unknown event '%s'", path, lineno, ev_kind);
@@ -598,11 +690,23 @@ static void networked_shot_bootstrap(Game *g, const Script *s) {
      * lobby / summary for half a minute. We set both the LIVE values
      * (lobby/match) AND the config so that start_round's "re-derive
      * limits from config" path doesn't reset them back to long
-     * defaults mid-round. */
-    g->config.auto_start_seconds = 1.0f;
-    g->config.time_limit         = 8.0f;
-    g->config.score_limit        = 10;
-    g->lobby.auto_start_default  = 1.0f;
+     * defaults mid-round.
+     *
+     * P07 — when the script's run cwd ships a soldut.cfg (CTF tests do
+     * this so mode/map_rotation reach config_pick_*), we honor the
+     * config-loaded values for score/time limits and only fast-track
+     * auto_start + countdown for iteration speed. The flag
+     * `loaded_from_file` is set by config_load and cleared otherwise. */
+    /* Default to fast-iteration values, but respect cfg overrides for
+     * any test that wants longer lobby/match phases (e.g. team-change
+     * tests need enough lobby time to send the wire after the
+     * handshake settles). */
+    if (!g->config.loaded_from_file) {
+        g->config.auto_start_seconds = 1.0f;
+        g->config.time_limit         = 8.0f;
+        g->config.score_limit        = 10;
+    }
+    g->lobby.auto_start_default  = g->config.auto_start_seconds;
     g->match.countdown_default   = 1.0f;
     g->match.summary_default     = 4.0f;   /* 15 s default; 4 s for tests */
     g->match.time_limit          = g->config.time_limit;
@@ -721,16 +825,84 @@ static void shot_host_flow(Game *g, float dt) {
         }
         case MATCH_PHASE_COUNTDOWN:
             if (match_tick(&g->match, dt)) {
-                /* start_round equivalent — inlined from main.c. */
+                /* start_round equivalent — inlined from main.c. Mirror
+                 * P07: CTF mode-mask validation, score-limit clamp,
+                 * team auto-balance, ctf_init_round, match_mode_cached. */
                 g->match.map_id = config_pick_map(&g->config, g->round_counter);
                 g->match.mode   = config_pick_mode(&g->config, g->round_counter);
+
+                /* P07 — CTF mode-mask validation. Build, check,
+                 * demote to TDM if the map can't host CTF. */
+                if (g->match.mode == MATCH_MODE_CTF) {
+                    arena_reset(&g->level_arena);
+                    map_build((MapId)g->match.map_id, &g->world, &g->level_arena);
+                    bool mode_ok  = (g->world.level.meta.mode_mask & (1u << MATCH_MODE_CTF)) != 0;
+                    bool flags_ok = (g->world.level.flag_count == 2 && g->world.level.flags);
+                    if (!mode_ok || !flags_ok) {
+                        LOG_W("shot_host_flow: map %s doesn't support CTF — demoting to TDM",
+                              map_def(g->match.map_id)->short_name);
+                        g->match.mode = MATCH_MODE_TDM;
+                    }
+                }
+
                 g->match.score_limit  = g->config.score_limit;
                 g->match.time_limit   = g->config.time_limit;
                 g->match.friendly_fire= g->config.friendly_fire;
+                if (g->match.mode == MATCH_MODE_CTF && g->match.score_limit >= 25) {
+                    g->match.score_limit = FLAG_CAPTURE_DEFAULT;
+                }
                 /* See comment in main.c::start_round — FFA needs
                  * world.friendly_fire forced on or no hit lands. */
                 g->world.friendly_fire= g->config.friendly_fire ||
                                         (g->match.mode == MATCH_MODE_FFA);
+
+                /* P07 — TDM/CTF team auto-balance, mirroring main.c. */
+                if (g->match.mode == MATCH_MODE_TDM ||
+                    g->match.mode == MATCH_MODE_CTF) {
+                    int red = 0, blue = 0;
+                    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+                        LobbySlot *ss = &g->lobby.slots[i];
+                        if (!ss->in_use) continue;
+                        if (ss->team == MATCH_TEAM_RED)  red++;
+                        else if (ss->team == MATCH_TEAM_BLUE) blue++;
+                    }
+                    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+                        LobbySlot *ss = &g->lobby.slots[i];
+                        if (!ss->in_use) continue;
+                        if (ss->team == MATCH_TEAM_NONE) continue;
+                        if (ss->team == MATCH_TEAM_RED || ss->team == MATCH_TEAM_BLUE) continue;
+                        int target = (red <= blue) ? MATCH_TEAM_RED : MATCH_TEAM_BLUE;
+                        ss->team = target;
+                        if (target == MATCH_TEAM_RED) red++; else blue++;
+                    }
+                    while (red - blue >= 2) {
+                        for (int i = MAX_LOBBY_SLOTS - 1; i >= 0; --i) {
+                            LobbySlot *ss = &g->lobby.slots[i];
+                            if (!ss->in_use) continue;
+                            if (ss->team != MATCH_TEAM_RED) continue;
+                            ss->team = MATCH_TEAM_BLUE; red--; blue++;
+                            break;
+                        }
+                        if (red - blue < 2) break;
+                    }
+                    while (blue - red >= 2) {
+                        for (int i = MAX_LOBBY_SLOTS - 1; i >= 0; --i) {
+                            LobbySlot *ss = &g->lobby.slots[i];
+                            if (!ss->in_use) continue;
+                            if (ss->team != MATCH_TEAM_BLUE) continue;
+                            ss->team = MATCH_TEAM_RED; blue--; red++;
+                            break;
+                        }
+                        if (blue - red < 2) break;
+                    }
+                    LOG_I("shot_host_flow: %s team auto-balance → red=%d blue=%d",
+                          match_mode_name(g->match.mode), red, blue);
+                    g->lobby.dirty = true;
+                }
+
+                /* Rebuild the level (CTF-validation may have already
+                 * built it; re-arena-reset + rebuild for a clean slate
+                 * — same shape as main.c::start_round). */
                 arena_reset(&g->level_arena);
                 map_build((MapId)g->match.map_id, &g->world, &g->level_arena);
                 decal_init((int)level_width_px(&g->world.level),
@@ -739,6 +911,16 @@ static void shot_host_flow(Game *g, float dt) {
                                         g->match.map_id, g->local_slot_id,
                                         g->match.mode);
                 g->lobby.dirty = true;
+
+                /* P05 — pickup pool. */
+                pickup_init_round(&g->world);
+                g->world.pickupfeed_count = 0;
+
+                /* P07 — flags + match_mode_cached on World. */
+                g->world.match_mode_cached = (int)g->match.mode;
+                ctf_init_round(&g->world, g->match.mode);
+                g->world.flag_state_dirty = false;
+
                 match_begin_round(&g->match);
                 g->mode = MODE_MATCH;
                 g_shot_kill_processed = g->world.killfeed_count;
@@ -746,11 +928,24 @@ static void shot_host_flow(Game *g, float dt) {
                     net_server_broadcast_lobby_list (&g->net, &g->lobby);
                     g->lobby.dirty = false;
                     net_server_broadcast_round_start(&g->net, &g->match);
+                    /* Initial flag-state broadcast — same as main.c. */
+                    if (g->world.flag_count > 0) {
+                        net_server_broadcast_flag_state(&g->net, &g->world);
+                    }
                 }
             }
             break;
         case MATCH_PHASE_ACTIVE: {
+            /* P07 — CTF tick (server only). Same shape as main.c. */
+            ctf_step(g, dt);
             shot_apply_new_kills(g);
+            /* Drain CTF dirty bit on the host. */
+            if (g->net.role == NET_ROLE_SERVER && g->world.flag_state_dirty) {
+                net_server_broadcast_flag_state(&g->net, &g->world);
+                g->world.flag_state_dirty = false;
+            } else if (g->net.role != NET_ROLE_SERVER) {
+                g->world.flag_state_dirty = false;
+            }
             bool end = false;
             if (g->match.mode == MATCH_MODE_FFA) {
                 for (int i = 0; i < MAX_LOBBY_SLOTS; ++i)
@@ -855,7 +1050,16 @@ static void shot_client_late_bind_mech(Game *g) {
 static void seed_world(Game *g, const Script *s) {
     World *w = &g->world;
     bool loaded = false;
-    if (s && s->load_lvl[0]) {
+    /* Map source priority: code-built map (P07 `map` directive)
+     * > on-disk .lvl (P04 `load_lvl`) > hardcoded tutorial. */
+    if (s && s->map_id >= 0) {
+        map_build((MapId)s->map_id, w, &g->level_arena);
+        loaded = true;
+        LOG_I("shotmode: built map '%s' (%dx%d, mode_mask=0x%x, %d flags)",
+              map_def(s->map_id)->short_name, w->level.width, w->level.height,
+              (unsigned)w->level.meta.mode_mask, w->level.flag_count);
+    }
+    if (!loaded && s && s->load_lvl[0]) {
         loaded = map_build_from_path(w, &g->level_arena, s->load_lvl);
         if (!loaded) {
             LOG_W("shotmode: load_lvl '%s' failed — falling back to tutorial",
@@ -870,20 +1074,52 @@ static void seed_world(Game *g, const Script *s) {
     }
     decal_init((int)level_width_px(&w->level), (int)level_height_px(&w->level));
 
+    /* P07 — apply mode override (if any) before spawning so ctf_init_round
+     * sees the right state. Mirror match_mode_cached so mech.c can
+     * branch in mech_kill (drop flag on death) and apply_jet_force
+     * (carrier penalty). The single-player shot path bypasses the
+     * lobby/match flow controllers, so set match.phase to ACTIVE
+     * directly — without it, ctf_step / pickup_step / match_apply_kill
+     * would silently no-op. */
+    if (s && s->match_mode >= 0) {
+        g->match.mode = (MatchModeId)s->match_mode;
+    }
+    g->match.phase             = MATCH_PHASE_ACTIVE;
+    g->world.match_mode_cached = (int)g->match.mode;
+    g->world.authoritative     = true;
+
+    /* If the loaded level supplied authored spawns AND the player team
+     * (RED) has a Red spawn, prefer it over the hardcoded shot-mode
+     * tutorial position. Same logic for the dummy on team BLUE. */
     const float feet_below_pelvis = 36.0f;
     const float foot_clearance    = 4.0f;
     Vec2 player_spawn = { 16.0f * 32.0f + 8.0f,
                           30.0f * 32.0f - feet_below_pelvis - foot_clearance };
+    Vec2 dummy_spawn  = { 75.0f * 32.0f,
+                          32.0f * 32.0f - feet_below_pelvis - foot_clearance };
+    if (w->level.spawn_count > 0) {
+        for (int i = 0; i < w->level.spawn_count; ++i) {
+            const LvlSpawn *sp = &w->level.spawns[i];
+            if (sp->team == 1) { player_spawn = (Vec2){ (float)sp->pos_x, (float)sp->pos_y }; break; }
+        }
+        for (int i = 0; i < w->level.spawn_count; ++i) {
+            const LvlSpawn *sp = &w->level.spawns[i];
+            if (sp->team == 2) { dummy_spawn = (Vec2){ (float)sp->pos_x, (float)sp->pos_y }; break; }
+        }
+    }
+
     MechLoadout lo = (s && s->have_loadout) ? s->loadout : mech_default_loadout();
     w->local_mech_id = mech_create_loadout(w, lo, player_spawn,
                                            /*team*/ 1, /*is_dummy*/ false);
 
-    Vec2 dummy_spawn = { 75.0f * 32.0f,
-                         32.0f * 32.0f - feet_below_pelvis - foot_clearance };
     MechLoadout dlo = mech_default_loadout();
     dlo.armor_id = ARMOR_NONE;
     w->dummy_mech_id = mech_create_loadout(w, dlo, dummy_spawn,
                                            /*team*/ 2, /*is_dummy*/ true);
+
+    /* P07 — populate flags[] when in CTF mode. ctf_init_round bails
+     * silently if the level lacks a Red+Blue flag pair. */
+    ctf_init_round(w, g->match.mode);
 
     w->camera_target = player_spawn;
     w->camera_smooth = player_spawn;
@@ -998,6 +1234,19 @@ int shotmode_run(const char *script_path) {
     if (!game_init(&game)) { free(s.events); free(s.lerps); return EXIT_FAILURE; }
     if (s.seed_override) pcg32_seed(&game.rng, s.seed_hi, s.seed_lo);
 
+    /* Pick up any soldut.cfg in cwd — shot mode is otherwise stuck
+     * on game_init's config_defaults, so a `mode=ctf` cfg in the
+     * shot run's tmpdir would be ignored. Mirrors main.c's flow.
+     * Re-init MatchState from the loaded config so config-driven
+     * mode / score_limit / time_limit reach the (host's) start_round
+     * via config_pick_*. */
+    config_load(&game.config, "soldut.cfg");
+    match_init(&game.match, game.config.mode, game.config.score_limit,
+               game.config.time_limit, game.config.friendly_fire);
+    game.match.map_id = config_pick_map(&game.config, 0);
+    game.lobby.auto_start_default = game.config.auto_start_seconds;
+    game.world.friendly_fire = game.config.friendly_fire;
+
     /* Window title — show host/client role so screenshots are
      * self-labeling. */
     char title_buf[160];
@@ -1093,6 +1342,67 @@ int shotmode_run(const char *script_path) {
                         game.world.mechs[lid].powerup_invis_remaining = ev->ax;
                         SHOT_LOG("t=%d give_invis local_mech=%d secs=%.2f",
                                  tick, lid, (double)ev->ax);
+                    }
+                    break;
+                }
+                case EV_FLAG_CARRY: {
+                    int lid = game.world.local_mech_id;
+                    int fidx = (int)ev->ax;
+                    if (lid >= 0 && lid < game.world.mech_count &&
+                        fidx >= 0 && fidx < game.world.flag_count) {
+                        game.world.flags[fidx].status       = FLAG_CARRIED;
+                        game.world.flags[fidx].carrier_mech = (int8_t)lid;
+                        game.world.flag_state_dirty         = true;
+                        SHOT_LOG("t=%d flag_carry flag=%d local_mech=%d",
+                                 tick, fidx, lid);
+                    }
+                    break;
+                }
+                case EV_TEAM_CHANGE: {
+                    int team = (int)ev->ax;
+                    if (game.net.role == NET_ROLE_CLIENT) {
+                        net_client_send_team_change(&game.net, team);
+                        LOG_I("shot: team_change → %d (sent to host)", team);
+                    } else if (game.local_slot_id >= 0) {
+                        lobby_set_team(&game.lobby, game.local_slot_id, team);
+                        LOG_I("shot: team_change → %d (host slot=%d)",
+                              team, game.local_slot_id);
+                    }
+                    break;
+                }
+                case EV_ARM_CARRY: {
+                    int fidx = (int)ev->ax;
+                    int mid  = (int)ev->ay;
+                    if (game.net.role == NET_ROLE_SERVER &&
+                        fidx >= 0 && fidx < game.world.flag_count &&
+                        mid  >= 0 && mid  < game.world.mech_count) {
+                        game.world.flags[fidx].status         = FLAG_CARRIED;
+                        game.world.flags[fidx].carrier_mech   = (int8_t)mid;
+                        game.world.flag_state_dirty           = true;
+                        LOG_I("shot: arm_carry flag=%d mech=%d (host-side)",
+                              fidx, mid);
+                    }
+                    break;
+                }
+                case EV_KILL_PEER: {
+                    int mid = (int)ev->ax;
+                    if (game.net.role == NET_ROLE_SERVER &&
+                        mid >= 0 && mid < game.world.mech_count &&
+                        game.world.mechs[mid].alive) {
+                        Mech *m = &game.world.mechs[mid];
+                        Vec2 pelv = (Vec2){
+                            game.world.particles.pos_x[m->particle_base + PART_PELVIS],
+                            game.world.particles.pos_y[m->particle_base + PART_PELVIS],
+                        };
+                        /* Use mech_apply_damage so the regular damage
+                         * path runs (kill-feed, hit-event broadcast,
+                         * ctf_drop_on_death from mech_kill, etc.).
+                         * 9999 dmg ensures lethal regardless of armor. */
+                        mech_apply_damage(&game.world, mid, PART_CHEST,
+                                          9999.0f, (Vec2){0.0f, -1.0f},
+                                          /*shooter*/ -1);
+                        (void)pelv;
+                        LOG_I("shot: kill_peer mech=%d (host-side)", mid);
                     }
                     break;
                 }
@@ -1402,6 +1712,54 @@ int shotmode_run(const char *script_path) {
                 }
                 break;
             }
+            case EV_FLAG_CARRY: {
+                int lid = game.world.local_mech_id;
+                int fidx = (int)ev->ax;
+                if (lid >= 0 && lid < game.world.mech_count &&
+                    fidx >= 0 && fidx < game.world.flag_count) {
+                    game.world.flags[fidx].status       = FLAG_CARRIED;
+                    game.world.flags[fidx].carrier_mech = (int8_t)lid;
+                    game.world.flag_state_dirty         = true;
+                    SHOT_LOG("t=%d flag_carry flag=%d local_mech=%d",
+                             tick, fidx, lid);
+                }
+                break;
+            }
+            case EV_TEAM_CHANGE: {
+                /* Single-player path doesn't have a lobby slot table —
+                 * just adjust the local mech's team directly. */
+                int team = (int)ev->ax;
+                int lid = game.world.local_mech_id;
+                if (lid >= 0 && lid < game.world.mech_count) {
+                    game.world.mechs[lid].team = team;
+                    LOG_I("shot: team_change → %d (local mech=%d)", team, lid);
+                }
+                break;
+            }
+            case EV_KILL_PEER: {
+                int mid = (int)ev->ax;
+                if (mid >= 0 && mid < game.world.mech_count &&
+                    game.world.mechs[mid].alive) {
+                    mech_apply_damage(&game.world, mid, PART_CHEST,
+                                      9999.0f, (Vec2){0.0f, -1.0f},
+                                      /*shooter*/ -1);
+                    LOG_I("shot: kill_peer mech=%d (single-player)", mid);
+                }
+                break;
+            }
+            case EV_ARM_CARRY: {
+                int fidx = (int)ev->ax;
+                int mid  = (int)ev->ay;
+                if (fidx >= 0 && fidx < game.world.flag_count &&
+                    mid  >= 0 && mid  < game.world.mech_count) {
+                    game.world.flags[fidx].status         = FLAG_CARRIED;
+                    game.world.flags[fidx].carrier_mech   = (int8_t)mid;
+                    game.world.flag_state_dirty           = true;
+                    LOG_I("shot: arm_carry flag=%d mech=%d (single-player)",
+                          fidx, mid);
+                }
+                break;
+            }
             }
             ev_idx++;
         }
@@ -1450,6 +1808,12 @@ int shotmode_run(const char *script_path) {
         }
 
         simulate(&game.world, in, TICK_DT);
+        /* P07 — CTF tick on the single-player path. ctf_step is a
+         * no-op when match.mode != CTF or flag_count == 0. The
+         * dirty bit is cleared here without broadcasting (no client
+         * to inform in single-player). */
+        ctf_step(&game, TICK_DT);
+        game.world.flag_state_dirty = false;
         game.input = in;
 
         /* (3) Render the tick we just simulated. We render every tick so

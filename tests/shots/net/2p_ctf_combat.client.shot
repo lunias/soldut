@@ -1,0 +1,18 @@
+# 2p_ctf_combat — client (BLUE) is the target. Walks not at all,
+# fires not at all — just standing fodder so the host's fire is the
+# only thing in flight. Asserts on the host log will verify damage
+# events fired (the bug-fix path).
+
+window 1280 720
+out build/shots/net/client_ctf_combat
+network connect 127.0.0.1:24028
+name ClientBlue
+
+# Match the host's peer_spawn for a clean local view.
+spawn_at 2400 1100
+aim 2200 1070
+
+at 100 shot t100_spawn
+at 250 shot t250_being_shot
+at 380 shot t380_dead
+at 600 end

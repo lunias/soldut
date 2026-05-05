@@ -328,25 +328,27 @@ static void draw_flag_compass(const World *w, int sw, int sh, Camera2D cam) {
 Two flags = 20 bytes max state, well within bandwidth budget. The encoding is event-driven (broadcast on transitions):
 
 ```c
-// NET_MSG_FLAG_STATE — new message, NET_CH_EVENT (reliable, ordered)
-struct {
-    uint8_t  msg_type;
-    uint8_t  flag_count;        // 0 = no CTF; 2 = both flags follow
-    struct {
-        uint8_t  team;
-        uint8_t  status;        // FlagStatus
-        uint8_t  carrier_mech;  // 0xFF = none
-        uint8_t  reserved;
-        int16_t  pos_x;         // dropped_pos for DROPPED, home_pos for HOME, ignored for CARRIED
-        int16_t  pos_y;
-        uint16_t return_in_ticks; // valid iff DROPPED, else 0
-    } flags[2];
-};                            // 2 + 2*12 = 26 bytes
+// NET_MSG_FLAG_STATE = 16 — NET_CH_EVENT (reliable, ordered)
+// Wire layout (variable size):
+//   u8  msg_type           = 16
+//   u8  flag_count         (0 = no CTF; 2 = both flags follow)
+//   per-flag (12 bytes × flag_count):
+//     u8  team             (MATCH_TEAM_RED or _BLUE)
+//     u8  status           (FlagStatus)
+//     i8  carrier_mech     (-1 = none)
+//     u8  reserved
+//     i16 pos_x_q          (1/8 px — home_pos for HOME, dropped_pos for DROPPED, ignored for CARRIED)
+//     i16 pos_y_q
+//     u16 return_in_ticks  (DROPPED: ticks-from-now until auto-return)
+//     u16 reserved
+// Total: 2 + 2*12 = 26 bytes when both flags present.
 ```
 
-Broadcast on every state transition. Bandwidth: ~6 events/min/round × 26 B / 16 players = trivial.
+Broadcast on every state transition (pickup / capture / drop / return / auto-return). Bandwidth: ~6 events/min/round × 26 B × 16 players ≈ 42 B/s aggregate, well under the 5 KB/s/client budget.
 
-`INITIAL_STATE` (the join handshake) carries the same FlagState message so a joining client sees correct flag positions immediately.
+`INITIAL_STATE` appends an optional flag-state suffix (same wire format minus the leading `msg_type` tag) so a future mid-round joiner sees correct flag positions on connect. M4 still parks joiners in the lobby until the next round, so this is forward-looking infra; the cost is one byte (`flag_count = 0`) on non-CTF rounds.
+
+The actual implementation broadcasts via the `flag_state_dirty` bit on World — ctf operations mutate state and set the bit, then `main.c::broadcast_flag_state_if_dirty` (per `MATCH_PHASE_ACTIVE` tick) is the single broadcast site. Coalesces same-tick transitions and keeps `ctf.c` independent of `net.c`.
 
 ## Lag compensation
 

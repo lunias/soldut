@@ -15,13 +15,14 @@
  * documents/02-game-design.md §"Modes" pins the contract:
  *   FFA  — first to N kills, or highest at timer end.
  *   TDM  — two teams; first team to N team-kills, or higher at end.
- *   CTF  — captures (M5 — included for plumbing only).
+ *   CTF  — first team to N captures (M5 P07; flags + carry + capture +
+ *          carrier penalties + auto-return). See documents/m5/06-ctf.md.
  */
 
 typedef enum {
     MATCH_MODE_FFA = 0,
     MATCH_MODE_TDM,
-    MATCH_MODE_CTF,           /* M5 — accepted at config but plays as TDM at M4 */
+    MATCH_MODE_CTF,
     MATCH_MODE_COUNT
 } MatchModeId;
 

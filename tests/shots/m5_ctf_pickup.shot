@@ -1,0 +1,34 @@
+# M5 P07 — Touch-driven CTF flag pickup on Crossfire.
+#
+# Verifies that ctf_step's per-tick touch detection actually fires at
+# runtime (not just via the flag_carry debug directive). The player
+# (RED) spawns just west of the BLUE flag, walks RIGHT a few px into
+# it, and the flag transitions to CARRIED.
+#
+# Crossfire BLUE flag: x = 4160, y = 974 (chest-height above platform).
+
+window 1280 720
+out build/shots/m5_ctf_pickup
+seed 1 2
+
+map crossfire
+mode ctf
+
+# Spawn ~80 px west of the BLUE flag so we walk RIGHT into it.
+spawn_at 4080 950
+
+contact_sheet ctf_pickup cols 4 cell 320 180
+
+at 1   shot t1_pre_walk
+at 30  shot t30_settled
+
+# Walk RIGHT for ~30 ticks (~140 px). Pickup should fire when chest x
+# crosses into 36 px of flag x = 4160 (i.e. when chest_x >= 4124).
+at 35 press right
+at 90 release right
+
+# Pickup expected around tick 50–60. Capture a frame after.
+at 70 shot t70_after_pickup
+at 100 shot t100_holding_blue
+
+at 120 end

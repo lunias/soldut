@@ -1,0 +1,42 @@
+# 2p_ctf_walk_own_flag — client side. Plays the BLUE team. Walks LEFT
+# repeatedly across the BLUE flag at (4160, 974), then walks RIGHT
+# back. If the client gets "stuck" on their own flag, the per-tick
+# pelvis trail in shot_dump_tick will show the local mech's pelv_x
+# stalling near x=4160 even though BTN_LEFT is being pressed.
+#
+# Compare to the host's log of mech=1 — if the host sees mech=1 cross
+# the flag while the client log shows mech=local stuck, the bug is in
+# client-side prediction.
+
+window 1280 720
+out build/shots/net/client_walk_own_flag
+network connect 127.0.0.1:24017
+name ClientBlue
+
+contact_sheet sheet cols 4 cell 320 180
+
+# Settle in the lobby.
+at 60  shot t60_lobby
+at 140 shot t140_round_start
+at 180 shot t180_settled
+
+# Walk RIGHT through the flag. Slot 1 BLUE spawn on Crossfire (CTF) is
+# spawn[5] at x=(140-12)*32=4096, west of the BLUE flag at x=4160.
+# 64 px traversal at ~4.6 px/tick = ~14 ticks to reach the flag. Hold
+# RIGHT through and past the flag to see if we get stuck on it.
+at 200 press right
+at 220 shot t220_walking_right
+at 250 shot t250_at_flag_x
+at 280 shot t280_past_flag_x
+at 320 release right
+at 330 shot t330_settled_east_of_flag
+
+# Walk LEFT back through the flag.
+at 360 press left
+at 380 shot t380_walking_left
+at 410 shot t410_at_flag_x_again
+at 440 shot t440_past_flag_x
+at 480 release left
+at 490 shot t490_settled_west_of_flag
+
+at 700 end

@@ -1,5 +1,6 @@
 #include "mech.h"
 
+#include "ctf.h"
 #include "level.h"
 #include "log.h"
 #include "particle.h"
@@ -685,6 +686,13 @@ static void apply_jump(World *w, const Mech *m, float jump_pxs, float dt) {
 #define JET_CEILING_TAPER_END    24.0f
 
 static void apply_jet_force(World *w, const Mech *m, float thrust_pxs2, float dt) {
+    /* P07 — CTF carrier penalty: half jet thrust. Soldat tradition;
+     * keeps the carrier from sky-dancing the flag back to base. The
+     * fuel-drain rate is unchanged (fuel runs out twice as fast for
+     * the same vertical gain — same effective penalty). */
+    if (ctf_is_carrier(w, m->id)) {
+        thrust_pxs2 *= 0.5f;
+    }
     ParticlePool *p = &w->particles;
     int b = m->particle_base;
     float head_y = p->pos_y[b + PART_HEAD];
@@ -1253,6 +1261,13 @@ bool mech_try_fire(World *w, int mid, ClientInput in) {
     if (m->fire_cooldown > 0.0f)             return false;
     if (m->reload_timer  > 0.0f)             return false;
 
+    /* P07 — CTF carrier penalty: secondary fire is fully disabled while
+     * carrying a flag. Trade-off vs Soldat's partial restriction: see
+     * TRADE_OFFS.md "Carrier secondary fully disabled". Primary still
+     * fires normally. P09's BTN_FIRE_SECONDARY (RMB one-shot) inherits
+     * the same gate when it lands. */
+    if (m->active_slot == 1 && ctf_is_carrier(w, mid)) return false;
+
     bool fire_held    = (in.buttons & BTN_FIRE) != 0;
     bool fire_pressed = ((~m->prev_buttons) & in.buttons & BTN_FIRE) != 0;
 
@@ -1527,6 +1542,20 @@ void mech_kill(World *w, int mid, int killshot_part, Vec2 dir,
     /* P06 — release any active grapple so the corpse doesn't keep
      * pulling toward an anchor. */
     if (m->grapple.state != GRAPPLE_IDLE) mech_grapple_release(w, mid);
+
+    /* P07 — CTF: if the dying mech is a flag carrier, drop the flag at
+     * the pelvis position (BEFORE the kill impulse displaces it) with
+     * a 30-s auto-return timer. ctf_drop_on_death is a no-op when the
+     * round isn't CTF or the mech isn't carrying anything. Snapshot
+     * the pelvis position now so the drop lands at the death site, not
+     * wherever the impulse sends the corpse. */
+    {
+        Vec2 pelv = (Vec2){
+            w->particles.pos_x[m->particle_base + PART_PELVIS],
+            w->particles.pos_y[m->particle_base + PART_PELVIS],
+        };
+        ctf_drop_on_death(w, (MatchModeId)w->match_mode_cached, mid, pelv);
+    }
 
     /* Apply impulse to pelvis so the body ragdolls as a unit. */
     int idx = m->particle_base + PART_PELVIS;

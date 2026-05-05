@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-grapple-ceiling shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling shot \
         debug gdb gdb-host gdb-client valgrind editor
 
 all: $(BIN)
@@ -126,6 +126,15 @@ $(BUILD_DIR)/pickup_test: tests/pickup_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(EN
 test-pickups: $(BUILD_DIR)/pickup_test
 	./$(BUILD_DIR)/pickup_test
 
+# M5 P07 — CTF runtime: ctf_init_round + ctf_step + ctf_drop_on_death.
+# Builds a synthetic level with a Red/Blue flag pair, exercises pickup /
+# friendly-return / auto-return / capture / no-carry-touch transitions.
+$(BUILD_DIR)/ctf_test: tests/ctf_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/ctf_test.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+test-ctf: $(BUILD_DIR)/ctf_test
+	./$(BUILD_DIR)/ctf_test
+
 # M5 P04 fix verification — map_spawn_point honors level->spawns when
 # the .lvl ships authored SPWN records. Pre-fix, F5 test-play would
 # put the player in g_red_lanes[0] regardless of what the editor saved.
@@ -155,6 +164,7 @@ test-editor: editor
 	./build/soldut_editor --shot tools/editor/shots/pickup_save.shot
 	./build/soldut_editor --shot tools/editor/shots/loadout.shot
 	./build/soldut_editor --shot tools/editor/shots/loadout_dropdowns.shot
+	./build/soldut_editor --shot tools/editor/shots/loadout_mode.shot
 
 # Grapple/swing visual + state regression on a purpose-built map. The
 # editor shot programmatically writes assets/maps/grapple_test.lvl
@@ -168,6 +178,40 @@ test-grapple-ceiling: $(BIN) editor
 	mkdir -p assets/maps
 	./build/soldut_editor --shot tools/editor/shots/grapple_test_map.shot
 	./$(BIN) --shot tests/shots/m5_grapple_ceiling.shot
+
+# M5 P07 — full CTF editor → game flow.
+# 1. Editor shot programmatically authors a CTF map
+#    (floor + walls + 2 spawns + 2 flags) and saves it to
+#    assets/maps/ctf_test.lvl.
+# 2. Game shot loads the saved .lvl, walks the player into the BLUE
+#    flag (touch-driven pickup), then back to the RED home flag
+#    (capture fires by the both-flags-home rule). Asserts on log
+#    lines: ctf_init_round, ctf: pickup, ctf: capture, score R5/B0.
+test-ctf-editor-flow: $(BIN) editor
+	mkdir -p assets/maps
+	./build/soldut_editor --shot tools/editor/shots/ctf_map.shot
+	./$(BIN) --shot tests/shots/m5_ctf_editor_map.shot
+	@echo "=== ctf-editor-flow (shot) assertions ==="
+	@HOST_LOG="build/shots/m5_ctf_editor_map/m5_ctf_editor_map.log" ; \
+	 PASS=0 ; FAIL=0 ; \
+	 asrt() { if eval "$$2" ; then echo "PASS: $$1" ; PASS=$$((PASS+1)) ; \
+	          else echo "FAIL: $$1" ; FAIL=$$((FAIL+1)) ; fi ; } ; \
+	 asrt "level loaded from disk"            "grep -q 'loaded.*assets/maps/ctf_test.lvl' '$$HOST_LOG'" ; \
+	 asrt "ctf_init_round populated 2 flags"  "grep -q 'ctf_init_round: flags at RED' '$$HOST_LOG'" ; \
+	 asrt "touch-driven pickup fired (BLUE)"  "grep -q 'ctf: pickup flag=1 (team=2)' '$$HOST_LOG'" ; \
+	 asrt "capture fired (R5/B0)"             "grep -q 'ctf: capture by mech=0.*score R5/B0' '$$HOST_LOG'" ; \
+	 echo ; \
+	 echo "== ctf-editor-flow (shot) summary: $$PASS passed, $$FAIL failed ==" ; \
+	 if [ "$$FAIL" != "0" ] ; then exit 1 ; fi
+	@echo
+	@echo "=== ctf-editor-flow (--test-play / F5 path) ==="
+	@./tests/test_play_ctf.sh
+	@echo
+	@echo "=== --mode override (F5 mode picker) ==="
+	@./tests/test_play_mode_override.sh
+	@echo
+	@echo "=== client walks own flag (snapshot quant overflow regression) ==="
+	@./tests/shots/net/run_ctf_walk_own_flag.sh
 
 # Shot mode — drive a scripted scene through the real renderer and
 # write PNGs. Handy for visual diffs without filming. Override SCRIPT

@@ -51,11 +51,10 @@ On top of that, **earlier milestones explicitly deferred work to M5**. We honor 
 
 ## What M5 explicitly does **not** do
 
-- **Mid-tick interpolation of remote mechs / two-snapshot buffer.** Stays in the M2 trade-off queue until WAN testing demands it.
 - **Snapshot delta encoding past M2's stub.** Stays in the M2 trade-off queue until 16+ player playtest pressures bandwidth.
 - **HMAC-SHA256 handshake.** Stays deferred until we expose servers to the open internet.
 - **Server-side entity culling.** Stays deferred. Ships at v0.2 alongside dedicated-server stretch goal.
-- **120 Hz fixed-step accumulator + render-side interpolation alpha.** Pushed to M6 stability pass; the audio/visual changes here can run on the existing 60 Hz sim.
+- **Sim at 120 Hz.** P03 landed the fixed-step accumulator + render-side interpolation alpha + two-snapshot remote-mech interp; running the sim at 120 Hz is now a flag-flip, but stays at 60 because slope-physics tuning happened against it. Decide after authored-map playtest.
 - **Left-arm IK / angle constraints.** Pushed to M6 polish pass.
 - **Destructible geometry.** Explicitly out of scope per [07-level-design.md](../07-level-design.md). Maps are static at v1.
 - **Procedurally generated maps.** Same.

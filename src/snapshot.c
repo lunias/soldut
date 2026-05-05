@@ -11,19 +11,29 @@
 
 /* ---- Quantization helpers ----------------------------------------- */
 /*
- * pos: 1/8 px → int16 covers ±4096 px, fine for our 3200 px world.
+ * pos: 1/4 px → int16 covers ±8190 px (was 1/8 px / ±4096 — see TRADE_OFFS).
  * vel: 1/16 px/tick (per-tick velocity, post-integrate). 16-bit
  *      signed covers ±2048 px/tick — way more than we'd ever see.
  * angle: uint16 fraction of 2π.
  */
 
+/* Position quantization is i16 with a 4× sub-pixel factor:
+ *   max representable px = 32760 / 4 ≈ 8190
+ *   resolution           = 0.25 px (well under 1-px renderer interp jitter)
+ *
+ * The factor used to be 8.0f (max ~4096 px, 0.125 px res) — that clamped
+ * any position east of x=4096 to x=4095 on the wire and made the
+ * Crossfire map's BLUE base unreachable for clients (the local mech kept
+ * snapping back to x=4095 every snapshot). When we ship a map wider
+ * than ~8000 px we'll need a wider encoding here. See TRADE_OFFS.md
+ * "snapshot pos quant factor 4× → 8 K px max world width". */
 static int16_t quant_pos(float p) {
-    float q = p * 8.0f;
+    float q = p * 4.0f;
     if (q >  32760.0f) q =  32760.0f;
     if (q < -32760.0f) q = -32760.0f;
     return (int16_t)(q < 0 ? q - 0.5f : q + 0.5f);
 }
-static float dequant_pos(int16_t q) { return (float)q / 8.0f; }
+static float dequant_pos(int16_t q) { return (float)q / 4.0f; }
 
 static int16_t quant_vel(float v) {
     float q = v * 16.0f;
