@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-meet-custom shot \
         debug gdb gdb-host gdb-client valgrind editor
 
 all: $(BIN)
@@ -161,6 +161,13 @@ test-map-chunks: $(BUILD_DIR)/map_chunk_test
 
 test-map-share: $(BIN) $(BUILD_DIR)/synth_map
 	./tests/net/run_map_share.sh
+
+# M5 P08 — full create-map → host → client-downloads → both-walk-and-meet
+# end-to-end. Drives the editor binary in shot mode to author a custom
+# .lvl, then runs paired host+client shots with isolated tmpdirs +
+# XDG_DATA_HOME so the client genuinely has to download.
+test-meet-custom: $(BIN) editor
+	./tests/shots/net/run_meet_custom.sh
 
 # End-to-end: editor shotmode authors a .lvl with a platform + spawn,
 # `./soldut --test-play <lvl>` loads it, soldut.log records the spawn

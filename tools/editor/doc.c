@@ -8,6 +8,44 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+#ifdef _WIN32
+#include <direct.h>
+#define DOC_MKDIR(p) _mkdir(p)
+#else
+#define DOC_MKDIR(p) mkdir((p), 0755)
+#endif
+
+/* mkdir -p the parent directory of `path`. The editor's default save
+ * target is `assets/maps/<name>.lvl`; on a fresh checkout that
+ * directory doesn't exist (it's gitignored), so fopen(... "wb")
+ * returns NULL and `level_save` reports LVL_ERR_IO. Walk the
+ * separators, create each segment ignoring "already exists" errors. */
+static void doc_ensure_parent_dir(const char *path) {
+    if (!path || !*path) return;
+    char buf[512];
+    snprintf(buf, sizeof buf, "%s", path);
+    /* Find last separator and truncate. */
+    char *last = NULL;
+    for (char *p = buf; *p; ++p) {
+        if (*p == '/' || *p == '\\') last = p;
+    }
+    if (!last || last == buf) return;   /* no parent dir or already root */
+    *last = '\0';
+    /* Walk and create each segment. Skip a leading slash on POSIX so
+     * mkdir("") doesn't fire on an absolute path. */
+    for (char *p = buf + 1; *p; ++p) {
+        if (*p == '/' || *p == '\\') {
+            char saved = *p;
+            *p = '\0';
+            DOC_MKDIR(buf);
+            *p = saved;
+        }
+    }
+    DOC_MKDIR(buf);
+}
 
 /* Sized arena used for level_load / level_save scratch. The editor
  * keeps one of these around for the lifetime of the process; each
@@ -188,6 +226,9 @@ bool doc_save(EditorDoc *d, const char *path) {
     L->meta       = d->meta;
     L->string_table      = d->str_pool;
     L->string_table_size = (int)arrlen(d->str_pool);
+
+    /* Ensure the destination directory exists before fopen. */
+    doc_ensure_parent_dir(path);
 
     LvlResult r = level_save(w, scr, path);
     free(w);

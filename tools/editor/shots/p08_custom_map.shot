@@ -1,0 +1,33 @@
+# tools/editor/shots/p08_custom_map.shot — author a small custom .lvl
+# for the P08 map-share end-to-end test.
+#
+# 100×16 tiles → 3200×512 px world. Solid floor on the bottom strip,
+# two spawns: one near each side, both team 1 (FFA-friendly). Saved
+# to a relative path `assets/maps/foundry.lvl` so the orchestrator can
+# cd into the host's tmp dir and have it land there.
+
+window 1280 720
+new 100 16
+ticks 80
+out p08_custom_map_out
+panels off
+contact_sheet p08
+
+# ---- Paint a floor strip on row 14 (world y = 448..480) ----
+at 1  tool tile
+at 1  tile_flags solid
+at 2  tile_fill_rect 0 448 3200 480
+
+# ---- Two spawns, both team 1 (FFA-friendly) ----
+at 20 tool spawn
+at 20 spawn_team 1
+at 21 spawn_add  256  416 1
+at 22 spawn_add 2944  416 1
+
+# ---- Save + screenshot for visual review ----
+at 40 save assets/maps/foundry.lvl
+at 41 assert dirty == 0
+at 41 assert spawns == 2
+at 41 assert tiles_solid == 100
+at 50 shot p08_authored
+at 60 end
