@@ -215,6 +215,30 @@ static void solve_angle(ParticlePool *p, const Constraint *c) {
     }
 }
 
+/* CSTR_FIXED_ANCHOR (P06): one-sided distance limit toward the
+ * constraint's inline `fixed_pos`. When the particle is farther than
+ * `rest`, pull it in. When closer, the rope is slack — no force.
+ * End b has effective inv_mass = 0 (it's a fixed world point), so the
+ * particle takes the full correction.
+ *
+ * Used by the grappling hook when anchored to a tile. The one-sided
+ * behaviour gives the firer the "Tarzan swing" feel: the body hangs
+ * at rope length, swings as a pendulum, and can drift closer to the
+ * anchor (slack) without being shoved away. */
+static void solve_fixed_anchor(ParticlePool *p, const Constraint *c) {
+    int ai = c->a;
+    if (p->inv_mass[ai] <= 0.0f) return;
+    float dx = c->fixed_pos.x - p->pos_x[ai];
+    float dy = c->fixed_pos.y - p->pos_y[ai];
+    float d2 = dx * dx + dy * dy;
+    if (d2 < 1e-6f) return;
+    float d = sqrtf(d2);
+    if (d <= c->rest) return;            /* slack — no force */
+    float diff = (d - c->rest) / d;
+    p->pos_x[ai] += dx * diff;
+    p->pos_y[ai] += dy * diff;
+}
+
 static void solve_constraints_one_pass(World *w) {
     ConstraintPool *cp = &w->constraints;
     ParticlePool   *pp = &w->particles;
@@ -225,6 +249,7 @@ static void solve_constraints_one_pass(World *w) {
             case CSTR_DISTANCE:        solve_distance(pp, c);       break;
             case CSTR_DISTANCE_LIMIT:  solve_distance_limit(pp, c); break;
             case CSTR_ANGLE:           solve_angle(pp, c);          break;
+            case CSTR_FIXED_ANCHOR:    solve_fixed_anchor(pp, c);   break;
         }
     }
 }

@@ -9,11 +9,27 @@ This doc lands the proper implementation. Roughly one engineer-day of work; pair
 Press fire (with Grappling Hook as the active secondary):
 
 1. A small projectile launches from the right hand toward the cursor.
-2. On hit (tile or mech bone), the rope goes taut. The player is **pulled** toward the anchor at a contracting rate.
-3. Pull continues until the player presses BTN_USE (release), or the contraction reaches the minimum length, or the anchor's mech dies, or the player dies.
-4. While pulled, the player can still aim and shoot — the grapple doesn't lock you out of combat.
+2. On hit (tile or mech bone), the rope goes taut at the **hit-time distance** between the firer's pelvis and the anchor.
+3. The rope acts as a **one-sided length limit** — slack when the firer is closer than rope length, taut when stretched. The firer hangs as a pendulum, swinging under gravity around the anchor (the **Tarzan** feel). There is no auto-contract; the firer doesn't get pinned against whatever they grappled.
+4. The rope length is the hit-time pelvis-to-anchor distance, **clamped to 300 px** so a long-range fire still gives a tight, swingable rope instead of a 600-px line you can't really swing on. If the firer hit something farther than 300 px, they're "outside" the rope at attach and get pulled in to 300 px over a few iterations of the constraint solver.
+5. **Hold BTN_JET (W)** while attached to **retract** — the rope shortens at 800 px/s (clamped to a 60 px minimum) and the firer zip-lines toward the anchor. Releasing W stops the retract; the rope length stays where it was.
+6. While attached, the player can still aim and shoot.
+7. **BTN_USE** releases the rope — the firer disconnects and falls / runs / jets.
+8. **BTN_FIRE** while ATTACHED auto-releases the current rope and fires a new head. This is the chain-grapple flow that lets the player swing across a level.
+9. Other releases happen on the anchor mech's death (dead anchors stop pulling) and on the firer's own death.
 
-This is the Soldat / Worms / Spider-Man tradition. It's pure utility — zero damage — but the right map design makes it transformative for vertical traversal.
+This is the Soldat / Worms tradition. It's pure utility — zero damage — but the right map design makes it transformative for vertical traversal.
+
+> **Earlier draft of this doc described an auto-contract design** (rest
+> length ticks down at 800 px/s, clamped to a 80 px minimum; firer
+> gets pulled to the anchor and held there). The author shipped that
+> at first and a playtester immediately reported "I cannot retract it,
+> I end up stuck to whatever I grappled" — so we replaced it with the
+> static-length rope above. The auto-contract path is gone from the
+> code; this doc reflects the shipping behaviour. If a later milestone
+> wants a "zip-line up" style retract, that should be a separate input
+> binding (e.g. hold BTN_JET while attached) rather than the default
+> rope behaviour.
 
 ## Data model
 
@@ -112,22 +128,22 @@ if (p->kind[i] == PROJ_GRAPPLE_HEAD) {
 }
 ```
 
-## Pull mechanism: contracting distance constraint
+## Rope mechanism: one-sided length-limit constraint
 
-When attached, we install a distance constraint between the firer's pelvis particle and an "anchor particle." The constraint solver does the rest — every relaxation iteration pulls the pelvis toward the anchor by the constraint's normal physics.
+When attached, we install a one-sided distance limit between the firer's pelvis particle and an "anchor particle." The constraint pulls only when the firer is *farther* than rope length; when closer, the rope is slack (no force). Every relaxation iteration of the existing 12-iter constraint loop enforces the limit. The result is pendulum-style swinging — the firer hangs at rope length under gravity and arcs around the anchor.
 
 Two shapes:
 
-- **Tile anchor** (`anchor_mech == -1`): the anchor is a virtual particle, fixed at `anchor_pos`. We don't actually allocate it in the particle pool — instead, the constraint solver has a special case for "one end of this constraint is a fixed Vec2." Cleanest implementation: add a `CSTR_FIXED_ANCHOR` constraint kind that holds the anchor position inline.
-- **Mech anchor** (`anchor_mech >= 0`): the anchor is the bone particle of the target mech. Use the existing `CSTR_DISTANCE` shape with `a = grappler_pelvis, b = target_bone_particle`.
+- **Tile anchor** (`anchor_mech == -1`): the anchor is a fixed world point. We use a dedicated `CSTR_FIXED_ANCHOR` kind that holds the anchor in `c->fixed_pos` inline. The solver's `solve_fixed_anchor` early-returns when `d ≤ c->rest` (slack) and pulls the particle in when `d > c->rest`.
+- **Mech anchor** (`anchor_mech >= 0`): the anchor is the bone particle of the target mech. We use the existing `CSTR_DISTANCE_LIMIT` shape with `a = grappler_pelvis, b = target_bone_particle, min_len = 0, max_len = rope_length`. Same one-sided behaviour — slack when `d ≤ max_len`, pulls in when stretched. The bone moves with the target each tick automatically (no per-tick update needed).
 
 ```c
-// src/world.h — new constraint kind
+// src/world.h — constraint kinds at v1
 typedef enum {
     CSTR_DISTANCE = 0,
     CSTR_DISTANCE_LIMIT,
     CSTR_ANGLE,
-    CSTR_FIXED_ANCHOR,        // new: end b is a fixed Vec2 stored inline
+    CSTR_FIXED_ANCHOR,        // P06: end b is a fixed Vec2 stored inline
 } ConstraintKind;
 
 typedef struct {
@@ -135,62 +151,72 @@ typedef struct {
     uint16_t c;
     uint8_t  kind;
     uint8_t  active;
-    float    rest;
-    float    min_len, max_len;
+    float    rest;            // FIXED_ANCHOR: max length
+    float    min_len, max_len;// DISTANCE_LIMIT: min/max length
     float    min_ang, max_ang;
-    Vec2     fixed_pos;       // new: used for CSTR_FIXED_ANCHOR
+    Vec2     fixed_pos;       // FIXED_ANCHOR: inline anchor
 } Constraint;
 ```
 
-Each tick of the simulation (in `mech_step_drive`), we tick the rest length down:
+Each tick of the simulation (in `mech_step_drive`), the rest length is **only** mutated when the player holds `BTN_JET` (W) — the player-driven retract that lets them zip-line toward the anchor. Without W held the rope is a static-length pendulum, not a winch. The block also updates the constraint's `fixed_pos` so float drift can't shift the anchor, releases on `BTN_USE`, and releases if the anchor mech dies:
 
 ```c
 // src/mech.c::mech_step_drive — when grapple is ATTACHED
 if (m->grapple.state == GRAPPLE_ATTACHED) {
-    float contract_rate = 800.0f * dt;   // 800 px/s
-    m->grapple.rest_length -= contract_rate;
-    if (m->grapple.rest_length < 80.0f) m->grapple.rest_length = 80.0f;
+    /* W-hold retract. Rope shortens at GRAPPLE_RETRACT_PXS while
+     * BTN_JET is held; clamped at GRAPPLE_MIN_REST_LEN so a fully-
+     * retracted firer doesn't end up inside the anchor tile. */
+    if (in.buttons & BTN_JET) {
+        m->grapple.rest_length -= GRAPPLE_RETRACT_PXS * dt;
+        if (m->grapple.rest_length < GRAPPLE_MIN_REST_LEN)
+            m->grapple.rest_length = GRAPPLE_MIN_REST_LEN;
+    }
     Constraint *c = &w->constraints.items[m->grapple.constraint_idx];
-    c->rest = m->grapple.rest_length;
-    if (m->grapple.anchor_mech == -1) {
-        c->fixed_pos = m->grapple.anchor_pos;
+    c->rest    = m->grapple.rest_length;       // tile anchor solver reads this
+    c->max_len = m->grapple.rest_length;       // mech anchor solver reads this
+    if (m->grapple.anchor_mech < 0) {
+        c->fixed_pos = m->grapple.anchor_pos;  // tile anchor authoritative
     }
-    // (For mech anchor, the anchor particle moves with the target — no
-    //  per-tick update needed.)
-    // Release on BTN_USE edge.
-    if ((m->latched_input.buttons & BTN_USE) &&
-        !(m->prev_buttons & BTN_USE))
-    {
-        grapple_release(w, mid);
+    if (m->grapple.anchor_mech >= 0
+        && !w->mechs[m->grapple.anchor_mech].alive) {
+        mech_grapple_release(w, mid);
     }
-    // Release if anchor mech dies.
-    if (m->grapple.anchor_mech >= 0 &&
-        !w->mechs[m->grapple.anchor_mech].alive)
-    {
-        grapple_release(w, mid);
-    }
+    if (pressed & BTN_USE) mech_grapple_release(w, mid);
 }
 ```
 
-The 800 px/s contract rate is starting; tune in playtest. Min length 80 px keeps the firer from face-planting into the anchor.
+Tunables (in `src/mech.c` + `src/projectile.c`):
+
+| Constant                    | Value      | What it does                                                |
+|-----------------------------|------------|-------------------------------------------------------------|
+| `GRAPPLE_MAX_REST_LEN`      | 300 px     | Caps the hit-time rope length (long fires get pulled in).   |
+| `GRAPPLE_RETRACT_PXS`       | 800 px/s   | How fast the rope shortens while W is held.                 |
+| `GRAPPLE_MIN_REST_LEN`      |  60 px     | Floor for rope length under retract; `0` would let the firer drift inside the anchor tile. |
+| `GRAPPLE_INIT_MIN_LEN`      |  80 px     | Floor for the initial rope length (before any retract).     |
+| `wpn->fire_rate_sec`        | 1.20 s     | Min interval between fires; gates chain re-fire too.        |
+
+The hit-time rope length is set once when the head sticks (clamped pelvis-to-anchor distance). The W-hold retract is the only thing that changes it after that.
+
+If the player wants to fire a new grapple while the current one is attached, they re-press `BTN_FIRE`: the fire path detects `state == GRAPPLE_ATTACHED`, calls `mech_grapple_release`, and falls through to spawn a fresh head — single press, full chain. The 1.20 s `fire_rate_sec` cooldown still gates how fast successive heads can launch.
 
 ## Solving CSTR_FIXED_ANCHOR
 
-Add to `src/physics.c::physics_constrain_and_collide`:
+In `src/physics.c::solve_constraints_one_pass`. Note the early-return for the slack case — that's what makes the rope one-sided (the pendulum feel rather than a rigid stick).
 
 ```c
 case CSTR_FIXED_ANCHOR: {
     int ai = c->a;
+    if (p->inv_mass[ai] <= 0.0f) return;
     Vec2 fp = c->fixed_pos;
-    float dx = fp.x - w->particles.pos_x[ai];
-    float dy = fp.y - w->particles.pos_y[ai];
+    float dx = fp.x - p->pos_x[ai];
+    float dy = fp.y - p->pos_y[ai];
     float d2 = dx*dx + dy*dy;
-    if (d2 < 1e-6f) break;
+    if (d2 < 1e-6f) return;
     float d = sqrtf(d2);
+    if (d <= c->rest) return;       // rope slack — no force
     float diff = (d - c->rest) / d;
-    // Move only the particle (the anchor is fixed).
-    w->particles.pos_x[ai] += dx * diff;
-    w->particles.pos_y[ai] += dy * diff;
+    p->pos_x[ai] += dx * diff;
+    p->pos_y[ai] += dy * diff;
     break;
 }
 ```
@@ -216,12 +242,12 @@ We don't reclaim the constraint's slot in the pool — `active = 0` is enough; t
 
 ## Anchor tracking when anchored to a moving mech
 
-When the anchor is a bone particle on a target mech, the constraint pulls *both* the firer and the target — symmetric distance constraint. This means the firer can:
+When the anchor is a bone particle on a target mech, the `CSTR_DISTANCE_LIMIT` constraint (with `min_len = 0`, `max_len = rope_length`) pulls *both* the firer and the target toward each other when the rope is stretched. Inside the rope length there's no force — the rope is slack. This means the firer can:
 
-- Pull a heavier mech *toward* themselves.
-- Be pulled *with* a lighter mech that's running away.
+- Yank a heavier mech *toward* themselves when the firer suddenly accelerates away.
+- Be tugged *with* a lighter mech that's running away from them.
 
-The asymmetry comes from particle inv_mass — the chassis's mass scale. A Heavy chassis pulling a Scout will pull the Scout much more than the Scout pulls the Heavy.
+The asymmetry comes from particle inv_mass — the chassis's mass scale. A Heavy chassis pulling a Scout pulls the Scout much more than the Scout pulls the Heavy.
 
 If the target mech *dies* while attached, the constraint goes inactive (we release on death, see above).
 
@@ -229,7 +255,7 @@ If the target *limb* dismembers (e.g., I grappled their leg, they lost the leg),
 
 ## Cooldown
 
-After release, `fire_cooldown = wpn->fire_rate_sec` (1.2 s). The grapple can't be re-fired during this. While `state == FLYING`, a second BTN_FIRE press is silently ignored.
+After every fire, `fire_cooldown = wpn->fire_rate_sec` (1.2 s). The grapple can't be re-fired during the cooldown. While `state == FLYING` a re-press is silently swallowed (no double-head). While `state == ATTACHED` a re-press auto-releases the current rope and falls through to fire a fresh head — but the cooldown still applies, so back-to-back chained fires are bounded to ≥1.2 s apart. (For tighter chains the right answer is to lower `fire_rate_sec` for the grapple specifically; that's a tuning decision.)
 
 ## Render
 
@@ -265,17 +291,17 @@ The rope is a single straight line. A flexing-rope shader (sampled bezier) is a 
 
 ## Audio
 
-Three SFX: fire, hit, release. Plus a continuous "rope tightening" loop while contracting. See [09-audio.md](09-audio.md) §"SFX manifest".
+Three SFX: fire, hit, release. The earlier "continuous rope tightening loop while contracting" cue is gone alongside the auto-contract design. See [09-audio.md](09-audio.md) §"SFX manifest".
 
 ## Edge cases worth being careful about
 
-- **Grapple while in another grapple.** Second BTN_FIRE press ignored unless state == IDLE.
-- **Grapple anchor inside a SOLID tile.** Shouldn't happen (the projectile stops at the surface), but guard against floating-point error: clamp anchor_pos out of any solid tile by 4 px before storing.
-- **Two players grappled to each other simultaneously.** Each owns one constraint; both contract; they meet in the middle. Cinematic.
-- **Grapple during ragdoll.** The dying player's grapple is released on transition to `!alive`.
-- **Grapple while reloading.** No interaction — grapple uses BTN_FIRE on the secondary slot, reload is per-slot, the active slot is the secondary.
-- **Holding fire on the grapple.** WFIRE_GRAPPLE is edge-triggered (we already gate on `prev_buttons & BTN_FIRE` in the fire path). Holding fire doesn't re-fire.
-- **Grapple while crouched.** Allowed; the contracting constraint pulls the pelvis. Crouch lowers the mech but doesn't change the grapple math.
+- **Grapple while in another grapple.** Re-press while ATTACHED chain-releases the current rope and fires a new head; re-press while FLYING is silently swallowed (no double-head).
+- **Grapple anchor inside a SOLID tile.** Shouldn't happen (the projectile stops at the surface), but guard against floating-point error: clamp anchor_pos 4 px back along the flight direction before storing.
+- **Two players grappled to each other simultaneously.** Each owns one rope. Both ropes are one-sided — they pull only when stretched. The two firers swing toward each other when both are flung out and stay slack between. Cinematic but bounded.
+- **Grapple during ragdoll.** The dying player's grapple is released on transition to `!alive` (`mech_kill` calls `mech_grapple_release` first thing).
+- **Grapple while reloading.** No interaction — grapple uses BTN_FIRE on the secondary slot, reload is per-slot.
+- **Holding fire on the grapple.** WFIRE_GRAPPLE is edge-triggered. Holding fire doesn't re-fire.
+- **Grapple while crouched.** Allowed; the rope's max-length limit acts on the pelvis regardless. Crouch lowers the mech but doesn't change the grapple math.
 
 ## Lag compensation
 
@@ -296,13 +322,14 @@ The other 4 maps (Foundry, Concourse, Reactor, Crossfire) are designed without d
 
 ## Done when
 
-- Grappling Hook secondary fires a head, the head sticks to tiles and bones, and the firer is pulled toward the anchor.
-- Release on BTN_USE works; release on anchor-mech-death works.
-- The rope renders correctly for both local and remote players (grapple state in snapshot delta).
+- Grappling Hook secondary fires a head, the head sticks to tiles and bones, and the firer hangs at the hit-time rope length, swinging as a pendulum (one-sided rope, no auto-contract).
+- Release on BTN_USE works; release on anchor-mech-death works; release on firer death works.
+- Re-pressing BTN_FIRE while ATTACHED chain-releases + fires a new head (the user's "swing across, disconnect, fire and re-attach" Tarzan flow).
+- The rope renders correctly for both local and remote players (grapple state on the snapshot's optional 8-byte suffix).
 - The Catwalk map's grapple-up-to-catwalk beats are reachable; without grapple they're reachable only by chained jet jumps.
 - The M3 trade-off "Grappling Hook is a stub" is deleted from TRADE_OFFS.md.
-- Audio cues fire correctly (fire, hit, release, contract loop).
-- A shot test (`tests/shots/m5_grapple.shot`) verifies a single grapple-and-pull cycle.
+- Audio cues fire correctly (fire, hit, release).
+- Shot tests `tests/shots/m5_grapple.shot` (basic) and `tests/shots/m5_grapple_swing.shot` (chain re-fire) verify the full cycle from log + screenshots.
 
 ## Trade-offs to log
 

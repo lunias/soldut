@@ -72,6 +72,12 @@ typedef enum {
     EV_TOGGLE_HELP,
     EV_OPEN_META,
     EV_CLOSE_META,
+    EV_OPEN_LOADOUT,
+    EV_CLOSE_LOADOUT,
+    EV_LOADOUT_APPLY,        /* writes modal state into ShotState.test_lo */
+    EV_LOADOUT_SET,          /* set one slot's idx — i1=slot, str1=name (or numeric idx) */
+    EV_LOADOUT_OPEN_DROPDOWN,/* programmatically expand a slot's dropdown — i1=slot */
+    EV_LOADOUT_CLOSE_DROPDOWNS, /* collapse all dropdowns (modal stays open) */
     EV_CLICK_TOOL_BUTTON,    /* mirrors main.c's "user clicked tool btn" handler */
     EV_MOUSE,
     EV_CAM_TARGET,
@@ -510,6 +516,44 @@ static int parse_script(const char *path, ScriptHeader *hdr,
         else if (strieq(cmd, "toggle_help")) { ev.kind = EV_TOGGLE_HELP; }
         else if (strieq(cmd, "open_meta"))   { ev.kind = EV_OPEN_META;   }
         else if (strieq(cmd, "close_meta"))  { ev.kind = EV_CLOSE_META;  }
+        else if (strieq(cmd, "open_loadout"))    { ev.kind = EV_OPEN_LOADOUT;    }
+        else if (strieq(cmd, "close_loadout"))   { ev.kind = EV_CLOSE_LOADOUT;   }
+        else if (strieq(cmd, "loadout_apply"))   { ev.kind = EV_LOADOUT_APPLY;   }
+        else if (strieq(cmd, "loadout_open_dropdown") && nt == 4) {
+            /* loadout_open_dropdown <slot> — programmatically expands
+             * one slot's dropdown so a screenshot can capture the
+             * open-list state. The modal must already be open. */
+            int slot = ui_loadout_slot_from_name(toks[3]);
+            if (slot < 0) {
+                fprintf(stderr, "shotmode: %s:%d: bad loadout slot: %s\n",
+                        path, line_no, toks[3]);
+                ++errors; continue;
+            }
+            ev.kind = EV_LOADOUT_OPEN_DROPDOWN;
+            ev.i1   = slot;
+        }
+        else if (strieq(cmd, "loadout_close_dropdowns")) {
+            ev.kind = EV_LOADOUT_CLOSE_DROPDOWNS;
+        }
+        else if (strieq(cmd, "loadout_set") && nt >= 5) {
+            /* loadout_set <slot> <name_or_idx>
+             * <slot>: chassis|primary|secondary|armor|jetpack
+             * <name_or_idx>: an integer (direct dropdown idx) OR an
+             *   option name with underscores in place of spaces (so
+             *   the line tokenizer doesn't split mid-name). E.g.,
+             *   `loadout_set secondary Grappling_Hook` → maps to the
+             *   "Grappling Hook" entry. Index 0 always means
+             *   "(default)" → empty string in test_lo. */
+            int slot = ui_loadout_slot_from_name(toks[3]);
+            if (slot < 0) {
+                fprintf(stderr, "shotmode: %s:%d: bad loadout slot: %s\n",
+                        path, line_no, toks[3]);
+                ++errors; continue;
+            }
+            ev.kind = EV_LOADOUT_SET;
+            ev.i1   = slot;
+            snprintf(ev.str1, sizeof ev.str1, "%s", toks[4]);
+        }
         else if (strieq(cmd, "click_tool_button") && nt == 4) {
             ev.kind = EV_CLICK_TOOL_BUTTON;
             int t = parse_tool(toks[3]);
@@ -670,6 +714,8 @@ typedef struct ShotState {
     int         active_tool;
     HelpModal   help;
     MetaModal   meta;
+    LoadoutModal    loadout;        /* test-play loadout modal (L key) */
+    TestPlayLoadout test_lo;        /* what F5 would forward to the game */
     Vector2     cursor_screen;
     int         assert_failures;
     bool        draw_panels;        /* render the actual UI chrome in shots */
@@ -686,6 +732,30 @@ static int doc_field_value(const ShotState *s, const char *field) {
     if (strieq(field, "dirty"))      return s->doc.dirty ? 1 : 0;
     if (strieq(field, "help_open"))  return s->help.open ? 1 : 0;
     if (strieq(field, "meta_open"))  return s->meta.open ? 1 : 0;
+    if (strieq(field, "loadout_open")) return s->loadout.open ? 1 : 0;
+    /* Which slot's dropdown is currently expanded (-1 if none). */
+    if (strieq(field, "loadout_dropdown_open")) {
+        for (int i = 0; i < LOADOUT_SLOT_COUNT; ++i)
+            if (s->loadout.edit[i]) return i;
+        return -1;
+    }
+    /* Per-slot dropdown index — what's currently picked in the modal,
+     * regardless of whether Apply has been pressed. 0 means "(default)". */
+    if (strieq(field, "loadout_chassis_idx"))   return s->loadout.idx[LOADOUT_SLOT_CHASSIS];
+    if (strieq(field, "loadout_primary_idx"))   return s->loadout.idx[LOADOUT_SLOT_PRIMARY];
+    if (strieq(field, "loadout_secondary_idx")) return s->loadout.idx[LOADOUT_SLOT_SECONDARY];
+    if (strieq(field, "loadout_armor_idx"))     return s->loadout.idx[LOADOUT_SLOT_ARMOR];
+    if (strieq(field, "loadout_jetpack_idx"))   return s->loadout.idx[LOADOUT_SLOT_JETPACK];
+    /* Per-slot APPLIED idx — what's stored in test_lo and would be
+     * forwarded to the game on F5. Resolves the test_lo string back to
+     * the dropdown idx so an integer assert can verify the apply flow.
+     * Returns -1 if the test_lo string is set but doesn't match any
+     * known option (catches typos in the apply path). */
+    if (strieq(field, "test_lo_chassis_idx"))   return ui_loadout_slot_idx(LOADOUT_SLOT_CHASSIS,   s->test_lo.chassis);
+    if (strieq(field, "test_lo_primary_idx"))   return ui_loadout_slot_idx(LOADOUT_SLOT_PRIMARY,   s->test_lo.primary);
+    if (strieq(field, "test_lo_secondary_idx")) return ui_loadout_slot_idx(LOADOUT_SLOT_SECONDARY, s->test_lo.secondary);
+    if (strieq(field, "test_lo_armor_idx"))     return ui_loadout_slot_idx(LOADOUT_SLOT_ARMOR,     s->test_lo.armor);
+    if (strieq(field, "test_lo_jetpack_idx"))   return ui_loadout_slot_idx(LOADOUT_SLOT_JETPACK,   s->test_lo.jetpack);
     if (strieq(field, "tiles_solid")) {
         int n = 0;
         int total = s->doc.width * s->doc.height;
@@ -893,6 +963,55 @@ static void apply_event(ShotState *s, const ShotEvent *e) {
         case EV_TOGGLE_HELP: ui_help_toggle(&s->help); break;
         case EV_OPEN_META:   ui_meta_open  (&s->meta, &s->doc); break;
         case EV_CLOSE_META:  s->meta.open = false; break;
+        case EV_OPEN_LOADOUT:  ui_loadout_open (&s->loadout, &s->test_lo); break;
+        case EV_CLOSE_LOADOUT: ui_loadout_close(&s->loadout); break;
+        case EV_LOADOUT_APPLY: {
+            ui_loadout_apply(&s->loadout, &s->test_lo);
+            ui_loadout_close(&s->loadout);
+            slog("loadout applied: chassis='%s' primary='%s' secondary='%s' armor='%s' jet='%s'",
+                 s->test_lo.chassis,   s->test_lo.primary,
+                 s->test_lo.secondary, s->test_lo.armor,
+                 s->test_lo.jetpack);
+            break;
+        }
+        case EV_LOADOUT_OPEN_DROPDOWN: {
+            int slot = e->i1;
+            if (slot < 0 || slot >= LOADOUT_SLOT_COUNT) break;
+            for (int k = 0; k < LOADOUT_SLOT_COUNT; ++k) s->loadout.edit[k] = false;
+            s->loadout.edit[slot] = true;
+            slog("loadout_open_dropdown: slot=%d", slot);
+            break;
+        }
+        case EV_LOADOUT_CLOSE_DROPDOWNS: {
+            for (int k = 0; k < LOADOUT_SLOT_COUNT; ++k) s->loadout.edit[k] = false;
+            slog("loadout_close_dropdowns");
+            break;
+        }
+        case EV_LOADOUT_SET: {
+            int slot = e->i1;
+            if (slot < 0 || slot >= LOADOUT_SLOT_COUNT) break;
+            int idx = -1;
+            if (e->str1[0] >= '0' && e->str1[0] <= '9') {
+                idx = atoi(e->str1);
+            } else {
+                /* Convert underscores back to spaces and look up. */
+                char buf[64];
+                snprintf(buf, sizeof buf, "%s", e->str1);
+                for (char *p = buf; *p; ++p) if (*p == '_') *p = ' ';
+                idx = ui_loadout_slot_idx(slot, buf);
+            }
+            if (idx < 0 || idx >= ui_loadout_slot_count(slot)) {
+                slog("loadout_set: slot=%d value='%s' → unknown option   FAIL",
+                     slot, e->str1);
+                ++s->assert_failures;
+                break;
+            }
+            s->loadout.idx[slot] = idx;
+            slog("loadout_set: slot=%d → idx=%d (%s)", slot, idx,
+                 ui_loadout_slot_name(slot, idx)[0]
+                     ? ui_loadout_slot_name(slot, idx) : "(default)");
+            break;
+        }
         case EV_CLICK_TOOL_BUTTON: {
             /* Mirrors main.c's "user clicked a toolbar button" logic.
              * Always opens meta on click — that's bug 4's fix. */
@@ -1077,8 +1196,9 @@ int editor_shotmode_run(const char *script_path) {
             render_summary_overlay(&s.doc, s.active_tool, &D);
         }
 
-        if (s.help.open)      ui_help_modal_draw(&s.help, &D);
-        else if (s.meta.open) ui_meta_modal_draw(&s.meta, &s.doc, &D);
+        if (s.help.open)         ui_help_modal_draw   (&s.help, &D);
+        else if (s.meta.open)    ui_meta_modal_draw   (&s.meta, &s.doc, &D);
+        else if (s.loadout.open) ui_loadout_modal_draw(&s.loadout, &s.test_lo, &D);
 
         EndDrawing();
 

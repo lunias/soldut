@@ -313,6 +313,54 @@ static void draw_mech(const ParticlePool *p, const ConstraintPool *cp,
     }
 }
 
+/* P06 — Grapple rope. Single straight line from the firer's right hand
+ * to the in-flight head (FLYING) or the anchor (ATTACHED). Drawn after
+ * the mech body so the rope sits over the arm. visual_offset matches
+ * the mech's reconcile-smoothing offset for the local mech.
+ *
+ * Called from renderer_draw_frame because it needs both ProjectilePool
+ * (for FLYING head lookup) and ParticlePool (for bone-anchor
+ * tracking) — draw_mech only has access to particles. */
+static void draw_grapple_rope(const World *w, int mid, float alpha,
+                              Vec2 visual_offset)
+{
+    const Mech *m = &w->mechs[mid];
+    if (m->grapple.state == GRAPPLE_IDLE) return;
+    int b = m->particle_base;
+    Vec2 hand = particle_render_pos(&w->particles, b + PART_R_HAND, alpha);
+    hand.x += visual_offset.x;
+    hand.y += visual_offset.y;
+
+    if (m->grapple.state == GRAPPLE_FLYING) {
+        int head_idx = projectile_find_grapple_head(&w->projectiles, mid);
+        if (head_idx < 0) return;
+        const ProjectilePool *pp = &w->projectiles;
+        Vec2 head_pos = {
+            pp->render_prev_x[head_idx] + (pp->pos_x[head_idx] - pp->render_prev_x[head_idx]) * alpha,
+            pp->render_prev_y[head_idx] + (pp->pos_y[head_idx] - pp->render_prev_y[head_idx]) * alpha,
+        };
+        DrawLineEx((Vector2){ hand.x, hand.y },
+                   (Vector2){ head_pos.x, head_pos.y },
+                   1.5f, (Color){200, 200, 80, 220});
+        return;
+    }
+
+    /* GRAPPLE_ATTACHED — anchor is either a tile (anchor_pos) or a
+     * bone particle on a target mech (read live so the rope tracks
+     * a moving target). */
+    Vec2 anchor;
+    if (m->grapple.anchor_mech < 0) {
+        anchor = m->grapple.anchor_pos;
+    } else {
+        const Mech *t = &w->mechs[m->grapple.anchor_mech];
+        int part_idx = t->particle_base + m->grapple.anchor_part;
+        anchor = particle_render_pos(&w->particles, part_idx, alpha);
+    }
+    DrawLineEx((Vector2){ hand.x, hand.y },
+               (Vector2){ anchor.x, anchor.y },
+               1.5f, (Color){240, 220, 100, 255});
+}
+
 /* P05 — placeholder pickup sprite. Bobs at 0.5 Hz / ±4 px for
  * available pickups; cooldown entries draw nothing. The "real" sprite
  * art lands at P13 with the atlas pipeline. PRACTICE_DUMMY entries
@@ -375,6 +423,9 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
                 bool is_local = (i == w->local_mech_id);
                 draw_mech(&w->particles, &w->constraints,
                           &w->mechs[i], &w->level, is_local, alpha, off);
+                /* P06 — draw the rope after the body so it sits on top
+                 * of the arm. */
+                draw_grapple_rope(w, i, alpha, off);
             }
             projectile_draw(&w->projectiles, alpha);
             fx_draw(&w->fx, alpha);

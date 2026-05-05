@@ -400,6 +400,300 @@ void ui_meta_modal_draw(MetaModal *m, EditorDoc *d, const UIDims *D) {
     if (IsKeyPressed(KEY_ESCAPE)) { m->open = false; }
 }
 
+/* ---- Test-play loadout modal -------------------------------------- */
+
+/* Option lists. Index 0 in every slot is "(default)" — the modal
+ * writes "" to the TestPlayLoadout for that slot, which makes the
+ * spawned game fall back to its own default. The remaining names
+ * are the spellings the game's CLI parser accepts (case-insensitive
+ * for chassis/armor/jetpack via mech.c's *_id_from_name; weapons by
+ * exact display name via weapon_short_name). */
+static const char *const g_lo_chassis  [] = {
+    "(default)", "Trooper", "Scout", "Heavy", "Sniper", "Engineer",
+};
+static const char *const g_lo_primary  [] = {
+    "(default)",
+    "Pulse Rifle", "Plasma SMG", "Riot Cannon", "Rail Cannon",
+    "Auto-Cannon", "Mass Driver", "Plasma Cannon", "Microgun",
+};
+static const char *const g_lo_secondary[] = {
+    "(default)",
+    "Sidearm", "Burst SMG", "Frag Grenades", "Micro-Rockets",
+    "Combat Knife", "Grappling Hook",
+};
+static const char *const g_lo_armor    [] = {
+    "(default)", "None", "Light", "Heavy", "Reactive",
+};
+static const char *const g_lo_jetpack  [] = {
+    "(default)", "Baseline", "Standard", "Burst", "Glide", "JumpJet",
+};
+
+#define ARRLEN(a) ((int)(sizeof(a) / sizeof((a)[0])))
+
+static const char *const *lo_table(int slot, int *out_n) {
+    switch (slot) {
+        case LOADOUT_SLOT_CHASSIS:   *out_n = ARRLEN(g_lo_chassis);   return g_lo_chassis;
+        case LOADOUT_SLOT_PRIMARY:   *out_n = ARRLEN(g_lo_primary);   return g_lo_primary;
+        case LOADOUT_SLOT_SECONDARY: *out_n = ARRLEN(g_lo_secondary); return g_lo_secondary;
+        case LOADOUT_SLOT_ARMOR:     *out_n = ARRLEN(g_lo_armor);     return g_lo_armor;
+        case LOADOUT_SLOT_JETPACK:   *out_n = ARRLEN(g_lo_jetpack);   return g_lo_jetpack;
+        default:                     *out_n = 0;                       return NULL;
+    }
+}
+
+int ui_loadout_slot_count(int slot) {
+    int n = 0; lo_table(slot, &n); return n;
+}
+
+const char *ui_loadout_slot_name(int slot, int idx) {
+    int n = 0; const char *const *t = lo_table(slot, &n);
+    if (!t || idx < 0 || idx >= n) return NULL;
+    if (idx == 0) return "";   /* "(default)" maps to empty */
+    return t[idx];
+}
+
+int ui_loadout_slot_idx(int slot, const char *name) {
+    int n = 0; const char *const *t = lo_table(slot, &n);
+    if (!t) return -1;
+    if (!name || !name[0]) return 0;
+    for (int i = 1; i < n; ++i) {
+        if (strcasecmp(t[i], name) == 0) return i;
+    }
+    return -1;
+}
+
+int ui_loadout_slot_from_name(const char *name) {
+    if (!name) return -1;
+    if (strcasecmp(name, "chassis"  ) == 0) return LOADOUT_SLOT_CHASSIS;
+    if (strcasecmp(name, "primary"  ) == 0) return LOADOUT_SLOT_PRIMARY;
+    if (strcasecmp(name, "secondary") == 0) return LOADOUT_SLOT_SECONDARY;
+    if (strcasecmp(name, "armor"    ) == 0) return LOADOUT_SLOT_ARMOR;
+    if (strcasecmp(name, "jetpack"  ) == 0) return LOADOUT_SLOT_JETPACK;
+    return -1;
+}
+
+void ui_loadout_open(LoadoutModal *m, const TestPlayLoadout *cur) {
+    m->open = true;
+    /* Seed indices from the current TestPlayLoadout (so re-opening shows
+     * what's already configured). Empty fields → 0 = "(default)". */
+    int ic = ui_loadout_slot_idx(LOADOUT_SLOT_CHASSIS,   cur ? cur->chassis   : "");
+    int ip = ui_loadout_slot_idx(LOADOUT_SLOT_PRIMARY,   cur ? cur->primary   : "");
+    int is = ui_loadout_slot_idx(LOADOUT_SLOT_SECONDARY, cur ? cur->secondary : "");
+    int ia = ui_loadout_slot_idx(LOADOUT_SLOT_ARMOR,     cur ? cur->armor     : "");
+    int ij = ui_loadout_slot_idx(LOADOUT_SLOT_JETPACK,   cur ? cur->jetpack   : "");
+    m->idx[LOADOUT_SLOT_CHASSIS]   = (ic >= 0) ? ic : 0;
+    m->idx[LOADOUT_SLOT_PRIMARY]   = (ip >= 0) ? ip : 0;
+    m->idx[LOADOUT_SLOT_SECONDARY] = (is >= 0) ? is : 0;
+    m->idx[LOADOUT_SLOT_ARMOR]     = (ia >= 0) ? ia : 0;
+    m->idx[LOADOUT_SLOT_JETPACK]   = (ij >= 0) ? ij : 0;
+    for (int i = 0; i < LOADOUT_SLOT_COUNT; ++i) m->edit[i] = false;
+}
+
+void ui_loadout_close(LoadoutModal *m) {
+    m->open = false;
+    for (int i = 0; i < LOADOUT_SLOT_COUNT; ++i) m->edit[i] = false;
+}
+
+void ui_loadout_apply(const LoadoutModal *m, TestPlayLoadout *out) {
+    if (!out) return;
+    /* Index 0 = "(default)" → empty string. Otherwise copy the option
+     * name verbatim (the spawned game's CLI parser does its own case-
+     * insensitive lookup for chassis/armor/jetpack and an exact match
+     * for weapons). */
+    const char *n;
+    n = ui_loadout_slot_name(LOADOUT_SLOT_CHASSIS,   m->idx[LOADOUT_SLOT_CHASSIS]);
+    snprintf(out->chassis,   sizeof out->chassis,   "%s", n ? n : "");
+    n = ui_loadout_slot_name(LOADOUT_SLOT_PRIMARY,   m->idx[LOADOUT_SLOT_PRIMARY]);
+    snprintf(out->primary,   sizeof out->primary,   "%s", n ? n : "");
+    n = ui_loadout_slot_name(LOADOUT_SLOT_SECONDARY, m->idx[LOADOUT_SLOT_SECONDARY]);
+    snprintf(out->secondary, sizeof out->secondary, "%s", n ? n : "");
+    n = ui_loadout_slot_name(LOADOUT_SLOT_ARMOR,     m->idx[LOADOUT_SLOT_ARMOR]);
+    snprintf(out->armor,     sizeof out->armor,     "%s", n ? n : "");
+    n = ui_loadout_slot_name(LOADOUT_SLOT_JETPACK,   m->idx[LOADOUT_SLOT_JETPACK]);
+    snprintf(out->jetpack,   sizeof out->jetpack,   "%s", n ? n : "");
+}
+
+/* Build a ;-separated string from a name array, suitable for
+ * GuiDropdownBox's `text` parameter. We memoize per slot so the
+ * pointer stays stable across frames. */
+static const char *lo_raygui_text(int slot) {
+    static char chassis_buf  [128];
+    static char primary_buf  [192];
+    static char secondary_buf[192];
+    static char armor_buf    [96];
+    static char jetpack_buf  [128];
+    static bool init = false;
+    if (!init) {
+        #define BUILD(buf, arr) do {                                     \
+            buf[0] = '\0';                                                \
+            for (int i = 0; i < ARRLEN(arr); ++i) {                       \
+                if (i > 0) strncat(buf, ";", sizeof(buf) - strlen(buf) - 1); \
+                strncat(buf, arr[i], sizeof(buf) - strlen(buf) - 1);      \
+            }                                                              \
+        } while (0)
+        BUILD(chassis_buf,   g_lo_chassis);
+        BUILD(primary_buf,   g_lo_primary);
+        BUILD(secondary_buf, g_lo_secondary);
+        BUILD(armor_buf,     g_lo_armor);
+        BUILD(jetpack_buf,   g_lo_jetpack);
+        #undef BUILD
+        init = true;
+    }
+    switch (slot) {
+        case LOADOUT_SLOT_CHASSIS:   return chassis_buf;
+        case LOADOUT_SLOT_PRIMARY:   return primary_buf;
+        case LOADOUT_SLOT_SECONDARY: return secondary_buf;
+        case LOADOUT_SLOT_ARMOR:     return armor_buf;
+        case LOADOUT_SLOT_JETPACK:   return jetpack_buf;
+        default:                     return "";
+    }
+}
+
+void ui_loadout_modal_draw(LoadoutModal *m, TestPlayLoadout *out,
+                           const UIDims *D) {
+    if (!m->open) return;
+    int sw = GetScreenWidth(), sh = GetScreenHeight();
+    DrawRectangle(0, 0, sw, sh, (Color){0, 0, 0, 160});
+
+    /* Modal background — drawn manually (instead of GuiPanel) so we
+     * control the contrast: dark COL_PANEL_2 background under the
+     * editor's COL_TEXT (light) labels. raygui's default GuiPanel uses
+     * a near-white background which made our light labels invisible. */
+    int dlg_w = ui_scl(580, D->scale), dlg_h = ui_scl(420, D->scale);
+    int dlg_x = (sw - dlg_w) / 2, dlg_y = (sh - dlg_h) / 2;
+    int title_h = ui_scl(36, D->scale);
+    DrawRectangle(dlg_x, dlg_y, dlg_w, dlg_h, COL_PANEL_2);
+    DrawRectangleLinesEx((Rectangle){(float)dlg_x, (float)dlg_y,
+                                     (float)dlg_w, (float)dlg_h},
+                         2.0f, COL_BORDER);
+    /* Title strip. */
+    DrawRectangle(dlg_x, dlg_y, dlg_w, title_h, COL_PANEL);
+    DrawRectangle(dlg_x, dlg_y + title_h - 1, dlg_w, 1, COL_BORDER);
+    ui_draw_text("Test-play loadout - picked here is what F5 spawns",
+                 dlg_x + D->pad * 2, dlg_y + (title_h - D->font_lg) / 2,
+                 D->font_lg, COL_TEXT_HIGH);
+
+    int label_x = dlg_x + D->pad * 2;
+    int field_x = label_x + ui_scl(140, D->scale);
+    int field_w = dlg_w - (field_x - dlg_x) - D->pad * 2;
+    int line_h  = D->row_h + D->pad;
+
+    /* Hint goes ABOVE the dropdowns, between the title and the first
+     * row, so an expanded dropdown's option list (which always grows
+     * downward from its box) can never overlap it. */
+    int hint_y  = dlg_y + title_h + D->pad;
+    ui_draw_text("\"(default)\" leaves the slot to the game's default.",
+                 label_x, hint_y, D->font_sm, COL_TEXT_DIM);
+
+    int top_y   = hint_y + D->font_sm + D->pad * 2;
+
+    static const char *const labels[LOADOUT_SLOT_COUNT] = {
+        "Chassis:",   "Primary:",   "Secondary:",   "Armor:",   "Jetpack:",
+    };
+
+    /* Determine which slot (if any) has its dropdown open. */
+    int open_slot = -1;
+    for (int i = 0; i < LOADOUT_SLOT_COUNT; ++i) {
+        if (m->edit[i]) { open_slot = i; break; }
+    }
+
+    /* Click-outside-closes / dropdown-switching. Done BEFORE drawing so
+     * raygui sees a clean state. When a dropdown is open and the user
+     * clicks somewhere not inside its expanded bounds, we either:
+     *   - clicked another (closed) dropdown's HEADER → swap which slot
+     *     is open (single-click switch);
+     *   - clicked anywhere else → close the open dropdown.
+     * raygui's GuiDropdownBox doesn't auto-close on outside clicks, so
+     * we have to do this ourselves. */
+    if (open_slot >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        Vector2 mp = GetMousePosition();
+        int y_open = top_y + open_slot * line_h;
+        int n_opts = ui_loadout_slot_count(open_slot);
+        Rectangle open_full = {
+            (float)field_x, (float)y_open,
+            (float)field_w, (float)(D->row_h * (n_opts + 1) + 2),
+        };
+        if (!CheckCollisionPointRec(mp, open_full)) {
+            int new_open = -1;
+            for (int i = 0; i < LOADOUT_SLOT_COUNT; ++i) {
+                if (i == open_slot) continue;
+                int y_i = top_y + i * line_h;
+                Rectangle box = { (float)field_x, (float)y_i,
+                                  (float)field_w, (float)D->row_h };
+                if (CheckCollisionPointRec(mp, box)) { new_open = i; break; }
+            }
+            for (int k = 0; k < LOADOUT_SLOT_COUNT; ++k) m->edit[k] = false;
+            if (new_open >= 0) m->edit[new_open] = true;
+            open_slot = new_open;
+        }
+    }
+
+    /* Pass 1: labels + CLOSED dropdowns. When a slot is open we
+     * GuiLock here so the closed dropdowns under the open one's
+     * expansion don't steal clicks intended for that expansion. */
+    if (open_slot >= 0) GuiLock();
+    for (int i = 0; i < LOADOUT_SLOT_COUNT; ++i) {
+        int y = top_y + i * line_h;
+        ui_draw_text(labels[i], label_x, y + (D->row_h - D->font_base) / 2,
+                     D->font_base, COL_TEXT);
+        if (i == open_slot) continue;       /* drawn in pass 2 */
+        Rectangle r = {(float)field_x, (float)y,
+                       (float)field_w, (float)D->row_h};
+        if (GuiDropdownBox(r, lo_raygui_text(i), &m->idx[i], false)) {
+            for (int k = 0; k < LOADOUT_SLOT_COUNT; ++k) m->edit[k] = false;
+            m->edit[i] = true;
+        }
+    }
+    if (open_slot >= 0) GuiUnlock();
+
+    /* Pass 2: the OPEN dropdown last so its expansion draws on top of
+     * the closed-dropdown rows visually (the GuiLock above already kept
+     * those rows from grabbing the click). */
+    if (open_slot >= 0) {
+        int y = top_y + open_slot * line_h;
+        Rectangle r = {(float)field_x, (float)y,
+                       (float)field_w, (float)D->row_h};
+        if (GuiDropdownBox(r, lo_raygui_text(open_slot),
+                           &m->idx[open_slot], true)) {
+            m->edit[open_slot] = false;     /* user clicked an option / header */
+        }
+    }
+
+    /* Apply / Cancel — gated on no dropdown open so a click that would
+     * normally hit them while a dropdown is expanded just falls into
+     * the click-outside handler above (closes the dropdown; user
+     * clicks Apply on the next frame). */
+    int btn_w = ui_scl(110, D->scale);
+    Rectangle ok = {(float)(dlg_x + dlg_w - btn_w - D->pad * 2),
+                    (float)(dlg_y + dlg_h - D->row_h - D->pad),
+                    (float)btn_w, (float)D->row_h};
+    Rectangle cn = {(float)(dlg_x + dlg_w - btn_w * 2 - D->pad * 3),
+                    (float)(dlg_y + dlg_h - D->row_h - D->pad),
+                    (float)btn_w, (float)D->row_h};
+    if (open_slot < 0 && GuiButton(ok, "Apply")) {
+        ui_loadout_apply(m, out);
+        ui_loadout_close(m);
+    }
+    if (open_slot < 0 && GuiButton(cn, "Cancel")) {
+        ui_loadout_close(m);
+    }
+}
+
+bool ui_draw_loadout_button(const UIDims *D) {
+    int sw = GetScreenWidth();
+    /* Place this immediately to the LEFT of the "press H for keyboard
+     * shortcuts" hint (which lives at the right edge of the top bar).
+     * The hint width depends on the font, so measure it and step back. */
+    const char *hint = "press H for keyboard shortcuts";
+    int hint_w = ui_measure_text(hint, D->font_sm);
+    int btn_w  = ui_scl(140, D->scale);
+    int btn_h  = D->top_h - D->pad * 2;
+    int btn_x  = sw - hint_w - D->pad * 4 - btn_w;
+    int btn_y  = D->pad;
+    Rectangle r = {(float)btn_x, (float)btn_y, (float)btn_w, (float)btn_h};
+    return GuiButton(r, "[L] Loadout") != 0;
+}
+
 /* ---- Help modal ----------------------------------------------------- */
 
 typedef struct { const char *key; const char *desc; } HelpRow;
@@ -413,6 +707,7 @@ static const HelpRow g_help_global[] = {
     { "Ctrl+Z",            "Undo" },
     { "Ctrl+Y / Ctrl+Shift+Z", "Redo" },
     { "F5",                "Test-play (saves to a temp .lvl, forks the game)" },
+    { "L",                 "Test-play loadout modal (chassis, primary, secondary, armor, jetpack)" },
     { "H",                 "Show / hide this help" },
     { "Esc",               "Close any modal / abandon polygon in progress" },
 };

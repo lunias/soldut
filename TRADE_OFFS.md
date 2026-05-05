@@ -13,7 +13,7 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-04** (post P05).
+Last updated: **2026-05-04** (post P06).
 
 ---
 
@@ -138,20 +138,6 @@ Last updated: **2026-05-04** (post P05).
 
 ## Combat
 
-### Grappling Hook is a stub
-
-- **What we did** — `WFIRE_GRAPPLE` registers the cooldown but doesn't
-  spawn a projectile or anchor. `mech_try_fire` logs
-  `grapple_attempt (NOT YET IMPLEMENTED)`.
-- **Why** — A hook needs a projectile head, a "snap anchor on tile or
-  bone hit" event, and a per-tick pull (a temporary distance constraint
-  with a contracting rest length, plus a release on BTN_USE). About a
-  day of work; fits cleanly into projectile.c + a small Hook struct on
-  Mech. Punted from M3 to keep the scope on weapons + dismemberment.
-- **Revisit when** — A player wants vertical movement in a chassis
-  without a strong jet, OR a map design has a "swing across this gap"
-  beat. M5 (level editor + maps) is the natural pairing.
-
 ### Projectile vs bone collision is sample-based, not analytic
 
 - **What we did** — `swept_seg_vs_bone` in `projectile.c` samples 8
@@ -186,6 +172,48 @@ Last updated: **2026-05-04** (post P05).
   projectile sniping. Add a per-projectile-tick proximity check to the
   3 nearest mechs.
 
+### Grapple anchor uses server-current position (no lag comp) (P06)
+
+- **What we did** — When a `PROJ_GRAPPLE_HEAD` lands and
+  `projectile_step` decides "tile hit at X" or "bone of mech B at part
+  P", it uses the SERVER'S current view of the world. No rewind to the
+  shooter's render time. Hitscan weapons go through
+  `weapons_fire_hitscan_lag_comp` which rewinds bone history; the
+  grapple does not.
+- **Why** — Per `documents/m5/05-grapple.md` §"Lag compensation":
+  the firer is pulling themselves; the rubber-band correction on a
+  missed grapple is sub-100 ms and the visible feedback (rope head
+  visibly hitting/missing) is local to the firer. Lag-compensating
+  grapple anchors would require a parallel `swept_seg_vs_bone_history`
+  + a redo of the constraint allocation against historical positions,
+  for a feel improvement that's hard to perceive at LAN latency.
+- **Revisit when** —
+  - WAN play (50–150 ms RTT) reveals players regularly missing grapples
+    they expected to hit on their screen — at which point the bone
+    rewind from `weapons_fire_hitscan_lag_comp` becomes the obvious
+    next step (refactor to a shared "swept-seg vs. bone at tick T" path).
+  - A future patch introduces a "grapple kill" mode (currently
+    explicitly zero-damage) where anchor decisions affect combat outcomes;
+    the moment grapples can damage, lag-comp matters the way it does
+    for hitscan.
+
+### Grapple rope renders as a straight line (P06)
+
+- **What we did** — `render.c::draw_grapple_rope` draws a single
+  `DrawLineEx` from R_HAND to the head (FLYING) or anchor (ATTACHED).
+  No flex, no sag, no bezier sampling.
+- **Why** — Per `documents/m5/05-grapple.md` §"Render": "A flexing-
+  rope shader (sampled bezier) is a nice-to-have for v1.5; not v1."
+  The straight-line read works visually because the constraint solver
+  pulls the firer along the line of the rope; a flex curve would
+  contradict the physics' actual line-of-pull anyway. Cosmetic.
+- **Revisit when** —
+  - Players report the rope looks "wrong" or rigid in playtest,
+    especially during ATTACHED while the firer's velocity has lateral
+    components (rope should appear to swing).
+  - We add catenary sag to anything else (e.g., decorative wires in
+    the level format) — at that point the same shader can be reused
+    for the grapple.
 
 ### Mechs rendered as raw capsules
 

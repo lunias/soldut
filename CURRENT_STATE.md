@@ -5,7 +5,7 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-04** (M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver, P02 — polygon collision + slope physics, P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote interp + `is_dummy` bit, P04 — standalone level editor at `tools/editor/` + `--test-play` flag, and P05 — pickup runtime + powerups + Engineer deployable + Burst SMG cadence + practice dummy in).
+Last updated: **2026-05-04** (M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver, P02 — polygon collision + slope physics, P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote interp + `is_dummy` bit, P04 — standalone level editor at `tools/editor/` + `--test-play` flag, P05 — pickup runtime + powerups + Engineer deployable + Burst SMG cadence + practice dummy, and P06 — grappling hook with `CSTR_FIXED_ANCHOR` + contracting distance constraint + state-bit-gated wire suffix in).
 
 ---
 
@@ -18,7 +18,7 @@ Last updated: **2026-05-04** (M4 lobby & matches in; M5 P01 — `.lvl` format + 
 | **M2**    | Foundation lands 2026-05-03. Host/client handshake works locally; per-tick input ship + 30 Hz snapshot broadcast + client-side prediction & replay + per-mech bone history for hitscan lag compensation are wired. LAN-only, full snapshots, no mid-tick interpolation of remote mechs (see TRADE_OFFS.md). Two-laptop bake test still pending. |
 | **M3**    | Combat depth in 2026-05-03. All 5 chassis (Trooper / Scout / Heavy / Sniper / Engineer) with passives. All 8 primaries (Pulse Rifle, Plasma SMG, Riot Cannon, Rail Cannon, Auto-Cannon, Mass Driver, Plasma Cannon, Microgun) and 6 secondaries (Sidearm, Burst SMG, Frag Grenades, Micro-Rockets, Combat Knife, Grappling Hook). Projectile pool with bone + tile collision. Explosions: damage falloff, line-of-sight check, impulse to ragdolls. Per-limb HP and dismemberment of all 5 limbs. Recoil + bink + self-bink fully wired. Friendly-fire toggle (`--ff` server flag). Kill feed with HEADSHOT/GIB/OVERKILL/RAGDOLL/SUICIDE flags. Loadout via CLI flags (`--chassis`, `--primary`, `--secondary`, `--armor`, `--jetpack`). Snapshot wire format widened to carry chassis/armor/jet/secondary; protocol id bumped to `S0LE`. |
 | **M4**    | Lobby & matches in 2026-05-03. Game flow is now title → browser → lobby → countdown → match → summary → next lobby. New modules: `match.{h,c}`, `lobby.{h,c}`, `lobby_ui.{h,c}`, `ui.{h,c}` (small immediate-mode raylib UI helpers, scale-aware for 4K), `config.{h,c}` (`soldut.cfg` key=value parser), `maps.{h,c}` (Foundry / Slipstream / Reactor — three code-built maps for the rotation; `.lvl` loader is M5). LOBBY-channel messages (player list with `mech_id`, slot delta, loadout, ready, team change, chat, vote, kick/ban, countdown, round start/end, match state). Server config file: port, max_players, mode, score_limit, time_limit, friendly_fire, auto_start_seconds, map_rotation, mode_rotation. Single-player flow auto-hosts an offline server and arms a 1s countdown. Protocol id bumped `S0LE` → `S0LF`. Network test scaffold under `tests/net/` runs the host/client end-to-end via real ENet loopback and asserts on log-line milestones. |
-| **M5**    | In progress. **P01–P05** in. P02: per-particle contact normals (Q1.7 SoA fields + `PARTICLE_FLAG_CEILING`); polygon broadphase grid built at level load (`level_build_poly_broadphase`); `physics_constrain_and_collide` interleaves tile + polygon collision per relaxation iter (closest-point-on-triangle, push-out via pre-baked edge normals); `level_ray_hits` tests segments against polygons too; slope-tangent run velocity, slope-aware friction (`0.99 - 0.07*|ny|`, ICE→0.998), angled-ceiling jet redirection, slope-aware post-physics anchor (skips when `ny_avg > -0.92`); WIND/ZERO_G ambient zones; environmental damage tick for DEADLY tiles+polys+ACID zones. Renderer draws polygons (P02 stopgap, replaced by sprite art at P13). P03: per-particle `render_prev_x/_y` snapshot at the top of each `simulate_step`; renderer lerps `pos` ↔ `render_prev` by `alpha = accum/TICK_DT` (also threaded through projectile + FX draw); reconcile `visual_offset` is now read by `renderer_draw_frame` and applied additively to local-mech draws (decays over ~6 frames so server snaps don't read as glitches); per-mech remote snapshot ring (`remote_snap_ring[8]`) + `snapshot_interp_remotes` lerps remote mechs at `client_render_time_ms - 100ms` between bracketing entries (clamped to nearest if only one entry, snap+clear on >200 px corrections); `state_bits` widened u8→u16, `SNAP_STATE_IS_DUMMY` rides bit 11 so client dummies don't drive arm-aim; protocol id bumped `S0LF` → `S0LG`. P05: new `src/pickup.{c,h}` with PickupPool (capacity 64) on World; `pickup_init_round` populates from `level->pickups` and spawns practice-dummy mechs on the authoritative side; `pickup_step` (server-only, per tick) does 24 px touch detection + cooldown rollover + transient lifetime expiry; per-kind apply rules with full-state-rejects-grab guards; powerup timers `powerup_berserk/invis/godmode_remaining` on Mech with `SNAP_STATE_BERSERK/INVIS/GODMODE` bits in the snapshot (clients mirror to sentinel timers); berserk doubles outgoing damage and godmode zeroes incoming damage in `mech_apply_damage`; render alpha-mods invis-active mechs (0.2 / 0.5 local). Engineer's `BTN_USE` now spawns a TRANSIENT `PICKUP_REPAIR_PACK` at the engineer's feet (10 s lifetime, 30 s cooldown) instead of self-healing — allies + the engineer can grab it. Burst SMG fires round 1 on press tick + queues `burst_pending_rounds` to fire at `burst_interval_sec` cadence in `mech_step_drive`. New wire message `NET_MSG_PICKUP_STATE = 15` (20 bytes — full spawner data so transients propagate). New world ring `pickupfeed[64]` drained per tick by `broadcast_new_pickups` in main.c. New regression test `tests/pickup_test.c` (32 assertions, `make test-pickups`). Protocol id stays `S0LG` (state_bits already u16 from P03; powerup bits ride bits 8–10). **Pending**: P06+ (grapple, CTF, map sharing, controls, art, audio, maps). |
+| **M5**    | In progress. **P01–P06** in. P02: per-particle contact normals (Q1.7 SoA fields + `PARTICLE_FLAG_CEILING`); polygon broadphase grid built at level load (`level_build_poly_broadphase`); `physics_constrain_and_collide` interleaves tile + polygon collision per relaxation iter (closest-point-on-triangle, push-out via pre-baked edge normals); `level_ray_hits` tests segments against polygons too; slope-tangent run velocity, slope-aware friction (`0.99 - 0.07*|ny|`, ICE→0.998), angled-ceiling jet redirection, slope-aware post-physics anchor (skips when `ny_avg > -0.92`); WIND/ZERO_G ambient zones; environmental damage tick for DEADLY tiles+polys+ACID zones. Renderer draws polygons (P02 stopgap, replaced by sprite art at P13). P03: per-particle `render_prev_x/_y` snapshot at the top of each `simulate_step`; renderer lerps `pos` ↔ `render_prev` by `alpha = accum/TICK_DT` (also threaded through projectile + FX draw); reconcile `visual_offset` is now read by `renderer_draw_frame` and applied additively to local-mech draws (decays over ~6 frames so server snaps don't read as glitches); per-mech remote snapshot ring (`remote_snap_ring[8]`) + `snapshot_interp_remotes` lerps remote mechs at `client_render_time_ms - 100ms` between bracketing entries (clamped to nearest if only one entry, snap+clear on >200 px corrections); `state_bits` widened u8→u16, `SNAP_STATE_IS_DUMMY` rides bit 11 so client dummies don't drive arm-aim; protocol id bumped `S0LF` → `S0LG`. P05: new `src/pickup.{c,h}` with PickupPool (capacity 64) on World; `pickup_init_round` populates from `level->pickups` and spawns practice-dummy mechs on the authoritative side; `pickup_step` (server-only, per tick) does 24 px touch detection + cooldown rollover + transient lifetime expiry; per-kind apply rules with full-state-rejects-grab guards; powerup timers `powerup_berserk/invis/godmode_remaining` on Mech with `SNAP_STATE_BERSERK/INVIS/GODMODE` bits in the snapshot (clients mirror to sentinel timers); berserk doubles outgoing damage and godmode zeroes incoming damage in `mech_apply_damage`; render alpha-mods invis-active mechs (0.2 / 0.5 local). Engineer's `BTN_USE` now spawns a TRANSIENT `PICKUP_REPAIR_PACK` at the engineer's feet (10 s lifetime, 30 s cooldown) instead of self-healing — allies + the engineer can grab it. Burst SMG fires round 1 on press tick + queues `burst_pending_rounds` to fire at `burst_interval_sec` cadence in `mech_step_drive`. New wire message `NET_MSG_PICKUP_STATE = 15` (20 bytes — full spawner data so transients propagate). New world ring `pickupfeed[64]` drained per tick by `broadcast_new_pickups` in main.c. New regression test `tests/pickup_test.c` (`make test-pickups`). P06: new per-Mech `Grapple` struct + `PROJ_GRAPPLE_HEAD` projectile + `CSTR_FIXED_ANCHOR` constraint (Constraint grows by `Vec2 fixed_pos`); `mech_try_fire`'s WFIRE_GRAPPLE branch spawns a 1200 px/s head from R_HAND (was `NOT YET IMPLEMENTED`); on hit `projectile_step` sets firer state to ATTACHED + calls `mech_grapple_attach` which appends a constraint to the global pool (CSTR_FIXED_ANCHOR for tile, CSTR_DISTANCE_LIMIT min=0/max=L for bone — both one-sided so the rope is slack when shorter than rest and taut when stretched). `mech_step_drive` keeps rest length fixed at hit-time distance (no auto-contract — the Tarzan/pendulum feel) and emits a per-second `grapple_swing` SHOT_LOG; releases on BTN_USE edge or anchor-mech death; `mech_kill` releases on firer death; `mech_grapple_release` flips `active=0` (slot leak bounded). BTN_FIRE while ATTACHED chain-releases + fires a new head (cooldown still gates back-to-back fires at 1.20 s). Snapshot: `SNAP_STATE_GRAPPLING` bit 12 gates an optional 8-byte trailing suffix on `EntitySnapshot` (state, anchor_mech, anchor_part, anchor_x_q, anchor_y_q) so idle bandwidth stays flat. Render: new `draw_grapple_rope` in `render.c` draws a 1.5-px gold line hand → live head (FLYING) or hand → anchor (ATTACHED, tile or bone particle). Two shot tests: `tests/shots/m5_grapple.shot` (basic fire/attach/swing/release) + `tests/shots/m5_grapple_swing.shot` (pendulum + chain re-fire while attached). Protocol id stays `S0LG`. **Pending**: P07–P18 (CTF, map sharing, controls, art, audio, authored maps). |
 
 ---
 
@@ -722,11 +722,149 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
     `tests/net/run_3p.sh` 10/10. Protocol id stays `S0LG` (no wire
     rev bump beyond P03; powerup bits ride existing reserved bits).
 
+- **P06 — Grappling hook** (2026-05-04).
+  - **Per-Mech state**. `world.h` adds `GrappleState` enum
+    (`IDLE / FLYING / ATTACHED`) and a `Grapple` struct
+    (`state, anchor_mech, anchor_part, anchor_pos, rest_length,
+    constraint_idx`); `Mech` gains `Grapple grapple`. Initialised
+    in `mech_create_loadout` with `constraint_idx = -1,
+    anchor_mech = -1` so a stale 0 isn't read as "the first
+    constraint slot is mine".
+  - **Constraint kind**. New `CSTR_FIXED_ANCHOR` in `ConstraintKind`;
+    `Constraint` grows by `Vec2 fixed_pos` (8 bytes — pool grows by
+    16 KB at 2048 cap, trivial). `physics.c::solve_fixed_anchor`
+    pulls particle `a` toward `c->fixed_pos` by the contracting
+    `c->rest`; the anchor end has effective inv_mass = 0 so the
+    particle takes the full correction. Tile anchors use this kind;
+    bone anchors reuse `CSTR_DISTANCE` between firer pelvis and the
+    target's bone particle (symmetric; mass-scale asymmetry pulls
+    a Heavy toward a Scout much less than vice-versa).
+  - **Projectile kind**. `PROJ_GRAPPLE_HEAD` added to
+    `ProjectileKind`; `projectile_step` special-cases it before the
+    damage path. On tile/bone hit: lands at the clamped point
+    (clamped 4 px back along flight direction so it isn't embedded
+    in a SOLID tile due to FP error), sets firer's grapple state to
+    ATTACHED, fills anchor fields, computes initial rest length from
+    pelvis distance (clamped to ≥80 px), and calls
+    `mech_grapple_attach`. The grappled mech takes no damage. On
+    lifetime expiry without a hit, `grapple_miss` fires and the
+    firer is reset to IDLE. All gated on `w->authoritative` so
+    clients don't fork their own state. New
+    `projectile_find_grapple_head(pool, mid)` helper for the
+    renderer.
+  - **Fire path**. `mech_try_fire`'s WFIRE_GRAPPLE branch (was
+    `NOT YET IMPLEMENTED`) is now the proper fire dispatch: edge-
+    triggered (only on `BTN_FIRE` press); silently no-ops when
+    `m->grapple.state != IDLE`; spawns the head from
+    `R_HAND` toward `mech_aim_dir` at speed read from
+    `wpn->projectile_speed_pxs` (1200 px/s, lifetime 0.5 s,
+    gravity_scale 0); cooldown = `wpn->fire_rate_sec` (1.20 s).
+    The weapon table entry for `WEAPON_GRAPPLING_HOOK` now carries
+    the projectile-kind/speed/life/grav_scale fields for
+    documentation + data-driven dispatch.
+  - **Per-tick rope step + retract + release** (revised twice after
+    user feedback). Original auto-contract pinned the firer at the
+    anchor with no way out → replaced with a static-length
+    one-sided rope (Tarzan swing) → user then asked for a
+    player-driven retract ("hold W to zip up to the anchor") and
+    flagged that ropes were too long to swing on. Final shape:
+    - `projectile_step` clamps the hit-time rope length to
+      `GRAPPLE_MAX_REST_LEN = 300 px` (initial-min 80 px so very
+      close grapples still feel rope-y). Long-range fires now leave
+      the firer "outside" the rope at attach time, so the constraint
+      pulls them in to 300 px and they swing on a tight pendulum
+      instead of dangling on a 600-px rope they couldn't actually
+      swing on.
+    - `mech_step_drive`'s server-side `state == ATTACHED` block:
+      while `BTN_JET` (W) is held, decreases `rest_length` at
+      `GRAPPLE_RETRACT_PXS = 800 px/s`, clamped at
+      `GRAPPLE_MIN_REST_LEN = 60 px`. Releasing W stops the
+      retract. Jet thrust still applies normally — the two effects
+      reinforce upward when the anchor is above the firer.
+    - SHOT_LOG: per-second `grapple_swing dist=… rest=… [retracting]`
+      traces, plus edge-trigger `grapple_retract_start/_stop` lines
+      so shot tests can verify the retract started/stopped on the
+      right tick and the rope length actually moved.
+    - Other releases unchanged: `BTN_USE` edge, anchor-mech death,
+      firer death (`mech_kill`).
+  - **Constraint kind**. Tile anchors use `CSTR_FIXED_ANCHOR`
+    (`physics.c::solve_fixed_anchor`) which is now ONE-SIDED — pulls
+    the particle in only when `d > c->rest`; slack (no force) when
+    `d ≤ c->rest`. Mech anchors use `CSTR_DISTANCE_LIMIT` with
+    `min_len = 0`, `max_len = rope_length` for the same one-sided
+    behaviour (the existing `solve_distance_limit` already had the
+    right shape). Together this gives the "Tarzan" feel: rope hangs
+    naturally, you can drift closer to the anchor, and you snap taut
+    when you swing past the rope length.
+  - **Lifecycle helpers**. `mech_grapple_attach` appends a slot to
+    the global `ConstraintPool` and stores its index on
+    `m->grapple.constraint_idx`; `mech_grapple_release` flips the
+    slot's `active = 0` (per spec, leakage is bounded by ~40
+    grapple cycles per mech per round vs the 2048-slot pool — never
+    pressures capacity).
+  - **Snapshot**. New `SNAP_STATE_GRAPPLING = 1u << 12` in
+    `state_bits`. When set, an 8-byte trailing suffix is appended
+    to the `EntitySnapshot` wire (state, anchor_mech, anchor_part,
+    reserved, anchor_x_q i16, anchor_y_q i16 — all 1 px res).
+    Idle entities = 0 bytes overhead (the suffix is gated by the
+    bit). Active grapple ≈ 240 B/s/active-grapple at 30 Hz.
+    `snapshot_decode` validates the trailing bytes per-entity.
+    `snapshot_apply` mirrors state to `m->grapple` for both local
+    and remote mechs; clients never allocate a constraint (the pull
+    arrives through pelvis-pos updates in subsequent snapshots).
+    *(Diverges from the prompt's `SNAP_DIRTY_GRAPPLE = 1u << 11`
+    on a per-entity dirty mask: the existing wire has no
+    per-entity dirty mask, so the gating bit moved into the
+    existing `state_bits` field which IS on the wire. Same intent
+    — idle = 0 bytes.)*
+  - **Renderer**. New `draw_grapple_rope(world, mid, alpha, off)`
+    in `render.c`, called from `renderer_draw_frame` after each
+    `draw_mech` (so the rope sits on top of the arm). FLYING →
+    1.5 px line from R_HAND to the live `PROJ_GRAPPLE_HEAD` pos
+    (looked up by `projectile_find_grapple_head`); ATTACHED → line
+    from R_HAND to either `m->grapple.anchor_pos` (tile) or the
+    target's bone particle (mech). Single straight line; flexing
+    rope shader is M6 polish. Reconcile `visual_offset` threads
+    through for the local mech.
+  - **Edge handling**. Holding `BTN_FIRE` doesn't re-fire (edge
+    gate). Re-press while FLYING is silently swallowed (no
+    double-head). Re-press while ATTACHED auto-releases the current
+    rope and falls through to fire a fresh head — this is the
+    "chain grapple" behaviour the user needed for swinging across a
+    level Tarzan-style. The 1.20 s `fire_rate_sec` cooldown still
+    gates how fast chains can land; back-to-back fires need ≥72
+    ticks between them. `BTN_USE` edge inside `mech_step_drive`
+    releases. `mech_kill` releases first (before impulse) so a
+    corpse doesn't keep dragging the rope.
+  - **Shot tests**. Two scripts under `tests/shots/`:
+    - `m5_grapple.shot` — basic fire/attach/release. Trooper at
+      spawn (2240, 984) anchors to the wall column at L=468; the
+      log captures `grapple_swing dist≈468 rest=468` traces while
+      attached (proves no auto-contract); `grapple_release` at
+      tick 180 on BTN_USE.
+    - `m5_grapple_swing.shot` — pendulum + chain grapple. Trooper
+      spawned mid-air at (2200, 600), fires/attaches, swings,
+      releases (BTN_USE), re-fires, then performs a chain re-fire
+      while ATTACHED — log shows `grapple_release` and a fresh
+      `grapple_fire` on the same tick (auto-release-and-refire),
+      followed by another attach. Verifies the user's "I want to
+      swing like Tarzan, disconnect, fire and re-attach" flow.
+    Contact sheet shows the rope rendering at ATTACHED + the
+    mech visibly pulled to the wall by tick 150 + post-release
+    at 190.
+  - Verification: `make` clean; `make test-physics` ok;
+    `make test-level-io` 25/25; `make test-pickups` 43/43;
+    `make test-spawn` ok; `tests/net/run.sh` 13/13;
+    `tests/net/run_3p.sh` 10/10; `make editor` builds clean.
+    Protocol id stays `S0LG` (`SNAP_STATE_GRAPPLING` rides the
+    existing u16 `state_bits`; the trailing 8 bytes are gated by
+    the bit so idle-grapple bandwidth is unchanged).
+
 ### Pending
 
-- **P06–P14** — grapple, CTF, map sharing, controls, mech
-  atlas runtime, weapon art, damage feedback, parallax / HUD / TTF /
-  halftone / decal chunking, audio.
+- **P07–P14** — CTF, map sharing, controls / `BTN_FIRE_SECONDARY` /
+  UI panel, mech atlas runtime, weapon art, damage feedback,
+  parallax / HUD / TTF / halftone / decal chunking, audio.
 - **P15–P18** — ComfyUI asset generation + the 8 maps + bake test.
 
 ## Headless test

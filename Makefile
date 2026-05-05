@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-grapple-ceiling shot \
         debug gdb gdb-host gdb-client valgrind editor
 
 all: $(BIN)
@@ -153,6 +153,21 @@ test-editor: editor
 	./build/soldut_editor --shot tools/editor/shots/validate_failures.shot
 	./build/soldut_editor --shot tools/editor/shots/scaling_4k.shot
 	./build/soldut_editor --shot tools/editor/shots/pickup_save.shot
+	./build/soldut_editor --shot tools/editor/shots/loadout.shot
+	./build/soldut_editor --shot tools/editor/shots/loadout_dropdowns.shot
+
+# Grapple/swing visual + state regression on a purpose-built map. The
+# editor shot programmatically writes assets/maps/grapple_test.lvl
+# (ceiling + grapple targets at varied heights), then the game shot
+# loads it via the new `load_lvl` shotmode directive and runs the
+# fire/swing/retract/chain-refire/release flow. Output goes to
+# build/shots/m5_grapple_ceiling/ — eyeball t110_after_retract.png
+# to confirm the head sits below the ceiling tile boundary instead
+# of inside it.
+test-grapple-ceiling: $(BIN) editor
+	mkdir -p assets/maps
+	./build/soldut_editor --shot tools/editor/shots/grapple_test_map.shot
+	./$(BIN) --shot tests/shots/m5_grapple_ceiling.shot
 
 # Shot mode — drive a scripted scene through the real renderer and
 # write PNGs. Handy for visual diffs without filming. Override SCRIPT

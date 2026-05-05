@@ -59,6 +59,29 @@
  *   at <tick> toggle_help             same as ui_help_toggle()
  *   at <tick> open_meta
  *   at <tick> close_meta
+ *   at <tick> open_loadout              opens the test-play loadout modal
+ *   at <tick> close_loadout
+ *   at <tick> loadout_set <slot> <val>  set a slot's dropdown idx.
+ *                                       <slot> ∈ chassis|primary|secondary|armor|jetpack
+ *                                       <val>  is either an integer idx
+ *                                              or the option name with
+ *                                              spaces written as
+ *                                              underscores (so the line
+ *                                              tokenizer doesn't split
+ *                                              mid-name). 0 = "(default)".
+ *   at <tick> loadout_apply             writes modal selections into
+ *                                       ShotState.test_lo and closes the
+ *                                       modal — mirrors the [Apply]
+ *                                       button.
+ *   at <tick> loadout_open_dropdown <slot>
+ *                                       programmatically expand one
+ *                                       slot's dropdown so a screenshot
+ *                                       captures the open list. The
+ *                                       loadout modal must already be
+ *                                       open. <slot> uses the same
+ *                                       names as loadout_set.
+ *   at <tick> loadout_close_dropdowns   collapse all dropdowns (modal
+ *                                       stays open).
  *   at <tick> click_tool_button <name>  mirrors a real toolbar click
  *                                      (always opens meta when name=meta)
  *
@@ -71,9 +94,22 @@
  *   at <tick> validate                run validate_doc; log results
  *
  *   at <tick> assert polys|spawns|pickups|ambis|decos|flags|tiles_solid|
- *                    validate_problems|active_tool|dirty|help_open|meta_open
+ *                    validate_problems|active_tool|dirty|help_open|
+ *                    meta_open|loadout_open|loadout_dropdown_open|
+ *                    loadout_chassis_idx|loadout_primary_idx|
+ *                    loadout_secondary_idx|loadout_armor_idx|
+ *                    loadout_jetpack_idx|
+ *                    test_lo_chassis_idx|test_lo_primary_idx|
+ *                    test_lo_secondary_idx|test_lo_armor_idx|
+ *                    test_lo_jetpack_idx
  *                    <op> <value>
  *      <op> ∈ { ==, !=, >, >=, <, <= }
+ *      The loadout_<slot>_idx fields read the modal's current
+ *      dropdown selection (regardless of Apply). The test_lo_<slot>_idx
+ *      fields read the LAST APPLIED value (idx of the string stored
+ *      in ShotState.test_lo, the same struct play_test forwards to the
+ *      game on F5). -1 means the test_lo string didn't match any known
+ *      option (typo or stale snapshot).
  *
  *   at <tick> end                     exit successfully
  */

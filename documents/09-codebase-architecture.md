@@ -42,6 +42,7 @@ src/
 ├── projectile.{c,h}        # bullets, grenades, rockets
 ├── particle.{c,h}          # blood, sparks, smoke
 ├── decal.{c,h}             # splat layer
+├── pickup.{c,h}            # pickup spawners + state machine + per-kind apply (M5 P05)
 ├── level.{c,h}             # tile grid + ray helpers
 ├── level_io.{c,h}          # `.lvl` binary format loader/saver + CRC32 (M5 P01)
 ├── maps.{c,h}              # code-built map fallbacks + `map_build` dispatcher
@@ -184,6 +185,7 @@ Each module's `.h` declares what it depends on. The dependency graph is a DAG; w
               mech     reconcile
               weapons
               projectile
+              pickup
               particle
               decal
               level

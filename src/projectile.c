@@ -138,9 +138,27 @@ void projectile_step(World *w, float dt) {
         if (!p->alive[i]) continue;
 
         /* Fuse / lifetime. Reaching zero detonates AOE projectiles
-         * (frag grenades, mass driver duds), expires non-AOE ones. */
+         * (frag grenades, mass driver duds), expires non-AOE ones.
+         *
+         * P06: a PROJ_GRAPPLE_HEAD that runs out its lifetime without
+         * landing resets the firer's grapple state to IDLE so the next
+         * fire press can re-fire. */
         p->life[i] -= dt;
         if (p->life[i] <= 0.0f) {
+            if (p->kind[i] == PROJ_GRAPPLE_HEAD && w->authoritative) {
+                int fmid = (int)p->owner_mech[i];
+                if (fmid >= 0 && fmid < w->mech_count) {
+                    Mech *firer = &w->mechs[fmid];
+                    if (firer->grapple.state == GRAPPLE_FLYING) {
+                        firer->grapple.state = GRAPPLE_IDLE;
+                        firer->grapple.constraint_idx = -1;
+                        SHOT_LOG("t=%llu mech=%d grapple_miss",
+                                 (unsigned long long)w->tick, fmid);
+                    }
+                }
+                p->alive[i] = 0;
+                continue;
+            }
             if (p->aoe_radius[i] > 0.0f) detonate(w, i);
             else                          p->alive[i] = 0;
             continue;
@@ -191,6 +209,84 @@ void projectile_step(World *w, float dt) {
         }
 
         bool any_hit = (hit_mech >= 0) || hit_wall;
+
+        /* P06 — Grapple head: on hit, stick. No damage, no AOE. The
+         * firer's grapple state transitions FLYING → ATTACHED and a
+         * constraint is allocated by mech_grapple_attach. Tile hits
+         * use CSTR_FIXED_ANCHOR; bone hits use CSTR_DISTANCE between
+         * firer pelvis and target bone particle. Server-only — clients
+         * mirror the state via SNAP_STATE_GRAPPLING + grapple suffix. */
+        if (p->kind[i] == PROJ_GRAPPLE_HEAD) {
+            if (any_hit) {
+                /* Land at the clamped point. */
+                p->pos_x[i] = a.x + (b.x - a.x) * t_hit;
+                p->pos_y[i] = a.y + (b.y - a.y) * t_hit;
+                if (w->authoritative) {
+                    int fmid = (int)p->owner_mech[i];
+                    if (fmid >= 0 && fmid < w->mech_count) {
+                        Mech *firer = &w->mechs[fmid];
+                        Vec2 anchor = (Vec2){ p->pos_x[i], p->pos_y[i] };
+                        /* Pull anchor 4 px back along the flight
+                         * direction so floating-point error doesn't
+                         * leave it embedded in a SOLID tile. */
+                        if (hit_mech < 0 && hit_wall) {
+                            float dx = b.x - a.x, dy = b.y - a.y;
+                            float vlen = sqrtf(dx*dx + dy*dy);
+                            if (vlen > 1e-3f) {
+                                anchor.x -= dx / vlen * 4.0f;
+                                anchor.y -= dy / vlen * 4.0f;
+                            }
+                        }
+                        firer->grapple.state       = GRAPPLE_ATTACHED;
+                        firer->grapple.anchor_pos  = anchor;
+                        firer->grapple.anchor_mech = (int8_t)((hit_mech >= 0) ? hit_mech : -1);
+                        firer->grapple.anchor_part = (uint8_t)((hit_mech >= 0) ? hit_part : 0);
+                        int pelv = firer->particle_base + PART_PELVIS;
+                        float pdx = w->particles.pos_x[pelv] - anchor.x;
+                        float pdy = w->particles.pos_y[pelv] - anchor.y;
+                        float L = sqrtf(pdx*pdx + pdy*pdy);
+                        /* Clamp the initial rope length to a swingable
+                         * radius. If the firer hit something far away,
+                         * the rope is shorter than the hit distance —
+                         * meaning the body is "outside" the rope at
+                         * attach time, so the constraint pulls it in
+                         * to GRAPPLE_MAX_REST_LEN over the next few
+                         * iterations and they swing on a tight
+                         * pendulum. Without this cap a 600-px rope
+                         * fired across the screen left players
+                         * dangling on a line they couldn't actually
+                         * swing on. The W-retract path can shorten
+                         * further down to the 60 px floor. */
+                        const float GRAPPLE_MAX_REST_LEN = 300.0f;
+                        const float GRAPPLE_INIT_MIN_LEN =  80.0f;
+                        if (L > GRAPPLE_MAX_REST_LEN) L = GRAPPLE_MAX_REST_LEN;
+                        if (L < GRAPPLE_INIT_MIN_LEN) L = GRAPPLE_INIT_MIN_LEN;
+                        firer->grapple.rest_length = L;
+                        mech_grapple_attach(w, fmid);
+                        SHOT_LOG("t=%llu mech=%d grapple_attach anchor=(%.1f,%.1f) tgt_mech=%d part=%d L=%.1f",
+                                 (unsigned long long)w->tick, fmid,
+                                 anchor.x, anchor.y,
+                                 (int)firer->grapple.anchor_mech,
+                                 (int)firer->grapple.anchor_part, L);
+                    }
+                }
+                /* Tiny visual sparks at landing point on both sides. */
+                Vec2 hp = { p->pos_x[i], p->pos_y[i] };
+                for (int k = 0; k < 3; ++k) {
+                    fx_spawn_spark(&w->fx, hp,
+                        (Vec2){ -p->vel_x[i] * 0.05f,
+                                -p->vel_y[i] * 0.05f }, w->rng);
+                }
+                p->alive[i] = 0;
+                continue;
+            }
+            /* No hit yet — advance and keep flying. */
+            p->pos_x[i] = b.x;
+            p->pos_y[i] = b.y;
+            if (i > last_alive) last_alive = i;
+            continue;
+        }
+
         if (any_hit) {
             /* Land at the clamped point. */
             p->pos_x[i] = a.x + (b.x - a.x) * t_hit;
@@ -287,6 +383,7 @@ static Color proj_color(uint8_t kind) {
         case PROJ_MICRO_ROCKET:     return (Color){ 255, 200, 100, 240 };
         case PROJ_FRAG_GRENADE:     return (Color){ 200, 200, 100, 230 };
         case PROJ_THROWN_KNIFE:     return (Color){ 220, 230, 240, 230 };
+        case PROJ_GRAPPLE_HEAD:     return (Color){ 240, 220, 100, 240 };
         default:                    return (Color){ 255, 255, 255, 220 };
     }
 }
@@ -299,8 +396,19 @@ static float proj_size(uint8_t kind) {
         case PROJ_FRAG_GRENADE:     return 4.0f;
         case PROJ_THROWN_KNIFE:     return 3.0f;
         case PROJ_PELLET:           return 1.6f;
+        case PROJ_GRAPPLE_HEAD:     return 3.0f;
         default:                    return 2.2f;
     }
+}
+
+int projectile_find_grapple_head(const ProjectilePool *p, int owner_mech_id) {
+    for (int i = 0; i < p->count; ++i) {
+        if (!p->alive[i]) continue;
+        if (p->kind[i] != PROJ_GRAPPLE_HEAD) continue;
+        if (p->owner_mech[i] != owner_mech_id) continue;
+        return i;
+    }
+    return -1;
 }
 
 void projectile_draw(const ProjectilePool *p, float alpha) {
