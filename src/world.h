@@ -67,6 +67,7 @@ typedef enum {
     CSTR_DISTANCE = 0,
     CSTR_DISTANCE_LIMIT,    /* min/max bound — used for joint limit cones */
     CSTR_ANGLE,
+    CSTR_FIXED_ANCHOR,      /* P06: end b is a fixed Vec2 stored inline */
 } ConstraintKind;
 
 typedef struct {
@@ -74,9 +75,10 @@ typedef struct {
     uint16_t c;             /* angle: middle joint */
     uint8_t  kind;          /* ConstraintKind */
     uint8_t  active;        /* false → dismembered/detached */
-    float    rest;          /* DISTANCE */
+    float    rest;          /* DISTANCE / FIXED_ANCHOR */
     float    min_len, max_len;  /* DISTANCE_LIMIT */
     float    min_ang, max_ang;  /* ANGLE (radians) */
+    Vec2     fixed_pos;     /* FIXED_ANCHOR: world-space anchor for end b */
 } Constraint;
 
 typedef struct {
@@ -116,6 +118,37 @@ static inline int limb_count(uint8_t mask) {
     while (mask) { n += (int)(mask & 1u); mask >>= 1; }
     return n;
 }
+
+/* ---- Grappling hook (M5 P06) ---------------------------------------
+ *
+ * Per-mech state for the secondary-slot grappling hook. Spec lives in
+ * `documents/m5/05-grapple.md`. Fire path spawns a PROJ_GRAPPLE_HEAD;
+ * on tile/bone hit the head sticks, anchor is stored, and a contracting
+ * distance constraint pulls the firer toward the anchor. Released on
+ * BTN_USE edge, anchor-mech death, or owner death.
+ *
+ * Constraint slot:
+ *   - tile anchor → CSTR_FIXED_ANCHOR with fixed_pos = anchor_pos
+ *   - bone anchor → CSTR_DISTANCE between firer pelvis and target bone
+ *
+ * Allocated lazily from the global ConstraintPool on attach; deactivated
+ * (active=0) on release. Slots leak by ~40 per round per mech (bounded
+ * vs. the 2048-slot pool); reset by round-end. */
+typedef enum {
+    GRAPPLE_IDLE     = 0,
+    GRAPPLE_FLYING   = 1,    /* head in flight */
+    GRAPPLE_ATTACHED = 2,    /* anchored, contracting */
+} GrappleState;
+
+typedef struct {
+    uint8_t  state;          /* GrappleState */
+    int8_t   anchor_mech;    /* -1 = tile-anchored; else mech_id of target */
+    uint8_t  anchor_part;    /* PART_* if anchor_mech >= 0; ignored otherwise */
+    uint8_t  reserved;
+    Vec2     anchor_pos;     /* world-space anchor (tile case authoritative) */
+    float    rest_length;    /* contracts each tick, clamped to >= 80 px */
+    int      constraint_idx; /* index into world.constraints; -1 if none */
+} Grapple;
 
 /* ---- Mech ----------------------------------------------------------- */
 #define MAX_MECHS         32
@@ -268,6 +301,14 @@ typedef struct {
     uint8_t   burst_pending_rounds;
     float     burst_pending_timer;
 
+    /* P06 — Grappling hook state. See `documents/m5/05-grapple.md`.
+     * Server-authoritative; clients mirror via SNAP_STATE_GRAPPLING +
+     * the trailing 8-byte grapple wire suffix on the EntitySnapshot.
+     * On the server, the constraint at `grapple.constraint_idx` is the
+     * thing the solver uses to pull the firer's pelvis to the anchor;
+     * on remote clients the field is rendered only (no constraint). */
+    Grapple   grapple;
+
     /* Last time this mech took a hit (tracking for "OVERKILL", etc.). */
     float     last_damage_taken;
     int       last_killshot_weapon;
@@ -315,6 +356,7 @@ typedef enum {
     PROJ_FRAG_GRENADE,
     PROJ_MICRO_ROCKET,
     PROJ_THROWN_KNIFE,
+    PROJ_GRAPPLE_HEAD,        /* P06: hook head, no damage, sticks on hit */
     PROJ_KIND_COUNT
 } ProjectileKind;
 

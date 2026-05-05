@@ -1,0 +1,102 @@
+# tools/editor/shots/loadout_dropdowns.shot
+#
+# Visual + state verification for the test-play loadout modal's
+# dropdowns, after the fix that:
+#   1. uses a dark COL_PANEL_2 background (so light COL_TEXT labels are
+#      visible — not the white-on-white that GuiPanel produced);
+#   2. labels rows with explicit "Chassis:", "Primary:", ... headings;
+#   3. uses GuiLock during pass-1 (closed dropdowns) when one is open,
+#      so its expansion doesn't get its clicks stolen by closed boxes
+#      behind it;
+#   4. closes / switches the open dropdown on a click outside its
+#      bounds (raygui doesn't auto-close on outside clicks).
+#
+# Shot mode can't synthesize a raygui mouse click, so we exercise the
+# state machine via `loadout_open_dropdown <slot>` (sets m->edit[slot]
+# = true, mirroring what a real click on the closed box would do) and
+# verify the modal renders the open list correctly.
+
+window 1280 800
+new 40 25
+ticks 200
+contact_sheet loadout_dropdowns cols 3 cell 640 400
+
+# Tick 0: editor with no modal yet.
+at 0  shot t00_no_modal
+at 0  assert loadout_open == 0
+at 0  assert loadout_dropdown_open == -1
+
+# Open the modal. All slots default → idx 0 ("(default)").
+at 5  open_loadout
+at 5  assert loadout_open == 1
+at 5  assert loadout_dropdown_open == -1
+at 6  shot t06_modal_no_dropdown
+
+# Open chassis dropdown (top row). Its option list expands DOWNWARD
+# over the rows for primary/secondary/armor/jetpack. We capture this
+# state to verify the labels for those rows aren't obscured to the
+# left of the expansion (the labels live to the LEFT of the dropdown
+# box, so they should remain readable beside the option list).
+at 10 loadout_open_dropdown chassis
+at 10 assert loadout_dropdown_open == 0
+at 11 shot t11_chassis_open
+
+# Switch to secondary dropdown (middle row). Like chassis, its
+# expansion overlaps the rows for armor/jetpack underneath. Verifies
+# we can swap which slot is open without first closing.
+at 15 loadout_open_dropdown secondary
+at 15 assert loadout_dropdown_open == 2
+at 16 shot t16_secondary_open
+
+# Now jetpack (bottom row). Its expansion stays inside the modal but
+# doesn't cover any other dropdown rows. Sanity-check the bottom-row
+# behaviour the user originally relied on.
+at 20 loadout_open_dropdown jetpack
+at 20 assert loadout_dropdown_open == 4
+at 21 shot t21_jetpack_open
+
+# Collapse all dropdowns; modal still open.
+at 25 loadout_close_dropdowns
+at 25 assert loadout_open == 1
+at 25 assert loadout_dropdown_open == -1
+
+# Programmatically populate every slot with an interesting value so
+# the modal shows recognisable choices in the screenshot. Apply →
+# test_lo gets the corresponding strings.
+at 30 loadout_set chassis   Engineer
+at 30 loadout_set primary   Microgun
+at 30 loadout_set secondary Grappling_Hook
+at 30 loadout_set armor     Reactive
+at 30 loadout_set jetpack   Glide
+at 31 shot t31_all_picked
+
+at 33 loadout_apply
+at 34 assert loadout_open == 0
+at 34 assert test_lo_chassis_idx   == 5      # Engineer
+at 34 assert test_lo_primary_idx   == 8      # Microgun
+at 34 assert test_lo_secondary_idx == 6      # Grappling Hook
+at 34 assert test_lo_armor_idx     == 4      # Reactive
+at 34 assert test_lo_jetpack_idx   == 4      # Glide
+at 35 shot t35_after_apply
+
+# Re-open and verify the modal seeds from test_lo (so the user sees
+# their last selection on next open).
+at 40 open_loadout
+at 41 assert loadout_chassis_idx   == 5
+at 41 assert loadout_primary_idx   == 8
+at 41 assert loadout_secondary_idx == 6
+at 41 assert loadout_armor_idx     == 4
+at 41 assert loadout_jetpack_idx   == 4
+at 42 shot t42_reopen_seeded
+
+# Open the secondary dropdown so the screenshot shows "Grappling Hook"
+# highlighted in the expanded option list — the visual the user wants
+# to see when picking a weapon for grapple testing.
+at 45 loadout_open_dropdown secondary
+at 46 shot t46_secondary_grapple_visible
+
+at 50 close_loadout
+at 50 assert loadout_open == 0
+at 51 shot t51_closed
+
+at 55 end

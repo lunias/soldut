@@ -115,7 +115,7 @@ This is the order that keeps things shippable and minimizes "block on a dependen
 
 **Week 1 — format + skeleton**
 - Land [01-lvl-format.md](01-lvl-format.md). New module `src/level_io.{c,h}`. Loader + saver round-trip a hard-coded test fixture.
-- Convert the three M4 code-built maps (Foundry / Slipstream / Reactor) to `.lvl` files via a one-shot exporter. The runtime reads them; `map_build` becomes a thin loader.
+- (Deferred to P17.) Convert the three M4 code-built maps (Foundry / Slipstream / Reactor) to `.lvl` files via the `tools/cook_maps/` cooker, or re-author them in the editor. Until then `map_build` tries `assets/maps/<short>.lvl` first and falls back to the code-built path.
 - Begin [03-collision-polygons.md](03-collision-polygons.md). Free polygons in the world struct, broadphase grid, closest-point collision. Slopes drop in as polygons.
 
 **Week 2 — editor + first new content**
@@ -172,8 +172,8 @@ These are the numbers M5 commits to. They are mostly carry-forwards from [10-per
 These are pre-disclosed: when M5 ships, expect at least these entries to land in [TRADE_OFFS.md](../../TRADE_OFFS.md) unless we explicitly do the "right" version.
 
 - **Mech atlas baked at build time, not loaded from a manifest.** Cuts a manifest format we'd have to maintain.
-- **Editor undo is whole-tile-grid snapshot, not differential.** Wastes memory for big maps but is bullet-proof.
-- **Pickup spawner state lives in level arena, not the world.** Means a level reload destroys live pickups; round transitions already do that.
+- **Editor undo is whole-tile-grid snapshot, not differential.** Wastes memory for big maps but is bullet-proof. *(Landed at P04.)*
+- **Pickup transient state isn't persisted across host restarts.** A host crash mid-round resets all spawners to AVAILABLE; engineer-deployed transients vanish. Acceptable until rounds run long enough that mid-round restarts are a real concern. *(Landed at P05; supersedes the original "spawner state lives in level arena" pre-disclosure — pickups actually live on `World.pickups`.)*
 - **Music plays only one track at a time (no crossfade).** Crossfade is double the streaming cost; a hard cut at round transitions is fine.
 - **No actual UDP for audio (obviously).** Not a real trade-off, just calling out that audio cues fire client-side from network events; clients hear *their own world*, not a globally synchronized acoustic state.
 - **CTF flag carrier-glow shader is pre-baked** rather than a runtime additive pass. The shader in [06-rendering-audio.md](../06-rendering-audio.md) §"Shaders" exists; this is just calling out the shape.

@@ -12,6 +12,7 @@
  */
 
 #include "doc.h"
+#include "play.h"          /* for TestPlayLoadout */
 #include "tool.h"
 #include "view.h"
 
@@ -64,6 +65,11 @@ void ui_draw_status_bar  (const EditorDoc *d, const EditorView *v,
  * Returns -1 if no button was clicked this frame. */
 int ui_draw_tool_buttons(ToolKind *active, const UIDims *D);
 
+/* Draws a small "[L] Loadout" button in the top bar's right area.
+ * Returns true if the user clicked it this frame. The "press H for
+ * keyboard shortcuts" hint is moved leftward to make room. */
+bool ui_draw_loadout_button(const UIDims *D);
+
 void ui_draw_tile_palette  (ToolCtx *c, const UIDims *D);
 void ui_draw_poly_palette  (ToolCtx *c, const UIDims *D);
 void ui_draw_pickup_palette(ToolCtx *c, const UIDims *D);
@@ -94,3 +100,53 @@ void ui_help_open       (HelpModal *h);
 void ui_help_close      (HelpModal *h);
 void ui_help_toggle     (HelpModal *h);
 void ui_help_modal_draw (HelpModal *h, const UIDims *D);
+
+/* ---- Test-play loadout modal (L hotkey or top-bar button) ---------
+ *
+ * Configures the chassis / primary / secondary / armor / jetpack the
+ * F5 test-play child gets. Same content as the editor's --test-*
+ * CLI flags, just exposed via dropdowns so a user can set the loadout
+ * mid-session without restarting the editor. Apply writes back into
+ * the caller's TestPlayLoadout (read by play_test on F5).
+ *
+ * Index 0 in each dropdown is "(default)" — empty string in the
+ * TestPlayLoadout, which makes the spawned game fall back to its own
+ * defaults. Names are the same display names the game's CLI parser
+ * accepts (e.g. "Grappling Hook"). */
+enum {
+    LOADOUT_SLOT_CHASSIS   = 0,
+    LOADOUT_SLOT_PRIMARY   = 1,
+    LOADOUT_SLOT_SECONDARY = 2,
+    LOADOUT_SLOT_ARMOR     = 3,
+    LOADOUT_SLOT_JETPACK   = 4,
+    LOADOUT_SLOT_COUNT     = 5,
+};
+
+typedef struct LoadoutModal {
+    bool open;
+    int  idx[LOADOUT_SLOT_COUNT];      /* dropdown indices, 0 = default */
+    bool edit[LOADOUT_SLOT_COUNT];     /* GuiDropdownBox open-state per slot */
+} LoadoutModal;
+
+void ui_loadout_open      (LoadoutModal *m, const TestPlayLoadout *cur);
+void ui_loadout_close     (LoadoutModal *m);
+void ui_loadout_apply     (const LoadoutModal *m, TestPlayLoadout *out);
+void ui_loadout_modal_draw(LoadoutModal *m, TestPlayLoadout *out,
+                           const UIDims *D);
+
+/* Slot-name → LOADOUT_SLOT_* (case-insensitive: "chassis" / "primary"
+ * / "secondary" / "armor" / "jetpack"). Returns -1 if unknown. */
+int  ui_loadout_slot_from_name(const char *name);
+
+/* Lookup the dropdown idx for a given option name in the given slot.
+ * Pass an empty string to get 0 (the "(default)" entry). Returns -1
+ * if the name doesn't match any option. Used by shotmode + the CLI-
+ * arg path to seed the modal's selection from a string. */
+int  ui_loadout_slot_idx(int slot, const char *name);
+
+/* Inverse: dropdown idx → option name. Returns "" for idx 0. Returns
+ * NULL for an out-of-range idx. */
+const char *ui_loadout_slot_name(int slot, int idx);
+
+/* Number of options in a slot's dropdown (including "(default)" at 0). */
+int  ui_loadout_slot_count(int slot);

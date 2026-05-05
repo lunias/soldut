@@ -97,6 +97,13 @@ typedef struct {
     bool     have_loadout;
     MechLoadout loadout;
 
+    /* Optional .lvl path. When set, seed_world calls map_build_from_path
+     * (same loader the game's --test-play uses) instead of the hardcoded
+     * `level_build_tutorial`. Empty string = use tutorial. Useful for
+     * grapple/swing tests that need ceilings or other geometry the
+     * tutorial doesn't have. */
+    char     load_lvl[256];
+
     Event   *events;
     int      event_count, event_capacity;
 
@@ -271,6 +278,11 @@ static bool parse_script(const char *path, Script *out) {
             }
         } else if (strcmp(tok, "out") == 0) {
             snprintf(out->out_dir, sizeof(out->out_dir), "%s", rest);
+        } else if (strcmp(tok, "load_lvl") == 0) {
+            /* `load_lvl <path>` — seed_world will load this .lvl
+             * via map_build_from_path instead of the hardcoded
+             * tutorial. Path can be relative to cwd. */
+            snprintf(out->load_lvl, sizeof(out->load_lvl), "%s", rest);
         } else if (strcmp(tok, "loadout") == 0) {
             char chassis[32], primary[32], secondary[32], armor[32], jetpack[32];
             char *q = rest;
@@ -842,7 +854,20 @@ static void shot_client_late_bind_mech(Game *g) {
  * stays self-contained and main.c isn't refactored just for shot mode. */
 static void seed_world(Game *g, const Script *s) {
     World *w = &g->world;
-    level_build_tutorial(&w->level, &g->level_arena);
+    bool loaded = false;
+    if (s && s->load_lvl[0]) {
+        loaded = map_build_from_path(w, &g->level_arena, s->load_lvl);
+        if (!loaded) {
+            LOG_W("shotmode: load_lvl '%s' failed — falling back to tutorial",
+                  s->load_lvl);
+        } else {
+            LOG_I("shotmode: loaded custom level '%s' (%dx%d)",
+                  s->load_lvl, w->level.width, w->level.height);
+        }
+    }
+    if (!loaded) {
+        level_build_tutorial(&w->level, &g->level_arena);
+    }
     decal_init((int)level_width_px(&w->level), (int)level_height_px(&w->level));
 
     const float feet_below_pelvis = 36.0f;

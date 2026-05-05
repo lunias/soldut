@@ -1,0 +1,89 @@
+# m5_grapple_swing.shot — exercises the new Tarzan-style grapple
+# behaviour and the chain-grapple flow:
+#   - Fire BTN_FIRE → head launches, sticks → ATTACHED at hit-time L
+#   - Rope holds at L (no auto-contract). Pendulum swing.
+#   - BTN_USE → release (state IDLE).
+#   - BTN_FIRE while ATTACHED → release + fire new (state FLYING).
+#   - BTN_FIRE while FLYING → silently swallowed (no double-head).
+#
+# The .log next to the PNGs captures every state transition via
+# SHOT_LOG, plus per-second `grapple_swing dist=… rest=…` traces while
+# attached so the swing distance can be eyeballed against the rest
+# length. The contact sheet shows the firer mid-swing at several
+# beats so the visual is recognisable as Tarzan (rope taut, body
+# pendulum'd off the anchor) rather than the old "pinned to the wall"
+# auto-contract behaviour.
+
+window 1280 720
+seed   6 6
+out    build/shots/m5_grapple_swing
+loadout - "Pulse Rifle" "Grappling Hook" Light Standard
+contact_sheet sheet cols 4 cell 480 270
+
+# Spawn mid-air, well above the high right platform and a bit to its
+# left, so the mech is FALLING when the grapple fires — that way the
+# rope visibly catches and swings the body around the anchor instead
+# of the (slack-rope) "standing on a platform with a string attached"
+# look you'd get from a grounded spawn.
+spawn_at 2200 600
+
+# Aim at the mid-map wall column (x=1760..1792). The hook flies down-
+# left; the rope length comes out around 500 px.
+aim 1780 1080
+
+# ---- Beat 1: fire + attach + swing ---------------------------------
+at  10 shot t010_idle
+at  15 tap swap                  # active slot → Grappling Hook
+at  20 shot t020_secondary
+at  25 tap fire                  # spawn PROJ_GRAPPLE_HEAD
+at  30 shot t030_head_inflight
+
+# Head reaches the wall around tick ~47 with this aim — see the
+# `grapple_attach anchor=… L=…` line in the log.
+at  60 shot t060_attached
+
+# Let gravity work the rope. With no auto-contract the mech swings
+# below the anchor — pendulum motion. This is what the user wanted.
+at 110 shot t110_mid_swing
+at 160 shot t160_late_swing
+
+# ---- Beat 2: BTN_USE disconnect ------------------------------------
+at 180 tap use                   # BTN_USE edge → grapple_release
+at 185 shot t185_after_release   # rope is gone, free fall begins
+
+# ---- Beat 3: re-fire while previously released ---------------------
+# Aim back at the wall column and fire again — IDLE → FLYING.
+at 195 aim 1780 1080
+at 200 tap fire                  # second grapple_fire
+at 230 shot t230_second_attach
+
+# ---- Beat 4: hold W to retract along the rope -----------------------
+# Holding BTN_JET (W) while ATTACHED contracts the rope at 800 px/s
+# (clamped at 60 px). Releasing W stops the contraction. The SHOT_LOG
+# `grapple_swing dist=… rest=…` traces show rest dropping each second
+# with " retracting" appended while W is held.
+at 240 press jet                 # start zip-line up
+at 250 shot t250_retract_start
+at 280 release jet               # let go of W → rest stops shrinking
+at 281 shot t281_retract_stopped
+
+# ---- Beat 5: chain-grapple (fire WHILE ATTACHED) -------------------
+# The whole point of the user request: be able to swing across the
+# level by chaining grapples. A BTN_FIRE press while ATTACHED should
+# auto-release the current rope and fire a new head.
+#
+# WeaponGrapplingHook.fire_rate_sec = 1.20 → 72-tick cooldown after
+# every fire, so the chain re-fire has to wait at least 72 ticks past
+# the most-recent grapple_fire (tick 200 → eligible at tick 272).
+# Re-aim slightly off the old anchor so the new rope is visibly
+# distinct.
+at 290 aim 1850 1090
+at 295 tap fire                  # chain re-fire (release + new fire)
+at 300 shot t300_chain_inflight  # new head should be flying
+at 330 shot t330_chain_attached  # newly-attached rope visible
+
+# ---- Beat 6: final release -----------------------------------------
+at 390 tap use
+at 400 shot t400_final_released
+
+at 450 end

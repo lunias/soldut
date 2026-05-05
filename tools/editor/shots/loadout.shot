@@ -1,0 +1,103 @@
+# tools/editor/shots/loadout.shot — exercises the test-play loadout
+# modal end-to-end:
+#   1. Open the modal (L key path).
+#   2. Set chassis / primary / secondary / armor / jetpack via dropdown
+#      idx (loadout_set with named-option string, with underscores in
+#      place of spaces).
+#   3. Capture the modal mid-state.
+#   4. Apply → modal closes + test_lo is populated.
+#   5. Assert ShotState.test_lo holds the matching idx for every slot
+#      (i.e. the names round-trip from name → idx → name correctly).
+#   6. Re-open the modal; verify it remembers the applied selection.
+#   7. Cancel → test_lo unchanged.
+#   8. End.
+#
+# A failure in any assert exits non-zero; shotmode.c::editor_shotmode_run
+# returns the assertion-failure count to make this CI-friendly.
+
+window 1280 800
+new 40 25
+ticks 200
+contact_sheet loadout cols 3 cell 640 400
+
+# Baseline: empty doc, no loadout configured yet.
+at 0  shot t00_blank
+at 0  assert loadout_open == 0
+at 0  assert test_lo_secondary_idx == 0   # 0 = "(default)"
+
+# Open the loadout modal.
+at 5  open_loadout
+at 5  assert loadout_open == 1
+
+# Set every slot to a known interesting value. Names use underscores
+# in place of spaces; the parser swaps them back before lookup.
+#   chassis   = Heavy             (idx 3)
+#   primary   = Mass_Driver       (idx 6)
+#   secondary = Grappling_Hook    (idx 6)
+#   armor     = Heavy             (idx 3)
+#   jetpack   = Burst             (idx 3)
+at 8  loadout_set chassis   Heavy
+at 8  loadout_set primary   Mass_Driver
+at 8  loadout_set secondary Grappling_Hook
+at 8  loadout_set armor     Heavy
+at 8  loadout_set jetpack   Burst
+
+# Verify the modal's selections BEFORE Apply (test_lo is still empty).
+at 9  assert loadout_chassis_idx   == 3
+at 9  assert loadout_primary_idx   == 6
+at 9  assert loadout_secondary_idx == 6
+at 9  assert loadout_armor_idx     == 3
+at 9  assert loadout_jetpack_idx   == 3
+at 9  assert test_lo_secondary_idx == 0     # nothing applied yet
+at 9  shot t09_modal_open
+
+# Apply → modal closes; test_lo gets populated.
+at 12 loadout_apply
+at 13 assert loadout_open == 0
+
+# After Apply: test_lo holds the matching strings (verified by resolving
+# back to dropdown idx).
+at 13 assert test_lo_chassis_idx   == 3
+at 13 assert test_lo_primary_idx   == 6
+at 13 assert test_lo_secondary_idx == 6
+at 13 assert test_lo_armor_idx     == 3
+at 13 assert test_lo_jetpack_idx   == 3
+at 14 shot t14_post_apply
+
+# Re-open the modal; ui_loadout_open seeds idx[] from test_lo, so the
+# previous selections should still be displayed.
+at 18 open_loadout
+at 18 assert loadout_open == 1
+at 19 assert loadout_chassis_idx   == 3
+at 19 assert loadout_primary_idx   == 6
+at 19 assert loadout_secondary_idx == 6
+at 19 assert loadout_armor_idx     == 3
+at 19 assert loadout_jetpack_idx   == 3
+at 19 shot t19_reopen_remembers
+
+# Change a single slot but DON'T apply — close it and confirm test_lo
+# is unchanged. (loadout_secondary_idx flips back to test_lo's
+# applied value when the modal is re-opened.)
+at 22 loadout_set secondary Sidearm        # idx 1
+at 22 assert loadout_secondary_idx == 1    # modal-only change
+at 23 close_loadout
+at 23 assert loadout_open == 0
+at 23 assert test_lo_secondary_idx == 6    # unchanged — still Grappling Hook
+
+# Re-open one more time to verify the seed still reads from test_lo
+# (NOT from the cancelled in-modal state).
+at 26 open_loadout
+at 27 assert loadout_secondary_idx == 6    # back to applied value
+at 27 shot t27_cancel_did_not_persist
+
+at 30 close_loadout
+at 30 assert loadout_open == 0
+
+# Verify the "(default)" path: clearing a slot via idx 0 → empty
+# string in test_lo (= use the game's default).
+at 33 open_loadout
+at 34 loadout_set primary 0                # 0 = "(default)"
+at 35 loadout_apply
+at 36 assert test_lo_primary_idx == 0
+
+at 40 end

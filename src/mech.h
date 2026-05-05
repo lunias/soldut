@@ -209,3 +209,19 @@ void mech_apply_bink(Mech *m, float bink_amount, float proximity_t,
 Vec2 mech_chest_pos(const World *w, int mech_id);
 Vec2 mech_hand_pos (const World *w, int mech_id);   /* right hand */
 Vec2 mech_aim_dir  (const World *w, int mech_id);
+
+/* P06 — Grapple constraint lifecycle. Both server-side calls.
+ *
+ * mech_grapple_attach assumes m->grapple already has anchor_pos /
+ * anchor_mech / anchor_part / rest_length filled in (set by the
+ * projectile collision path); it allocates a constraint slot from
+ * the global ConstraintPool and stores its index in
+ * m->grapple.constraint_idx. Tile anchors get a CSTR_FIXED_ANCHOR;
+ * mech anchors get a CSTR_DISTANCE between the firer's pelvis and
+ * the target's bone particle.
+ *
+ * mech_grapple_release deactivates the constraint (active=0; slot
+ * leak is bounded per spec) and resets m->grapple.state to IDLE.
+ * Safe to call at any state — if state is already IDLE it's a no-op. */
+void mech_grapple_attach (World *w, int mech_id);
+void mech_grapple_release(World *w, int mech_id);

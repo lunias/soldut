@@ -329,6 +329,13 @@ int mech_create_loadout(World *w, MechLoadout lo, Vec2 spawn,
     m->aim_bink        = 0.0f;
     m->ability_cooldown = 0.0f;
 
+    /* P06 — grapple starts IDLE. The memset above zeroed the struct,
+     * which gives state=GRAPPLE_IDLE and anchor_mech=0; constraint_idx
+     * needs to be -1 explicitly so a stale 0 isn't misread as "the
+     * first constraint slot is mine". */
+    m->grapple.constraint_idx = -1;
+    m->grapple.anchor_mech    = -1;
+
     LOG_I("mech_create: id=%d chassis=%s%s armor=%s jet=%s primary=%s secondary=%s",
           mid, ch->name, is_dummy ? " (dummy)" : "",
           ar->name, jp->name,
@@ -358,6 +365,70 @@ Vec2 mech_aim_dir(const World *w, int mid) {
     float L = sqrtf(d.x * d.x + d.y * d.y);
     if (L < 1e-3f) return (Vec2){ m->facing_left ? -1.0f : 1.0f, 0.0f };
     return (Vec2){ d.x / L, d.y / L };
+}
+
+/* ---- P06: Grapple constraint lifecycle ----------------------------- */
+
+void mech_grapple_attach(World *w, int mid) {
+    if (mid < 0 || mid >= w->mech_count) return;
+    Mech *m = &w->mechs[mid];
+
+    /* Allocate from the global ConstraintPool — append at count. The
+     * per-mech constraint range covers only the skeleton; the grapple
+     * is a transient extra slot. Slot leaks on release (active=0) but
+     * is bounded per spec. */
+    ConstraintPool *cp = &w->constraints;
+    if (cp->count >= cp->capacity) {
+        LOG_W("mech_grapple_attach: constraint pool full (%d/%d)",
+              cp->count, cp->capacity);
+        m->grapple.state = GRAPPLE_IDLE;
+        m->grapple.constraint_idx = -1;
+        return;
+    }
+    int ci = cp->count++;
+    Constraint *c = &cp->items[ci];
+    *c = (Constraint){ 0 };
+    c->active = 1;
+    /* Rope acts as a one-sided length limit: slack (no force) when the
+     * pelvis is closer than the rope length, taut (pulls in) when
+     * stretched beyond it. solve_fixed_anchor (tile case) and
+     * CSTR_DISTANCE_LIMIT (mech case) both implement this when min=0
+     * and the ceiling lives in `rest` / `max_len`. */
+    c->a = (uint16_t)(m->particle_base + PART_PELVIS);
+    if (m->grapple.anchor_mech < 0) {
+        /* Tile anchor — fixed Vec2 + one-sided distance. */
+        c->kind      = CSTR_FIXED_ANCHOR;
+        c->b         = c->a;             /* unused, but matches solver assumption */
+        c->rest      = m->grapple.rest_length;
+        c->fixed_pos = m->grapple.anchor_pos;
+    } else {
+        /* Bone anchor — distance-limit constraint with min=0 / max=rope
+         * length so the rope is one-sided (slack when shorter, taut
+         * when stretched). The constraint solver's inv_mass split
+         * pulls both ends toward each other proportional to mass when
+         * stretched: a Heavy yanking a Scout pulls the Scout much more. */
+        const Mech *t = &w->mechs[m->grapple.anchor_mech];
+        c->kind     = CSTR_DISTANCE_LIMIT;
+        c->b        = (uint16_t)(t->particle_base + m->grapple.anchor_part);
+        c->min_len  = 0.0f;
+        c->max_len  = m->grapple.rest_length;
+    }
+    m->grapple.constraint_idx = ci;
+}
+
+void mech_grapple_release(World *w, int mid) {
+    if (mid < 0 || mid >= w->mech_count) return;
+    Mech *m = &w->mechs[mid];
+    if (m->grapple.state == GRAPPLE_IDLE && m->grapple.constraint_idx < 0) return;
+    if (m->grapple.constraint_idx >= 0
+        && m->grapple.constraint_idx < w->constraints.count) {
+        w->constraints.items[m->grapple.constraint_idx].active = 0;
+    }
+    m->grapple.constraint_idx = -1;
+    m->grapple.state          = GRAPPLE_IDLE;
+    m->grapple.anchor_mech    = -1;
+    SHOT_LOG("t=%llu mech=%d grapple_release",
+             (unsigned long long)w->tick, mid);
 }
 
 void mech_apply_bink(Mech *m, float bink_amount, float proximity_t,
@@ -888,6 +959,95 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
         m->grounded = any_foot_grounded(w, m);
     }
 
+    /* P06 — Grapple step. Server-side only. The rope is a one-sided
+     * distance constraint (slack when shorter than rest, taut when
+     * stretched), so the firer swings as a pendulum at a fixed radius
+     * — the "Tarzan" feel. BTN_USE edge-release; anchor-mech death
+     * also releases. (Firer death is handled in mech_kill.)
+     *
+     * Re-firing BTN_FIRE while attached is handled in mech_try_fire —
+     * it releases the current grapple and fires a new head, so the
+     * player can chain grapples to swing across a level.
+     *
+     * Holding BTN_JET (W) while attached retracts the rope at
+     * GRAPPLE_RETRACT_PXS — the player zip-lines toward the anchor.
+     * Release W and the rope stops shortening. The retract bottoms
+     * out at GRAPPLE_MIN_REST_LEN so a fully-retracted firer doesn't
+     * end up inside the anchor tile / bone. (Jet thrust still applies
+     * normally while W is held — the two effects reinforce: jet
+     * pushes up, rope shortens toward the anchor.) */
+    if (w->authoritative && m->alive && m->grapple.state == GRAPPLE_ATTACHED) {
+        bool jet_held     = (in.buttons      & BTN_JET) != 0;
+        bool jet_was_held = (m->prev_buttons & BTN_JET) != 0;
+        if (jet_held && !jet_was_held) {
+            SHOT_LOG("t=%llu mech=%d grapple_retract_start rest=%.1f",
+                     (unsigned long long)w->tick, mid,
+                     m->grapple.rest_length);
+        } else if (!jet_held && jet_was_held) {
+            SHOT_LOG("t=%llu mech=%d grapple_retract_stop  rest=%.1f",
+                     (unsigned long long)w->tick, mid,
+                     m->grapple.rest_length);
+        }
+        if (jet_held) {
+            const float GRAPPLE_RETRACT_PXS  = 800.0f;
+            /* MIN must clear the body height: head sits ~48 px above
+             * pelvis with a ~8 px head radius, so a min of 60 px puts
+             * the head crown right at the anchor's tile surface and
+             * the constraint solver vs. tile collision fight produces
+             * the "stuck in the ceiling" report. 100 px gives ~40 px
+             * of head-clearance below a ceiling-tile anchor with the
+             * default Trooper proportions, plus headroom for the
+             * other chassis. */
+            const float GRAPPLE_MIN_REST_LEN = 100.0f;
+            m->grapple.rest_length -= GRAPPLE_RETRACT_PXS * dt;
+            if (m->grapple.rest_length < GRAPPLE_MIN_REST_LEN) {
+                m->grapple.rest_length = GRAPPLE_MIN_REST_LEN;
+            }
+        }
+        if (m->grapple.constraint_idx >= 0
+            && m->grapple.constraint_idx < w->constraints.count) {
+            Constraint *c = &w->constraints.items[m->grapple.constraint_idx];
+            /* Mirror rest length onto whichever solver field this
+             * constraint kind reads from. Tile anchor: c->rest. Mech
+             * anchor: c->max_len (CSTR_DISTANCE_LIMIT). */
+            c->rest    = m->grapple.rest_length;
+            c->max_len = m->grapple.rest_length;
+            /* Tile anchor — fixed_pos is authoritative every tick (the
+             * grapple struct's anchor_pos is the source of truth; the
+             * constraint mirrors it). */
+            if (m->grapple.anchor_mech < 0) c->fixed_pos = m->grapple.anchor_pos;
+        }
+        /* Release on anchor-mech death. */
+        if (m->grapple.anchor_mech >= 0
+            && m->grapple.anchor_mech < (int8_t)w->mech_count
+            && !w->mechs[m->grapple.anchor_mech].alive) {
+            mech_grapple_release(w, mid);
+        }
+        /* Release on BTN_USE edge. */
+        if (pressed & BTN_USE) mech_grapple_release(w, mid);
+
+        /* Per-second swing-distance trace for shot tests. SHOT_LOG is a
+         * one-branch no-op outside shot mode; cheap to keep on. */
+        if (m->grapple.state == GRAPPLE_ATTACHED && (w->tick % 60) == 0) {
+            int pelv = m->particle_base + PART_PELVIS;
+            float dx, dy;
+            if (m->grapple.anchor_mech < 0) {
+                dx = w->particles.pos_x[pelv] - m->grapple.anchor_pos.x;
+                dy = w->particles.pos_y[pelv] - m->grapple.anchor_pos.y;
+            } else {
+                const Mech *t = &w->mechs[m->grapple.anchor_mech];
+                int tp = t->particle_base + m->grapple.anchor_part;
+                dx = w->particles.pos_x[pelv] - w->particles.pos_x[tp];
+                dy = w->particles.pos_y[pelv] - w->particles.pos_y[tp];
+            }
+            float d = sqrtf(dx*dx + dy*dy);
+            SHOT_LOG("t=%llu mech=%d grapple_swing dist=%.1f rest=%.1f%s",
+                     (unsigned long long)w->tick, mid, d,
+                     m->grapple.rest_length,
+                     (in.buttons & BTN_JET) ? " retracting" : "");
+        }
+    }
+
     /* Cooldowns + bink decay. */
     if (m->fire_cooldown > 0.0f) m->fire_cooldown -= dt;
     if (m->recoil_kick   > 0.0f) m->recoil_kick   -= dt * 4.0f;
@@ -1158,13 +1318,56 @@ bool mech_try_fire(World *w, int mid, ClientInput in) {
         m->fire_cooldown = wpn->fire_rate_sec;
     }
     else if (wpn->fire == WFIRE_GRAPPLE) {
-        /* Grappling hook: tagged in TRADE_OFFS as deferred. We still
-         * play the cooldown so a player pressing fire isn't surprised
-         * by silence. */
+        /* P06 — Grappling hook. Edge-triggered (holding fire doesn't
+         * re-fire).
+         *
+         * Re-press while ATTACHED: release the current rope and fire a
+         * new one — this is what lets the player chain grapples to
+         * swing across a level (Tarzan-style traversal).
+         *
+         * Re-press while FLYING (head still in flight): swallow it. We
+         * don't want to double-fire and end up with two heads in the
+         * air. */
         if (!fire_pressed) return false;
-        m->fire_cooldown = wpn->fire_rate_sec;
-        SHOT_LOG("t=%llu mech=%d grapple_attempt (NOT YET IMPLEMENTED)",
-                 (unsigned long long)w->tick, mid);
+        if (m->grapple.state == GRAPPLE_FLYING) return false;
+        if (m->grapple.state == GRAPPLE_ATTACHED) {
+            mech_grapple_release(w, mid);
+            /* Fall through to the fresh-fire path below. */
+        }
+
+        Vec2 hand    = part_pos(w, m, PART_R_HAND);
+        Vec2 aim_dir = mech_aim_dir(w, mid);
+        float speed  = wpn->projectile_speed_pxs > 0.0f
+                       ? wpn->projectile_speed_pxs : 1200.0f;
+        Vec2 vel     = (Vec2){ aim_dir.x * speed, aim_dir.y * speed };
+        float life   = wpn->projectile_life_sec > 0.0f
+                       ? wpn->projectile_life_sec : (wpn->range_px / speed);
+        ProjectileSpawn ps = {
+            .kind          = (wpn->projectile_kind != 0)
+                             ? wpn->projectile_kind : PROJ_GRAPPLE_HEAD,
+            .weapon_id     = m->weapon_id,
+            .owner_mech_id = mid,
+            .owner_team    = m->team,
+            .origin        = hand,
+            .velocity      = vel,
+            .damage        = 0.0f,
+            .aoe_radius    = 0.0f,
+            .aoe_damage    = 0.0f,
+            .aoe_impulse   = 0.0f,
+            .life          = life,
+            .gravity_scale = wpn->projectile_grav_scale,
+            .drag          = wpn->projectile_drag,
+            .bouncy        = false,
+        };
+        int ph = projectile_spawn(w, ps);
+        if (ph < 0) return false;
+        m->grapple.state          = GRAPPLE_FLYING;
+        m->grapple.constraint_idx = -1;
+        m->grapple.anchor_mech    = -1;
+        m->fire_cooldown          = wpn->fire_rate_sec;
+        SHOT_LOG("t=%llu mech=%d grapple_fire ph=%d aim=(%.2f,%.2f)",
+                 (unsigned long long)w->tick, mid, ph,
+                 aim_dir.x, aim_dir.y);
     }
 
     if (m->active_slot == 0) m->ammo_primary   = m->ammo;
@@ -1320,6 +1523,10 @@ void mech_kill(World *w, int mid, int killshot_part, Vec2 dir,
     m->alive = false;
     clear_pose(m);
     (void)killshot_part;
+
+    /* P06 — release any active grapple so the corpse doesn't keep
+     * pulling toward an anchor. */
+    if (m->grapple.state != GRAPPLE_IDLE) mech_grapple_release(w, mid);
 
     /* Apply impulse to pelvis so the body ragdolls as a unit. */
     int idx = m->particle_base + PART_PELVIS;

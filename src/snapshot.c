@@ -105,6 +105,21 @@ void snapshot_capture(const World *w, SnapshotFrame *out, uint16_t ack_input_seq
         if (m->powerup_berserk_remaining > 0.0f)  bits |= SNAP_STATE_BERSERK;
         if (m->powerup_invis_remaining   > 0.0f)  bits |= SNAP_STATE_INVIS;
         if (m->powerup_godmode_remaining > 0.0f)  bits |= SNAP_STATE_GODMODE;
+
+        /* P06 — Grapple state. The trailing 8-byte suffix is only on
+         * the wire when SNAP_STATE_GRAPPLING is set; idle stays flat.
+         * For ATTACHED with a tile anchor, anchor_pos is the source of
+         * truth for the rope endpoint. For a bone anchor, the receiver
+         * looks up the live particle position; we still ship anchor_pos
+         * for fallback / mid-flight FLYING-state handling. */
+        if (m->grapple.state != GRAPPLE_IDLE) {
+            bits |= SNAP_STATE_GRAPPLING;
+            e->grapple_state       = m->grapple.state;
+            e->grapple_anchor_mech = (int8_t)m->grapple.anchor_mech;
+            e->grapple_anchor_part = m->grapple.anchor_part;
+            e->grapple_anchor_x_q  = (int16_t)m->grapple.anchor_pos.x;
+            e->grapple_anchor_y_q  = (int16_t)m->grapple.anchor_pos.y;
+        }
         e->state_bits = bits;
 
         e->team      = (uint8_t)m->team;
@@ -154,12 +169,15 @@ int snapshot_encode(const SnapshotFrame *cur,
     (void)baseline;
 
     for (int i = 0; i < cur->ent_count; ++i) {
-        if (p + ENTITY_SNAPSHOT_WIRE_BYTES > end) {
+        const EntitySnapshot *e = &cur->ents[i];
+        bool has_grapple = (e->state_bits & SNAP_STATE_GRAPPLING) != 0;
+        int  ent_bytes   = ENTITY_SNAPSHOT_WIRE_BYTES
+                         + (has_grapple ? ENTITY_SNAPSHOT_GRAPPLE_BYTES : 0);
+        if (p + ent_bytes > end) {
             LOG_E("snapshot_encode: buffer overflow at ent %d/%d",
                   i, cur->ent_count);
             return 0;
         }
-        const EntitySnapshot *e = &cur->ents[i];
         /* Pack the EntitySnapshot fields explicitly (don't rely on
          * the C struct layout, which can pad differently across
          * compilers). 22 bytes total. */
@@ -189,6 +207,17 @@ int snapshot_encode(const SnapshotFrame *cur,
         *p++ = e->jetpack_id;
         *p++ = e->secondary_id;
         *p++ = e->ammo_secondary;
+        /* P06 — Optional grapple suffix (8 bytes when SNAP_STATE_GRAPPLING). */
+        if (has_grapple) {
+            *p++ = e->grapple_state;
+            *p++ = (uint8_t)e->grapple_anchor_mech;
+            *p++ = e->grapple_anchor_part;
+            *p++ = 0;  /* reserved */
+            *p++ = (uint8_t)e->grapple_anchor_x_q;
+            *p++ = (uint8_t)((uint16_t)e->grapple_anchor_x_q >> 8);
+            *p++ = (uint8_t)e->grapple_anchor_y_q;
+            *p++ = (uint8_t)((uint16_t)e->grapple_anchor_y_q >> 8);
+        }
     }
 
     return (int)(p - buf);
@@ -227,6 +256,9 @@ bool snapshot_decode(const uint8_t *buf, int len,
         LOG_E("snapshot_decode: count %u > MAX_MECHS", (unsigned)cnt);
         return false;
     }
+    /* Lower-bound check: every entity contributes at least the fixed
+     * 28-byte record. The optional 8-byte grapple suffix is checked
+     * per-entity below when its state_bits says it's present. */
     if (end - p < (int)cnt * ENTITY_SNAPSHOT_WIRE_BYTES) {
         LOG_E("snapshot_decode: short body (%d left, need %d)",
               (int)(end - p), (int)cnt * ENTITY_SNAPSHOT_WIRE_BYTES);
@@ -254,6 +286,19 @@ bool snapshot_decode(const uint8_t *buf, int len,
         e->jetpack_id     = *p++;
         e->secondary_id   = *p++;
         e->ammo_secondary = *p++;
+        /* P06 — Optional grapple suffix. */
+        if (e->state_bits & SNAP_STATE_GRAPPLING) {
+            if (end - p < ENTITY_SNAPSHOT_GRAPPLE_BYTES) {
+                LOG_E("snapshot_decode: short grapple suffix at ent %d", i);
+                return false;
+            }
+            e->grapple_state       = *p++;
+            e->grapple_anchor_mech = (int8_t)*p++;
+            e->grapple_anchor_part = *p++;
+            p++;  /* reserved */
+            e->grapple_anchor_x_q  = (int16_t)((uint16_t)(p[0] | (p[1] << 8))); p += 2;
+            e->grapple_anchor_y_q  = (int16_t)((uint16_t)(p[0] | (p[1] << 8))); p += 2;
+        }
     }
     out->ent_count = cnt;
     out->valid = true;
@@ -418,6 +463,23 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
         m->powerup_berserk_remaining = (e->state_bits & SNAP_STATE_BERSERK) ? 1.0f : 0.0f;
         m->powerup_invis_remaining   = (e->state_bits & SNAP_STATE_INVIS)   ? 1.0f : 0.0f;
         m->powerup_godmode_remaining = (e->state_bits & SNAP_STATE_GODMODE) ? 1.0f : 0.0f;
+        /* P06 — Grapple. Clients never allocate a constraint (the
+         * pull is felt through the snapshot's pelvis_pos updates);
+         * we just store state + anchor for the rope renderer. */
+        if (e->state_bits & SNAP_STATE_GRAPPLING) {
+            m->grapple.state          = e->grapple_state;
+            m->grapple.anchor_mech    = e->grapple_anchor_mech;
+            m->grapple.anchor_part    = e->grapple_anchor_part;
+            m->grapple.anchor_pos     = (Vec2){
+                (float)e->grapple_anchor_x_q,
+                (float)e->grapple_anchor_y_q,
+            };
+            m->grapple.constraint_idx = -1;
+        } else {
+            m->grapple.state          = GRAPPLE_IDLE;
+            m->grapple.anchor_mech    = -1;
+            m->grapple.constraint_idx = -1;
+        }
         if (e->state_bits & SNAP_STATE_JET) {
             m->anim_id = ANIM_JET;
         } else if (m->grounded) {

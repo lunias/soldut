@@ -1,0 +1,88 @@
+# m5_grapple_ceiling.shot — exercises the grapple/swing flow on a
+# purpose-built map (assets/maps/grapple_test.lvl) with a ceiling and
+# three grapple targets at different heights, so the swing physics
+# gets an environment the tutorial map can't provide.
+#
+# The .lvl is built by tools/editor/shots/grapple_test_map.shot —
+# run that FIRST. Layout:
+#   - 60×30 tiles = 1920×960 px world
+#   - Ceiling: y=0..64 (full width, grappable)
+#   - Floor:   y=896..960
+#   - Walls:   x=0..32, x=1888..1920
+#   - Beam   B: 600..900,  y=300..332     (mid-air horizontal beam)
+#   - Pillar C: 1300..1332, y=64..500     (hangs from ceiling)
+#   - Pillar D: 1700..1732, y=500..896    (floor-rooted)
+#
+# What this verifies (read the .log for SHOT_LOG transitions):
+#   1. Ceiling grapple from mid-air → swing → retract.
+#      With MIN_REST_LEN=100 the head should stay clear of the
+#      ceiling tile boundary (this is the "stuck in the ceiling"
+#      regression the user reported).
+#   2. Disconnect, fall to floor, walk under beam B, grapple it,
+#      swing.
+#   3. Chain re-fire mid-swing onto pillar C (BTN_FIRE while
+#      ATTACHED auto-releases + fires a new head).
+#   4. Final disconnect.
+
+window 1280 720
+seed 7 7
+out build/shots/m5_grapple_ceiling
+loadout - "Pulse Rifle" "Grappling Hook" Light Standard
+load_lvl assets/maps/grapple_test.lvl
+
+# Spawn mid-air below the ceiling so the first beat is a clean
+# straight-up grapple.
+spawn_at 400 200
+contact_sheet sheet cols 4 cell 480 270
+
+# ---- Beat 1: ceiling grapple + retract -----------------------------
+# Mech is in free-fall from spawn. Swap to grapple, fire straight up
+# at the ceiling. Distance ~150 px, well within range.
+at  10 shot t010_falling
+at  15 tap swap
+at  20 shot t020_secondary
+
+at  22 aim 400 40              # straight up into the ceiling
+at  25 tap fire
+at  40 shot t040_attached_ceiling
+
+# Hold W to retract toward the ceiling. Mech zip-lines up. With
+# MIN_REST_LEN=100 the head should sit ~40 px below the ceiling
+# tile boundary (anchor at y≈68 + min rest 100 = pelvis y≈168;
+# head ~120; head_top ~112; ceiling extends to y=64). 48 px
+# clearance at min retract.
+at  45 press jet
+at  90 shot t090_retracting
+at  95 release jet
+at 110 shot t110_after_retract
+
+# Disconnect.
+at 140 tap use
+at 160 shot t160_after_release
+
+# ---- Beat 2: walk right + grapple Beam B (mid-air) -----------------
+# Wait for the mech to land + run east to under the beam (x=750).
+# RUN_SPEED_PXS = 280 → 60 ticks of run = 280 px → from ~400 to ~680.
+# We hold a bit longer to clear the beam's leading edge.
+at 200 press right
+at 280 release right
+at 290 shot t290_under_beam
+
+at 295 aim 750 320             # beam B
+at 300 tap fire
+at 350 shot t350_beam_attached
+at 400 shot t400_beam_swing
+
+# ---- Beat 3: chain re-fire mid-swing onto Pillar C -----------------
+# Cooldown is 1.20 s = 72 ticks; last fire at t=300, eligible at
+# t=372. Aim toward pillar C and re-fire.
+at 380 aim 1300 480            # pillar C, near the bottom of the hang
+at 385 tap fire                # chain re-fire (release + new fire)
+at 430 shot t430_pillar_attached
+at 480 shot t480_pillar_swing
+
+# ---- Beat 4: final release -----------------------------------------
+at 520 tap use
+at 540 shot t540_final_released
+
+at 600 end

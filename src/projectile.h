@@ -61,3 +61,8 @@ void projectile_draw(const ProjectilePool *p, float alpha);
 void explosion_spawn(World *w, Vec2 pos, float radius, float damage,
                      float impulse, int owner_mech_id, int owner_team,
                      int weapon_id);
+
+/* P06 — Find the live PROJ_GRAPPLE_HEAD owned by `owner_mech_id` in
+ * the pool. Returns the slot index or -1. Used by render.c to draw the
+ * rope from the firer's hand to the in-flight head. */
+int projectile_find_grapple_head(const ProjectilePool *p, int owner_mech_id);

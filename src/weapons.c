@@ -174,6 +174,15 @@ static const Weapon g_weapons[WEAPON_COUNT] = {
         .mag_size = 1, .range_px = 600.0f,
         .recoil_impulse = 0.0f, .bink = 0.0f, .self_bink = 0.0f,
         .muzzle_offset = 18.0f,
+        /* P06 — head projectile params; mech_try_fire's WFIRE_GRAPPLE
+         * path reads these directly rather than going through
+         * weapons_spawn_projectiles (which is for damaging projectiles).
+         * Lifetime = range / speed = 0.5 s. */
+        .projectile_kind        = PROJ_GRAPPLE_HEAD,
+        .projectile_speed_pxs   = 1200.0f,
+        .projectile_life_sec    = 0.5f,
+        .projectile_drag        = 0.0f,
+        .projectile_grav_scale  = 0.0f,
     },
 };
 

@@ -1,0 +1,49 @@
+# m5_grapple.shot — Trooper swaps to Grappling Hook, fires diagonally,
+# the rope sticks, and the mech hangs at the hit-time rope length so
+# it can swing as a pendulum (no auto-contract — that pinned the mech
+# against whatever it grappled and gave the user no way to disconnect).
+# BTN_USE (E) releases the rope.
+#
+# Verifies (read from the .log next to the PNGs):
+#   - WFIRE_GRAPPLE on the secondary slot (BTN_SWAP, then BTN_FIRE)
+#   - PROJ_GRAPPLE_HEAD spawns + flies (grapple_fire)
+#   - On hit, grapple_attach fires (state → ATTACHED, anchor + L logged)
+#   - mech_step_drive emits per-second `grapple_swing` lines so we can
+#     see that `dist` stays close to `rest` instead of contracting to
+#     the old MIN_REST_LEN=80 px.
+#   - BTN_USE → grapple_release (state → IDLE).
+
+window 1280 720
+seed   6 6
+out    build/shots/m5_grapple
+loadout - "Pulse Rifle" "Grappling Hook" Light Standard
+contact_sheet sheet cols 4 cell 480 270
+
+# Park the player on the high right platform (top y=1024, pelvis ~y=984).
+spawn_at 2240 984
+# Aim down-left at the mid-map wall column (x=1760..1792, y=992..1152).
+# Distance ~474 px — well within the 600 px head range. We expect the
+# rope to be ~470 px long and HOLD at that length while the mech swings.
+aim 1780 1080
+
+at  10 shot t010_idle
+at  15 tap swap            # active slot becomes Grappling Hook
+at  20 shot t020_secondary
+
+at  25 tap fire            # WFIRE_GRAPPLE → spawn PROJ_GRAPPLE_HEAD
+at  28 shot t028_flight    # head in flight (rope FLYING)
+
+# By tick ~30–60 the head has either landed or expired. Either way the
+# state machine has transitioned away from FLYING.
+at  60 shot t060_attached  # ATTACHED → rope to anchor (hopefully)
+
+# Pendulum swing — gravity + the rope's max-length constraint together
+# give the mech a Tarzan-style swing. By tick 150 the body has swung
+# down-and-around the anchor; the rope length stays close to the
+# initial L (within a few px due to gravity oscillation).
+at 150 shot t150_swing
+
+at 180 tap use             # BTN_USE → grapple_release
+at 190 shot t190_released
+
+at 240 end

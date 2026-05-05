@@ -107,11 +107,49 @@ int main(int argc, char **argv) {
         SetTextureFilter(def_font.texture, TEXTURE_FILTER_BILINEAR);
     }
 
+    /* Parse CLI args: optional initial .lvl path (first non-flag arg)
+     * + the test-play loadout flags consumed by F5. Flag values without
+     * a partner (`--test-chassis` with no NAME) are ignored. */
+    TestPlayLoadout test_lo = {0};
+    const char *initial_lvl = NULL;
+    for (int i = 1; i < argc; ++i) {
+        const char *a = argv[i];
+        if (strcmp(a, "--test-chassis") == 0 && i + 1 < argc) {
+            snprintf(test_lo.chassis, sizeof test_lo.chassis, "%s", argv[++i]);
+        }
+        else if (strcmp(a, "--test-primary") == 0 && i + 1 < argc) {
+            snprintf(test_lo.primary, sizeof test_lo.primary, "%s", argv[++i]);
+        }
+        else if (strcmp(a, "--test-secondary") == 0 && i + 1 < argc) {
+            snprintf(test_lo.secondary, sizeof test_lo.secondary, "%s", argv[++i]);
+        }
+        else if (strcmp(a, "--test-armor") == 0 && i + 1 < argc) {
+            snprintf(test_lo.armor, sizeof test_lo.armor, "%s", argv[++i]);
+        }
+        else if (strcmp(a, "--test-jetpack") == 0 && i + 1 < argc) {
+            snprintf(test_lo.jetpack, sizeof test_lo.jetpack, "%s", argv[++i]);
+        }
+        else if (a[0] != '-' && !initial_lvl) {
+            initial_lvl = a;
+        }
+        /* Unknown flags are silently ignored (--shot is handled above
+         * in the early-exit loop and never reaches here). */
+    }
+    if (test_lo.chassis  [0] || test_lo.primary[0] || test_lo.secondary[0]
+     || test_lo.armor    [0] || test_lo.jetpack[0]) {
+        LOG_I("editor: F5 test-play loadout — chassis=%s primary=%s secondary=%s armor=%s jet=%s",
+              test_lo.chassis  [0] ? test_lo.chassis   : "(default)",
+              test_lo.primary  [0] ? test_lo.primary   : "(default)",
+              test_lo.secondary[0] ? test_lo.secondary : "(default)",
+              test_lo.armor    [0] ? test_lo.armor     : "(default)",
+              test_lo.jetpack  [0] ? test_lo.jetpack   : "(default)");
+    }
+
     EditorDoc doc;       doc_init(&doc);
     doc_new(&doc, EDITOR_DEFAULT_W, EDITOR_DEFAULT_H);
-    if (argc > 1) {
-        if (!doc_load(&doc, argv[1])) {
-            LOG_W("editor: could not open %s — starting blank", argv[1]);
+    if (initial_lvl) {
+        if (!doc_load(&doc, initial_lvl)) {
+            LOG_W("editor: could not open %s — starting blank", initial_lvl);
         }
     }
 
@@ -121,6 +159,14 @@ int main(int argc, char **argv) {
     FilesDialog files;   memset(&files, 0, sizeof files);
     MetaModal  meta;     memset(&meta, 0, sizeof meta);
     HelpModal  help;     memset(&help, 0, sizeof help);
+    /* Loadout modal — seeded from any --test-* CLI args parsed above so
+     * re-opening the modal mid-session shows the current selections. */
+    LoadoutModal loadout; memset(&loadout, 0, sizeof loadout);
+    {
+        LoadoutModal seed = {0};
+        ui_loadout_open(&seed, &test_lo);
+        for (int i = 0; i < LOADOUT_SLOT_COUNT; ++i) loadout.idx[i] = seed.idx[i];
+    }
 
     ToolKind active_tool = TOOL_TILE;
 
@@ -145,6 +191,16 @@ int main(int argc, char **argv) {
             if (IsKeyPressed(KEY_H)) ui_help_toggle(&help);
             if (help.open && IsKeyPressed(KEY_ESCAPE)) ui_help_close(&help);
             if (meta.open && IsKeyPressed(KEY_ESCAPE)) meta.open = false;
+            /* L opens the test-play loadout modal (toggle off too).
+             * Esc closes when open. Held-Ctrl never opens (Ctrl+L is
+             * unbound but we don't want it leaking into a tool key). */
+            if (!loadout.open && !meta.open && !help.open
+                && IsKeyPressed(KEY_L)) {
+                ui_loadout_open(&loadout, &test_lo);
+            }
+            if (loadout.open && IsKeyPressed(KEY_ESCAPE)) {
+                ui_loadout_close(&loadout);
+            }
         }
 
         /* ---- File dialog has top priority — eat all input ---------- */
@@ -212,6 +268,19 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        /* ---- Loadout modal ---------------------------------------- */
+        if (loadout.open) {
+            BeginDrawing();
+            ClearBackground(COL_BG);
+            BeginMode2D(view.cam);
+            draw_doc(&doc);
+            view_draw_grid(&view, &doc);
+            EndMode2D();
+            ui_loadout_modal_draw(&loadout, &test_lo, &D);
+            EndDrawing();
+            continue;
+        }
+
         /* ---- Universal verbs --------------------------------------- */
         if (ctrl_down() && IsKeyPressed(KEY_S)) {
             if (shift_down() || !doc.source_path[0]) {
@@ -247,7 +316,7 @@ int main(int argc, char **argv) {
             if (problems > 0) {
                 files_message(&files, "F5 blocked: validation", errs);
             } else {
-                play_test(&doc);
+                play_test(&doc, &test_lo);
             }
         }
 
@@ -273,7 +342,8 @@ int main(int argc, char **argv) {
         for (int k = KEY_A; k <= KEY_Z; ++k) {
             if (IsKeyPressed(k) && vt->on_key && !ctrl_down()) {
                 if (k != KEY_T && k != KEY_P && k != KEY_S && k != KEY_I &&
-                    k != KEY_A && k != KEY_D && k != KEY_M && k != KEY_H) {
+                    k != KEY_A && k != KEY_D && k != KEY_M && k != KEY_H
+                    && k != KEY_L) {
                     vt->on_key(&doc, &undo, &ctx, k);
                 }
             }
@@ -339,6 +409,11 @@ int main(int argc, char **argv) {
         EndMode2D();
 
         ui_draw_top_bar(&doc, &D);
+        /* The "[L] Loadout" button sits in the top bar to the left of
+         * the keyboard-shortcuts hint. Same effect as pressing L. */
+        if (ui_draw_loadout_button(&D)) {
+            ui_loadout_open(&loadout, &test_lo);
+        }
         /* Always open the meta modal when the user CLICKS the Meta
          * button, even if active_tool was already TOOL_META — the
          * earlier "if (picked != active_tool)" gate meant the second

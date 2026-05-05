@@ -1,0 +1,61 @@
+# tools/editor/shots/grapple_test_map.shot
+#
+# Programmatically builds a grapple-test map and saves it to
+# assets/maps/grapple_test.lvl. The companion game shot at
+# tests/shots/m5_grapple_ceiling.shot loads this .lvl via the new
+# `load_lvl` directive on game shotmode and exercises the swing /
+# retract / chain re-fire flow against a layout the tutorial map
+# can't provide (full ceiling + multiple grapple targets).
+#
+# Layout (60×30 tiles = 1920×960 px world):
+#   - Floor:       bottom 2 rows, full width
+#   - Ceiling:     top 2 rows, full width  (the player can grapple it)
+#   - Side walls:  full-height columns at x=0..32 and x=1888..1920
+#   - Beam B:      600..900, y=300..332     (mid-air horizontal beam)
+#   - Pillar C:    1300..1332, y=64..500    (hangs from the ceiling)
+#   - Pillar D:    1700..1732, y=500..896   (rises from the floor)
+#   - Spawn:       (300, 96)  — game shot overrides via spawn_at
+#
+# Note: the editor's `tile_fill_rect x0 y0 x1 y1` snaps to whole tiles
+# (floor on the start, ceil on the end), so x0=400/y0=400 → tile 12;
+# x1=432/y1=896 → tile 14 / 28. We keep target widths >= 32 so each
+# pillar is at least one tile, which is the smallest grappable surface.
+#
+# Pillar A (the original "tall floor pillar at x=400") was REMOVED
+# from this layout because it blocked the floor walk-path west to
+# east — the player would crash into it before reaching beam B.
+
+window 1280 800
+new 60 30
+ticks 30
+out build/shots/editor/grapple_test_map
+
+# ---- Outer shell --------------------------------------------------
+at 0 tool tile
+at 0 tile_flags solid
+at 0 tile_fill_rect 0    896 1920 960     # floor (full width)
+at 0 tile_fill_rect 0    0   1920 64      # ceiling (full width)
+at 0 tile_fill_rect 0    64  32   896     # left wall
+at 0 tile_fill_rect 1888 64  1920 896     # right wall
+
+# ---- Interior grapple targets -------------------------------------
+at 1 tile_fill_rect 600  300 900  332     # beam  B (mid-air horizontal)
+at 1 tile_fill_rect 1300 64  1332 500     # pillar C (hangs from ceiling)
+at 1 tile_fill_rect 1700 500 1732 896     # pillar D (floor-rooted)
+
+# ---- Spawn point --------------------------------------------------
+# Used when `spawn_at` is NOT supplied by the game shot. The game
+# shot we ship (tests/shots/m5_grapple_ceiling.shot) overrides this
+# via its own spawn_at to start the mech mid-air below the ceiling.
+at 2 spawn_add 300 856 0
+
+# ---- Sanity-assert + save -----------------------------------------
+at 3 dump
+at 3 validate
+at 3 assert spawns        == 1
+at 3 assert tiles_solid   >  0
+at 3 assert validate_problems == 0
+at 4 save assets/maps/grapple_test.lvl
+at 5 shot built
+
+at 8 end

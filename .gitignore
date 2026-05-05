@@ -28,3 +28,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Generated assets (editor shots + cook_maps write here; authored
+# .lvl files for shipped maps land at P17/P18 and will be tracked
+# then).
+assets/maps/

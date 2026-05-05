@@ -94,12 +94,24 @@ typedef struct {
     uint8_t  jetpack_id;
     uint8_t  secondary_id;
     uint8_t  ammo_secondary;
+    /* P06 — Grapple suffix (only present on the wire when state_bits
+     * has SNAP_STATE_GRAPPLING set). When the bit is clear, these
+     * fields are zero. Idle (state == GRAPPLE_IDLE) keeps the suffix
+     * absent so idle bandwidth stays flat. */
+    uint8_t  grapple_state;
+    int8_t   grapple_anchor_mech;
+    uint8_t  grapple_anchor_part;
+    int16_t  grapple_anchor_x_q;
+    int16_t  grapple_anchor_y_q;
 } EntitySnapshot;
 
 /* On-wire size of one EntitySnapshot.
  *   M3 = 22 (M2 size) + 5 = 27 bytes.
- *   P03 widens state_bits u8 → u16 = 28 bytes. */
-#define ENTITY_SNAPSHOT_WIRE_BYTES 28
+ *   P03 widens state_bits u8 → u16 = 28 bytes.
+ *   P06 adds an OPTIONAL 8-byte grapple suffix gated by
+ *     SNAP_STATE_GRAPPLING; the fixed-width minimum stays 28. */
+#define ENTITY_SNAPSHOT_WIRE_BYTES         28
+#define ENTITY_SNAPSHOT_GRAPPLE_BYTES       8
 
 enum {
     /* Original 8-bit set (M2). */
@@ -119,6 +131,7 @@ enum {
     SNAP_STATE_INVIS       = 1u <<  9,    /* powerup: render alpha-mod */
     SNAP_STATE_GODMODE     = 1u << 10,    /* powerup: ignore incoming damage */
     SNAP_STATE_IS_DUMMY    = 1u << 11,    /* practice dummy — skips arm-aim drive */
+    SNAP_STATE_GRAPPLING   = 1u << 12,    /* P06: trailing 8-byte grapple suffix follows entity record */
 };
 
 /* Bits used in the per-entity dirty mask when delta-encoding. (We
