@@ -31,9 +31,10 @@ P05 ─ Pickup system + Engineer + Burst SMG + practice dummy
 P06 ─ Grappling hook
 P07 ─ CTF mode
 P08 ─ Map sharing across the network
-P09 ─ BTN_FIRE_SECONDARY + keybinds + UI controls panel
 P08b ─ Custom map registry (scan assets/maps/, surface in lobby UI)
-       — independent of P09, can run in either order
+       — shipped 2026-05-05; resolved the "Custom map names not in
+       lobby rotation" trade-off (deleted from TRADE_OFFS.md).
+P09 ─ BTN_FIRE_SECONDARY + keybinds + UI controls panel
 
 P10 ─ Mech sprite atlas runtime + per-chassis bone distinctness
 P11 ─ Per-weapon visible art + two-handed foregrip

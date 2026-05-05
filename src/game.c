@@ -4,6 +4,7 @@
 #include "lobby.h"
 #include "map_cache.h"
 #include "map_download.h"
+#include "maps.h"
 #include "match.h"
 #include "particle.h"
 #include "projectile.h"
@@ -107,6 +108,13 @@ bool game_init(Game *g) {
         return false;
     }
     map_cache_init();
+
+    /* M5 P08b — populate the runtime map registry from the four
+     * code-built defaults plus every assets/maps/<name>.lvl on disk.
+     * Must run BEFORE config_load so config.c::map_id_from_name can
+     * resolve map_rotation entries by short_name (including custom
+     * maps). */
+    map_registry_init();
 
     g->mode = MODE_BOOT;
     g->tick = 0;

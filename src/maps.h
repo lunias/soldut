@@ -4,13 +4,24 @@
 #include "match.h"
 #include "world.h"
 
+#include <stdint.h>
+
 /*
- * maps — registry of M4 hard-coded maps.
+ * maps — runtime registry of playable maps.
  *
- * The proper .lvl loader + level editor lands at M5
- * (documents/07-level-design.md, documents/11-roadmap.md §M5). For M4 we
- * need the lobby/match flow to support map switching, so we ship three
- * code-built maps the lobby can rotate through.
+ * The four reserved indices (MAP_FOUNDRY..MAP_CROSSFIRE) are LOAD-BEARING
+ * for `build_fallback`'s code-built switch; they map to the three M4
+ * arenas plus the P07 CTF arena and seed the registry on every launch.
+ *
+ * P08b — `g_map_registry` is populated at startup from the four code-built
+ * defaults plus every `assets/maps/<name>.lvl` file the host finds on disk
+ * (display_name + mode_mask read from the file's META lump without a full
+ * level_load). A designer who saves `assets/maps/my_arena.lvl` from the
+ * editor sees `my_arena` in the lobby's map cycle on next launch.
+ *
+ * Wire format is unchanged — `MapDescriptor` carries `short_name + crc +
+ * size`, and `match.map_id` is a host-local index that the client uses
+ * only as a display hint (the descriptor is the truth).
  */
 
 typedef enum {
@@ -18,16 +29,43 @@ typedef enum {
     MAP_SLIPSTREAM,          /* taller layout, more vertical jet beats */
     MAP_REACTOR,             /* central pillar, two flanking platforms */
     MAP_CROSSFIRE,           /* M5 P07 — symmetric CTF arena, two team bases */
-    MAP_COUNT
+    MAP_BUILTIN_COUNT,       /* = 4; reserved indices for code-built fallbacks */
 } MapId;
 
+#define MAP_REGISTRY_MAX 32  /* hard cap on total maps (builtins + custom) */
+
 typedef struct MapDef {
-    MapId       id;
-    const char *short_name;
-    const char *display_name;
-    const char *blurb;
-    int         tile_w, tile_h;
+    int      id;                /* index into g_map_registry.entries */
+    char     short_name[24];    /* filename stem, lowercased, ASCII */
+    char     display_name[32];  /* META display, or short_name title-cased */
+    char     blurb[64];         /* META blurb, or "" (custom maps don't carry one) */
+    int      tile_w, tile_h;    /* from .lvl header (or code-built default) */
+    uint16_t mode_mask;         /* FFA=1, TDM=2, CTF=4 */
+    bool     has_lvl_on_disk;   /* false → code-built fallback only */
+    uint32_t file_crc;          /* 0 if no .lvl on disk */
+    uint32_t file_size;         /* 0 if no .lvl on disk */
 } MapDef;
+
+typedef struct MapRegistry {
+    MapDef entries[MAP_REGISTRY_MAX];
+    int    count;
+} MapRegistry;
+
+/* Process-global registry. Built once via `map_registry_init` (called
+ * from game_init); subsequent module calls (map_def, map_id_from_name,
+ * config_pick_map, lobby UI cycle) read from this. */
+extern MapRegistry g_map_registry;
+
+/* Populate registry: 4 code-built defaults first, then scan
+ * `assets/maps/<name>.lvl` and append (or override-by-short-name) every
+ * file found. Idempotent — safe to call multiple times for
+ * hot-reload-style "the editor just saved a file" rescans (P08b ships
+ * startup-only; rescan trigger is a future task). */
+void map_registry_init(void);
+
+/* Same as map_registry_init but scans a caller-supplied directory.
+ * Used by tests; production callers should use map_registry_init. */
+void map_registry_init_from(const char *maps_dir);
 
 const MapDef *map_def(int id);
 int           map_id_from_name(const char *name);

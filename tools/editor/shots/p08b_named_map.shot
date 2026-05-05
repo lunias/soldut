@@ -1,0 +1,38 @@
+# tools/editor/shots/p08b_named_map.shot — author a small custom .lvl
+# saved under a NON-RESERVED filename (`my_arena.lvl`).
+#
+# Companion to tools/editor/shots/p08_custom_map.shot which saves over
+# `foundry.lvl` to exercise the override path. This script proves the
+# P08b registry surfaces user-authored maps in the lobby UI WITHOUT
+# the designer having to overwrite one of the four reserved slots.
+#
+# 100×16 tiles → 3200×512 px world. Solid floor on the bottom strip,
+# two spawns: one near each side, both team 1 (FFA-friendly). Saved
+# to `assets/maps/my_arena.lvl` so the orchestrator can cd into the
+# host's tmp dir and have it land there.
+
+window 1280 720
+new 100 16
+ticks 80
+out p08b_named_map_out
+panels off
+contact_sheet p08b
+
+# ---- Paint a floor strip on row 14 (world y = 448..480) ----
+at 1  tool tile
+at 1  tile_flags solid
+at 2  tile_fill_rect 0 448 3200 480
+
+# ---- Two spawns, both team 1 (FFA-friendly) ----
+at 20 tool spawn
+at 20 spawn_team 1
+at 21 spawn_add  256  416 1
+at 22 spawn_add 2944  416 1
+
+# ---- Save + screenshot for visual review ----
+at 40 save assets/maps/my_arena.lvl
+at 41 assert dirty == 0
+at 41 assert spawns == 2
+at 41 assert tiles_solid == 100
+at 50 shot p08b_authored
+at 60 end
