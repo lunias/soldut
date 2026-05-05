@@ -13,7 +13,7 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-05** (post P08; map sharing across the network).
+Last updated: **2026-05-05** (post P08; map sharing across the network; P09b custom-map-registry trade-off pre-disclosed).
 
 ---
 
@@ -444,6 +444,36 @@ Last updated: **2026-05-05** (post P08; map sharing across the network).
   - Round-already-active mid-round join becomes a real flow.
   - A spectator mode is added (spectators connect mid-round and
     need correct pickup state from tick 0 of their connection).
+
+### Custom map names not in lobby rotation (P08 follow-up)
+
+- **What we did** — P08 ships the wire to stream any `.lvl` from server
+  to client (`MapDescriptor` carries crc + size + short_name; the cache
+  is content-addressed). But the host's lobby UI picks maps from a
+  hardcoded `MapId` enum with **only four entries** (Foundry / Slipstream /
+  Reactor / Crossfire). `config.map_rotation` accepts named maps via
+  `map_id_from_name`, which only matches that static table. There's no
+  scan of `assets/maps/` for arbitrary `.lvl` files. A designer who
+  saves `assets/maps/my_arena.lvl` from the editor (P04) can only get
+  it into a real round by **overwriting** one of the four reserved
+  filenames (e.g., saving as `foundry.lvl`), which silently displaces
+  the original. The editor's mkdir-p fix (post-P08) makes the save
+  itself work, but the UX of picking it for a multiplayer round is
+  hostile.
+- **Why** — P08's actual scope was the wire protocol + cache + download
+  path; the runtime registry that surfaces arbitrary `.lvl` files in
+  the lobby UI is a separable piece of work (~150 LOC across maps.c +
+  lobby_ui.c + a unit test). Bundling it into P08 would have widened
+  the change set and delayed the protocol landing. The wire is
+  content-addressed (CRC) not name-addressed, so the runtime registry
+  is purely a host-side UX layer — no protocol changes needed.
+- **Revisit when** — **Now-ish.** A spec for the fix lives at
+  `documents/m5/prompts/P09b-map-registry.md`: replace the static
+  `MapId` enum with a runtime `MapRegistry` populated from
+  `assets/maps/*.lvl` at process start, point every `MAP_COUNT` walk at
+  `g_map_registry.count`, and keep the four named constants
+  (MAP_FOUNDRY etc.) as load-bearing reserved indices for
+  `build_fallback`. Delete this entry when P09b lands.
 
 ### `.lvl` v1 format is locked in
 

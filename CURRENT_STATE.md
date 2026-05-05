@@ -1254,6 +1254,12 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
 
 ### Pending
 
+- **P09b** — Custom map registry: scan `assets/maps/*.lvl` at startup,
+  surface user-authored maps in the host's lobby UI cycle (rather
+  than overwriting one of the four reserved MapId slots). Spec at
+  `documents/m5/prompts/P09b-map-registry.md`. Independent of P09;
+  resolves the "Custom map names not in lobby rotation (P08
+  follow-up)" trade-off.
 - **P09–P14** — Controls (`BTN_FIRE_SECONDARY` / keybinds / UI panel),
   mech atlas runtime, weapon art, damage feedback, parallax / HUD /
   TTF / halftone / decal chunking, audio.
