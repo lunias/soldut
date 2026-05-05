@@ -22,6 +22,7 @@ void tool_ctx_init(ToolCtx *c) {
     c->pickup_variant  = PICK_HEALTH_S;
     c->ambi_kind    = AMBI_WIND;
     c->deco_layer   = 1;
+    c->flag_team    = 1;        /* P07 — start on RED so first click drops Red */
 }
 
 const char *tool_name(ToolKind k) {
@@ -32,6 +33,7 @@ const char *tool_name(ToolKind k) {
         case TOOL_PICKUP: return "Pickup";
         case TOOL_AMBI:   return "Ambient";
         case TOOL_DECO:   return "Deco";
+        case TOOL_FLAG:   return "Flag";
         case TOOL_META:   return "Meta";
         default:          return "?";
     }
@@ -361,6 +363,65 @@ static void deco_overlay(const EditorDoc *d, const ToolCtx *c, const EditorView 
     DrawRectangleLines((int)sm.x - 8, (int)sm.y - 8, 16, 16, (Color){255, 140, 240, 255});
 }
 
+/* ---- Flag tool (M5 P07) ------------------------------------------ */
+/* Drops a CTF flag base. team auto-toggles 1 ↔ 2 between placements so
+ * a designer who clicks twice drops one of each. Validation enforces
+ * "0 or one of each team" via tools/editor/validate.c. */
+
+static void flag_press(EditorDoc *d, UndoStack *u, ToolCtx *c, int wx, int wy) {
+    LvlFlag f = {0};
+    f.pos_x = (int16_t)wx;
+    f.pos_y = (int16_t)wy;
+    f.team  = c->flag_team;
+    arrput(d->flags, f);
+    undo_record_obj_add(u, UC_FLAG_ADD, (int)arrlen(d->flags) - 1, &f);
+    /* Auto-toggle so successive clicks place the other team. */
+    c->flag_team = (c->flag_team == 1) ? 2u : 1u;
+    /* Auto-set the META mode_mask CTF bit when both flags are placed.
+     * Same check as runtime ctf_init_round — Red AND Blue present. */
+    int red_n = 0, blue_n = 0;
+    int fn = (int)arrlen(d->flags);
+    for (int i = 0; i < fn; ++i) {
+        if (d->flags[i].team == 1) red_n++;
+        if (d->flags[i].team == 2) blue_n++;
+    }
+    if (red_n > 0 && blue_n > 0) {
+        d->meta.mode_mask |= (uint16_t)(1u << 2);   /* MATCH_MODE_CTF = 2 */
+    }
+    d->dirty = true;
+}
+
+static void flag_overlay(const EditorDoc *d, const ToolCtx *c, const EditorView *v) {
+    (void)d; (void)v;
+    Color cc = (c->flag_team == 1) ? (Color){240, 80, 80, 255}
+                                    : (Color){100, 160, 240, 255};
+    Vector2 m = view_screen_to_world(v, GetMousePosition());
+    Vector2 sm = view_snap(m, 4);
+    /* Mirror runtime render: rectangle staff + circle pennant top. */
+    DrawRectangle((int)sm.x - 6, (int)sm.y - 12, 12, 24, cc);
+    DrawCircle((int)sm.x, (int)sm.y - 14, 6, cc);
+    DrawCircleLines((int)sm.x, (int)sm.y, 22.0f / v->cam.zoom,
+                    (Color){cc.r, cc.g, cc.b, 200});
+}
+
+static bool flag_key(EditorDoc *d, UndoStack *u, ToolCtx *c, int key) {
+    (void)d; (void)u;
+    if (key == KEY_ONE || key == KEY_KP_1) { c->flag_team = 1; return true; }
+    if (key == KEY_TWO || key == KEY_KP_2) { c->flag_team = 2; return true; }
+    return false;
+}
+
+static int flag_nearest(const EditorDoc *d, int wx, int wy, int max_px) {
+    int best = -1; long best_d2 = (long)max_px * max_px + 1;
+    for (int i = 0; i < (int)arrlen(d->flags); ++i) {
+        long dx = d->flags[i].pos_x - wx;
+        long dy = d->flags[i].pos_y - wy;
+        long dd = dx * dx + dy * dy;
+        if (dd < best_d2) { best_d2 = dd; best = i; }
+    }
+    return best;
+}
+
 /* ---- Right-click handlers (delete-nearest / cancel) --------------- */
 
 static int spawn_nearest(const EditorDoc *d, int wx, int wy, int max_px) {
@@ -458,6 +519,28 @@ void tool_on_press_right(EditorDoc *d, UndoStack *u, ToolCtx *c, int wx, int wy,
             }
             break;
         }
+        case TOOL_FLAG: {
+            int idx = flag_nearest(d, wx, wy, 24);
+            if (idx >= 0) {
+                LvlFlag rec = d->flags[idx];
+                arrdel(d->flags, idx);
+                undo_record_obj_del(u, UC_FLAG_DEL, idx, &rec);
+                /* If we dropped below the Red+Blue threshold, clear the
+                 * CTF bit on mode_mask so saving doesn't ship stale
+                 * info. */
+                int red_n = 0, blue_n = 0;
+                int fn = (int)arrlen(d->flags);
+                for (int i = 0; i < fn; ++i) {
+                    if (d->flags[i].team == 1) red_n++;
+                    if (d->flags[i].team == 2) blue_n++;
+                }
+                if (red_n == 0 || blue_n == 0) {
+                    d->meta.mode_mask &= (uint16_t)~(1u << 2);   /* CTF bit */
+                }
+                d->dirty = true;
+            }
+            break;
+        }
         default: break;
     }
 }
@@ -501,6 +584,10 @@ static const ToolVTable g_vtables[TOOL_COUNT] = {
     [TOOL_DECO] = {
         .on_press = deco_press, .on_drag = noop_drag, .on_release = noop_release,
         .draw_overlay = deco_overlay, .on_key = noop_key,
+    },
+    [TOOL_FLAG] = {
+        .on_press = flag_press, .on_drag = noop_drag, .on_release = noop_release,
+        .draw_overlay = flag_overlay, .on_key = flag_key,
     },
     [TOOL_META] = {
         .on_press = NULL,  /* meta is a modal — main.c handles it */

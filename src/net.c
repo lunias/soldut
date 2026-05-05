@@ -21,6 +21,7 @@
 
 #include "net.h"
 
+#include "ctf.h"
 #include "decal.h"
 #include "game.h"
 #include "hash.h"
@@ -431,18 +432,146 @@ static void send_accept(void *peer, uint32_t client_id, int mech_id,
                  buf, (int)(p - buf));
 }
 
+/* ---- Flag state wire (P07) -------------------------------------------
+ *
+ * Used both by NET_MSG_FLAG_STATE broadcasts (event channel, on every
+ * state transition) AND embedded in NET_MSG_INITIAL_STATE so a joining
+ * client sees the correct flag positions immediately.
+ *
+ * Wire layout (variable size):
+ *   u8  flag_count          (0 = no CTF; 2 = both flags follow)
+ *   per-flag (12 bytes × flag_count):
+ *     u8  team              (MATCH_TEAM_RED or _BLUE)
+ *     u8  status            (FlagStatus)
+ *     i8  carrier_mech      (-1 = none)
+ *     u8  reserved
+ *     i16 pos_x_q           (1/4 px — home_pos for HOME, dropped_pos for
+ *                            DROPPED, ignored for CARRIED)
+ *     i16 pos_y_q
+ *     u16 return_in_ticks   (DROPPED: ticks-from-now until auto-return)
+ *     u16 reserved
+ *
+ * Total broadcast: 1 (tag) + 1 + 24 = 26 bytes when both flags present.
+ * Bandwidth: ~6 events/min × 26 B × 16 peers ≈ 42 B/s aggregate. */
+#define FLAG_STATE_REC_BYTES   12
+#define FLAG_STATE_MAX_BYTES   (1 + 2 * FLAG_STATE_REC_BYTES)
+
+static int encode_flag_state(const World *w, uint8_t *p_out) {
+    uint8_t *p = p_out;
+    int n = (w->flag_count > 2) ? 2 : w->flag_count;
+    if (n < 0) n = 0;
+    w_u8(&p, (uint8_t)n);
+    for (int f = 0; f < n; ++f) {
+        const Flag *fl = &w->flags[f];
+        Vec2 pos;
+        switch ((FlagStatus)fl->status) {
+            case FLAG_HOME:    pos = fl->home_pos;    break;
+            case FLAG_DROPPED: pos = fl->dropped_pos; break;
+            default:           pos = (Vec2){ 0.0f, 0.0f }; break;
+        }
+        float qx = pos.x * 4.0f, qy = pos.y * 4.0f;
+        if (qx >  32760.0f) qx =  32760.0f;
+        if (qx < -32760.0f) qx = -32760.0f;
+        if (qy >  32760.0f) qy =  32760.0f;
+        if (qy < -32760.0f) qy = -32760.0f;
+        int16_t pxq = (int16_t)(qx < 0 ? qx - 0.5f : qx + 0.5f);
+        int16_t pyq = (int16_t)(qy < 0 ? qy - 0.5f : qy + 0.5f);
+        uint16_t return_in = 0;
+        if (fl->status == FLAG_DROPPED && fl->return_at_tick > w->tick) {
+            uint64_t diff = fl->return_at_tick - w->tick;
+            return_in = (diff > 0xFFFFu) ? 0xFFFFu : (uint16_t)diff;
+        }
+        w_u8 (&p, fl->team);
+        w_u8 (&p, fl->status);
+        w_u8 (&p, (uint8_t)fl->carrier_mech);
+        w_u8 (&p, 0);
+        w_u16(&p, (uint16_t)pxq);
+        w_u16(&p, (uint16_t)pyq);
+        w_u16(&p, return_in);
+        w_u16(&p, 0);
+    }
+    return (int)(p - p_out);
+}
+
+/* Decode flag-state bytes into `w`. Returns bytes consumed, or 0 on
+ * malformed input. Sets w->flag_count and w->flags[] for the records
+ * actually present. */
+static int decode_flag_state(const uint8_t *in, int in_len, World *w) {
+    if (in_len < 1) return 0;
+    const uint8_t *r = in;
+    uint8_t n = r_u8(&r);
+    if (n > 2) return 0;
+    int need = 1 + (int)n * FLAG_STATE_REC_BYTES;
+    if (in_len < need) return 0;
+    w->flag_count = (int)n;
+    for (int f = 0; f < (int)n; ++f) {
+        Flag *fl = &w->flags[f];
+        fl->team           = r_u8(&r);
+        fl->status         = r_u8(&r);
+        fl->carrier_mech   = (int8_t)r_u8(&r);
+        (void)r_u8(&r);
+        int16_t pxq        = (int16_t)r_u16(&r);
+        int16_t pyq        = (int16_t)r_u16(&r);
+        uint16_t return_in = r_u16(&r);
+        (void)r_u16(&r);
+        Vec2 pos = { (float)pxq / 4.0f, (float)pyq / 4.0f };
+        if (fl->status == FLAG_HOME) {
+            fl->home_pos = pos;
+        } else if (fl->status == FLAG_DROPPED) {
+            fl->dropped_pos    = pos;
+            fl->return_at_tick = w->tick + (uint64_t)return_in;
+        }
+        /* CARRIED: position is derived from the carrier mech's chest at
+         * draw time; nothing to update here. */
+    }
+    return need;
+}
+
+void net_server_broadcast_flag_state(NetState *ns, const struct World *w) {
+    if (!ns || !w || ns->role != NET_ROLE_SERVER) return;
+    if (w->flag_count <= 0) return;
+    uint8_t buf[1 + FLAG_STATE_MAX_BYTES];
+    uint8_t *p = buf;
+    w_u8(&p, NET_MSG_FLAG_STATE);
+    int n = encode_flag_state(w, p);
+    p += n;
+    ENetPacket *pkt = enet_packet_create(buf, (size_t)(p - buf),
+                                          ENET_PACKET_FLAG_RELIABLE);
+    enet_host_broadcast((ENetHost *)ns->enet_host, NET_CH_EVENT, pkt);
+    ns->bytes_sent += (uint32_t)(p - buf);
+    ns->packets_sent++;
+}
+
+static void client_handle_flag_state(NetState *ns, const uint8_t *body,
+                                     int blen, Game *g)
+{
+    (void)ns;
+    int n = decode_flag_state(body, blen, &g->world);
+    if (n <= 0) {
+        LOG_W("client: malformed FLAG_STATE (%d bytes)", blen);
+    }
+}
+
 /* ACCEPT is followed by INITIAL_STATE which carries the lobby slot
  * table + match state so the client can render the lobby UI. The
  * world snapshot stream begins only at ROUND_START — clients don't
- * need world geometry until then. */
+ * need world geometry until then.
+ *
+ * P07: appends an optional flag-state suffix so a client joining
+ * mid-CTF-round (only possible in future flows; M4 parks joiners in
+ * the lobby) sees correct flag positions immediately. The suffix is
+ * variable-length: 1 byte flag_count + flag_count*12. flag_count = 0
+ * outside CTF rounds; the trailing byte still ships. */
 static void send_initial_state(void *peer, const Game *g) {
-    enum { CAP = 4 + LOBBY_LIST_WIRE_BYTES + MATCH_SNAPSHOT_WIRE_BYTES };
+    enum { CAP = 1 + 4 + LOBBY_LIST_WIRE_BYTES + MATCH_SNAPSHOT_WIRE_BYTES + FLAG_STATE_MAX_BYTES };
     uint8_t buf[CAP];
     uint8_t *p = buf;
     w_u8 (&p, NET_MSG_INITIAL_STATE);
     w_u32(&p, SOLDUT_PROTOCOL_ID);            /* echo so version errors show twice */
     lobby_encode_list(&g->lobby, p);          p += LOBBY_LIST_WIRE_BYTES;
     match_encode     (&g->match, p);          p += MATCH_SNAPSHOT_WIRE_BYTES;
+    int fs_n = encode_flag_state(&g->world, p);
+    p += fs_n;
     enet_send_to(peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
                  buf, (int)(p - buf));
 }
@@ -611,6 +740,8 @@ static void server_handle_lobby_team(NetPeer *p, const uint8_t *body,
     if (team < 0 || team >= MATCH_TEAM_COUNT) return;
     /* In FFA mode, force everyone to team 1. */
     if (g->match.mode == MATCH_MODE_FFA && team != MATCH_TEAM_NONE) team = MATCH_TEAM_FFA;
+    LOG_I("server: lobby team change peer=%u slot=%d team=%d",
+          (unsigned)p->client_id, slot, team);
     lobby_set_team(&g->lobby, slot, team);
 }
 
@@ -768,6 +899,15 @@ static void client_handle_initial_state(NetState *ns, const uint8_t *body,
     lobby_decode_list(&g->lobby, r);    r += LOBBY_LIST_WIRE_BYTES;
     match_decode    (&g->match, r);     r += MATCH_SNAPSHOT_WIRE_BYTES;
 
+    /* P07 — optional flag-state suffix. Decoder consumes only what's
+     * actually present; missing bytes (older host that doesn't ship
+     * the suffix) leaves world.flag_count unchanged. */
+    int remaining = blen - (int)(r - body);
+    if (remaining > 0) {
+        int n = decode_flag_state(r, remaining, &g->world);
+        if (n > 0) r += n;
+    }
+
     /* Map will be built when ROUND_START arrives. For now we keep the
      * world empty so the lobby UI has something to draw against. */
     g->world.authoritative = false;
@@ -838,6 +978,13 @@ static void client_handle_round_start(const uint8_t *body, int blen, Game *g) {
      * them with SNAP_STATE_IS_DUMMY set. Subsequent transient pickups
      * (engineer repair packs) arrive via NET_MSG_PICKUP_STATE. */
     pickup_init_round(&g->world);
+    /* P07 — populate flags[] from the just-loaded level. Same shape as
+     * pickups: both sides run ctf_init_round so home_pos is locally
+     * available without waiting on a network event. Subsequent state
+     * transitions arrive via NET_MSG_FLAG_STATE. Mirror the mode onto
+     * World so mech.c (which doesn't see Game) can branch in mech_kill. */
+    g->world.match_mode_cached = (int)g->match.mode;
+    ctf_init_round(&g->world, g->match.mode);
     g->mode = MODE_MATCH;
     LOG_I("client: ROUND_START map=%d mode=%s",
           g->match.map_id, match_mode_name(g->match.mode));
@@ -970,7 +1117,7 @@ static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen
      * tracer / spark FX for them. Replaying here would double up. */
     if ((int)shooter == g->world.local_mech_id) return;
 
-    Vec2 origin = { (float)oxq / 8.0f, (float)oyq / 8.0f };
+    Vec2 origin = { (float)oxq / 4.0f, (float)oyq / 4.0f };
     Vec2 dir    = { (float)dxq / 32767.0f, (float)dyq / 32767.0f };
 
     const Weapon *wpn = weapon_def((int)weapon);
@@ -1081,7 +1228,7 @@ static void client_handle_pickup_state(NetState *ns, const uint8_t *body, int bl
         };
     }
     PickupSpawner *s = &p->items[spawner_id];
-    s->pos               = (Vec2){ (float)pxq / 8.0f, (float)pyq / 8.0f };
+    s->pos               = (Vec2){ (float)pxq / 4.0f, (float)pyq / 4.0f };
     s->kind              = kind;
     s->variant           = variant;
     s->state             = state;
@@ -1101,7 +1248,7 @@ static void client_handle_hit_event(NetState *ns, const uint8_t *body, int blen,
     int16_t  dyq    = (int16_t)r_u16(&r);
     uint8_t  dmg    = r_u8 (&r);
     /* Dequant. */
-    Vec2 hp  = { (float)pxq / 8.0f, (float)pyq / 8.0f };
+    Vec2 hp  = { (float)pxq / 4.0f, (float)pyq / 4.0f };
     Vec2 dir = { (float)dxq / 32767.0f, (float)dyq / 32767.0f };
     /* Spawn FX. Same shape as mech_apply_damage on the server: 8
      * blood + 4 sparks per hit, scaled lightly with damage so a
@@ -1382,6 +1529,8 @@ static void client_dispatch_event(NetState *ns, Game *g, ENetEvent *ev) {
                     client_handle_fire_event(ns, body, blen, g); break;
                 case NET_MSG_PICKUP_STATE:
                     client_handle_pickup_state(ns, body, blen, g); break;
+                case NET_MSG_FLAG_STATE:
+                    client_handle_flag_state(ns, body, blen, g); break;
                 case NET_MSG_LOBBY_LIST:
                     client_handle_lobby_list(body, blen, g); break;
                 case NET_MSG_LOBBY_SLOT_UPDATE:
@@ -1527,7 +1676,7 @@ void net_server_broadcast_kill(NetState *ns, int killer_mech_id,
  *   u8  type = NET_MSG_FIRE_EVENT
  *   u16 shooter_mech_id
  *   u8  weapon_id
- *   i16 origin_x_q  (1/8 px, same quant as snapshot pos)
+ *   i16 origin_x_q  (1/4 px, same quant as snapshot pos)
  *   i16 origin_y_q
  *   i16 dir_x_q     (Q1.15 normalized direction)
  *   i16 dir_y_q
@@ -1537,8 +1686,8 @@ void net_server_broadcast_fire(NetState *ns, int shooter_mech_id, int weapon_id,
                                float dir_x, float dir_y)
 {
     if (ns->role != NET_ROLE_SERVER) return;
-    float qx = origin_x * 8.0f;
-    float qy = origin_y * 8.0f;
+    float qx = origin_x * 4.0f;
+    float qy = origin_y * 4.0f;
     if (qx >  32760.0f) qx =  32760.0f;
     if (qx < -32760.0f) qx = -32760.0f;
     if (qy >  32760.0f) qy =  32760.0f;
@@ -1569,7 +1718,7 @@ void net_server_broadcast_fire(NetState *ns, int shooter_mech_id, int weapon_id,
  *   u8  type = NET_MSG_HIT_EVENT
  *   u16 victim_mech_id
  *   u8  hit_part (PART_*)
- *   i16 pos_x_q  (1/8 px, same quant as snapshot pos)
+ *   i16 pos_x_q  (1/4 px, same quant as snapshot pos)
  *   i16 pos_y_q
  *   i16 dir_x_q  (Q1.15 — multiply by 32767, normalized direction)
  *   i16 dir_y_q
@@ -1580,9 +1729,9 @@ void net_server_broadcast_hit(NetState *ns, int victim_mech_id, int hit_part,
                               int damage)
 {
     if (ns->role != NET_ROLE_SERVER) return;
-    /* Quantize pos at 1/8 px (matches snapshot pos_q). */
-    float qx = pos_x * 8.0f;
-    float qy = pos_y * 8.0f;
+    /* Quantize pos at 1/4 px (matches snapshot pos_q). */
+    float qx = pos_x * 4.0f;
+    float qy = pos_y * 4.0f;
     if (qx >  32760.0f) qx =  32760.0f;
     if (qx < -32760.0f) qx = -32760.0f;
     if (qy >  32760.0f) qy =  32760.0f;
@@ -1619,7 +1768,7 @@ void net_server_broadcast_hit(NetState *ns, int victim_mech_id, int hit_part,
  *   u8  reserved
  *   u64 available_at_tick    (server tick when COOLDOWN expires;
  *                             UINT64_MAX = permanently consumed)
- *   i16 pos_x_q              (1/8 px — only meaningful for transients
+ *   i16 pos_x_q              (1/4 px — only meaningful for transients
  *                             but always shipped so the client can
  *                             populate fresh entries uniformly)
  *   i16 pos_y_q
@@ -1638,8 +1787,8 @@ void net_server_broadcast_pickup_state(NetState *ns, int spawner_id,
 {
     if (!ns || !s || ns->role != NET_ROLE_SERVER) return;
     if (spawner_id < 0 || spawner_id > 255) return;
-    float qx = s->pos.x * 8.0f;
-    float qy = s->pos.y * 8.0f;
+    float qx = s->pos.x * 4.0f;
+    float qy = s->pos.y * 4.0f;
     if (qx >  32760.0f) qx =  32760.0f;
     if (qx < -32760.0f) qx = -32760.0f;
     if (qy >  32760.0f) qy =  32760.0f;

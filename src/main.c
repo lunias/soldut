@@ -1,7 +1,9 @@
 #include "config.h"
+#include "ctf.h"
 #include "decal.h"
 #include "game.h"
 #include "level.h"
+#include "level_io.h"
 #include "lobby.h"
 #include "lobby_ui.h"
 #include "log.h"
@@ -62,6 +64,9 @@ typedef struct {
     char        armor[16];
     char        jetpack[16];
     char        test_play_lvl[256];   /* M5 P04 — editor F5 hands us a .lvl path */
+    char        mode_override[8];     /* M5 P07 — --mode <ffa|tdm|ctf>, overrides
+                                       * the test-play META auto-detect. Empty
+                                       * means "use the auto-detect path". */
     bool        friendly_fire;
     bool        skip_title;
     bool        ff_set;
@@ -127,6 +132,14 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
             snprintf(out->test_play_lvl, sizeof out->test_play_lvl, "%s", argv[++i]);
             out->mode = LAUNCH_HOST;
             out->skip_title = true;
+        }
+        /* M5 P07 — explicit match-mode override for test-play. The
+         * editor's loadout modal forwards this so a designer can stress
+         * the same .lvl in FFA / TDM / CTF without round-tripping
+         * through META edits. Applies AFTER the META auto-detect runs,
+         * so an explicit pick wins over the .lvl's mode_mask hint. */
+        else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
+            snprintf(out->mode_override, sizeof out->mode_override, "%s", argv[++i]);
         }
     }
 }
@@ -224,6 +237,17 @@ static void broadcast_new_fires(Game *g) {
     g_firefeed_processed = cur;
 }
 
+/* Server: ship CTF flag state when ctf transitions have flipped the
+ * dirty bit. Single broadcast per tick at most — coalesces same-tick
+ * pickup+capture pairs. ctf operations themselves don't broadcast;
+ * keeping that here means ctf.c stays independent of net.c. */
+static void broadcast_flag_state_if_dirty(Game *g) {
+    if (g->net.role != NET_ROLE_SERVER) return;
+    if (!g->world.flag_state_dirty) return;
+    net_server_broadcast_flag_state(&g->net, &g->world);
+    g->world.flag_state_dirty = false;
+}
+
 /* Server: drain pickup-state events queued by pickup_step /
  * pickup_spawn_transient. Each event ships the full spawner record
  * (20 bytes) so clients can both mirror state transitions on level-
@@ -280,10 +304,43 @@ static void start_round(Game *g) {
     /* Pick map + mode from rotation. */
     g->match.map_id = config_pick_map (&g->config, g->round_counter);
     g->match.mode   = config_pick_mode(&g->config, g->round_counter);
+
+    /* P07 — CTF mode-mask validation. If the rotation lands on CTF and
+     * the picked map's META.mode_mask doesn't allow CTF (or the map
+     * doesn't carry a Red+Blue flag pair), demote the round to TDM
+     * rather than skip silently — that way the players still get a
+     * round on the same map; CTF resumes when the rotation hits a
+     * compatible map. We can't read mode_mask before building the
+     * level (it's in the .lvl META), so we build first, then validate,
+     * then rebuild. The double build is cheap (small maps) and only
+     * happens when CTF is selected. */
+    if (g->match.mode == MATCH_MODE_CTF && !g->test_play_lvl[0]) {
+        arena_reset(&g->level_arena);
+        map_build((MapId)g->match.map_id, &g->world, &g->level_arena);
+        bool mode_ok = (g->world.level.meta.mode_mask & (1u << MATCH_MODE_CTF)) != 0;
+        bool flags_ok = (g->world.level.flag_count == 2 && g->world.level.flags);
+        if (!mode_ok || !flags_ok) {
+            LOG_W("start_round: map %s doesn't support CTF (mode_mask=0x%x flag_count=%d) "
+                  "— demoting to TDM",
+                  map_def(g->match.map_id)->short_name,
+                  (unsigned)g->world.level.meta.mode_mask,
+                  g->world.level.flag_count);
+            g->match.mode = MATCH_MODE_TDM;
+        }
+    }
+
     /* Re-derive limits from config to account for mode-rotation. */
     g->match.score_limit  = g->config.score_limit;
     g->match.time_limit   = g->config.time_limit;
     g->match.friendly_fire= g->config.friendly_fire;
+    /* P07 — CTF default score limit is 5 captures (per the design
+     * canon), much smaller than the FFA default of 25 kills. If the
+     * config's score_limit looks like the FFA default (>= 25), assume
+     * the host hasn't customized for CTF and clamp to FLAG_CAPTURE_DEFAULT.
+     * A host who explicitly sets score_limit=10 in soldut.cfg keeps 10. */
+    if (g->match.mode == MATCH_MODE_CTF && g->match.score_limit >= 25) {
+        g->match.score_limit = FLAG_CAPTURE_DEFAULT;
+    }
     /* FFA mode: every player is on team 1 (MATCH_TEAM_FFA aliases
      * MATCH_TEAM_RED). The friendly-fire check in mech_apply_damage
      * compares teams and drops same-team hits when ff is off — so
@@ -296,7 +353,9 @@ static void start_round(Game *g) {
 
     /* Build map. M5 P04: in test-play mode, ignore the rotation and
      * reload the scratch .lvl so successive rounds keep using the
-     * editor's map. */
+     * editor's map. The CTF validation above may have already built
+     * the level; rebuild unconditionally here so the slate is clean
+     * (arena reset wipes the previous build's allocations). */
     arena_reset(&g->level_arena);
     if (g->test_play_lvl[0]) {
         map_build_from_path(&g->world, &g->level_arena, g->test_play_lvl);
@@ -306,12 +365,90 @@ static void start_round(Game *g) {
     decal_init((int)level_width_px(&g->world.level),
                (int)level_height_px(&g->world.level));
 
+    /* P07 — TDM/CTF team auto-balance. In FFA the lobby_add_slot
+     * default `team = MATCH_TEAM_FFA` (= 1 = RED) is correct. In
+     * TDM/CTF that puts everyone on RED, which makes CTF never trigger
+     * a touch transition (same-team mech walking through their own
+     * flag = no-op) AND breaks combat (same-team friendly_fire = off
+     * by default in CTF). Force a deterministic split: in-use slots go
+     * RED / BLUE / RED / BLUE / ... by slot index, skipping spectators
+     * (team == NONE). Players who change team via UI between rounds
+     * keep their choice — but if the mode flipped between rounds, the
+     * old assignment may not be valid (e.g., FFA default wins
+     * everyone), so we respect EXPLICIT RED/BLUE choices and
+     * reassign anything else.
+     *
+     * **MUST run before lobby_spawn_round_mechs** — that helper reads
+     * `slot.team` and bakes it into `mech.team`, which is what
+     * mech_apply_damage's friendly-fire check uses. Running balance
+     * AFTER the spawn means the mechs were already created on RED
+     * and shooting any other player gets dropped as same-team. */
+    if (g->match.mode == MATCH_MODE_TDM || g->match.mode == MATCH_MODE_CTF) {
+        int red = 0, blue = 0;
+        /* First pass: count slots that already have an explicit
+         * RED/BLUE choice, leaving them alone. */
+        for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+            LobbySlot *s = &g->lobby.slots[i];
+            if (!s->in_use) continue;
+            if (s->team == MATCH_TEAM_RED)  red++;
+            else if (s->team == MATCH_TEAM_BLUE) blue++;
+        }
+        /* Second pass: assign anyone who isn't on RED/BLUE/NONE to the
+         * smaller team (slot index breaks ties).
+         *
+         * Note: MATCH_TEAM_FFA aliases MATCH_TEAM_RED, so slots whose
+         * team is the FFA-default would already be counted as RED in
+         * the first pass. To break the everyone-on-RED problem, we do
+         * a third equal-out pass below. */
+        for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+            LobbySlot *s = &g->lobby.slots[i];
+            if (!s->in_use) continue;
+            if (s->team == MATCH_TEAM_NONE) continue;
+            if (s->team == MATCH_TEAM_RED || s->team == MATCH_TEAM_BLUE) continue;
+            int target = (red <= blue) ? MATCH_TEAM_RED : MATCH_TEAM_BLUE;
+            s->team = target;
+            if (target == MATCH_TEAM_RED) red++; else blue++;
+        }
+        /* Third pass: equal-out. If RED has 2+ more than BLUE, walk
+         * the slots in reverse and reassign until balanced. Reverse so
+         * slot 0 (the host) stays put. The auto-balance is reset only
+         * when |red - blue| > 1; explicit player picks (which set the
+         * team explicitly) survive single-step imbalance. */
+        while (red - blue >= 2) {
+            for (int i = MAX_LOBBY_SLOTS - 1; i >= 0; --i) {
+                LobbySlot *s = &g->lobby.slots[i];
+                if (!s->in_use) continue;
+                if (s->team != MATCH_TEAM_RED) continue;
+                s->team = MATCH_TEAM_BLUE;
+                red--; blue++;
+                break;
+            }
+            if (red - blue < 2) break;
+        }
+        while (blue - red >= 2) {
+            for (int i = MAX_LOBBY_SLOTS - 1; i >= 0; --i) {
+                LobbySlot *s = &g->lobby.slots[i];
+                if (!s->in_use) continue;
+                if (s->team != MATCH_TEAM_BLUE) continue;
+                s->team = MATCH_TEAM_RED;
+                blue--; red++;
+                break;
+            }
+            if (blue - red < 2) break;
+        }
+        LOG_I("match: %s team auto-balance → red=%d blue=%d",
+              match_mode_name(g->match.mode), red, blue);
+        g->lobby.dirty = true;
+    }
+
     /* Spawn mechs for every active slot. lobby_spawn_round_mechs sets
-     * each slot's mech_id; mark the table dirty so the next net_poll
-     * iteration broadcasts the updated mapping to clients. The client
-     * uses slot.mech_id to resolve its own world.local_mech_id —
-     * without this it stays at -1, the camera doesn't follow, and the
-     * client renders a black screen. */
+     * each slot's mech_id and reads slot.team to set mech.team; mark
+     * the table dirty so the next net_poll iteration broadcasts the
+     * updated mapping to clients. The client uses slot.mech_id to
+     * resolve its own world.local_mech_id — without this it stays at
+     * -1, the camera doesn't follow, and the client renders a black
+     * screen. (Auto-balance above MUST have happened first or every
+     * mech ends up on the FFA-default RED team.) */
     lobby_spawn_round_mechs(&g->lobby, &g->world,
                             g->match.map_id, g->local_slot_id,
                             g->match.mode);
@@ -327,6 +464,14 @@ static void start_round(Game *g) {
     g->world.pickupfeed_count = 0;
     g_pickupfeed_processed = 0;
 
+    /* P07 — populate flags[] from level.flags (only when mode == CTF;
+     * ctf_init_round zeroes flag_count for other modes). Mirror the
+     * mode onto World so mech.c can branch (mech_kill → drop). The
+     * client runs the same path from client_handle_round_start. */
+    g->world.match_mode_cached = (int)g->match.mode;
+    ctf_init_round(&g->world, g->match.mode);
+    g->world.flag_state_dirty = false;
+
     match_begin_round(&g->match);
     g->mode = MODE_MATCH;
     g_killfeed_processed = g->world.killfeed_count;
@@ -338,6 +483,14 @@ static void start_round(Game *g) {
         net_server_broadcast_lobby_list  (&g->net, &g->lobby);
         g->lobby.dirty = false;
         net_server_broadcast_round_start (&g->net, &g->match);
+        /* P07 — initial flag state. Both sides ran ctf_init_round so
+         * home_pos is locally available; this broadcast is mostly a
+         * sanity rebroadcast (status=HOME / carrier=-1) but covers
+         * any odd race + matches the pickup pattern. No-op when not
+         * in CTF mode (flag_count == 0). */
+        if (g->world.flag_count > 0) {
+            net_server_broadcast_flag_state(&g->net, &g->world);
+        }
     }
     LOG_I("match_flow: round %d begin (mode=%s map=%s)",
           g->round_counter,
@@ -464,10 +617,16 @@ static void host_match_flow_step(Game *g, float dt) {
             }
             break;
         case MATCH_PHASE_ACTIVE: {
+            /* P07 — CTF tick (auto-return + touch detection + capture).
+             * Runs before kills are applied so a kill that happens to
+             * coincide with a flag touch sees the post-touch state.
+             * No-op outside CTF rounds. */
+            ctf_step(g, dt);
             apply_new_kills(g);
             broadcast_new_hits(g);
             broadcast_new_fires(g);
             broadcast_new_pickups(g);
+            broadcast_flag_state_if_dirty(g);
             /* End on score limit (FFA = any per-player slot >= cap). */
             bool end = false;
             if (g->match.mode == MATCH_MODE_FFA) {
@@ -648,11 +807,76 @@ int main(int argc, char **argv) {
     if (args.test_play_lvl[0]) {
         snprintf(game.test_play_lvl, sizeof game.test_play_lvl, "%s",
                  args.test_play_lvl);
-        game.config.mode               = MATCH_MODE_FFA;
+        /* P07 — peek the .lvl's META.mode_mask + flag_count so F5 from
+         * the editor on a CTF-capable map runs as CTF (with 2 flags
+         * placed and the META CTF bit set). Without this, every
+         * test-play hardcoded FFA and CTF maps couldn't be tested via
+         * F5 at all. The peek mutates g->world.level temporarily; the
+         * real load happens later in bootstrap_host / start_round. */
+        MatchModeId tp_mode = MATCH_MODE_FFA;
+        bool        tp_ff   = true;
+        int         tp_score= 50;
+        {
+            LvlResult r = level_load(&game.world, &game.level_arena,
+                                      args.test_play_lvl);
+            if (r == LVL_OK) {
+                uint16_t mm = game.world.level.meta.mode_mask;
+                bool have_ctf_pair = (game.world.level.flag_count == 2 &&
+                                      game.world.level.flags);
+                if ((mm & (1u << MATCH_MODE_CTF)) && have_ctf_pair) {
+                    tp_mode = MATCH_MODE_CTF;
+                    /* CTF: friendly_fire OFF (same-team can't shoot),
+                     * score_limit clamped to FLAG_CAPTURE_DEFAULT (5). */
+                    tp_ff    = false;
+                    tp_score = FLAG_CAPTURE_DEFAULT;
+                    LOG_I("test-play: detected CTF map (mode_mask=0x%x, "
+                          "flag_count=%d) — running CTF mode",
+                          (unsigned)mm, game.world.level.flag_count);
+                } else if ((mm & (1u << MATCH_MODE_TDM)) &&
+                           !(mm & (1u << MATCH_MODE_FFA))) {
+                    tp_mode = MATCH_MODE_TDM;
+                    tp_ff   = false;
+                }
+            }
+            /* Reset the level arena so the post-game-init flow
+             * rebuilds cleanly. The peek mutated tiles + arrays in
+             * the level arena; bootstrap_host / start_round arena-
+             * reset before calling map_build_from_path again. */
+            arena_reset(&game.level_arena);
+            /* Zero the level state so renderer / map_build don't
+             * dereference freed arena pointers. */
+            game.world.level = (Level){0};
+        }
+        /* P07 — explicit --mode override beats the META auto-detect.
+         * Applies on top of the tp_* defaults computed above so that
+         * forcing CTF on a non-flag map gets the CTF score-limit clamp,
+         * and forcing FFA on a CTF map gets friendly-fire back on. */
+        if (args.mode_override[0]) {
+            const char *mo = args.mode_override;
+            if      (strcasecmp(mo, "ffa") == 0) {
+                tp_mode = MATCH_MODE_FFA; tp_ff = true;  tp_score = 50;
+            }
+            else if (strcasecmp(mo, "tdm") == 0) {
+                tp_mode = MATCH_MODE_TDM; tp_ff = false; tp_score = 50;
+            }
+            else if (strcasecmp(mo, "ctf") == 0) {
+                tp_mode = MATCH_MODE_CTF; tp_ff = false; tp_score = FLAG_CAPTURE_DEFAULT;
+            }
+            else {
+                LOG_W("test-play: --mode '%s' unknown — keeping auto-detect (%d)",
+                      mo, (int)tp_mode);
+            }
+            LOG_I("test-play: --mode override → mode=%d ff=%d score_limit=%d",
+                  (int)tp_mode, (int)tp_ff, tp_score);
+        }
+
+        game.config.mode               = tp_mode;
+        game.config.mode_rotation[0]   = tp_mode;
+        game.config.mode_rotation_count= 1;
         game.config.time_limit         = 60;
-        game.config.score_limit        = 50;
+        game.config.score_limit        = tp_score;
         game.config.auto_start_seconds = 1;
-        game.config.friendly_fire      = true;
+        game.config.friendly_fire      = tp_ff;
         /* Turn on the SHOT_LOG sink so test-play emits the diagnostic
          * trail shipped via the existing `SHOT_LOG()` macro across the
          * codebase (anim transitions, grounded toggles, hitscan, etc.)
@@ -752,6 +976,10 @@ int main(int argc, char **argv) {
                 }
             }
             else if (ui.request_host) {
+                /* Legacy fast-path (still wired so existing CLI / older
+                 * UI paths keep working). The new UI sets MODE_HOST_SETUP
+                 * directly from the title button, so this branch is
+                 * mainly belt-and-braces. */
                 ui.request_host = false;
                 snprintf(args.name, sizeof args.name, "%s", ui.player_name);
                 if (bootstrap_host(&game, &args, /*offline*/false)) {
@@ -766,6 +994,47 @@ int main(int argc, char **argv) {
                     net_discovery_open(&game.net);
                 }
                 game.mode = MODE_BROWSER;
+            }
+            break;
+        }
+
+        case MODE_HOST_SETUP: {
+            BeginDrawing();
+            host_setup_screen_run(&ui, &game, pf.render_w, pf.render_h);
+            EndDrawing();
+            if (ui.request_start_host) {
+                ui.request_start_host = false;
+                /* Apply the user's choices to the live config so
+                 * config_pick_mode/_map and start_round all see them.
+                 * Single-entry rotations so subsequent rounds reuse
+                 * the same picks (rotation across modes/maps is M5
+                 * P17/18 territory; the host-setup screen here is
+                 * single-mode for now). */
+                game.config.mode               = (MatchModeId)ui.setup_mode;
+                game.config.score_limit        = ui.setup_score_limit;
+                game.config.time_limit         = (float)ui.setup_time_limit_s;
+                game.config.friendly_fire      = ui.setup_friendly_fire;
+                game.config.map_rotation[0]    = ui.setup_map_id;
+                game.config.map_rotation_count = 1;
+                game.config.mode_rotation[0]   = (MatchModeId)ui.setup_mode;
+                game.config.mode_rotation_count= 1;
+
+                /* Re-init MatchState from the new config. */
+                match_init(&game.match, game.config.mode,
+                           game.config.score_limit,
+                           game.config.time_limit,
+                           game.config.friendly_fire);
+                game.match.map_id = ui.setup_map_id;
+                game.world.friendly_fire = game.config.friendly_fire ||
+                                            (game.match.mode == MATCH_MODE_FFA);
+
+                snprintf(args.name, sizeof args.name, "%s", ui.player_name);
+                if (bootstrap_host(&game, &args, /*offline*/false)) {
+                    game.mode = MODE_LOBBY;
+                } else {
+                    game.mode = MODE_TITLE;
+                }
+                ui.setup_initialized = false;
             }
             break;
         }

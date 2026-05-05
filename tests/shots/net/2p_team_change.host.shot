@@ -1,0 +1,21 @@
+# 2p_team_change — host side. Sits in lobby (TDM mode) while the
+# client sends a team_change RED → BLUE. Verifies the wire and the
+# server-side lobby UI update propagate correctly.
+#
+# Pairs with 2p_team_change.client.shot which sends the team change
+# at tick 100. Host sits idle and re-renders.
+
+window 1280 720
+out build/shots/net/host_team_change
+network host 24025
+name HostA
+
+# auto_start_seconds=4 from soldut.cfg → auto-start fires at tick ~240.
+# Capture lobby pre-team-change at tick 90 (handshake settled).
+at 90  shot t90_pre_team_change
+
+# Capture post-change at tick 200 (still in lobby; auto_start hasn't fired).
+at 200 shot t200_post_team_change
+
+# Run past the round start so the inner run.sh assertions pass.
+at 600 end

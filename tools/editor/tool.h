@@ -24,6 +24,7 @@ typedef enum {
     TOOL_PICKUP,           /* I */
     TOOL_AMBI,             /* A */
     TOOL_DECO,             /* D */
+    TOOL_FLAG,             /* F — CTF flag base (M5 P07) */
     TOOL_META,             /* M */
     TOOL_COUNT,
 } ToolKind;
@@ -56,6 +57,12 @@ typedef struct ToolCtx {
     /* Decoration tool state. */
     uint8_t  deco_layer;
     uint16_t deco_sprite_str;  /* STRT offset; 0 = no sprite (empty placeholder) */
+
+    /* Flag tool state. P07 — CTF flag bases. The team auto-toggles on
+     * each placement so a designer can drop one of each side without
+     * fiddling. 1 (Red) is placed first; 2 (Blue) second. Reverts to
+     * 1 after the second is placed. */
+    uint8_t  flag_team;
 } ToolCtx;
 
 typedef struct ToolVTable {

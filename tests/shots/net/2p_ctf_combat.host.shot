@@ -1,0 +1,43 @@
+# 2p_ctf_combat — host (RED) shoots client (BLUE) on a CTF map.
+#
+# This is the regression test for the "shooting opposing mechs in
+# CTF mode does nothing" bug — the auto-balance had been running
+# AFTER lobby_spawn_round_mechs, so both players ended up on RED
+# (FFA-default) and friendly_fire=off blocked all damage.
+#
+# Verifies on the host log: hit events fire (mech_apply_damage gets
+# past the friendly-fire gate), the victim takes damage, and
+# eventually dies. Pairs with 2p_ctf_combat.client.shot which is
+# stationary fodder.
+#
+# Crossfire is huge (4480 px wide) so we use spawn_at + peer_spawn
+# to put both players in close range. Pulse Rifle range is 2400 px
+# but moving the test to ~200 px apart keeps tracers tight.
+
+window 1280 720
+out build/shots/net/host_ctf_combat
+network host 24028
+name HostRed
+
+# Both bodies on a flat strip near red base. Host (slot 0) at left,
+# client (slot 1) just to the right within rifle range.
+spawn_at 2200 1100
+peer_spawn 1 2400 1100
+
+# Aim at the client's chest.
+aim 2400 1070
+
+contact_sheet sheet cols 4 cell 320 180
+
+# Phase 1 (100-180): settle, take stock.
+at 100 shot t100_spawn
+
+# Phase 2 (180+): hold fire on the client. Pulse Rifle 18 dmg / 110ms,
+# 150 HP target → ~9 hits to drop = ~1 second on full-auto.
+at 180 press fire
+at 360 release fire
+
+at 250 shot t250_trading
+at 380 shot t380_post_kill
+
+at 600 end

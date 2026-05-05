@@ -13,7 +13,7 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-04** (post P06).
+Last updated: **2026-05-05** (post P07; snapshot pos quant overflow fix).
 
 ---
 
@@ -383,6 +383,47 @@ Last updated: **2026-05-04** (post P06).
   - We start optimizing wire bandwidth seriously (delta-encoded
     snapshots — see "no snapshot delta encoding" entry).
 
+### Carrier secondary fully disabled, not partially (P07)
+
+- **What we did** — `mech_try_fire` short-circuits when
+  `m->active_slot == 1 && ctf_is_carrier(w, mid)`. The flag carrier can
+  fire their primary normally; their secondary slot is wholly inert
+  while carrying. P09's `BTN_FIRE_SECONDARY` (RMB one-shot) inherits
+  the same gate when it lands.
+- **Why** — Soldat's CTF rules allow some secondaries (knife / nades
+  with reduced ammo) while disabling others. Implementing per-weapon
+  rules adds a `Weapon.carrier_allowed` flag plus per-secondary tuning
+  and isn't load-bearing for getting the round-loop right. The fully-
+  disabled simplification reads as "you can defend with primary,
+  not stack utility on top" — a coherent rule players can predict.
+- **Revisit when** —
+  - Playtest reveals the half-jet + no-secondary penalty over-stacks
+    and capturing feels impossible. Loosen the secondary rule first
+    (knife / micro-rockets re-enabled) before touching the jet rule.
+  - We add a non-damage utility secondary (e.g. smoke grenade) that
+    the carrier obviously SHOULD be able to use defensively.
+
+### Auto-return is 30 s flat (no fading visual countdown) (P07)
+
+- **What we did** — Dropped flags auto-return after exactly
+  `FLAG_AUTO_RETURN_TICKS = 30 * 60` ticks (30 s @ 60 Hz). The wire
+  format ships `return_in_ticks` so a HUD timer is possible, but the
+  current HUD doesn't render a countdown — the only visual cue is a
+  faint outline halo on `FLAG_DROPPED` flags via `render.c::draw_flag`.
+- **Why** — Threewave / UT have a "flag pulses faster as return is
+  imminent" pattern that requires a per-frame shader tween + a HUD
+  timer. v1 ships the simple constant timer; visual urgency is the
+  player knowing the rule (30 s) and counting in their head if they
+  care. Most rounds the flag is grabbed long before auto-return fires
+  anyway.
+- **Revisit when** —
+  - Playtest reveals players regularly losing dropped-flag awareness
+    in the last 5 s (a common Threewave complaint). Add either a
+    pulse shader to draw_flag or a small "auto-return in N s"
+    timer to the HUD pip.
+  - The HUD final-art pass (P13) lands and we want the dropped flag
+    to read at a glance — natural carrier for the pulse work.
+
 ### Initial pickup state for mid-round joiners not shipped (P05)
 
 - **What we did** — Both host and client call `pickup_init_round`
@@ -453,6 +494,32 @@ Last updated: **2026-05-04** (post P06).
   - Anyone reports anti-spoof bypasses on the LAN.
   - We add encryption-at-rest for chat / lobby messages — at that
     point we'd want a real KDF.
+
+### Snapshot pos quant factor 4× → ~8190 px max world width
+
+- **What we did** — `quant_pos` in `src/snapshot.c` and the parallel
+  encoders in `src/net.c` (projectile state, hit/fire events, flag
+  state) pack world positions as `int16_t` with a 4× sub-pixel factor.
+  Range: ±8190 px. Resolution: 0.25 px.
+- **Why** — Originally the factor was 8× (range ±4096 px, 0.125 px
+  resolution). The Crossfire CTF map is 4480 px wide, so anything
+  east of x=4096 (the entire BLUE base, including the BLUE flag at
+  x=4160) silently wrapped to x=4095 in the wire format. The
+  symptom on the wire was hard to spot — user-visible behavior was
+  "the client gets stuck on their own flag" because every snapshot
+  jammed the client's local mech back to x=4095, even as the server
+  simulated past it. Cutting the factor in half doubled the range and
+  kept sub-pixel precision well below renderer-interp jitter.
+- **Revisit when** —
+  - We ship a map wider than ~8000 px. Either bump down to a 2× factor
+    (max ±16380 px, 0.5 px res) or move position to `int32_t`.
+  - We add per-frame visible reconcile jitter that wasn't there before.
+    0.25 px steps could in principle stair-step the local mech under
+    extreme low-velocity conditions; not observed in current play.
+  - Bandwidth becomes the bottleneck (current snapshot is well under
+    budget — 22 bytes per mech × 32 mechs × 30 Hz = 21 KB/s). At
+    that point you'd encode delta+varint and the fixed factor
+    becomes irrelevant.
 
 ### No snapshot delta encoding (full snapshots only)
 

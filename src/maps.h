@@ -17,6 +17,7 @@ typedef enum {
     MAP_FOUNDRY = 0,         /* the existing tutorial map */
     MAP_SLIPSTREAM,          /* taller layout, more vertical jet beats */
     MAP_REACTOR,             /* central pillar, two flanking platforms */
+    MAP_CROSSFIRE,           /* M5 P07 — symmetric CTF arena, two team bases */
     MAP_COUNT
 } MapId;
 

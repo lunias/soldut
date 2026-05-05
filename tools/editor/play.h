@@ -16,17 +16,24 @@
 
 /* Loadout to pass through on F5 — populated by main.c from the editor's
  * --test-chassis / --test-primary / --test-secondary / --test-armor /
- * --test-jetpack CLI args. Empty strings mean "fall back to the game's
- * default" (the same default the game uses when its own flags aren't
- * given). Names match the spelling the game's CLI parser expects
- * (case-insensitive for chassis/armor/jetpack; weapons by display
- * name e.g. "Grappling Hook"). */
+ * --test-jetpack / --test-mode CLI args. Empty strings mean "fall back
+ * to the game's default" (the same default the game uses when its own
+ * flags aren't given). Names match the spelling the game's CLI parser
+ * expects (case-insensitive for chassis/armor/jetpack/mode; weapons by
+ * display name e.g. "Grappling Hook").
+ *
+ * `mode` is "FFA" / "TDM" / "CTF" (case-insensitive). Empty leaves the
+ * spawned game to its own auto-detect path: the .lvl's META.mode_mask
+ * picks CTF when both flags are present, otherwise FFA. Setting it
+ * overrides that auto-detect — useful for sanity-checking a CTF map in
+ * FFA, or forcing TDM teams on a map that has no flags. */
 typedef struct {
     char chassis  [32];
     char primary  [32];
     char secondary[32];
     char armor    [32];
     char jetpack  [32];
+    char mode     [16];
 } TestPlayLoadout;
 
 /* Save the doc to a temp .lvl, then fork the game binary with

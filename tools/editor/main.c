@@ -129,6 +129,9 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--test-jetpack") == 0 && i + 1 < argc) {
             snprintf(test_lo.jetpack, sizeof test_lo.jetpack, "%s", argv[++i]);
         }
+        else if (strcmp(a, "--test-mode") == 0 && i + 1 < argc) {
+            snprintf(test_lo.mode, sizeof test_lo.mode, "%s", argv[++i]);
+        }
         else if (a[0] != '-' && !initial_lvl) {
             initial_lvl = a;
         }
@@ -136,13 +139,14 @@ int main(int argc, char **argv) {
          * in the early-exit loop and never reaches here). */
     }
     if (test_lo.chassis  [0] || test_lo.primary[0] || test_lo.secondary[0]
-     || test_lo.armor    [0] || test_lo.jetpack[0]) {
-        LOG_I("editor: F5 test-play loadout — chassis=%s primary=%s secondary=%s armor=%s jet=%s",
+     || test_lo.armor    [0] || test_lo.jetpack[0] || test_lo.mode[0]) {
+        LOG_I("editor: F5 test-play loadout — chassis=%s primary=%s secondary=%s armor=%s jet=%s mode=%s",
               test_lo.chassis  [0] ? test_lo.chassis   : "(default)",
               test_lo.primary  [0] ? test_lo.primary   : "(default)",
               test_lo.secondary[0] ? test_lo.secondary : "(default)",
               test_lo.armor    [0] ? test_lo.armor     : "(default)",
-              test_lo.jetpack  [0] ? test_lo.jetpack   : "(default)");
+              test_lo.jetpack  [0] ? test_lo.jetpack   : "(default)",
+              test_lo.mode     [0] ? test_lo.mode      : "(default)");
     }
 
     EditorDoc doc;       doc_init(&doc);
@@ -328,6 +332,7 @@ int main(int argc, char **argv) {
             if (IsKeyPressed(KEY_I)) active_tool = TOOL_PICKUP;
             if (IsKeyPressed(KEY_A)) active_tool = TOOL_AMBI;
             if (IsKeyPressed(KEY_D)) active_tool = TOOL_DECO;
+            if (IsKeyPressed(KEY_F)) active_tool = TOOL_FLAG;
             if (IsKeyPressed(KEY_M)) {
                 active_tool = TOOL_META;
                 ui_meta_open(&meta, &doc);
@@ -342,8 +347,8 @@ int main(int argc, char **argv) {
         for (int k = KEY_A; k <= KEY_Z; ++k) {
             if (IsKeyPressed(k) && vt->on_key && !ctrl_down()) {
                 if (k != KEY_T && k != KEY_P && k != KEY_S && k != KEY_I &&
-                    k != KEY_A && k != KEY_D && k != KEY_M && k != KEY_H
-                    && k != KEY_L) {
+                    k != KEY_A && k != KEY_D && k != KEY_F && k != KEY_M
+                    && k != KEY_H && k != KEY_L) {
                     vt->on_key(&doc, &undo, &ctx, k);
                 }
             }

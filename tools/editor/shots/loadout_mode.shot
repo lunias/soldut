@@ -1,0 +1,61 @@
+# tools/editor/shots/loadout_mode.shot — exercises the new MODE slot
+# (LOADOUT_SLOT_MODE) on the test-play loadout modal:
+#   1. Open the modal (L key path).
+#   2. Pick CTF via the MODE dropdown.
+#   3. Apply → modal closes + test_lo.mode == "CTF".
+#   4. Re-open → seeded selection is preserved.
+#   5. Switch to FFA, apply.
+#   6. Set back to "(default)" via idx 0 → test_lo.mode is empty.
+#
+# Pairs with the runtime test tests/test_play_mode_override.sh which
+# checks that --mode <name> actually overrides the META auto-detect.
+
+window 1280 800
+new 40 25
+ticks 80
+contact_sheet loadout_mode cols 3 cell 640 400
+
+at 0  shot t00_blank
+at 0  assert loadout_open == 0
+at 0  assert test_lo_mode_idx == 0   # 0 = "(default)"
+
+# Open the modal — verify MODE starts at idx 0.
+at 4  open_loadout
+at 4  assert loadout_open == 1
+at 5  assert loadout_mode_idx == 0
+at 5  shot t05_modal_open
+
+# Pick CTF (idx 3 in g_lo_mode: (default), FFA, TDM, CTF).
+at 8  loadout_set mode CTF
+at 9  assert loadout_mode_idx == 3
+at 9  assert test_lo_mode_idx == 0    # not applied yet
+at 10 shot t10_ctf_picked
+
+# Apply → modal closes; test_lo.mode == "CTF".
+at 12 loadout_apply
+at 13 assert loadout_open == 0
+at 13 assert test_lo_mode_idx == 3
+at 14 shot t14_after_apply_ctf
+
+# Re-open: seed should remember CTF.
+at 18 open_loadout
+at 19 assert loadout_open    == 1
+at 19 assert loadout_mode_idx == 3
+at 19 shot t19_reopen_remembers_ctf
+
+# Switch to FFA (idx 1) and apply.
+at 22 loadout_set mode FFA
+at 23 assert loadout_mode_idx == 1
+at 24 loadout_apply
+at 25 assert test_lo_mode_idx == 1
+at 26 shot t26_after_apply_ffa
+
+# Clear back to "(default)" via idx 0 → test_lo.mode becomes empty,
+# which makes the spawned game fall back to the META auto-detect.
+at 30 open_loadout
+at 31 loadout_set mode 0                  # 0 = "(default)"
+at 32 loadout_apply
+at 33 assert test_lo_mode_idx == 0
+at 34 shot t34_back_to_default
+
+at 40 end

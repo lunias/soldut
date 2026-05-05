@@ -1,0 +1,30 @@
+# 2p_ctf_walk_own_flag — host side. Plays the RED team. Stationary
+# observer. The client (BLUE) walks back and forth across the BLUE
+# (their own team's) flag at x=4160 to expose any stuck/collision
+# behavior.
+#
+# This is the reproducer for the bug:
+#   "the client appears to get stuck on their own flag in testing.
+#    The server can pass through their own flag as expected."
+#
+# We need the host running the round so the client has a server to
+# connect to. The shot_dump_tick sink emits per-mech pelvis pos every
+# tick — host log will show mech=1 (the client) trajectory crossing
+# x=4160. If the host believes the client moves smoothly and the
+# client's own log shows the same particle stuck, that proves the
+# divergence is on the client.
+
+window 1280 720
+out build/shots/net/host_walk_own_flag
+network host 24017
+name HostRed
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 60  shot t60_lobby
+at 140 shot t140_round_start
+at 200 shot t200_observer
+at 260 shot t260_observer
+at 320 shot t320_observer
+at 400 shot t400_observer
+at 700 end

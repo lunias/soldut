@@ -57,17 +57,29 @@ typedef struct LobbyUIState {
     bool       request_browse;
     bool       request_connect;       /* with pending_host / pending_port */
     bool       request_single_player;
+
+    /* Host-setup screen: working draft of the match config. Initialized
+     * from g->config when entering MODE_HOST_SETUP. main.c applies the
+     * draft to g->config when the user clicks "Start Hosting". */
+    int        setup_mode;            /* MatchModeId */
+    int        setup_map_id;          /* MapId — re-chosen if mode-mask incompatible */
+    int        setup_score_limit;
+    int        setup_time_limit_s;    /* int seconds for the +/- stepper */
+    bool       setup_friendly_fire;
+    bool       setup_initialized;     /* false until first entry → seeds from g->config */
+    bool       request_start_host;    /* one-shot: setup confirmed → main.c bootstraps */
 } LobbyUIState;
 
 void lobby_ui_init(LobbyUIState *L);
 
 /* Sample input + render the relevant screen. Caller handles raylib
  * Begin/EndDrawing wrapping. */
-void title_screen_run   (LobbyUIState *L, struct Game *g, int sw, int sh);
-void browser_screen_run (LobbyUIState *L, struct Game *g, int sw, int sh);
-void connect_screen_run (LobbyUIState *L, struct Game *g, int sw, int sh);
-void lobby_screen_run   (LobbyUIState *L, struct Game *g, int sw, int sh);
-void summary_screen_run (LobbyUIState *L, struct Game *g, int sw, int sh);
+void title_screen_run     (LobbyUIState *L, struct Game *g, int sw, int sh);
+void host_setup_screen_run(LobbyUIState *L, struct Game *g, int sw, int sh);
+void browser_screen_run   (LobbyUIState *L, struct Game *g, int sw, int sh);
+void connect_screen_run   (LobbyUIState *L, struct Game *g, int sw, int sh);
+void lobby_screen_run     (LobbyUIState *L, struct Game *g, int sw, int sh);
+void summary_screen_run   (LobbyUIState *L, struct Game *g, int sw, int sh);
 
 /* In-match overlay (score / timer at the top of the screen, plus the
  * usual HUD which the existing render path already draws). */

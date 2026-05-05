@@ -1,0 +1,49 @@
+# M5 P07 — Capture-the-flag end-to-end on the code-built Crossfire map.
+#
+# Verifies the visible CTF behaviors:
+#   1. Flags render at their team bases (HOME state) on round start.
+#   2. Pickup transition: the player walks into the BLUE flag, flag
+#      transitions to CARRIED, attached to the player's chest.
+#   3. Capture transition: the player (RED) carrying BLUE flag touches
+#      the RED home flag → both flags HOME, team_score += 5.
+#   4. Drop on death: a fresh-armed carry, kill the carrier (deadly
+#      tile / shot), flag transitions to DROPPED.
+#
+# To skip walking the entire 4480-px arena, we use the `flag_carry`
+# debug directive to pre-arm the carrier state and `spawn_at` to drop
+# the player near the home flag for capture verification.
+
+window 1280 720
+out build/shots/m5_ctf_capture
+seed 1 2
+
+# Code-built CTF map. mode_mask=FFA|TDM|CTF, 2 flags, per-team spawns.
+map crossfire
+mode ctf
+
+# Park the player just east of the RED home flag so we can verify
+# (a) at-base render (tick 0) and (b) capture from a few px walk.
+# Crossfire RED flag: x = 320, platform top y ≈ 1016.
+spawn_at 380 970
+
+# Default aim is "200 px to the right of chest" — fine for face direction.
+contact_sheet ctf_capture cols 4 cell 320 180
+
+at 1   shot t1_round_start_red_at_home
+at 30  shot t30_player_at_red_base
+
+# Arm the carrier state: local mech is now carrying flag idx 1 (BLUE).
+# This bypasses the long traversal across the map and lets us verify
+# the carry visual + capture transition.
+at 40 flag_carry 1
+at 50 shot t50_carrying_blue_flag
+
+# Walk LEFT into the RED home flag (~60 px away). RUN_SPEED ≈ 4.6 px/tick.
+at 60 press left
+at 95 release left
+at 95 shot t95_capture_landed
+
+# After capture both flags are HOME and the team score is 5.
+at 120 shot t120_post_capture_home
+
+at 130 end

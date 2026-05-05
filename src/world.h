@@ -544,6 +544,33 @@ typedef struct PickupPool {
     int           count;
 } PickupPool;
 
+/* ---- Flags (CTF, M5 P07) -------------------------------------------
+ *
+ * One per team in CTF mode. Populated at round start from `level.flags`
+ * (LvlFlag records); zero entries when match.mode != CTF. The runtime
+ * record is server-authoritative and replicated to clients via
+ * NET_MSG_FLAG_STATE on every state transition (and inside
+ * INITIAL_STATE for joining clients). See `documents/m5/06-ctf.md`. */
+typedef enum {
+    FLAG_HOME    = 0,
+    FLAG_CARRIED = 1,
+    FLAG_DROPPED = 2,
+} FlagStatus;
+
+typedef struct Flag {
+    Vec2     home_pos;
+    uint8_t  team;                  /* MATCH_TEAM_RED or _BLUE */
+    uint8_t  status;                /* FlagStatus */
+    int8_t   carrier_mech;          /* mech id when CARRIED; else -1 */
+    uint8_t  reserved;
+    Vec2     dropped_pos;           /* meaningful when DROPPED */
+    uint64_t return_at_tick;        /* DROPPED: world.tick when auto-return fires */
+} Flag;
+
+#define FLAG_TOUCH_RADIUS_PX     36.0f
+#define FLAG_AUTO_RETURN_TICKS   (30u * 60u)   /* 30 s @ 60 Hz */
+#define FLAG_CAPTURE_DEFAULT     5             /* score_limit default for CTF */
+
 /* ---- Tile / level data ---------------------------------------------
  *
  * The on-disk format lives in [documents/m5/01-lvl-format.md]. The Lvl*
@@ -764,9 +791,27 @@ typedef struct World {
     int          pickupfeed[PICKUPFEED_CAPACITY];
     int          pickupfeed_count;
 
+    /* CTF flag entities (P07). Populated at round start when
+     * match.mode == CTF, zeroed out otherwise. flags[0]=RED, flags[1]=BLUE.
+     *
+     * `flag_state_dirty` is set by ctf operations (pickup/capture/return/
+     * drop-on-death/auto-return) and cleared by main.c after broadcasting
+     * NET_MSG_FLAG_STATE. Same pattern as `lobby.dirty` — keeps mutation
+     * sites decoupled from the network layer. */
+    Flag         flags[2];
+    int          flag_count;        /* 0 outside CTF; 2 in a valid CTF round */
+    bool         flag_state_dirty;  /* set by any ctf transition; main.c clears on broadcast */
+
     /* Server config: friendly-fire toggle. False by default — same-team
      * damage is dropped. Tournament servers can flip this. */
     bool     friendly_fire;
+
+    /* Cache of match.mode (P07). World-side mirror so mech.c (which
+     * doesn't see Game) can branch on mode without an extra parameter
+     * threading through every kill / damage / fire path. Mirrored from
+     * MatchState by the host's start_round and the client's round-start
+     * handler. 0 (MATCH_MODE_FFA) until set. */
+    int      match_mode_cached;
 
     /* Camera state — written by the renderer, read by simulate for
      * effects like screen-shake decay. Storing on World means the

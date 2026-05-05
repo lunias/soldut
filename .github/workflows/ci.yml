@@ -35,12 +35,13 @@ jobs:
       # The shot-mode editor tests need a GL context, so they're not
       # run here yet — the bake-test rig will move them to a
       # virtual-display job in M5 P18.
-      - name: Run regression tests (test-physics, test-level-io, test-spawn, test-pickups)
+      - name: Run regression tests (test-physics, test-level-io, test-spawn, test-pickups, test-ctf)
         run: |
           make test-physics
           make test-level-io
           make test-spawn
           make test-pickups
+          make test-ctf
 
       - name: Show binaries
         run: |
@@ -96,6 +97,7 @@ jobs:
           make test-level-io
           make test-spawn
           make test-pickups
+          make test-ctf
 
       - name: Show binaries
         run: |

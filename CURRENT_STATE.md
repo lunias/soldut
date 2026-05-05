@@ -5,7 +5,7 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-04** (M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver, P02 — polygon collision + slope physics, P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote interp + `is_dummy` bit, P04 — standalone level editor at `tools/editor/` + `--test-play` flag, P05 — pickup runtime + powerups + Engineer deployable + Burst SMG cadence + practice dummy, and P06 — grappling hook with `CSTR_FIXED_ANCHOR` + contracting distance constraint + state-bit-gated wire suffix in).
+Last updated: **2026-05-04** (M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver, P02 — polygon collision + slope physics, P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote interp + `is_dummy` bit, P04 — standalone level editor at `tools/editor/` + `--test-play` flag, P05 — pickup runtime + powerups + Engineer deployable + Burst SMG cadence + practice dummy, P06 — grappling hook with `CSTR_FIXED_ANCHOR` + contracting distance constraint + state-bit-gated wire suffix, and P07 — CTF mode with flag entities + capture rule + carrier penalties + 26-byte `NET_MSG_FLAG_STATE` event protocol in).
 
 ---
 
@@ -18,7 +18,7 @@ Last updated: **2026-05-04** (M4 lobby & matches in; M5 P01 — `.lvl` format + 
 | **M2**    | Foundation lands 2026-05-03. Host/client handshake works locally; per-tick input ship + 30 Hz snapshot broadcast + client-side prediction & replay + per-mech bone history for hitscan lag compensation are wired. LAN-only, full snapshots, no mid-tick interpolation of remote mechs (see TRADE_OFFS.md). Two-laptop bake test still pending. |
 | **M3**    | Combat depth in 2026-05-03. All 5 chassis (Trooper / Scout / Heavy / Sniper / Engineer) with passives. All 8 primaries (Pulse Rifle, Plasma SMG, Riot Cannon, Rail Cannon, Auto-Cannon, Mass Driver, Plasma Cannon, Microgun) and 6 secondaries (Sidearm, Burst SMG, Frag Grenades, Micro-Rockets, Combat Knife, Grappling Hook). Projectile pool with bone + tile collision. Explosions: damage falloff, line-of-sight check, impulse to ragdolls. Per-limb HP and dismemberment of all 5 limbs. Recoil + bink + self-bink fully wired. Friendly-fire toggle (`--ff` server flag). Kill feed with HEADSHOT/GIB/OVERKILL/RAGDOLL/SUICIDE flags. Loadout via CLI flags (`--chassis`, `--primary`, `--secondary`, `--armor`, `--jetpack`). Snapshot wire format widened to carry chassis/armor/jet/secondary; protocol id bumped to `S0LE`. |
 | **M4**    | Lobby & matches in 2026-05-03. Game flow is now title → browser → lobby → countdown → match → summary → next lobby. New modules: `match.{h,c}`, `lobby.{h,c}`, `lobby_ui.{h,c}`, `ui.{h,c}` (small immediate-mode raylib UI helpers, scale-aware for 4K), `config.{h,c}` (`soldut.cfg` key=value parser), `maps.{h,c}` (Foundry / Slipstream / Reactor — three code-built maps for the rotation; `.lvl` loader is M5). LOBBY-channel messages (player list with `mech_id`, slot delta, loadout, ready, team change, chat, vote, kick/ban, countdown, round start/end, match state). Server config file: port, max_players, mode, score_limit, time_limit, friendly_fire, auto_start_seconds, map_rotation, mode_rotation. Single-player flow auto-hosts an offline server and arms a 1s countdown. Protocol id bumped `S0LE` → `S0LF`. Network test scaffold under `tests/net/` runs the host/client end-to-end via real ENet loopback and asserts on log-line milestones. |
-| **M5**    | In progress. **P01–P06** in. P02: per-particle contact normals (Q1.7 SoA fields + `PARTICLE_FLAG_CEILING`); polygon broadphase grid built at level load (`level_build_poly_broadphase`); `physics_constrain_and_collide` interleaves tile + polygon collision per relaxation iter (closest-point-on-triangle, push-out via pre-baked edge normals); `level_ray_hits` tests segments against polygons too; slope-tangent run velocity, slope-aware friction (`0.99 - 0.07*|ny|`, ICE→0.998), angled-ceiling jet redirection, slope-aware post-physics anchor (skips when `ny_avg > -0.92`); WIND/ZERO_G ambient zones; environmental damage tick for DEADLY tiles+polys+ACID zones. Renderer draws polygons (P02 stopgap, replaced by sprite art at P13). P03: per-particle `render_prev_x/_y` snapshot at the top of each `simulate_step`; renderer lerps `pos` ↔ `render_prev` by `alpha = accum/TICK_DT` (also threaded through projectile + FX draw); reconcile `visual_offset` is now read by `renderer_draw_frame` and applied additively to local-mech draws (decays over ~6 frames so server snaps don't read as glitches); per-mech remote snapshot ring (`remote_snap_ring[8]`) + `snapshot_interp_remotes` lerps remote mechs at `client_render_time_ms - 100ms` between bracketing entries (clamped to nearest if only one entry, snap+clear on >200 px corrections); `state_bits` widened u8→u16, `SNAP_STATE_IS_DUMMY` rides bit 11 so client dummies don't drive arm-aim; protocol id bumped `S0LF` → `S0LG`. P05: new `src/pickup.{c,h}` with PickupPool (capacity 64) on World; `pickup_init_round` populates from `level->pickups` and spawns practice-dummy mechs on the authoritative side; `pickup_step` (server-only, per tick) does 24 px touch detection + cooldown rollover + transient lifetime expiry; per-kind apply rules with full-state-rejects-grab guards; powerup timers `powerup_berserk/invis/godmode_remaining` on Mech with `SNAP_STATE_BERSERK/INVIS/GODMODE` bits in the snapshot (clients mirror to sentinel timers); berserk doubles outgoing damage and godmode zeroes incoming damage in `mech_apply_damage`; render alpha-mods invis-active mechs (0.2 / 0.5 local). Engineer's `BTN_USE` now spawns a TRANSIENT `PICKUP_REPAIR_PACK` at the engineer's feet (10 s lifetime, 30 s cooldown) instead of self-healing — allies + the engineer can grab it. Burst SMG fires round 1 on press tick + queues `burst_pending_rounds` to fire at `burst_interval_sec` cadence in `mech_step_drive`. New wire message `NET_MSG_PICKUP_STATE = 15` (20 bytes — full spawner data so transients propagate). New world ring `pickupfeed[64]` drained per tick by `broadcast_new_pickups` in main.c. New regression test `tests/pickup_test.c` (`make test-pickups`). P06: new per-Mech `Grapple` struct + `PROJ_GRAPPLE_HEAD` projectile + `CSTR_FIXED_ANCHOR` constraint (Constraint grows by `Vec2 fixed_pos`); `mech_try_fire`'s WFIRE_GRAPPLE branch spawns a 1200 px/s head from R_HAND (was `NOT YET IMPLEMENTED`); on hit `projectile_step` sets firer state to ATTACHED + calls `mech_grapple_attach` which appends a constraint to the global pool (CSTR_FIXED_ANCHOR for tile, CSTR_DISTANCE_LIMIT min=0/max=L for bone — both one-sided so the rope is slack when shorter than rest and taut when stretched). `mech_step_drive` keeps rest length fixed at hit-time distance (no auto-contract — the Tarzan/pendulum feel) and emits a per-second `grapple_swing` SHOT_LOG; releases on BTN_USE edge or anchor-mech death; `mech_kill` releases on firer death; `mech_grapple_release` flips `active=0` (slot leak bounded). BTN_FIRE while ATTACHED chain-releases + fires a new head (cooldown still gates back-to-back fires at 1.20 s). Snapshot: `SNAP_STATE_GRAPPLING` bit 12 gates an optional 8-byte trailing suffix on `EntitySnapshot` (state, anchor_mech, anchor_part, anchor_x_q, anchor_y_q) so idle bandwidth stays flat. Render: new `draw_grapple_rope` in `render.c` draws a 1.5-px gold line hand → live head (FLYING) or hand → anchor (ATTACHED, tile or bone particle). Two shot tests: `tests/shots/m5_grapple.shot` (basic fire/attach/swing/release) + `tests/shots/m5_grapple_swing.shot` (pendulum + chain re-fire while attached). Protocol id stays `S0LG`. **Pending**: P07–P18 (CTF, map sharing, controls, art, audio, authored maps). |
+| **M5**    | In progress. **P01–P07** in. P02: per-particle contact normals (Q1.7 SoA fields + `PARTICLE_FLAG_CEILING`); polygon broadphase grid built at level load (`level_build_poly_broadphase`); `physics_constrain_and_collide` interleaves tile + polygon collision per relaxation iter (closest-point-on-triangle, push-out via pre-baked edge normals); `level_ray_hits` tests segments against polygons too; slope-tangent run velocity, slope-aware friction (`0.99 - 0.07*|ny|`, ICE→0.998), angled-ceiling jet redirection, slope-aware post-physics anchor (skips when `ny_avg > -0.92`); WIND/ZERO_G ambient zones; environmental damage tick for DEADLY tiles+polys+ACID zones. Renderer draws polygons (P02 stopgap, replaced by sprite art at P13). P03: per-particle `render_prev_x/_y` snapshot at the top of each `simulate_step`; renderer lerps `pos` ↔ `render_prev` by `alpha = accum/TICK_DT` (also threaded through projectile + FX draw); reconcile `visual_offset` is now read by `renderer_draw_frame` and applied additively to local-mech draws (decays over ~6 frames so server snaps don't read as glitches); per-mech remote snapshot ring (`remote_snap_ring[8]`) + `snapshot_interp_remotes` lerps remote mechs at `client_render_time_ms - 100ms` between bracketing entries (clamped to nearest if only one entry, snap+clear on >200 px corrections); `state_bits` widened u8→u16, `SNAP_STATE_IS_DUMMY` rides bit 11 so client dummies don't drive arm-aim; protocol id bumped `S0LF` → `S0LG`. P05: new `src/pickup.{c,h}` with PickupPool (capacity 64) on World; `pickup_init_round` populates from `level->pickups` and spawns practice-dummy mechs on the authoritative side; `pickup_step` (server-only, per tick) does 24 px touch detection + cooldown rollover + transient lifetime expiry; per-kind apply rules with full-state-rejects-grab guards; powerup timers `powerup_berserk/invis/godmode_remaining` on Mech with `SNAP_STATE_BERSERK/INVIS/GODMODE` bits in the snapshot (clients mirror to sentinel timers); berserk doubles outgoing damage and godmode zeroes incoming damage in `mech_apply_damage`; render alpha-mods invis-active mechs (0.2 / 0.5 local). Engineer's `BTN_USE` now spawns a TRANSIENT `PICKUP_REPAIR_PACK` at the engineer's feet (10 s lifetime, 30 s cooldown) instead of self-healing — allies + the engineer can grab it. Burst SMG fires round 1 on press tick + queues `burst_pending_rounds` to fire at `burst_interval_sec` cadence in `mech_step_drive`. New wire message `NET_MSG_PICKUP_STATE = 15` (20 bytes — full spawner data so transients propagate). New world ring `pickupfeed[64]` drained per tick by `broadcast_new_pickups` in main.c. New regression test `tests/pickup_test.c` (`make test-pickups`). P06: new per-Mech `Grapple` struct + `PROJ_GRAPPLE_HEAD` projectile + `CSTR_FIXED_ANCHOR` constraint (Constraint grows by `Vec2 fixed_pos`); `mech_try_fire`'s WFIRE_GRAPPLE branch spawns a 1200 px/s head from R_HAND (was `NOT YET IMPLEMENTED`); on hit `projectile_step` sets firer state to ATTACHED + calls `mech_grapple_attach` which appends a constraint to the global pool (CSTR_FIXED_ANCHOR for tile, CSTR_DISTANCE_LIMIT min=0/max=L for bone — both one-sided so the rope is slack when shorter than rest and taut when stretched). `mech_step_drive` keeps rest length fixed at hit-time distance (no auto-contract — the Tarzan/pendulum feel) and emits a per-second `grapple_swing` SHOT_LOG; releases on BTN_USE edge or anchor-mech death; `mech_kill` releases on firer death; `mech_grapple_release` flips `active=0` (slot leak bounded). BTN_FIRE while ATTACHED chain-releases + fires a new head (cooldown still gates back-to-back fires at 1.20 s). Snapshot: `SNAP_STATE_GRAPPLING` bit 12 gates an optional 8-byte trailing suffix on `EntitySnapshot` (state, anchor_mech, anchor_part, anchor_x_q, anchor_y_q) so idle bandwidth stays flat. Render: new `draw_grapple_rope` in `render.c` draws a 1.5-px gold line hand → live head (FLYING) or hand → anchor (ATTACHED, tile or bone particle). Two shot tests: `tests/shots/m5_grapple.shot` (basic fire/attach/swing/release) + `tests/shots/m5_grapple_swing.shot` (pendulum + chain re-fire while attached). Protocol id stays `S0LG`. P07: new `src/ctf.{c,h}` module — server-authoritative flag entities (`Flag flags[2]` + `flag_count` on World, populated by `ctf_init_round` from `level.flags` LvlFlag records; flags[0]=RED, flags[1]=BLUE convention). `ctf_step` per tick: 36 px touch detection, 30 s auto-return, both-flags-home capture rule (carrier touching own HOME flag while carrying enemy → +5 team, +1 slot, captured flag returns home). `ctf_drop_on_death` from `mech_kill` drops at pelvis pos with `FLAG_AUTO_RETURN_TICKS` pending. Carrier penalties: `apply_jet_force` halves thrust when `ctf_is_carrier`; `mech_try_fire` rejects when `active_slot == 1 && ctf_is_carrier`. New world fields: `flag_state_dirty` (mutation hint, broadcast site is `main.c::broadcast_flag_state_if_dirty`) + `match_mode_cached` (so `mech_kill` can branch without seeing Game). New wire message `NET_MSG_FLAG_STATE = 16` (variable: 1 byte tag + 1 byte flag_count + 12 bytes per flag — team / status / carrier_mech / pos_q / return_in_ticks; max 26 bytes for a both-flags broadcast). INITIAL_STATE appends optional flag-state suffix for joining clients. CTF score limit defaults to `FLAG_CAPTURE_DEFAULT = 5` when config has the FFA-default `>=25`. Mode-mask validation in `start_round`: if rotation lands on CTF and the picked map's META.mode_mask doesn't allow CTF (or has no Red+Blue flag pair), demote to TDM and log warning (the build-then-validate path takes one extra map_build per CTF round). Render: `draw_flags` after mech body — vertical staff + triangular pennant team-colored, sin-driven wobble while CARRIED, outline halo for DROPPED. HUD: `draw_flag_pips` (Red top-left + Blue top-right corner pips, alpha-pulse for CARRIED, outline-only for DROPPED) + `draw_flag_compass` (off-screen flag → triangular arrow at the nearest screen edge pointing at the flag, team-colored). New regression test `tests/ctf_test.c` (52 assertions, `make test-ctf`): init_round, flag_position, enemy pickup, friendly no-pickup, carrier-dies drop, friendly return, auto-return on timer, capture, ctf_is_carrier, no-capture-without-carry. Protocol id stays `S0LG` (FLAG_STATE event uses a free message id 16, no entity-snapshot widening). **Pending**: P08–P18 (map sharing, controls, art, audio, authored maps). |
 
 ---
 
@@ -860,9 +860,300 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
     existing u16 `state_bits`; the trailing 8 bytes are gated by
     the bit so idle-grapple bandwidth is unchanged).
 
+- **P07 — Capture the Flag** (2026-05-04).
+  - **New module** `src/ctf.{c,h}`. Public API: `ctf_init_round`,
+    `ctf_step`, `ctf_drop_on_death`, `ctf_is_carrier`,
+    `ctf_flag_position`. Server-authoritative; ctf operations mutate
+    `world.flags[]` and set `world.flag_state_dirty` — the broadcast
+    site is `main.c::broadcast_flag_state_if_dirty` (called once per
+    `MATCH_PHASE_ACTIVE` tick), keeping ctf.c independent of net.c.
+  - **Flag runtime data** in `world.h`: `FlagStatus` enum
+    (HOME / CARRIED / DROPPED), `Flag` struct (home_pos, team,
+    status, carrier_mech, dropped_pos, return_at_tick), `World.flags[2]`
+    + `flag_count`. `FLAG_TOUCH_RADIUS_PX = 36`,
+    `FLAG_AUTO_RETURN_TICKS = 30 * 60`,
+    `FLAG_CAPTURE_DEFAULT = 5`. `World.match_mode_cached` mirrors
+    `match.mode` so `mech.c` can branch in `mech_kill` without seeing
+    `Game`. `World.flag_state_dirty` is the single hint bit.
+  - **`ctf_init_round`** populates `flags[]` from `level.flags` (LvlFlag
+    records) when mode == CTF and the level carries one Red and one
+    Blue flag; index convention is `flags[0]=RED`, `flags[1]=BLUE`.
+    Other modes (or invalid flag pair) → `flag_count = 0`. Both host
+    and client run it from their respective round-start handlers.
+  - **`ctf_step`** (server, per-tick): auto-return on timer, then
+    36 px touch detection over every alive non-dummy mech.
+    `ctf_touch` resolves the transition table (same-team HOME +
+    carrying-enemy → capture; same-team DROPPED → return; enemy
+    HOME/DROPPED → pickup; CARRIED skipped at outer loop).
+    `ctf_capture` enforces the both-flags-home rule (capturing
+    requires the toucher's own flag to be HOME — checked implicitly
+    because the touch path fires only when `flag->status == HOME`).
+    Capture: +5 to `match.team_score[carrier->team]`, +1 to
+    `lobby.slots[scorer].score`, captured flag back to HOME.
+  - **Carrier penalties** in `mech.c`:
+    - `apply_jet_force` halves `thrust_pxs2` when `ctf_is_carrier`.
+    - `mech_try_fire` rejects when `m->active_slot == 1 && ctf_is_carrier`
+      (entire secondary disabled — see TRADE_OFFS).
+  - **Death drops the flag**: `mech_kill` snapshots the pelvis position
+    BEFORE the kill impulse displaces it, then calls
+    `ctf_drop_on_death(world, match_mode_cached, mid, pelv)`. The
+    drop transitions `status → DROPPED`, fills `dropped_pos`, sets
+    `return_at_tick = world.tick + FLAG_AUTO_RETURN_TICKS`, and marks
+    the dirty bit. Non-CTF modes are no-op.
+  - **Wire protocol**: new message `NET_MSG_FLAG_STATE = 16` on
+    `NET_CH_EVENT` (reliable, ordered). Variable size: 1 byte tag +
+    1 byte flag_count + 12 bytes per flag (team / status /
+    carrier_mech / pos_q / return_in_ticks). Max 26 bytes for a
+    both-flags broadcast. `INITIAL_STATE` appends an optional
+    flag-state suffix so future mid-round joiners see correct flag
+    positions on connect (M4 still parks joiners in the lobby; this
+    is forward-looking infra). Bandwidth: ~6 events/min × 26 B × 16
+    peers ≈ 42 B/s aggregate, trivial vs the 5 KB/s/client budget.
+    Helper functions `encode_flag_state` / `decode_flag_state` are
+    shared between the broadcast and INITIAL_STATE paths.
+  - **Mode-mask validation** in `main.c::start_round`: if rotation
+    lands on CTF and the picked map's `META.mode_mask & MATCH_MODE_CTF`
+    isn't set (or `level.flag_count != 2`), demote to TDM and log a
+    warning. The check requires building the level to read META, so
+    the CTF path takes one extra `map_build` per round when the
+    rotation lands on a CTF entry — cheap (small maps, one
+    arena-reset).
+  - **CTF score limit default**: when mode == CTF and the config's
+    `score_limit >= 25` (the FFA default), clamp to
+    `FLAG_CAPTURE_DEFAULT = 5`. A host who explicitly sets
+    `score_limit=10` in `soldut.cfg` keeps 10 (their config beats
+    the default).
+  - **Render** (`render.c::draw_flags` after `draw_mech`,
+    inside `BeginMode2D`): vertical staff + triangular pennant
+    team-colored. Position picks home_pos / dropped_pos /
+    carrier-chest based on status (interp-lerped from `render_prev_*`
+    for the carried case so the flag tracks moving bodies smoothly).
+    Pennant gets a sin-driven tip-vertex wobble while CARRIED.
+    DROPPED draws a faint outline halo to read as urgent.
+  - **HUD** (`hud.c`): two new helpers, drawn first (so they show
+    even for spectators / between rounds): `draw_flag_pips` puts a
+    24-px pip in each top corner — Red TL, Blue TR — with HOME =
+    solid, CARRIED = alpha-pulse, DROPPED = outline-only with
+    center dot. `draw_flag_compass` projects each flag world pos
+    via `GetWorldToScreen2D`; if off-screen, draws a small
+    triangular arrow at the closest viewport edge pointing toward
+    the flag, colored by team.  `hud_draw` signature widened to
+    take `Camera2D camera`; `render.c` passes `r->camera`.
+  - **`match.h`** comment on `MATCH_MODE_CTF` cleaned up — no longer
+    "plays as TDM at M4".
+  - **Regression test** `tests/ctf_test.c` (52 assertions,
+    `make test-ctf`): init_round modes, flag_position cases, enemy
+    pickup, friendly no-pickup, carrier-dies drop (CTF + non-CTF
+    no-op), friendly return + scoring, auto-return on timer, capture
+    + team/slot scoring, ctf_is_carrier truth, no-capture-without-
+    carry guard. Authors a synthetic 2-flag level on top of
+    `level_build_tutorial` so the test is self-contained.
+  - **Crossfire CTF map (code-built)**: new `MAP_CROSSFIRE` MapId
+    + `build_crossfire` in `maps.c`. 140×42 symmetric arena with
+    Red base on the left, Blue base on the right, central cover,
+    sniper overlooks, 2 flags at chest-height, 8 authored
+    LvlSpawn records (4 per team), 5 example pickups. mode_mask
+    = FFA|TDM|CTF. Existing maps got mode_mask = FFA|TDM (no CTF
+    bit) so the runtime mode-mask validator demotes any CTF
+    request landing on Foundry/Slipstream/Reactor to TDM with a
+    log warning. The CTF score limit clamp's `>=25` heuristic
+    works because the FFA default in `config_defaults` is 25; an
+    explicit `score_limit=N<25` in `soldut.cfg` is honored.
+  - **Team auto-balance** in start_round (`main.c`) and
+    shotmode's start_round mirror: when mode is TDM/CTF, in-use
+    slots get distributed RED/BLUE deterministically (slot 0 →
+    RED, slot 1 → BLUE; explicit user picks survive a single-
+    step imbalance). Without this, every player spawns on the
+    FFA-default team (= RED) and CTF never triggers a touch
+    transition because there's no "enemy carrier."
+  - **Editor TOOL_FLAG** in `tools/editor/`. New `TOOL_FLAG`
+    enum entry (with `F` key shortcut + toolbar button). Mouse-
+    click drops a `LvlFlag` at the cursor; team auto-toggles
+    1→2→1 between placements so a designer who clicks twice
+    drops a Red+Blue pair. Right-click deletes nearest. Auto-sets
+    `META.mode_mask` CTF bit when both teams' flags are present;
+    clears when either drops below. Editor's `validate.c` already
+    enforced the CTF constraints (≤1 flag per team, matching
+    spawns); they continue to apply. Help modal updated to list
+    the F shortcut + 1/2 team selection.
+  - **Shot mode CTF support**: new `mode <ffa|tdm|ctf>` and
+    `map <short_name>` directives in `src/shotmode.c`. `seed_world`
+    honors them and runs `ctf_init_round` when in CTF mode (also
+    sets `world.match_mode_cached` and `match.phase = ACTIVE`).
+    New `flag_carry <flag_idx>` debug event for shot tests — pre-
+    arms the local mech as a carrier without forcing the test to
+    walk across the entire arena. `shotmode_run` now calls
+    `config_load` so a soldut.cfg in the test cwd reaches
+    `config_pick_*` (without this, networked shot tests couldn't
+    select CTF mode/Crossfire map).
+  - **Shot tests**:
+    - `tests/shots/m5_ctf_capture.shot` — single-player end-to-
+      end: spawn near RED base, arm BLUE flag carry via debug
+      directive, walk into RED home flag, capture fires (R5/B0).
+    - `tests/shots/m5_ctf_pickup.shot` — single-player touch-
+      driven pickup: spawn 80 px west of BLUE flag, walk RIGHT
+      into it, pickup transition fires + carrier visual.
+    - `tests/shots/net/2p_ctf.{host,client}.shot` — paired
+      networked: host (RED) arms a carry + walks RIGHT into RED
+      home flag → capture fires + score 5-0; client (BLUE)
+      mirrors flag-state via the wire, sees BLUE flag missing
+      from base during carry, sees ROUND OVER post-capture.
+    - `tests/shots/net/run_ctf.sh` — wraps `tests/shots/net/run.sh`
+      with a temporary `soldut.cfg` that drives mode=ctf +
+      map_rotation=crossfire. 12 base assertions (host/client
+      plumbing) + 7 CTF-specific (flag init, capture, mirror).
+  - **Network smoke test**: `tests/net/run_ctf.sh` (15 assertions)
+    — log-driven, CI-runnable. Verifies host builds Crossfire
+    with mode_mask=0x7, both sides run `ctf_init_round`, team
+    auto-balance fires (red=1 blue=1), CTF score limit clamps
+    to 5, client receives ROUND_START with mode=CTF, snapshots
+    flow, round ends correctly.
+  - Verification: `make` clean; `make test-physics` ok;
+    `make test-level-io` 25/25; `make test-pickups` 43/43;
+    `make test-ctf` 52/52; `make test-spawn` ok; `make test-editor`
+    (editor smoke + 4 scenario scripts) ok;
+    `tests/net/run.sh` 13/13; `tests/net/run_3p.sh` 10/10;
+    `tests/net/run_ctf.sh` 15/15;
+    `tests/shots/net/run.sh 2p_basic` 12/12;
+    `tests/shots/net/run.sh 2p_motion` 12/12;
+    `tests/shots/net/run_ctf.sh` 12+7=19/19. Protocol id stays
+    `S0LG` (`NET_MSG_FLAG_STATE` uses message id 16, no
+    entity-snapshot widening).
+
+  - **Lobby UX pass — host setup, mode/map controls, per-player team picker** (post-P07).
+    - **MODE_HOST_SETUP screen** (`host_setup_screen_run` in
+      `lobby_ui.c`). Title's "Host Server" button now routes to a
+      pre-lobby setup screen instead of dropping straight into the
+      lobby. The screen's mode picker (FFA / TDM / CTF radio buttons),
+      map cycle button (auto-skips maps whose `meta.mode_mask` doesn't
+      cover the picked mode), score-limit + time-limit steppers, and
+      friendly-fire toggle land in `g->config` + a fresh `match_init`
+      when the user clicks **Start Hosting**. The script-driven test
+      paths (`--shot ... network host`) bypass the screen and continue
+      to read directly from `soldut.cfg`.
+    - **Lobby MATCH panel** at the top of the lobby (between LOBBY
+      title and player list). For all viewers: the current mode is
+      a highlighted pill, the map name is visible, score/time/ff
+      printed beside. For the host (only when `match.phase == LOBBY ||
+      SUMMARY`, never mid-round): the FFA/TDM/CTF pills + map button
+      are clickable. Host changes mutate `g->match` + `g->config` and
+      broadcast `NET_MSG_LOBBY_MATCH_STATE` so all clients see the new
+      mode/map immediately. Mode changes auto-skip to a compatible map
+      and clamp the CTF default score limit to 5 when bumping from
+      FFA/TDM's default of 25.
+    - **TEAM panel at the top of the loadout column** (above LOADOUT,
+      not buried beneath it as before). Mode-aware:
+      - TDM/CTF: three-cell **RED / BLUE / Spec** picker. The active
+        team is highlighted in its team color; the player taps any
+        cell to switch. Each player controls only their own slot;
+        clicks route through the existing `apply_team_change` path
+        (`net_client_send_team_change` for clients, `lobby_set_team`
+        for the host) which the server fans out via the standard
+        dirty-bit lobby_list broadcast.
+      - FFA: a two-cell **Playing / Spectator** toggle (FFA has only
+        one team — the meaningful axis is "in" vs "sitting out").
+    - **Bootstrap respect for cfg**: `networked_shot_bootstrap`
+      stopped overriding `auto_start_seconds` / `time_limit` /
+      `score_limit` when a `soldut.cfg` was loaded — same shape as the
+      P07 fix for CTF tests; lets the new team-change shot test set a
+      4-second auto-start for a longer lobby observation window.
+    - **Test scaffold**: new `team_change <team>` shotmode directive
+      drives `net_client_send_team_change` for clients (and
+      `lobby_set_team` for hosts) so a paired shot script can simulate
+      the lobby UI's TEAM-button click without a real mouse. Coverage:
+      - `tests/shots/net/2p_team_change.{host,client}.shot` — paired
+        scripts; client sends BLUE at lobby tick 120, host's player
+        list reflects it before the round starts. Captures
+        before/after PNGs + a side-by-side contact sheet.
+      - `tests/shots/net/run_team_change.sh` — wraps `run.sh` with a
+        TDM-mode `soldut.cfg`. 12 base assertions (round flow + wire
+        round-trip) + 4 team-change-specific (host config TDM, slot 1
+        accepted, client team_change sent, lobby_list received). 16/16
+        passing.
+    - Verification: full pre-existing test matrix re-runs clean —
+      `tests/net/run.sh` 13/13, `run_3p.sh` 10/10, `run_ctf.sh` 15/15,
+      `run.sh 2p_basic` 12/12, `run.sh 2p_motion` 12/12,
+      `run_ctf.sh` (shot) 19/19, `run_team_change.sh` 16/16.
+
+  - **CTF combat regression — auto-balance ordering bug** (post-P07).
+    - **Bug**: `start_round` ran the TDM/CTF team auto-balance AFTER
+      `lobby_spawn_round_mechs`. The spawn helper bakes `slot.team`
+      into `mech.team`; with the auto-balance running too late, both
+      players spawned on the FFA-default RED team and
+      `mech_apply_damage`'s friendly-fire gate (`shooter.team ==
+      victim.team && !world.friendly_fire`) silently dropped every
+      shot. CTF/TDM rounds played as "everyone on RED, can't shoot
+      anyone." The user reported it as "shooting opposing mechs in
+      CTF mode does nothing."
+    - **Fix**: moved the auto-balance block above
+      `lobby_spawn_round_mechs` in `main.c::start_round`. Mechs now
+      get spawned with their post-balance team. Comment marked the
+      ordering as load-bearing.
+    - **Regression test**: `tests/shots/net/2p_ctf_combat.{host,client}.shot`
+      + `run_ctf_combat.sh` — 12 base + 7 CTF-combat assertions
+      (build, mode, balance ran, balance precedes mech_create, hit
+      lands, victim HP drops, fire-event log shows opposing-team
+      hit). 19/19 passing.
+    - **Drop-on-kill paired shot**: `tests/shots/net/2p_ctf_drop_on_kill.{host,client}.shot`
+      + `run_ctf_drop_on_kill.sh` — 12 base + 4 drop assertions
+      (server-side carrier arming, mech_kill on victim id=1,
+      `ctf: drop flag=0` log line, drop pos near spawn). 16/16
+      passing. Verifies the wire round-trip that `ctf_test.c`'s unit
+      `test_carrier_dies_drop` covered at the function level.
+    - **New shotmode debug directives** (test-only):
+      - `arm_carry <flag_idx> <mech_id>` — host-side server-state
+        flag arming; needed because `flag_carry` on a *client* only
+        mutates client-local state and never reaches the server.
+      - `kill_peer <mech_id>` — host-side `mech_apply_damage` with
+        9999 dmg from shooter=-1 (environmental). Sidesteps weapon
+        accuracy variance (recoil + bink) so death-flow tests are
+        deterministic.
+
+  - **Editor → game CTF round-trip via F5** (post-P07).
+    - **`--test-play` auto-detects CTF mode** from the loaded
+      `.lvl`'s `META.mode_mask` + `flag_count`. The host-setup screen
+      doesn't reach the F5 path (the editor forks `./soldut
+      --test-play <abs_path>` directly), so the runtime peeks the
+      level's META right after parsing args: if `(mode_mask & CTF) &&
+      flag_count == 2`, it sets `config.mode = CTF`,
+      `config.score_limit = FLAG_CAPTURE_DEFAULT (= 5)`, and
+      `config.friendly_fire = false`. Without this, F5 on a CTF map
+      hardcoded FFA — flags rendered but capture never fired because
+      `match.mode != CTF` blocked `ctf_step`. Logs
+      `test-play: detected CTF map (mode_mask=0x4, flag_count=2)`
+      so the auto-detect is observable.
+    - **Editor `flag_add` auto-sets `META.mode_mask` CTF bit** when
+      both team-1 and team-2 flags are present, mirroring the
+      `tool_flag` (mouse-click) path. Editor shot scripts that drop
+      a CTF flag pair now save a CTF-tagged map without an extra
+      `meta_set` step.
+    - **`tools/editor/shots/ctf_map.shot`** — programmatically
+      authors a 50×16 tile arena: floor + side walls + Red flag
+      at (200, 332) + Blue flag at (1400, 332) + matching team
+      spawns. Saves to `assets/maps/ctf_test.lvl`. Reloads from
+      disk and asserts the round-trip preserved 2 flags + 2 spawns.
+    - **`tests/shots/m5_ctf_editor_map.shot`** — single-player
+      shot that loads the editor's `ctf_test.lvl`, sets `mode ctf`,
+      spawns the player just east of the BLUE flag. Player walks
+      LEFT — touches BLUE flag (pickup), keeps walking ~1280 px to
+      RED home flag (capture). Final score R5/B0 (CTF default).
+      Visual contact sheet shows pickup → carry → capture → both-
+      home transitions cleanly.
+    - **`tests/test_play_ctf.sh`** — verifies the actual F5 code
+      path: spawns `./soldut --test-play assets/maps/ctf_test.lvl`
+      with a 5-second timeout, greps `soldut.log` for the
+      auto-detect log line + round-begin in CTF mode +
+      ctf_init_round + score_limit clamp.
+    - **`make test-ctf-editor-flow`** chains both halves: editor
+      shot writes the .lvl, game shot exercises the capture flow,
+      then the F5 / --test-play check runs. 4 (shot) + 4 (test-play)
+      = 8/8 assertions all green; 4 unit assertions inside the
+      editor shot itself (saved-flag count, mode_mask CTF bit set,
+      reload preserves flags + spawns).
+
 ### Pending
 
-- **P07–P14** — CTF, map sharing, controls / `BTN_FIRE_SECONDARY` /
+- **P08–P14** — Map sharing, controls / `BTN_FIRE_SECONDARY` /
   UI panel, mech atlas runtime, weapon art, damage feedback,
   parallax / HUD / TTF / halftone / decal chunking, audio.
 - **P15–P18** — ComfyUI asset generation + the 8 maps + bake test.

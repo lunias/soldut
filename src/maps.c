@@ -26,6 +26,10 @@ static const MapDef g_maps[MAP_COUNT] = {
                          "Reactor",
                          "Central pillar, two flanking platforms.",
                          110, 42 },
+    [MAP_CROSSFIRE]  = { MAP_CROSSFIRE,  "crossfire",
+                         "Crossfire",
+                         "Symmetric CTF arena. Two team bases, central run.",
+                         140, 42 },
 };
 
 const MapDef *map_def(int id) {
@@ -127,8 +131,9 @@ static void build_foundry(Level *L, Arena *arena) {
     add_pickup_to_map(L, arena,  75 * 32, dummy_top_y, PICKUP_POWERUP,       POWERUP_BERSERK);
     add_pickup_to_map(L, arena,  90 * 32, floor_y,     PICKUP_ARMOR,         ARMOR_LIGHT);
 
-    LOG_I("map: foundry built (%dx%d, %d pickups)",
-          L->width, L->height, L->pickup_count);
+    L->meta.mode_mask = (uint16_t)((1u << MATCH_MODE_FFA) | (1u << MATCH_MODE_TDM));
+    LOG_I("map: foundry built (%dx%d, %d pickups, mode_mask=0x%x)",
+          L->width, L->height, L->pickup_count, (unsigned)L->meta.mode_mask);
 }
 
 /* ---- MAP_SLIPSTREAM ----------------------------------------------- */
@@ -155,7 +160,9 @@ static void build_slipstream(Level *L, Arena *arena) {
     /* Two cover blocks on the main floor. */
     fill_rect(L, 30, L->height - 8,  31, L->height - 4, TILE_SOLID);
     fill_rect(L, 69, L->height - 8,  70, L->height - 4, TILE_SOLID);
-    LOG_I("map: slipstream built (%dx%d)", L->width, L->height);
+    L->meta.mode_mask = (uint16_t)((1u << MATCH_MODE_FFA) | (1u << MATCH_MODE_TDM));
+    LOG_I("map: slipstream built (%dx%d, mode_mask=0x%x)",
+          L->width, L->height, (unsigned)L->meta.mode_mask);
 }
 
 /* ---- MAP_REACTOR -------------------------------------------------- */
@@ -177,7 +184,122 @@ static void build_reactor(Level *L, Arena *arena) {
     /* High overlooks. */
     fill_rect(L, 22, L->height - 22, 32, L->height - 21, TILE_SOLID);
     fill_rect(L, 78, L->height - 22, 88, L->height - 21, TILE_SOLID);
-    LOG_I("map: reactor built (%dx%d)", L->width, L->height);
+    L->meta.mode_mask = (uint16_t)((1u << MATCH_MODE_FFA) | (1u << MATCH_MODE_TDM));
+    LOG_I("map: reactor built (%dx%d, mode_mask=0x%x)",
+          L->width, L->height, (unsigned)L->meta.mode_mask);
+}
+
+/* ---- MAP_CROSSFIRE (M5 P07) ---------------------------------------- */
+/* The CTF map. Symmetric 140×42 layout — two team bases on far left and
+ * far right with a small back wall, an elevated forward platform per
+ * team, and a central depression with cover columns to funnel fights.
+ *
+ * The flag at each base sits on top of the rear elevated platform,
+ * accessible only from the front (so a defender can sit between flag
+ * and approach). Spawn lanes are biased to each team's back area so
+ * the carrier has a legitimate run home.
+ *
+ * mode_mask carries FFA|TDM|CTF so the rotation can mix it in with
+ * non-CTF rounds. */
+static void build_crossfire(Level *L, Arena *arena) {
+    map_alloc_tiles(L, arena, 140, 42);
+
+    int W = L->width, H = L->height;
+    /* Floor across the full width. */
+    fill_rect(L, 0, H - 4, W, H, TILE_SOLID);
+
+    /* Outer side walls (full height). */
+    fill_rect(L, 0,     0, 2,     H - 4, TILE_SOLID);
+    fill_rect(L, W - 2, 0, W,     H - 4, TILE_SOLID);
+
+    /* RED base (left) — back platform 12 tiles deep, raised 6 tiles. */
+    fill_rect(L, 4,  H - 10, 18, H - 9,  TILE_SOLID);   /* platform top */
+    fill_rect(L, 16, H - 14, 18, H - 9,  TILE_SOLID);   /* short rear wall */
+
+    /* BLUE base (right) — mirror of red. */
+    fill_rect(L, W - 18, H - 10, W - 4, H - 9,  TILE_SOLID);
+    fill_rect(L, W - 18, H - 14, W - 16, H - 9, TILE_SOLID);
+
+    /* Forward elevated platforms — per-team approach to the central
+     * battleground. RED's faces right, BLUE's faces left. */
+    fill_rect(L, 26, H - 8, 36, H - 7, TILE_SOLID);
+    fill_rect(L, W - 36, H - 8, W - 26, H - 7, TILE_SOLID);
+
+    /* Central cover columns + a low mid platform. The map's "name"
+     * (Crossfire) refers to the central exchange where both teams'
+     * forward platforms have line-of-sight. */
+    int mid = W / 2;
+    fill_rect(L, mid - 12, H - 6, mid - 11, H - 4, TILE_SOLID);
+    fill_rect(L, mid + 11, H - 6, mid + 12, H - 4, TILE_SOLID);
+    fill_rect(L, mid - 4,  H - 7, mid + 4,  H - 6, TILE_SOLID);   /* mid bridge */
+
+    /* High overlooks — a sniper perch per team, accessible by jet. */
+    fill_rect(L, 12, H - 22, 22, H - 21, TILE_SOLID);
+    fill_rect(L, W - 22, H - 22, W - 12, H - 21, TILE_SOLID);
+
+    /* ---- Authored spawns (LvlSpawn) — preferred over the
+     * hardcoded g_red/g_blue_lanes by map_spawn_point's M5 path.
+     * Stagger horizontally inside each team's back third. */
+    int n_spawns = 8;
+    L->spawns = (LvlSpawn *)arena_alloc(arena, sizeof(LvlSpawn) * (size_t)n_spawns);
+    if (L->spawns) {
+        L->spawn_count = n_spawns;
+        const int floor_y = (H - 4) * 32;        /* feet sit on top of row H-4 */
+        const int spawn_y = floor_y - 40;        /* pelvis above the floor */
+        const int plat_top_y = (H - 10) * 32 - 40;
+        /* RED side: two on platform, two on floor between base and mid. */
+        L->spawns[0] = (LvlSpawn){ .pos_x =  6 * 32, .pos_y = (int16_t)plat_top_y, .team = 1, .flags = 1, .lane_hint = 0 };
+        L->spawns[1] = (LvlSpawn){ .pos_x = 12 * 32, .pos_y = (int16_t)plat_top_y, .team = 1, .flags = 1, .lane_hint = 1 };
+        L->spawns[2] = (LvlSpawn){ .pos_x = 22 * 32, .pos_y = (int16_t)spawn_y,   .team = 1, .flags = 1, .lane_hint = 2 };
+        L->spawns[3] = (LvlSpawn){ .pos_x = 30 * 32, .pos_y = (int16_t)spawn_y,   .team = 1, .flags = 1, .lane_hint = 3 };
+        /* BLUE side: mirror. */
+        L->spawns[4] = (LvlSpawn){ .pos_x = (int16_t)((W -  6) * 32), .pos_y = (int16_t)plat_top_y, .team = 2, .flags = 1, .lane_hint = 0 };
+        L->spawns[5] = (LvlSpawn){ .pos_x = (int16_t)((W - 12) * 32), .pos_y = (int16_t)plat_top_y, .team = 2, .flags = 1, .lane_hint = 1 };
+        L->spawns[6] = (LvlSpawn){ .pos_x = (int16_t)((W - 22) * 32), .pos_y = (int16_t)spawn_y,   .team = 2, .flags = 1, .lane_hint = 2 };
+        L->spawns[7] = (LvlSpawn){ .pos_x = (int16_t)((W - 30) * 32), .pos_y = (int16_t)spawn_y,   .team = 2, .flags = 1, .lane_hint = 3 };
+    }
+
+    /* ---- Flags — one per team, hovering at chest height above each
+     * team's back platform. Touch detection in ctf_step uses
+     * mech_chest_pos against flag.home_pos with a 36 px radius
+     * (FLAG_TOUCH_RADIUS_PX) — so flags need to sit near where a
+     * standing mech's chest would actually be. The platform's top
+     * tile row is `H-10`, top edge at y = (H-10)*32 = 1024. Pelvis
+     * sits at floor - 36 = 988, chest ~30 px above pelvis = 958.
+     * Setting flag y to platform_top - 50 = 974 puts the flag
+     * staff/pennant in chest-overlap range (dy ≈ 16 → in radius). */
+    L->flags = (LvlFlag *)arena_alloc(arena, sizeof(LvlFlag) * 2);
+    if (L->flags) {
+        L->flag_count = 2;
+        const int chest_y = (H - 10) * 32 - 50;
+        L->flags[0] = (LvlFlag){
+            .pos_x = (int16_t)(10 * 32),         /* RED base */
+            .pos_y = (int16_t)chest_y,
+            .team  = 1,
+        };
+        L->flags[1] = (LvlFlag){
+            .pos_x = (int16_t)((W - 10) * 32),   /* BLUE base */
+            .pos_y = (int16_t)chest_y,
+            .team  = 2,
+        };
+    }
+
+    /* ---- Pickups — Health + Ammo on each side near mid; one armor
+     * pack at center for risky teamplay. */
+    int floor_y = (H - 4) * 32 - 16;
+    int plat_y  = (H - 8)  * 32 - 16;
+    add_pickup_to_map(L, arena,  40 * 32, floor_y, PICKUP_HEALTH,       HEALTH_SMALL);
+    add_pickup_to_map(L, arena, (W - 40) * 32, floor_y, PICKUP_HEALTH,  HEALTH_SMALL);
+    add_pickup_to_map(L, arena,  31 * 32, plat_y,  PICKUP_AMMO_PRIMARY, 0);
+    add_pickup_to_map(L, arena, (W - 31) * 32, plat_y, PICKUP_AMMO_PRIMARY, 0);
+    add_pickup_to_map(L, arena,  mid * 32, floor_y, PICKUP_ARMOR,       ARMOR_LIGHT);
+
+    L->meta.mode_mask = (uint16_t)((1u << MATCH_MODE_FFA) |
+                                    (1u << MATCH_MODE_TDM) |
+                                    (1u << MATCH_MODE_CTF));
+    LOG_I("map: crossfire built (%dx%d, %d spawns, %d flags, %d pickups, mode_mask=0x%x)",
+          W, H, L->spawn_count, L->flag_count, L->pickup_count,
+          (unsigned)L->meta.mode_mask);
 }
 
 static void build_fallback(MapId id, Level *level, Arena *arena) {
@@ -185,6 +307,7 @@ static void build_fallback(MapId id, Level *level, Arena *arena) {
         case MAP_FOUNDRY:    build_foundry(level, arena);    break;
         case MAP_SLIPSTREAM: build_slipstream(level, arena); break;
         case MAP_REACTOR:    build_reactor(level, arena);    break;
+        case MAP_CROSSFIRE:  build_crossfire(level, arena);  break;
         default:             build_foundry(level, arena);    break;
     }
 }
