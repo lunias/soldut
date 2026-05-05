@@ -80,6 +80,15 @@ enum {
     NET_MSG_LOBBY_ROUND_START  = 31,    /* server → client: enter MATCH       */
     NET_MSG_LOBBY_ROUND_END    = 32,    /* server → client: enter SUMMARY     */
     NET_MSG_LOBBY_MATCH_STATE  = 33,    /* server → client: MatchState delta  */
+
+    /* M5 P08 — map sharing. All on NET_CH_LOBBY (reliable, ordered). The
+     * INITIAL_STATE body now also carries an appended MapDescriptor (32
+     * bytes) so the connecting client knows what map the server is
+     * running before the round starts. */
+    NET_MSG_MAP_REQUEST        = 40,    /* client → server: please ship the .lvl bytes for crc */
+    NET_MSG_MAP_CHUNK          = 41,    /* server → client: one fragment of the .lvl */
+    NET_MSG_MAP_READY          = 42,    /* client → server: I have the map (status=0/1/2) */
+    NET_MSG_MAP_DESCRIPTOR     = 43,    /* server → client: new descriptor (host changed maps) */
 };
 
 /* Reject reasons sent in NET_MSG_REJECT body. */
@@ -88,6 +97,44 @@ enum {
     NET_REJECT_SERVER_FULL      = 2,
     NET_REJECT_BAD_NONCE        = 3,
     NET_REJECT_TIMEOUT          = 4,
+};
+
+/* M5 P08 — map sharing wire format.
+ *
+ * MapDescriptor identifies the server's current map. Embedded in
+ * INITIAL_STATE so the connecting client can decide whether to download.
+ * size_bytes == 0 (and crc32 == 0) signals "no .lvl on disk to ship —
+ * client uses its own code-built fallback under MapId rotation." */
+typedef struct MapDescriptor {
+    uint32_t crc32;             /* matches the .lvl header CRC field */
+    uint32_t size_bytes;        /* total .lvl size in bytes; 0 = code-built only */
+    uint8_t  short_name_len;    /* length of short_name, 0..23 */
+    char     short_name[24];    /* ASCII; null-padded to 24 */
+    uint8_t  reserved[3];       /* pad / future use */
+} MapDescriptor;
+/* Wire size: 4 + 4 + 1 + 24 + 3 = 36 bytes. The struct's natural
+ * alignment on every supported target is 4 (max member alignment) so
+ * sizeof matches the on-wire layout. */
+#define NET_MAP_DESCRIPTOR_BYTES 36
+_Static_assert(sizeof(MapDescriptor) == NET_MAP_DESCRIPTOR_BYTES,
+               "MapDescriptor must be exactly 36 bytes — wire format depends on it");
+
+/* Limits for the streaming protocol — kept close to the on-wire spec
+ * so wire-format checks read the same constants the server enforces. */
+#define NET_MAP_MAX_FILE_BYTES   (2u * 1024u * 1024u)  /* 2 MB hard cap */
+#define NET_MAP_CHUNK_PAYLOAD     1180                  /* ENet MTU minus chunk header */
+#define NET_MAP_CHUNK_HEADER_BYTES  16
+#define NET_MAP_REQUEST_BYTES        9                  /* tag + crc32 + resume_offset */
+#define NET_MAP_READY_BYTES          8                  /* tag + crc32 + status + reserved[2] */
+
+/* MAP_READY status codes — what the client tells the server about the
+ * map after finalize. Anything other than OK keeps the client out of
+ * the round-start gate. */
+enum {
+    NET_MAP_READY_OK             = 0,    /* client has the map, validated */
+    NET_MAP_READY_CRC_MISMATCH   = 1,    /* assembled buffer's CRC didn't match */
+    NET_MAP_READY_PARSE_FAILURE  = 2,    /* level_load rejected the file */
+    NET_MAP_READY_TOO_LARGE      = 3,    /* descriptor.size > NET_MAP_MAX_FILE_BYTES */
 };
 
 typedef enum {
@@ -127,6 +174,12 @@ typedef struct NetPeer {
     uint32_t     round_trip_ms;   /* enet's view of RTT */
     uint32_t     bytes_sent;
     uint32_t     bytes_recv;
+
+    /* M5 P08 — server tracks which map crc each peer has signaled
+     * MAP_READY for. The auto-start countdown reads this: a peer is
+     * "not ready to start" until they've ack'd the current map's crc.
+     * 0 means "no MAP_READY yet" (a peer that just connected). */
+    uint32_t     map_ready_crc;
 } NetPeer;
 
 /* A discovery result, populated by net_poll when DISCOVERY_REPLY
@@ -323,6 +376,25 @@ void net_client_send_chat       (NetState *ns, const char *text);
 void net_client_send_map_vote   (NetState *ns, int choice /*0/1/2*/);
 void net_client_send_kick       (NetState *ns, int target_slot);
 void net_client_send_ban        (NetState *ns, int target_slot);
+
+/* M5 P08 — map sharing client outbound. */
+void net_client_send_map_request(NetState *ns, uint32_t crc32, uint32_t resume_offset);
+void net_client_send_map_ready  (NetState *ns, uint32_t crc32, uint8_t status);
+
+/* M5 P08 — server checks whether every active peer has sent MAP_READY for
+ * the current map crc. Used by main.c's auto-start gate so the round
+ * doesn't begin until everyone has the file. Returns true if there are
+ * no peers that need to wait on (offline solo, no clients, or all
+ * acknowledged). */
+struct Game;
+bool net_server_all_peers_map_ready(const NetState *ns, uint32_t current_map_crc);
+
+/* M5 P08 — broadcast the current MapDescriptor to every active peer.
+ * Called after the host's serve_info refreshes (start_round, host-driven
+ * map changes). Clients re-run their resolve-or-download path. The
+ * descriptor in INITIAL_STATE handles fresh joins; this message handles
+ * mid-lobby map changes. */
+void net_server_broadcast_map_descriptor(NetState *ns, const MapDescriptor *desc);
 
 /* ---- LAN discovery ----------------------------------------------- */
 

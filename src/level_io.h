@@ -55,6 +55,12 @@ const char *level_io_result_str(LvlResult r);
  * the editor / cook tool can verify a buffer without re-saving. */
 uint32_t level_crc32(const uint8_t *data, int n);
 
+/* M5 P08 — compute the CRC32 of a .lvl buffer with the on-file CRC
+ * field (offset 36, 4 bytes) treated as zero. The download-finalize
+ * path uses this to verify a reassembled buffer matches the
+ * descriptor's stated CRC before writing to cache. */
+uint32_t level_compute_buffer_crc(const uint8_t *buf, int n);
+
 struct Level;
 
 /* Build the per-tile polygon broadphase from the level's existing

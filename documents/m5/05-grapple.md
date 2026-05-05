@@ -58,35 +58,29 @@ The grapple state is per-mech; each mech can have one active grapple at a time. 
 
 ## Wire format
 
-A grapple's state needs to ride snapshots so remote clients can render the rope correctly. Cheap encoding: 4 bytes per mech.
-
-```c
-// EntitySnapshot extension — not adding a separate field, just packing
-// the 3-bit state + anchor position into existing reserved space.
-//
-// We use 1 of the 5 spare bits in the new state_bits u16, plus 2 new
-// reserved bytes... actually, dedicated:
-//
-//   grapple_state    : 2 bits  (GRAPPLE_IDLE/FLYING/ATTACHED, 3 values)
-//   grapple_anchor_x : 13 bits (signed, ±4096 px in 1-px res)
-//   grapple_anchor_y : 13 bits
-//   grapple_anchor_mech : 5 bits (-1 = no mech anchor; 0..30 = mech_id)
-//
-// Pack into 32 bits = 4 bytes.
-```
-
-Bumping the EntitySnapshot from 28 → 32 bytes pushes the bandwidth budget but stays within the 80 kbps target: 32 × 32 mechs × 30 Hz = 30 KB/s downstream = 240 kbps. **That exceeds the 80 kbps target.**
-
-Mitigation: only ship the grapple bytes when the grapple is non-IDLE. Add a `SNAP_DIRTY_GRAPPLE` bit to the per-entity dirty mask; when IDLE (the 99% case) the bytes are absent.
+A grapple's state needs to ride snapshots so remote clients can render the rope correctly. The wire has no per-entity dirty mask, so the gating bit lives in the existing `state_bits` u16 (already on the wire after P03's u8→u16 widening). When set, an 8-byte suffix is appended after the entity's regular fields:
 
 ```c
 // snapshot.h — added
 enum {
-    SNAP_DIRTY_GRAPPLE = 1u << 11,
+    SNAP_STATE_GRAPPLING = 1u << 12,   // bit 12 in EntitySnapshot.state_bits
 };
+
+// EntitySnapshot trailing suffix when SNAP_STATE_GRAPPLING is set:
+//   grapple_state       : u8   (GRAPPLE_IDLE/FLYING/ATTACHED)
+//   grapple_anchor_mech : u8   (0xFF = no mech anchor)
+//   grapple_anchor_part : u8   (bone index when anchored to a mech)
+//   reserved            : u8
+//   grapple_anchor_x_q  : i16  (1 px res, direct (int16_t)anchor.x)
+//   grapple_anchor_y_q  : i16
+// Total: 8 bytes per active grapple.
 ```
 
-This keeps idle bandwidth flat. Active grapples cost ~4 bytes × however-many-mechs-are-grappling × 30 Hz ≈ 480 B/s per active grapple. With 4 simultaneous active grapples (very unusual): 2 KB/s. Trivial.
+The base EntitySnapshot stays at 28 bytes (its post-P03 size). Idle entities pay 0 bytes of grapple overhead — the suffix is gated by the bit. Active grapples cost 8 bytes × N grapplers × 30 Hz ≈ 240 B/s per active grapple. With 4 simultaneous active grapples (very unusual): 1 KB/s. Trivial.
+
+The suffix uses 1 px resolution (direct `(int16_t)` cast of the anchor world position) rather than the `quant_pos` 4× sub-pixel factor used by `pos_x_q`. The grapple anchor is a static decoration, not a physics-relevant position; sub-pixel precision wasn't needed.
+
+> Earlier drafts of this doc proposed `SNAP_DIRTY_GRAPPLE = 1u << 11` on a per-entity dirty mask. That mask doesn't exist on the wire, so the gating moved into `state_bits` — same intent (idle = 0 bytes), different mechanism.
 
 ## The hook head
 

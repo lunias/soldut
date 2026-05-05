@@ -2,6 +2,8 @@
 #include "config.h"
 #include "log.h"
 #include "lobby.h"
+#include "map_cache.h"
+#include "map_download.h"
 #include "match.h"
 #include "particle.h"
 #include "projectile.h"
@@ -94,6 +96,17 @@ bool game_init(Game *g) {
     g->pending_port   = SOLDUT_DEFAULT_PORT;
     g->offline_solo   = false;
     g->auto_start_single_player = false;
+
+    /* M5 P08 — map sharing: pre-allocate the download buffer +
+     * received-bits bitmap on the permanent arena, and ensure the
+     * platform cache directory exists. Both are idempotent / cheap. */
+    if (!map_download_init(&g->map_download, &g->permanent)) {
+        LOG_E("map_download_init failed (need %u + %u bytes from permanent arena)",
+              (unsigned)NET_MAP_MAX_FILE_BYTES,
+              (unsigned)(MAP_DOWNLOAD_MAX_CHUNKS / 8));
+        return false;
+    }
+    map_cache_init();
 
     g->mode = MODE_BOOT;
     g->tick = 0;

@@ -365,6 +365,24 @@ static void start_round(Game *g) {
     decal_init((int)level_width_px(&g->world.level),
                (int)level_height_px(&g->world.level));
 
+    /* P08 — refresh the host's serve descriptor so INITIAL_STATE +
+     * map-share streaming reflect the round's chosen map, and push
+     * the new descriptor to all peers so any client that doesn't have
+     * the file kicks off a download immediately. */
+    {
+        const char *short_name = g->test_play_lvl[0]
+                               ? NULL
+                               : map_def(g->match.map_id)->short_name;
+        const char *serve_in   = g->test_play_lvl[0] ? g->test_play_lvl : NULL;
+        maps_refresh_serve_info(short_name, serve_in,
+                                &g->server_map_desc,
+                                g->server_map_serve_path,
+                                sizeof(g->server_map_serve_path));
+        if (g->net.role == NET_ROLE_SERVER) {
+            net_server_broadcast_map_descriptor(&g->net, &g->server_map_desc);
+        }
+    }
+
     /* P07 — TDM/CTF team auto-balance. In FFA the lobby_add_slot
      * default `team = MATCH_TEAM_FFA` (= 1 = RED) is correct. In
      * TDM/CTF that puts everyone on RED, which makes CTF never trigger
@@ -596,15 +614,34 @@ static void host_match_flow_step(Game *g, float dt) {
                     g->lobby.dirty = true;
                 }
             }
+            /* P08 — hold the countdown at >=1.5s when peers are still
+             * downloading the current map. Code-built maps (descriptor
+             * crc=0) bypass the gate entirely — there's nothing to
+             * download. Slow clients still finalize MAP_READY through
+             * the chunk stream while the timer holds. */
+            uint32_t cur_map_crc = g->server_map_desc.crc32;
+            bool map_gate_ok = (cur_map_crc == 0) ||
+                               (g->net.role != NET_ROLE_SERVER) ||
+                               net_server_all_peers_map_ready(&g->net, cur_map_crc);
+            if (!map_gate_ok && g->lobby.auto_start_active &&
+                g->lobby.auto_start_remaining < 1.5f) {
+                g->lobby.auto_start_remaining = 1.5f;
+                g->lobby.dirty = true;
+            }
             if (lobby_tick(&g->lobby, dt)) {
-                /* Auto-start fired → enter countdown. test-play uses
-                 * a 1 s countdown (set in match.countdown_default at
-                 * startup) so designers' F5 round-trip stays short. */
-                float secs = g->test_play_lvl[0]
-                                 ? g->match.countdown_default : 5.0f;
-                match_begin_countdown(&g->match, secs);
-                if (g->net.role == NET_ROLE_SERVER) {
-                    net_server_broadcast_match_state(&g->net, &g->match);
+                if (!map_gate_ok) {
+                    /* Defensive — re-arm in case the hold above raced. */
+                    lobby_auto_start_arm(&g->lobby, 1.5f);
+                } else {
+                    /* Auto-start fired → enter countdown. test-play uses
+                     * a 1 s countdown (set in match.countdown_default at
+                     * startup) so designers' F5 round-trip stays short. */
+                    float secs = g->test_play_lvl[0]
+                                     ? g->match.countdown_default : 5.0f;
+                    match_begin_countdown(&g->match, secs);
+                    if (g->net.role == NET_ROLE_SERVER) {
+                        net_server_broadcast_match_state(&g->net, &g->match);
+                    }
                 }
             }
             host_broadcast_countdown_if_changed(g, dt);
@@ -703,6 +740,19 @@ static bool bootstrap_host(Game *g, const LaunchArgs *args, bool offline) {
     }
     decal_init((int)level_width_px(&g->world.level),
                (int)level_height_px(&g->world.level));
+
+    /* P08 — fill in the serve descriptor for the pre-round lobby map
+     * so connecting clients learn what we have on disk. start_round
+     * refreshes it for the actual round map. */
+    {
+        const char *short_name = g->test_play_lvl[0]
+                               ? NULL : map_def(MAP_FOUNDRY)->short_name;
+        const char *serve_in   = g->test_play_lvl[0] ? g->test_play_lvl : NULL;
+        maps_refresh_serve_info(short_name, serve_in,
+                                &g->server_map_desc,
+                                g->server_map_serve_path,
+                                sizeof(g->server_map_serve_path));
+    }
     return true;
 }
 

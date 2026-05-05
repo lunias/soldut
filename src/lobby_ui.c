@@ -767,6 +767,37 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     ClearBackground((Color){10, 12, 16, 255});
     sync_loadout_from_server(L, g);
 
+    /* ---- P08 — map download progress banner --------------------- *
+     * Drawn first (under the title strip) when a download is in
+     * flight. Width spans the screen; thin progress bar across the
+     * panel. Other lobby controls remain visible/clickable but the
+     * server's map-ready gate keeps the round from firing while
+     * we're below 100%. */
+    if (g->map_download.active) {
+        int bw = sw - 2 * S(32);
+        int bx = S(32);
+        int by = S(50);
+        int bh = S(26);
+        DrawRectangle(bx, by, bw, bh, (Color){20, 32, 48, 240});
+        DrawRectangleLines(bx, by, bw, bh, (Color){80, 140, 200, 255});
+        int pct = map_download_progress_pct(&g->map_download);
+        int fill_w = (int)((float)bw * (float)pct / 100.0f);
+        if (fill_w > 0) {
+            DrawRectangle(bx + 2, by + 2, fill_w - 4, bh - 4,
+                          (Color){70, 130, 200, 255});
+        }
+        char dl_label[80];
+        snprintf(dl_label, sizeof(dl_label),
+                 "DOWNLOADING MAP %s — %d%%  (%u / %u bytes)",
+                 g->map_download.desc.short_name, pct,
+                 (unsigned)g->map_download.bytes_received,
+                 (unsigned)g->map_download.total_size);
+        ui_draw_text(&L->ui, dl_label,
+                     bx + S(8),
+                     by + (bh - 14) / 2,
+                     14, (Color){220, 230, 240, 255});
+    }
+
     /* ---- Top strip: title + MATCH panel ----
      * Visible to all players. The host gets clickable mode + map
      * buttons (only between rounds — phase == LOBBY); clients see the
@@ -842,8 +873,15 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
             g->config.mode_rotation_count = 1;
             g->config.map_rotation[0] = g->match.map_id;
             g->config.map_rotation_count = 1;
+            /* P08 — refresh serve descriptor + push to clients so they
+             * download the new map (or fall back to code-built). */
+            maps_refresh_serve_info(map_def(g->match.map_id)->short_name,
+                                    NULL, &g->server_map_desc,
+                                    g->server_map_serve_path,
+                                    sizeof(g->server_map_serve_path));
             if (g->net.role == NET_ROLE_SERVER) {
                 net_server_broadcast_match_state(&g->net, &g->match);
+                net_server_broadcast_map_descriptor(&g->net, &g->server_map_desc);
             }
             LOG_I("host: lobby mode → %s map → %s",
                   match_mode_name(g->match.mode),
@@ -884,8 +922,14 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
             }
             g->config.map_rotation[0] = g->match.map_id;
             g->config.map_rotation_count = 1;
+            /* P08 — same refresh+broadcast as the mode-change branch. */
+            maps_refresh_serve_info(map_def(g->match.map_id)->short_name,
+                                    NULL, &g->server_map_desc,
+                                    g->server_map_serve_path,
+                                    sizeof(g->server_map_serve_path));
             if (g->net.role == NET_ROLE_SERVER) {
                 net_server_broadcast_match_state(&g->net, &g->match);
+                net_server_broadcast_map_descriptor(&g->net, &g->server_map_desc);
             }
             LOG_I("host: lobby map → %s",
                   map_def(g->match.map_id)->display_name);

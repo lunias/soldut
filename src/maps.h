@@ -54,3 +54,39 @@ bool map_build_from_path(World *world, Arena *arena, const char *path);
  * pick lanes that spread players across the full map width. */
 Vec2 map_spawn_point(MapId id, const Level *level, int slot_index,
                      int team, MatchModeId mode);
+
+/* M5 P08 — client-side map build by descriptor. Walks the same
+ * resolution order as client_resolve_or_download:
+ *   1. assets/maps/<short>.lvl with matching CRC → load
+ *   2. download_cache/<crc>.lvl with matching CRC → load
+ *   3. fall back to code-built map for the supplied MapId
+ *
+ * Used by ROUND_START on the client so a downloaded map actually
+ * loads from cache instead of getting stomped by the MapId rotation. */
+struct MapDescriptor;
+void map_build_for_descriptor(World *world, Arena *arena,
+                              const struct MapDescriptor *desc,
+                              MapId fallback_id);
+
+/* M5 P08 — refill the host's MapDescriptor + serve_path after a
+ * map_build / map_build_from_path. Probes the .lvl on disk and reads
+ * its CRC + size; on a code-built map (no .lvl on disk), zeroes the
+ * descriptor so clients know not to expect a download.
+ *
+ * Inputs:
+ *   short_name   — map short_name (e.g. "foundry"), or the basename of
+ *                  test_play_lvl when in F5 test-play mode.
+ *   serve_path_in — when non-NULL, the host's local path to the .lvl
+ *                   (used for test-play with absolute paths). When NULL,
+ *                   defaults to assets/maps/<short_name>.lvl.
+ *
+ * Outputs (non-NULL ptrs):
+ *   *out_desc       — filled from the file header (or zeroed if missing)
+ *   out_serve_path  — set to the resolved host-local .lvl path
+ */
+struct MapDescriptor;
+void maps_refresh_serve_info(const char *short_name,
+                             const char *serve_path_in,
+                             struct MapDescriptor *out_desc,
+                             char *out_serve_path,
+                             size_t out_serve_path_cap);

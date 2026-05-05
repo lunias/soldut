@@ -13,7 +13,7 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-05** (post P07; snapshot pos quant overflow fix).
+Last updated: **2026-05-05** (post P08; map sharing across the network).
 
 ---
 
@@ -474,6 +474,92 @@ Last updated: **2026-05-05** (post P07; snapshot pos quant overflow fix).
 ---
 
 ## Networking
+
+### Map-shared assets resolve to client-local files (P08)
+
+- **What we did** — A custom `.lvl` streamed from a server (P08) is
+  validated, cached at `<XDG_DATA_HOME>/soldut/maps/<crc>.lvl`, and
+  loaded on round start. But the level's string-table-indexed asset
+  references (background PNG, music OGG, ambient loop, etc.) are still
+  resolved against **the client's local files**. A custom map that
+  references `"music/citadel.ogg"` plays whatever the client has at
+  `assets/music/citadel.ogg`, not what the server has on disk.
+- **Why** — Bundling the audio + parallax assets alongside the `.lvl`
+  would multiply the on-wire payload from a ~500 KB level file to
+  several MB per map, plus require either (a) a multi-file "map bundle"
+  format (.tar / .zip on the wire) or (b) a manifest + content-addressed
+  per-asset download. Both are real work and don't matter until P14
+  (audio module) and P13 (parallax) actually consume those references.
+  At P08 we ship the `.lvl` only; missing-asset references fall back to
+  the existing per-map defaults baked into the runtime.
+- **Revisit when** —
+  - P14 ships audio and a custom map's missing music is noticeable in
+    playtest.
+  - P13 ships parallax and a custom map's missing background reads as
+    visibly broken (skybox missing, etc.).
+  - A community starts shipping custom maps with custom assets and the
+    workflow becomes visibly missing.
+  - At that point: design a "map bundle" format (probably a tarball with
+    the `.lvl` + a manifest of asset paths + content-addressed asset
+    files) and extend the wire protocol to ship the bundle in chunks
+    instead of just the `.lvl`. The cache directory shape stays the
+    same; just `<crc>.bundle` instead of `<crc>.lvl`.
+
+### No server-side download throttling (P08)
+
+- **What we did** — `server_handle_map_request` on receiving a
+  `NET_MSG_MAP_REQUEST` immediately reads the entire `.lvl` from disk
+  and `enet_send_to`s every chunk back-to-back on the reliable channel.
+  No per-peer throttling, no bytes-per-second cap, no fair-queueing
+  across simultaneous joiners. ENet's reliable channel handles
+  retransmission backpressure but we don't shape the queue.
+- **Why** — At P08's scale (LAN play; small maps ≤50 KB; rare joins)
+  ENet's own buffering is fine. A 500 KB map at the spec's worst case
+  is ~430 chunks — drained from the host's outgoing queue in one second
+  on LAN. A burst of 8 simultaneous joins requesting the same 500 KB
+  map = ~4 MB host upstream within a second; ENet absorbs that without
+  visible stutter on a typical home connection. The proper fix
+  (per-peer in-flight-bytes cap + a queue that round-robins across
+  peers) is a half-day of work that solves a problem we don't have yet.
+- **Revisit when** —
+  - A host runs a public server and reports stutter / lobby UI
+    unresponsiveness when many clients connect simultaneously.
+  - Maps grow past 1 MB (per P17/P18 authored content) and the
+    upstream burst at simultaneous-join becomes a real bottleneck.
+  - We hit `NET_MAP_MAX_FILE_BYTES = 2 MB` as a real ceiling and have
+    to consider "what happens when 16 peers all download a 2 MB file
+    at once" (32 MB upstream burst — no longer trivial).
+
+### No download resume across host process restarts (P08)
+
+- **What we did** — `NET_MSG_MAP_REQUEST` carries a `resume_offset`
+  field for "I had a partial download from before, please continue from
+  byte N." The server honors it (fseek's the file to that offset before
+  streaming). But the client's `MapDownload` lives in process memory:
+  if the client process restarts, the partial buffer is gone and
+  resume_offset is always 0 on the next connect. Worse, if the **host**
+  restarts mid-download, its `server_map_desc.crc32` may have changed
+  (different .lvl contents in `assets/maps/`), and the client's
+  resume_offset is meaningless against the new file.
+- **Why** — Persisting partial downloads across process restarts wants
+  either (a) a per-`<crc>.partial` file in the cache that we extend on
+  successive runs, plus a resumed-state index, or (b) treating every
+  fresh process as starting over (current behavior). At P08 the
+  download is fast enough (~1–3 s LAN, ~5 s WAN at 500 KB) that
+  resume-across-restarts is not load-bearing. The wire format reserves
+  `resume_offset` so we can add the persistence path later without
+  bumping the protocol.
+- **Revisit when** —
+  - Maps grow past 1 MB AND we ship over WAN at typical home upload
+    speeds (~500 KB/s) — at that point a 2 MB map takes ~5 s and a
+    crash mid-download is more likely to be a noticeable lost minute.
+  - We do an internet-public test with 50 ms+ RTT and observe that
+    half-finished downloads after a quick reconnect re-pull from byte 0.
+  - At that point: write the partial buffer to `<cache>/<crc>.partial`
+    on every chunk apply (or at least every N seconds), index pending
+    crcs in a small `partials.txt` so the client knows what to resume
+    on next connect. The host already trusts the resume_offset; only
+    client-side state needs persisting.
 
 ### Non-cryptographic handshake token (keyed FNV1a, not HMAC-SHA256)
 

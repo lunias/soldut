@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks shot \
         debug gdb gdb-host gdb-client valgrind editor
 
 all: $(BIN)
@@ -143,6 +143,24 @@ $(BUILD_DIR)/spawn_test: tests/spawn_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET
 
 test-spawn: $(BUILD_DIR)/spawn_test
 	./$(BUILD_DIR)/spawn_test
+
+# M5 P08 — synth_map writes a .lvl on disk for the map-share end-to-end
+# test. Used by tests/net/run_map_share.sh; standalone build target so
+# CI can bake it before invoking the wrapper.
+$(BUILD_DIR)/synth_map: tests/synth_map.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/synth_map.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+# M5 P08 — chunk reassembly + duplicate-detection unit test. Asserts
+# correctness of map_download_apply_chunk against a synthesized chunk
+# stream (in-order, out-of-order, duplicates, oversize).
+$(BUILD_DIR)/map_chunk_test: tests/map_chunk_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/map_chunk_test.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+test-map-chunks: $(BUILD_DIR)/map_chunk_test
+	./$(BUILD_DIR)/map_chunk_test
+
+test-map-share: $(BIN) $(BUILD_DIR)/synth_map
+	./tests/net/run_map_share.sh
 
 # End-to-end: editor shotmode authors a .lvl with a platform + spawn,
 # `./soldut --test-play <lvl>` loads it, soldut.log records the spawn

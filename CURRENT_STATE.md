@@ -5,7 +5,7 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-04** (M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver, P02 — polygon collision + slope physics, P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote interp + `is_dummy` bit, P04 — standalone level editor at `tools/editor/` + `--test-play` flag, P05 — pickup runtime + powerups + Engineer deployable + Burst SMG cadence + practice dummy, P06 — grappling hook with `CSTR_FIXED_ANCHOR` + contracting distance constraint + state-bit-gated wire suffix, and P07 — CTF mode with flag entities + capture rule + carrier penalties + 26-byte `NET_MSG_FLAG_STATE` event protocol in).
+Last updated: **2026-05-05** (M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver, P02 — polygon collision + slope physics, P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote interp + `is_dummy` bit, P04 — standalone level editor at `tools/editor/` + `--test-play` flag, P05 — pickup runtime + powerups + Engineer deployable + Burst SMG cadence + practice dummy, P06 — grappling hook with `CSTR_FIXED_ANCHOR` + contracting distance constraint + state-bit-gated wire suffix, P07 — CTF mode with flag entities + capture rule + carrier penalties + 26-byte `NET_MSG_FLAG_STATE` event protocol; post-P07 — lobby UX pass, auto-balance ordering fix, editor → game CTF round-trip via F5, snapshot pos quant 8× → 4× to fit Crossfire's 4480 px width; P08 — map sharing across the network: `MapDescriptor` in `INITIAL_STATE`, `NET_MSG_MAP_REQUEST`/`MAP_CHUNK`/`MAP_READY`/`MAP_DESCRIPTOR`, `src/map_cache.{c,h}` + `src/map_download.{c,h}`, content-addressed cache at `<XDG/AppData>/soldut/maps/<crc>.lvl` with 64 MB LRU, lobby UI download progress, host gate on per-peer MAP_READY).
 
 ---
 
@@ -18,7 +18,7 @@ Last updated: **2026-05-04** (M4 lobby & matches in; M5 P01 — `.lvl` format + 
 | **M2**    | Foundation lands 2026-05-03. Host/client handshake works locally; per-tick input ship + 30 Hz snapshot broadcast + client-side prediction & replay + per-mech bone history for hitscan lag compensation are wired. LAN-only, full snapshots, no mid-tick interpolation of remote mechs (see TRADE_OFFS.md). Two-laptop bake test still pending. |
 | **M3**    | Combat depth in 2026-05-03. All 5 chassis (Trooper / Scout / Heavy / Sniper / Engineer) with passives. All 8 primaries (Pulse Rifle, Plasma SMG, Riot Cannon, Rail Cannon, Auto-Cannon, Mass Driver, Plasma Cannon, Microgun) and 6 secondaries (Sidearm, Burst SMG, Frag Grenades, Micro-Rockets, Combat Knife, Grappling Hook). Projectile pool with bone + tile collision. Explosions: damage falloff, line-of-sight check, impulse to ragdolls. Per-limb HP and dismemberment of all 5 limbs. Recoil + bink + self-bink fully wired. Friendly-fire toggle (`--ff` server flag). Kill feed with HEADSHOT/GIB/OVERKILL/RAGDOLL/SUICIDE flags. Loadout via CLI flags (`--chassis`, `--primary`, `--secondary`, `--armor`, `--jetpack`). Snapshot wire format widened to carry chassis/armor/jet/secondary; protocol id bumped to `S0LE`. |
 | **M4**    | Lobby & matches in 2026-05-03. Game flow is now title → browser → lobby → countdown → match → summary → next lobby. New modules: `match.{h,c}`, `lobby.{h,c}`, `lobby_ui.{h,c}`, `ui.{h,c}` (small immediate-mode raylib UI helpers, scale-aware for 4K), `config.{h,c}` (`soldut.cfg` key=value parser), `maps.{h,c}` (Foundry / Slipstream / Reactor — three code-built maps for the rotation; `.lvl` loader is M5). LOBBY-channel messages (player list with `mech_id`, slot delta, loadout, ready, team change, chat, vote, kick/ban, countdown, round start/end, match state). Server config file: port, max_players, mode, score_limit, time_limit, friendly_fire, auto_start_seconds, map_rotation, mode_rotation. Single-player flow auto-hosts an offline server and arms a 1s countdown. Protocol id bumped `S0LE` → `S0LF`. Network test scaffold under `tests/net/` runs the host/client end-to-end via real ENet loopback and asserts on log-line milestones. |
-| **M5**    | In progress. **P01–P07** in. P02: per-particle contact normals (Q1.7 SoA fields + `PARTICLE_FLAG_CEILING`); polygon broadphase grid built at level load (`level_build_poly_broadphase`); `physics_constrain_and_collide` interleaves tile + polygon collision per relaxation iter (closest-point-on-triangle, push-out via pre-baked edge normals); `level_ray_hits` tests segments against polygons too; slope-tangent run velocity, slope-aware friction (`0.99 - 0.07*|ny|`, ICE→0.998), angled-ceiling jet redirection, slope-aware post-physics anchor (skips when `ny_avg > -0.92`); WIND/ZERO_G ambient zones; environmental damage tick for DEADLY tiles+polys+ACID zones. Renderer draws polygons (P02 stopgap, replaced by sprite art at P13). P03: per-particle `render_prev_x/_y` snapshot at the top of each `simulate_step`; renderer lerps `pos` ↔ `render_prev` by `alpha = accum/TICK_DT` (also threaded through projectile + FX draw); reconcile `visual_offset` is now read by `renderer_draw_frame` and applied additively to local-mech draws (decays over ~6 frames so server snaps don't read as glitches); per-mech remote snapshot ring (`remote_snap_ring[8]`) + `snapshot_interp_remotes` lerps remote mechs at `client_render_time_ms - 100ms` between bracketing entries (clamped to nearest if only one entry, snap+clear on >200 px corrections); `state_bits` widened u8→u16, `SNAP_STATE_IS_DUMMY` rides bit 11 so client dummies don't drive arm-aim; protocol id bumped `S0LF` → `S0LG`. P05: new `src/pickup.{c,h}` with PickupPool (capacity 64) on World; `pickup_init_round` populates from `level->pickups` and spawns practice-dummy mechs on the authoritative side; `pickup_step` (server-only, per tick) does 24 px touch detection + cooldown rollover + transient lifetime expiry; per-kind apply rules with full-state-rejects-grab guards; powerup timers `powerup_berserk/invis/godmode_remaining` on Mech with `SNAP_STATE_BERSERK/INVIS/GODMODE` bits in the snapshot (clients mirror to sentinel timers); berserk doubles outgoing damage and godmode zeroes incoming damage in `mech_apply_damage`; render alpha-mods invis-active mechs (0.2 / 0.5 local). Engineer's `BTN_USE` now spawns a TRANSIENT `PICKUP_REPAIR_PACK` at the engineer's feet (10 s lifetime, 30 s cooldown) instead of self-healing — allies + the engineer can grab it. Burst SMG fires round 1 on press tick + queues `burst_pending_rounds` to fire at `burst_interval_sec` cadence in `mech_step_drive`. New wire message `NET_MSG_PICKUP_STATE = 15` (20 bytes — full spawner data so transients propagate). New world ring `pickupfeed[64]` drained per tick by `broadcast_new_pickups` in main.c. New regression test `tests/pickup_test.c` (`make test-pickups`). P06: new per-Mech `Grapple` struct + `PROJ_GRAPPLE_HEAD` projectile + `CSTR_FIXED_ANCHOR` constraint (Constraint grows by `Vec2 fixed_pos`); `mech_try_fire`'s WFIRE_GRAPPLE branch spawns a 1200 px/s head from R_HAND (was `NOT YET IMPLEMENTED`); on hit `projectile_step` sets firer state to ATTACHED + calls `mech_grapple_attach` which appends a constraint to the global pool (CSTR_FIXED_ANCHOR for tile, CSTR_DISTANCE_LIMIT min=0/max=L for bone — both one-sided so the rope is slack when shorter than rest and taut when stretched). `mech_step_drive` keeps rest length fixed at hit-time distance (no auto-contract — the Tarzan/pendulum feel) and emits a per-second `grapple_swing` SHOT_LOG; releases on BTN_USE edge or anchor-mech death; `mech_kill` releases on firer death; `mech_grapple_release` flips `active=0` (slot leak bounded). BTN_FIRE while ATTACHED chain-releases + fires a new head (cooldown still gates back-to-back fires at 1.20 s). Snapshot: `SNAP_STATE_GRAPPLING` bit 12 gates an optional 8-byte trailing suffix on `EntitySnapshot` (state, anchor_mech, anchor_part, anchor_x_q, anchor_y_q) so idle bandwidth stays flat. Render: new `draw_grapple_rope` in `render.c` draws a 1.5-px gold line hand → live head (FLYING) or hand → anchor (ATTACHED, tile or bone particle). Two shot tests: `tests/shots/m5_grapple.shot` (basic fire/attach/swing/release) + `tests/shots/m5_grapple_swing.shot` (pendulum + chain re-fire while attached). Protocol id stays `S0LG`. P07: new `src/ctf.{c,h}` module — server-authoritative flag entities (`Flag flags[2]` + `flag_count` on World, populated by `ctf_init_round` from `level.flags` LvlFlag records; flags[0]=RED, flags[1]=BLUE convention). `ctf_step` per tick: 36 px touch detection, 30 s auto-return, both-flags-home capture rule (carrier touching own HOME flag while carrying enemy → +5 team, +1 slot, captured flag returns home). `ctf_drop_on_death` from `mech_kill` drops at pelvis pos with `FLAG_AUTO_RETURN_TICKS` pending. Carrier penalties: `apply_jet_force` halves thrust when `ctf_is_carrier`; `mech_try_fire` rejects when `active_slot == 1 && ctf_is_carrier`. New world fields: `flag_state_dirty` (mutation hint, broadcast site is `main.c::broadcast_flag_state_if_dirty`) + `match_mode_cached` (so `mech_kill` can branch without seeing Game). New wire message `NET_MSG_FLAG_STATE = 16` (variable: 1 byte tag + 1 byte flag_count + 12 bytes per flag — team / status / carrier_mech / pos_q / return_in_ticks; max 26 bytes for a both-flags broadcast). INITIAL_STATE appends optional flag-state suffix for joining clients. CTF score limit defaults to `FLAG_CAPTURE_DEFAULT = 5` when config has the FFA-default `>=25`. Mode-mask validation in `start_round`: if rotation lands on CTF and the picked map's META.mode_mask doesn't allow CTF (or has no Red+Blue flag pair), demote to TDM and log warning (the build-then-validate path takes one extra map_build per CTF round). Render: `draw_flags` after mech body — vertical staff + triangular pennant team-colored, sin-driven wobble while CARRIED, outline halo for DROPPED. HUD: `draw_flag_pips` (Red top-left + Blue top-right corner pips, alpha-pulse for CARRIED, outline-only for DROPPED) + `draw_flag_compass` (off-screen flag → triangular arrow at the nearest screen edge pointing at the flag, team-colored). New regression test `tests/ctf_test.c` (52 assertions, `make test-ctf`): init_round, flag_position, enemy pickup, friendly no-pickup, carrier-dies drop, friendly return, auto-return on timer, capture, ctf_is_carrier, no-capture-without-carry. Protocol id stays `S0LG` (FLAG_STATE event uses a free message id 16, no entity-snapshot widening). **Pending**: P08–P18 (map sharing, controls, art, audio, authored maps). |
+| **M5**    | In progress. **P01–P08** in. P02: per-particle contact normals (Q1.7 SoA fields + `PARTICLE_FLAG_CEILING`); polygon broadphase grid built at level load (`level_build_poly_broadphase`); `physics_constrain_and_collide` interleaves tile + polygon collision per relaxation iter (closest-point-on-triangle, push-out via pre-baked edge normals); `level_ray_hits` tests segments against polygons too; slope-tangent run velocity, slope-aware friction (`0.99 - 0.07*|ny|`, ICE→0.998), angled-ceiling jet redirection, slope-aware post-physics anchor (skips when `ny_avg > -0.92`); WIND/ZERO_G ambient zones; environmental damage tick for DEADLY tiles+polys+ACID zones. Renderer draws polygons (P02 stopgap, replaced by sprite art at P13). P03: per-particle `render_prev_x/_y` snapshot at the top of each `simulate_step`; renderer lerps `pos` ↔ `render_prev` by `alpha = accum/TICK_DT` (also threaded through projectile + FX draw); reconcile `visual_offset` is now read by `renderer_draw_frame` and applied additively to local-mech draws (decays over ~6 frames so server snaps don't read as glitches); per-mech remote snapshot ring (`remote_snap_ring[8]`) + `snapshot_interp_remotes` lerps remote mechs at `client_render_time_ms - 100ms` between bracketing entries (clamped to nearest if only one entry, snap+clear on >200 px corrections); `state_bits` widened u8→u16, `SNAP_STATE_IS_DUMMY` rides bit 11 so client dummies don't drive arm-aim; protocol id bumped `S0LF` → `S0LG`. P05: new `src/pickup.{c,h}` with PickupPool (capacity 64) on World; `pickup_init_round` populates from `level->pickups` and spawns practice-dummy mechs on the authoritative side; `pickup_step` (server-only, per tick) does 24 px touch detection + cooldown rollover + transient lifetime expiry; per-kind apply rules with full-state-rejects-grab guards; powerup timers `powerup_berserk/invis/godmode_remaining` on Mech with `SNAP_STATE_BERSERK/INVIS/GODMODE` bits in the snapshot (clients mirror to sentinel timers); berserk doubles outgoing damage and godmode zeroes incoming damage in `mech_apply_damage`; render alpha-mods invis-active mechs (0.2 / 0.5 local). Engineer's `BTN_USE` now spawns a TRANSIENT `PICKUP_REPAIR_PACK` at the engineer's feet (10 s lifetime, 30 s cooldown) instead of self-healing — allies + the engineer can grab it. Burst SMG fires round 1 on press tick + queues `burst_pending_rounds` to fire at `burst_interval_sec` cadence in `mech_step_drive`. New wire message `NET_MSG_PICKUP_STATE = 15` (20 bytes — full spawner data so transients propagate). New world ring `pickupfeed[64]` drained per tick by `broadcast_new_pickups` in main.c. New regression test `tests/pickup_test.c` (`make test-pickups`). P06: new per-Mech `Grapple` struct + `PROJ_GRAPPLE_HEAD` projectile + `CSTR_FIXED_ANCHOR` constraint (Constraint grows by `Vec2 fixed_pos`); `mech_try_fire`'s WFIRE_GRAPPLE branch spawns a 1200 px/s head from R_HAND (was `NOT YET IMPLEMENTED`); on hit `projectile_step` sets firer state to ATTACHED + calls `mech_grapple_attach` which appends a constraint to the global pool (CSTR_FIXED_ANCHOR for tile, CSTR_DISTANCE_LIMIT min=0/max=L for bone — both one-sided so the rope is slack when shorter than rest and taut when stretched). `mech_step_drive` keeps rest length fixed at hit-time distance (no auto-contract — the Tarzan/pendulum feel) and emits a per-second `grapple_swing` SHOT_LOG; releases on BTN_USE edge or anchor-mech death; `mech_kill` releases on firer death; `mech_grapple_release` flips `active=0` (slot leak bounded). BTN_FIRE while ATTACHED chain-releases + fires a new head (cooldown still gates back-to-back fires at 1.20 s). Snapshot: `SNAP_STATE_GRAPPLING` bit 12 gates an optional 8-byte trailing suffix on `EntitySnapshot` (state, anchor_mech, anchor_part, anchor_x_q, anchor_y_q) so idle bandwidth stays flat. Render: new `draw_grapple_rope` in `render.c` draws a 1.5-px gold line hand → live head (FLYING) or hand → anchor (ATTACHED, tile or bone particle). Two shot tests: `tests/shots/m5_grapple.shot` (basic fire/attach/swing/release) + `tests/shots/m5_grapple_swing.shot` (pendulum + chain re-fire while attached). Protocol id stays `S0LG`. P07: new `src/ctf.{c,h}` module — server-authoritative flag entities (`Flag flags[2]` + `flag_count` on World, populated by `ctf_init_round` from `level.flags` LvlFlag records; flags[0]=RED, flags[1]=BLUE convention). `ctf_step` per tick: 36 px touch detection, 30 s auto-return, both-flags-home capture rule (carrier touching own HOME flag while carrying enemy → +5 team, +1 slot, captured flag returns home). `ctf_drop_on_death` from `mech_kill` drops at pelvis pos with `FLAG_AUTO_RETURN_TICKS` pending. Carrier penalties: `apply_jet_force` halves thrust when `ctf_is_carrier`; `mech_try_fire` rejects when `active_slot == 1 && ctf_is_carrier`. New world fields: `flag_state_dirty` (mutation hint, broadcast site is `main.c::broadcast_flag_state_if_dirty`) + `match_mode_cached` (so `mech_kill` can branch without seeing Game). New wire message `NET_MSG_FLAG_STATE = 16` (variable: 1 byte tag + 1 byte flag_count + 12 bytes per flag — team / status / carrier_mech / pos_q / return_in_ticks; max 26 bytes for a both-flags broadcast). INITIAL_STATE appends optional flag-state suffix for joining clients. CTF score limit defaults to `FLAG_CAPTURE_DEFAULT = 5` when config has the FFA-default `>=25`. Mode-mask validation in `start_round`: if rotation lands on CTF and the picked map's META.mode_mask doesn't allow CTF (or has no Red+Blue flag pair), demote to TDM and log warning (the build-then-validate path takes one extra map_build per CTF round). Render: `draw_flags` after mech body — vertical staff + triangular pennant team-colored, sin-driven wobble while CARRIED, outline halo for DROPPED. HUD: `draw_flag_pips` (Red top-left + Blue top-right corner pips, alpha-pulse for CARRIED, outline-only for DROPPED) + `draw_flag_compass` (off-screen flag → triangular arrow at the nearest screen edge pointing at the flag, team-colored). New regression test `tests/ctf_test.c` (52 assertions, `make test-ctf`): init_round, flag_position, enemy pickup, friendly no-pickup, carrier-dies drop, friendly return, auto-return on timer, capture, ctf_is_carrier, no-capture-without-carry. Protocol id stays `S0LG` (FLAG_STATE event uses a free message id 16, no entity-snapshot widening). P08: new modules `src/map_cache.{c,h}` + `src/map_download.{c,h}`; 32-byte `MapDescriptor` (crc32 + size_bytes + short_name[24] padded to 36 wire bytes via reserved[3]) appended to every `INITIAL_STATE` body so connecting clients learn the host's current map; four new wire messages on `NET_CH_LOBBY` (`NET_MSG_MAP_REQUEST=40`/`MAP_CHUNK=41`/`MAP_READY=42`/`MAP_DESCRIPTOR=43`); chunk size 1180 bytes (matches the 1200-byte ENet MTU after the 16-byte chunk header); content-addressed cache at `<XDG_DATA_HOME or platform default>/soldut/maps/<crc32_hex>.lvl` with 64 MB LRU eviction (atomic write via `<crc>.lvl.tmp` + rename); resolve order on the client = `assets/maps/<short>.lvl` with matching CRC, then `<cache>/<crc>.lvl`, else download; `level_compute_buffer_crc` exposed from level_io.c so `client_finalize_map_download` can verify reassembled bytes against descriptor; `maps_refresh_serve_info` recomputes the host's serve descriptor + serve_path after every map_build (bootstrap_host, start_round, lobby UI mode/map cycle); host's auto-start countdown holds at ≥1.5 s while any peer's `map_ready_crc` doesn't match the current map crc (slow downloaders still join the round; the gate just defers the fire so they don't miss spawn); 30 s stall watchdog on the client cancels + disconnects if no chunks arrive; lobby UI shows `DOWNLOADING MAP NN%` progress strip when `g->map_download.active`; mid-lobby host map changes broadcast `NET_MSG_MAP_DESCRIPTOR` so clients re-resolve; protocol id stays `S0LG` (additive). New regression tests: `tests/map_chunk_test.c` (21 assertions, `make test-map-chunks`) covering chunk reassembly + duplicate detection + OOB rejection + bit-flip CRC fail; `tests/synth_map.c` writes a custom .lvl on demand; `tests/net/run_map_share.sh` (15 assertions) end-to-end host streams + client downloads + caches + plays. Version string `0.0.7-m5p08`. **Pending**: P09–P18 (controls, art, audio, authored maps). |
 
 ---
 
@@ -1151,11 +1151,112 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
       editor shot itself (saved-flag count, mode_mask CTF bit set,
       reload preserves flags + spawns).
 
+  - **Snapshot pos quant 8× → 4×** (post-P07, 2026-05-05).
+    - **Bug**: `quant_pos` in `src/snapshot.c` (and the parallel
+      encoders in `src/net.c` for projectile state, hit/fire events,
+      flag state) packed world positions as `int16_t` with an 8×
+      sub-pixel factor. Range was ±4096 px, resolution 0.125 px.
+      Crossfire CTF is 4480 px wide, so anything east of x=4096 (the
+      entire BLUE base, including the BLUE flag at x=4160) silently
+      wrapped to x=4095 in the wire format. User-visible symptom was
+      "the client gets stuck on their own flag" — every snapshot
+      jammed the client's local mech back to x=4095 even as the
+      server simulated past it.
+    - **Fix**: cut the factor in half to 4×. Range now ±8190 px,
+      resolution 0.25 px (still well below renderer-interp jitter).
+      Logged in TRADE_OFFS.md; revisit when a map exceeds ~8000 px.
+    - Verification: paired host+client CTF shot tests on Crossfire
+      no longer pin the client to x=4095; capture flow completes
+      end-to-end on the wide map.
+
+- **P08 — Map sharing across the network** (2026-05-05).
+  - **New modules**: `src/map_cache.{h,c}` (content-addressed cache
+    at platform-specific path, 64 MB LRU eviction by mtime, atomic
+    `<crc>.lvl.tmp` + rename writes) and `src/map_download.{h,c}`
+    (per-process MapDownload struct on permanent arena: 2 MB buffer +
+    1792-bit chunk-received bitmap, in-order reassembly, duplicate
+    detection, 30 s stall watchdog).
+  - **Wire format additions** (all on `NET_CH_LOBBY`, reliable):
+    - `MapDescriptor` (36 bytes: u32 crc32 + u32 size_bytes + u8
+      short_name_len + char[24] short_name + u8[3] reserved) appended
+      to every `NET_MSG_INITIAL_STATE` body. crc=0 size=0 = code-built
+      fallback (no .lvl on disk to ship).
+    - `NET_MSG_MAP_REQUEST = 40` (9 bytes: tag + crc32 + resume_offset)
+      from client to server.
+    - `NET_MSG_MAP_CHUNK = 41` (16-byte header + ≤1180 byte payload).
+      Header: tag + crc32 + total_size + chunk_offset + chunk_len +
+      is_last + reserved. The 1180-byte payload sizing matches the
+      1200-byte ENet MTU after framing + chunk header.
+    - `NET_MSG_MAP_READY = 42` (8 bytes: tag + crc32 + status +
+      reserved[2]) from client to server. Status: 0=ok, 1=crc_mismatch,
+      2=parse_failure, 3=too_large.
+    - `NET_MSG_MAP_DESCRIPTOR = 43` (1 + 36 bytes) broadcast on
+      mid-lobby host map changes so clients re-resolve.
+  - **Cache directory** by platform (`map_cache_init` resolves +
+    `mkdir -p` once per process; cache dir override via `XDG_DATA_HOME`
+    on Linux):
+    - Linux: `$XDG_DATA_HOME/soldut/maps/` (default `~/.local/share/soldut/maps/`)
+    - macOS: `~/Library/Application Support/Soldut/maps/`
+    - Windows: `%APPDATA%\Soldut\maps\`
+  - **Client resolve order** (`net.c::client_resolve_or_download`):
+    1. `assets/maps/<short>.lvl` with matching CRC + size → MAP_READY ok.
+    2. `<cache>/<crc>.lvl` → MAP_READY ok.
+    3. `map_download_begin` + send MAP_REQUEST.
+  - **Server-side stream** (`net.c::server_handle_map_request`): opens
+    `g->server_map_serve_path`, fseek to `resume_offset`, streams 1180-byte
+    chunks via `enet_send_to(NET_CH_LOBBY, RELIABLE)` until EOF. ENet
+    handles backpressure on the reliable channel.
+  - **Host map-ready gate** (main.c `host_match_flow_step`): `lobby_tick`'s
+    auto-start fire is held above 1.5 s while
+    `net_server_all_peers_map_ready(current_map_desc.crc32)` is false.
+    Code-built maps (crc=0) bypass the gate. Slow downloaders DO
+    extend the countdown; very slow downloaders eventually time out
+    via the client-side 30 s stall watchdog.
+  - **Serve-info refresh sites**: `bootstrap_host` (initial map),
+    `start_round` (per-round map), `lobby_screen_run` mode-change branch,
+    `lobby_screen_run` map-cycle branch. All call
+    `maps_refresh_serve_info` then broadcast `NET_MSG_MAP_DESCRIPTOR`
+    when on the host.
+  - **Client-side ROUND_START path**: `client_handle_round_start` now
+    calls `map_build_for_descriptor` (new helper in maps.c) which walks
+    assets-with-matching-CRC → cache-by-CRC → fallback to MapId code-build.
+    Downloaded maps load from cache on round start without polluting
+    the assets directory.
+  - **Lobby UI**: a thin progress strip with bar + percentage shows in
+    `lobby_screen_run` whenever `g->map_download.active`. Layout fits
+    above the existing MATCH panel; team / loadout controls remain
+    interactive (the host's gate prevents accidental round start before
+    download completes).
+  - **Trust model** (per `documents/m5/10-map-sharing.md` §"Trust"):
+    `MapDescriptor.size_bytes > 2 MB` → MAP_READY status=TOO_LARGE
+    (and no download begun). MAP_CHUNK with offset+len > total_size →
+    rejected in `map_download_apply_chunk`. Reassembled buffer's CRC
+    must match descriptor; mismatch → MAP_READY status=CRC_MISMATCH +
+    log + don't write cache. Cache LRU evicts at 64 MB; one-shot
+    `map_cache_evict_lru` runs after each successful write.
+  - **Tests**: new `tests/map_chunk_test.c` (21 assertions,
+    `make test-map-chunks`) covering chunk-stream reassembly,
+    duplicate detection (bytes_received doesn't double-count), OOB
+    rejection, non-aligned-offset rejection, bit-flip CRC failure.
+    New `tests/synth_map.c` writes synthetic .lvl on disk.
+    New `tests/net/run_map_share.sh` (15 assertions) end-to-end host
+    serves + client downloads + writes cache + plays the round.
+    Verifies MAP_REQUEST flow, chunk streaming, MAP_READY ack, and the
+    cached `<crc>.lvl` file appearing in the client's XDG_DATA_HOME.
+  - **Version**: bumped `SOLDUT_VERSION_STRING` to `0.0.7-m5p08`.
+    Protocol id stays `S0LG` (P08 is additive — no widening of any
+    existing message body).
+  - Verification: `make` clean; `make test-physics` ok;
+    `make test-level-io` 25/25; `make test-pickups` 43/43;
+    `make test-ctf` 52/52; `make test-spawn` ok; `make test-map-chunks`
+    21/21; `tests/net/run.sh` 13/13; `tests/net/run_3p.sh` 10/10;
+    `tests/net/run_ctf.sh` 15/15; `tests/net/run_map_share.sh` 15/15.
+
 ### Pending
 
-- **P08–P14** — Map sharing, controls / `BTN_FIRE_SECONDARY` /
-  UI panel, mech atlas runtime, weapon art, damage feedback,
-  parallax / HUD / TTF / halftone / decal chunking, audio.
+- **P09–P14** — Controls (`BTN_FIRE_SECONDARY` / keybinds / UI panel),
+  mech atlas runtime, weapon art, damage feedback, parallax / HUD /
+  TTF / halftone / decal chunking, audio.
 - **P15–P18** — ComfyUI asset generation + the 8 maps + bake test.
 
 ## Headless test
