@@ -96,6 +96,18 @@ uint32_t level_crc32(const uint8_t *data, int n) {
 
 /* CRC over a buffer with a 4-byte window zeroed (for the header CRC
  * field, which is itself part of the file). */
+uint32_t level_compute_buffer_crc(const uint8_t *buf, int n) {
+    if (!buf || n < (int)(HDR_OFF_CRC32 + 4)) return 0;
+    if (!g_crc_table_init) crc_table_build();
+    uint32_t c = 0xFFFFFFFFu;
+    for (int i = 0; i < n; ++i) {
+        uint8_t b = buf[i];
+        if (i >= HDR_OFF_CRC32 && i < HDR_OFF_CRC32 + 4) b = 0;
+        c = g_crc_table[(c ^ b) & 0xffu] ^ (c >> 8);
+    }
+    return c ^ 0xFFFFFFFFu;
+}
+
 static uint32_t crc32_with_zeroed_window(const uint8_t *buf, int n,
                                          int window_off) {
     if (!g_crc_table_init) crc_table_build();

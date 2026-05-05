@@ -5,6 +5,7 @@
 #include "hash.h"
 #include "input.h"
 #include "lobby.h"
+#include "map_download.h"
 #include "match.h"
 #include "net.h"
 #include "reconcile.h"
@@ -98,6 +99,24 @@ typedef struct Game {
      * cleared at process exit. The path is absolute (the editor runs
      * realpath() before forking us). */
     char         test_play_lvl[256];
+
+    /* M5 P08 — map sharing.
+     *
+     * Server-side: descriptor for the map currently being served (refilled
+     * after every map_build via maps_refresh_serve_info). serve_path is
+     * the host's local path to the .lvl bytes. crc32==0 + size_bytes==0
+     * means the host built code-only and there's no .lvl to ship —
+     * clients fall back to their own MapId rotation.
+     *
+     * Client-side: pending_map is the descriptor received in INITIAL_STATE
+     * (stored so the resolve+download path can reference it after the
+     * handler returns). map_download is the active reassembly state when
+     * non-trivial. */
+    MapDescriptor server_map_desc;
+    char          server_map_serve_path[256];
+
+    MapDescriptor pending_map;
+    MapDownload   map_download;
 } Game;
 
 bool game_init(Game *g);

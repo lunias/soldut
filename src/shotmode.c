@@ -735,6 +735,12 @@ static void networked_shot_bootstrap(Game *g, const Script *s) {
         map_build(MAP_FOUNDRY, &g->world, &g->level_arena);
         decal_init((int)level_width_px(&g->world.level),
                    (int)level_height_px(&g->world.level));
+        /* P08 — refresh the host's serve descriptor so INITIAL_STATE
+         * carries the map crc. Mirrors main.c::bootstrap_host. */
+        maps_refresh_serve_info(map_def(MAP_FOUNDRY)->short_name,
+                                NULL, &g->server_map_desc,
+                                g->server_map_serve_path,
+                                sizeof(g->server_map_serve_path));
         g->mode = MODE_LOBBY;
         LOG_I("shotmode: hosting on port %u as '%s'", (unsigned)s->netport, nm);
     } else if (s->netmode == NETMODE_CONNECT) {
@@ -907,6 +913,17 @@ static void shot_host_flow(Game *g, float dt) {
                 map_build((MapId)g->match.map_id, &g->world, &g->level_arena);
                 decal_init((int)level_width_px(&g->world.level),
                            (int)level_height_px(&g->world.level));
+                /* P08 — refresh + broadcast the serve descriptor so any
+                 * mid-round-joining client (and any client that arrived
+                 * before round_start) knows what the new round's map is. */
+                maps_refresh_serve_info(map_def(g->match.map_id)->short_name,
+                                        NULL, &g->server_map_desc,
+                                        g->server_map_serve_path,
+                                        sizeof(g->server_map_serve_path));
+                if (g->net.role == NET_ROLE_SERVER) {
+                    net_server_broadcast_map_descriptor(&g->net,
+                                                        &g->server_map_desc);
+                }
                 lobby_spawn_round_mechs(&g->lobby, &g->world,
                                         g->match.map_id, g->local_slot_id,
                                         g->match.mode);

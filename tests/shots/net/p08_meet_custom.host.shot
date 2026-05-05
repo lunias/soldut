@@ -1,0 +1,33 @@
+# P08 — host walks RIGHT on a custom map (downloaded by the client).
+#
+# Pairs with p08_meet_custom.client.shot. Run via the wrapper at
+# tests/shots/net/run_meet_custom.sh which:
+#   1. Asks the editor to author <host_dir>/assets/maps/foundry.lvl
+#   2. cd's into <host_dir> and launches this shot
+#   3. cd's into <client_dir> (no assets/maps/) with a fresh
+#      XDG_DATA_HOME (no cache) and launches the client shot
+#   4. Asserts on map-share log lines + screenshot existence
+#
+# The map authored by the editor shot has spawns at x ≈ 256 (slot 0,
+# host) and x ≈ 2944 (slot 1, client) on the bottom row. Host walks
+# right, client walks left, they meet near x ≈ 1600.
+
+window 1280 720
+out build/shots/net/p08_meet_custom_host
+network host 24600
+name HostA
+
+at 60   shot lobby
+# Round arms after 1 s soldut.cfg auto_start; first shot post-start.
+at 200  shot match_start
+
+# Walk right toward center. ~280 px/s on flat ground; 600 ticks ≈ 10s
+# of running carries us ~2800 px, more than enough to reach center.
+at 220  press right
+at 460  release right
+
+at 380  shot midwalk
+at 520  shot meet
+at 600  end
+
+contact_sheet sheet cols 3 cell 320 180

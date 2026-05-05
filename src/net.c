@@ -26,8 +26,11 @@
 #include "game.h"
 #include "hash.h"
 #include "level.h"
+#include "level_io.h"
 #include "lobby.h"
 #include "log.h"
+#include "map_cache.h"
+#include "map_download.h"
 #include "match.h"
 #include "maps.h"
 #include "mech.h"
@@ -38,6 +41,8 @@
 #include "snapshot.h"
 #include "weapons.h"
 #include "world.h"
+
+#include <stdio.h>
 
 #include "../third_party/enet/include/enet/enet.h"
 
@@ -552,6 +557,123 @@ static void client_handle_flag_state(NetState *ns, const uint8_t *body,
     }
 }
 
+/* ---- Map descriptor wire (P08) ----------------------------------
+ *
+ * 32 bytes: u32 crc32, u32 size_bytes, u8 short_name_len, char[24]
+ * short_name, u8[3] reserved. Embedded in INITIAL_STATE. crc==0 +
+ * size==0 means the host has no .lvl on disk and clients should use
+ * their own MapId-rotation fallback. */
+static void encode_map_descriptor(uint8_t **p, const MapDescriptor *d) {
+    w_u32  (p, d->crc32);
+    w_u32  (p, d->size_bytes);
+    w_u8   (p, d->short_name_len);
+    w_bytes(p, d->short_name, 24);
+    w_u8   (p, 0);
+    w_u8   (p, 0);
+    w_u8   (p, 0);
+}
+
+static int decode_map_descriptor(const uint8_t *in, int in_len, MapDescriptor *out) {
+    if (in_len < NET_MAP_DESCRIPTOR_BYTES) return 0;
+    const uint8_t *r = in;
+    out->crc32          = r_u32(&r);
+    out->size_bytes     = r_u32(&r);
+    out->short_name_len = r_u8 (&r);
+    r_bytes(&r, out->short_name, 24);
+    /* Defensive null-terminate. */
+    if (out->short_name_len > 23) out->short_name_len = 23;
+    out->short_name[out->short_name_len] = '\0';
+    (void)r_u8(&r);
+    (void)r_u8(&r);
+    (void)r_u8(&r);
+    return NET_MAP_DESCRIPTOR_BYTES;
+}
+
+/* ---- P08 — map sharing client outbound ---------------------------- */
+
+void net_client_send_map_request(NetState *ns, uint32_t crc32, uint32_t resume_offset) {
+    if (!ns || ns->role != NET_ROLE_CLIENT || !ns->server.enet_peer) return;
+    uint8_t buf[NET_MAP_REQUEST_BYTES];
+    uint8_t *p = buf;
+    w_u8 (&p, NET_MSG_MAP_REQUEST);
+    w_u32(&p, crc32);
+    w_u32(&p, resume_offset);
+    enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
+                 buf, (int)(p - buf));
+    LOG_I("client: MAP_REQUEST crc=%08x offset=%u", (unsigned)crc32, (unsigned)resume_offset);
+}
+
+void net_client_send_map_ready(NetState *ns, uint32_t crc32, uint8_t status) {
+    if (!ns || ns->role != NET_ROLE_CLIENT || !ns->server.enet_peer) return;
+    uint8_t buf[NET_MAP_READY_BYTES];
+    uint8_t *p = buf;
+    w_u8 (&p, NET_MSG_MAP_READY);
+    w_u32(&p, crc32);
+    w_u8 (&p, status);
+    w_u8 (&p, 0);
+    w_u8 (&p, 0);
+    enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
+                 buf, (int)(p - buf));
+    LOG_I("client: MAP_READY crc=%08x status=%u", (unsigned)crc32, (unsigned)status);
+}
+
+/* Returns true if the client has the .lvl locally and can be marked
+ * ready immediately. Returns false if a download must be initiated.
+ *
+ * Resolution order:
+ *   1. assets/maps/<short_name>.lvl with matching CRC
+ *   2. <download_cache>/<crc32_hex>.lvl
+ *   3. otherwise: begin download
+ *
+ * For a code-built descriptor (crc==0 size==0) we send MAP_READY
+ * immediately — the client uses its own MapId fallback. */
+static bool client_resolve_or_download(NetState *ns, Game *g, const MapDescriptor *desc) {
+    if (desc->crc32 == 0 && desc->size_bytes == 0) {
+        /* Code-built fallback signal — no download. */
+        net_client_send_map_ready(ns, 0u, NET_MAP_READY_OK);
+        return true;
+    }
+    if (desc->size_bytes > NET_MAP_MAX_FILE_BYTES) {
+        LOG_E("client: descriptor size %u > cap %u — refusing",
+              (unsigned)desc->size_bytes, (unsigned)NET_MAP_MAX_FILE_BYTES);
+        net_client_send_map_ready(ns, desc->crc32, NET_MAP_READY_TOO_LARGE);
+        return false;
+    }
+
+    /* Probe the shipped path. */
+    char shipped[256];
+    if (map_cache_assets_path(desc->short_name, shipped, sizeof(shipped))) {
+        if (map_cache_file_crc(shipped) == desc->crc32 &&
+            map_cache_file_size(shipped) == desc->size_bytes) {
+            LOG_I("client: map crc=%08x found at %s", (unsigned)desc->crc32, shipped);
+            net_client_send_map_ready(ns, desc->crc32, NET_MAP_READY_OK);
+            return true;
+        }
+    }
+
+    /* Probe the cache. */
+    if (map_cache_has(desc->crc32)) {
+        const char *cached = map_cache_path(desc->crc32);
+        if (map_cache_file_crc(cached) == desc->crc32 &&
+            map_cache_file_size(cached) == desc->size_bytes) {
+            LOG_I("client: map crc=%08x found in cache at %s",
+                  (unsigned)desc->crc32, cached);
+            net_client_send_map_ready(ns, desc->crc32, NET_MAP_READY_OK);
+            return true;
+        }
+    }
+
+    /* Begin download. */
+    if (!map_download_begin(&g->map_download, desc, ns->server_time)) {
+        LOG_E("client: map_download_begin failed for crc=%08x", (unsigned)desc->crc32);
+        return false;
+    }
+    net_client_send_map_request(ns, desc->crc32, 0u);
+    LOG_I("client: downloading map crc=%08x (%u bytes)",
+          (unsigned)desc->crc32, (unsigned)desc->size_bytes);
+    return false;
+}
+
 /* ACCEPT is followed by INITIAL_STATE which carries the lobby slot
  * table + match state so the client can render the lobby UI. The
  * world snapshot stream begins only at ROUND_START — clients don't
@@ -561,9 +683,16 @@ static void client_handle_flag_state(NetState *ns, const uint8_t *body,
  * mid-CTF-round (only possible in future flows; M4 parks joiners in
  * the lobby) sees correct flag positions immediately. The suffix is
  * variable-length: 1 byte flag_count + flag_count*12. flag_count = 0
- * outside CTF rounds; the trailing byte still ships. */
+ * outside CTF rounds; the trailing byte still ships.
+ *
+ * P08: appends a fixed-size 32-byte MapDescriptor so the joining
+ * client can decide to download the .lvl before round start. */
 static void send_initial_state(void *peer, const Game *g) {
-    enum { CAP = 1 + 4 + LOBBY_LIST_WIRE_BYTES + MATCH_SNAPSHOT_WIRE_BYTES + FLAG_STATE_MAX_BYTES };
+    enum { CAP = 1 + 4
+              + LOBBY_LIST_WIRE_BYTES
+              + MATCH_SNAPSHOT_WIRE_BYTES
+              + FLAG_STATE_MAX_BYTES
+              + NET_MAP_DESCRIPTOR_BYTES };
     uint8_t buf[CAP];
     uint8_t *p = buf;
     w_u8 (&p, NET_MSG_INITIAL_STATE);
@@ -572,6 +701,7 @@ static void send_initial_state(void *peer, const Game *g) {
     match_encode     (&g->match, p);          p += MATCH_SNAPSHOT_WIRE_BYTES;
     int fs_n = encode_flag_state(&g->world, p);
     p += fs_n;
+    encode_map_descriptor(&p, &g->server_map_desc);
     enet_send_to(peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
                  buf, (int)(p - buf));
 }
@@ -807,6 +937,128 @@ static void server_handle_lobby_kick_or_ban(NetState *ns, NetPeer *p,
     lobby_chat_system(&g->lobby, msg);
 }
 
+/* ---- M5 P08 — server-side map sharing ---------------------------- */
+
+void net_server_broadcast_map_descriptor(NetState *ns, const MapDescriptor *desc) {
+    if (!ns || ns->role != NET_ROLE_SERVER || !ns->enet_host || !desc) return;
+    uint8_t buf[1 + NET_MAP_DESCRIPTOR_BYTES];
+    uint8_t *p = buf;
+    w_u8(&p, NET_MSG_MAP_DESCRIPTOR);
+    encode_map_descriptor(&p, desc);
+    ENetPacket *pkt = enet_packet_create(buf, (size_t)(p - buf),
+                                          ENET_PACKET_FLAG_RELIABLE);
+    enet_host_broadcast((ENetHost *)ns->enet_host, NET_CH_LOBBY, pkt);
+    ns->bytes_sent += (uint32_t)(p - buf);
+    ns->packets_sent++;
+    LOG_I("server: broadcast MAP_DESCRIPTOR crc=%08x size=%u short=%s",
+          (unsigned)desc->crc32, (unsigned)desc->size_bytes, desc->short_name);
+}
+
+bool net_server_all_peers_map_ready(const NetState *ns, uint32_t current_map_crc) {
+    if (!ns) return true;
+    if (ns->role != NET_ROLE_SERVER) return true;
+    /* If the current map is code-built (crc==0), there's nothing to
+     * gate on — no peer needs to download. */
+    if (current_map_crc == 0) return true;
+    for (int i = 0; i < NET_MAX_PEERS; ++i) {
+        const NetPeer *p = &ns->peers[i];
+        if (p->state != NET_PEER_ACTIVE) continue;
+        if (p->map_ready_crc != current_map_crc) return false;
+    }
+    return true;
+}
+
+/* Stream the host's serve .lvl to a single peer in 1180-byte chunks. */
+static void server_handle_map_request(NetState *ns, NetPeer *peer,
+                                      const Game *g, const uint8_t *body,
+                                      int blen)
+{
+    if (blen < NET_MAP_REQUEST_BYTES - 1) return;
+    const uint8_t *r = body;
+    uint32_t crc           = r_u32(&r);
+    uint32_t resume_offset = r_u32(&r);
+
+    /* Stale request — peer asks for a crc we no longer have. Re-fire
+     * INITIAL_STATE so they pick up the current descriptor and try
+     * again. */
+    if (crc != g->server_map_desc.crc32 || crc == 0) {
+        LOG_W("server: MAP_REQUEST crc=%08x doesn't match current %08x — "
+              "re-sending INITIAL_STATE",
+              (unsigned)crc, (unsigned)g->server_map_desc.crc32);
+        send_initial_state(peer->enet_peer, g);
+        return;
+    }
+    if (g->server_map_serve_path[0] == '\0') {
+        LOG_E("server: MAP_REQUEST but no serve_path — bug");
+        return;
+    }
+    FILE *f = fopen(g->server_map_serve_path, "rb");
+    if (!f) {
+        LOG_E("server: MAP_REQUEST cannot open %s", g->server_map_serve_path);
+        return;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return; }
+    long flen = ftell(f);
+    if (flen < 0) { fclose(f); return; }
+    if ((uint32_t)flen != g->server_map_desc.size_bytes) {
+        LOG_W("server: serve file size %ld != descriptor %u (file changed under us)",
+              flen, (unsigned)g->server_map_desc.size_bytes);
+        fclose(f);
+        return;
+    }
+    if (resume_offset > (uint32_t)flen) resume_offset = 0;
+    if (fseek(f, (long)resume_offset, SEEK_SET) != 0) { fclose(f); return; }
+
+    uint32_t off  = resume_offset;
+    uint32_t total = (uint32_t)flen;
+    int chunks = 0;
+    while (off < total) {
+        uint8_t buf[1 + NET_MAP_CHUNK_HEADER_BYTES + NET_MAP_CHUNK_PAYLOAD];
+        uint32_t want = total - off;
+        if (want > NET_MAP_CHUNK_PAYLOAD) want = NET_MAP_CHUNK_PAYLOAD;
+        size_t got = fread(buf + 1 + NET_MAP_CHUNK_HEADER_BYTES, 1, want, f);
+        if (got == 0) break;
+        uint8_t *p = buf;
+        w_u8 (&p, NET_MSG_MAP_CHUNK);
+        w_u32(&p, crc);
+        w_u32(&p, total);
+        w_u32(&p, off);
+        w_u16(&p, (uint16_t)got);
+        uint8_t is_last = (off + (uint32_t)got >= total) ? 1 : 0;
+        w_u8 (&p, is_last);
+        w_u8 (&p, 0);   /* reserved */
+        /* p now points to the payload area; got bytes already there */
+        int total_pkt = 1 + NET_MAP_CHUNK_HEADER_BYTES + (int)got;
+        enet_send_to(peer->enet_peer, NET_CH_LOBBY,
+                     ENET_PACKET_FLAG_RELIABLE, buf, total_pkt);
+        ns->bytes_sent  += (uint32_t)total_pkt;
+        ns->packets_sent++;
+        off += (uint32_t)got;
+        chunks++;
+    }
+    fclose(f);
+    LOG_I("server: MAP_REQUEST crc=%08x → streamed %d chunks (resume=%u)",
+          (unsigned)crc, chunks, (unsigned)resume_offset);
+}
+
+static void server_handle_map_ready(NetPeer *peer, const uint8_t *body, int blen)
+{
+    if (blen < NET_MAP_READY_BYTES - 1) return;
+    const uint8_t *r = body;
+    uint32_t crc    = r_u32(&r);
+    uint8_t  status = r_u8 (&r);
+    /* reserved[2] follows */
+    if (status == NET_MAP_READY_OK) {
+        peer->map_ready_crc = crc;
+        LOG_I("server: peer %u MAP_READY crc=%08x",
+              (unsigned)peer->client_id, (unsigned)crc);
+    } else {
+        peer->map_ready_crc = 0;   /* not ready */
+        LOG_W("server: peer %u MAP_READY status=%u crc=%08x — peer can't load this map",
+              (unsigned)peer->client_id, (unsigned)status, (unsigned)crc);
+    }
+}
+
 static void server_handle_input(NetState *ns, NetPeer *p,
                                 const uint8_t *body, int blen, Game *g)
 {
@@ -899,13 +1151,32 @@ static void client_handle_initial_state(NetState *ns, const uint8_t *body,
     lobby_decode_list(&g->lobby, r);    r += LOBBY_LIST_WIRE_BYTES;
     match_decode    (&g->match, r);     r += MATCH_SNAPSHOT_WIRE_BYTES;
 
-    /* P07 — optional flag-state suffix. Decoder consumes only what's
-     * actually present; missing bytes (older host that doesn't ship
-     * the suffix) leaves world.flag_count unchanged. */
+    /* P07 — optional flag-state suffix. The flag-state encoding starts
+     * with a single u8 flag_count, then 12 bytes per flag. We must
+     * parse it before the descriptor (which is fixed-size at the tail
+     * of the message). Compute its length first so we can offset to
+     * the descriptor — decode_flag_state on a non-flag-state byte
+     * stream would misinterpret the descriptor's leading byte
+     * (descriptor[0] = low byte of crc32, often non-zero, which would
+     * be read as flag_count). */
     int remaining = blen - (int)(r - body);
-    if (remaining > 0) {
+    if (remaining >= NET_MAP_DESCRIPTOR_BYTES) {
+        int flag_remaining = remaining - NET_MAP_DESCRIPTOR_BYTES;
+        if (flag_remaining > 0) {
+            int n = decode_flag_state(r, flag_remaining, &g->world);
+            if (n > 0) r += n;
+        }
+        /* P08 — MapDescriptor at the tail. */
+        int n = decode_map_descriptor(r, NET_MAP_DESCRIPTOR_BYTES, &g->pending_map);
+        if (n > 0) r += n;
+    } else if (remaining > 0) {
+        /* Older host with no descriptor; treat any trailing bytes as
+         * flag-state. pending_map stays zeroed (= no map advertised). */
         int n = decode_flag_state(r, remaining, &g->world);
         if (n > 0) r += n;
+        memset(&g->pending_map, 0, sizeof(g->pending_map));
+    } else {
+        memset(&g->pending_map, 0, sizeof(g->pending_map));
     }
 
     /* Map will be built when ROUND_START arrives. For now we keep the
@@ -920,6 +1191,15 @@ static void client_handle_initial_state(NetState *ns, const uint8_t *body,
     LOG_I("client: INITIAL_STATE applied — in lobby (local_slot=%d, "
           "match_phase=%s map=%d)",
           g->local_slot_id, match_phase_name(g->match.phase), g->match.map_id);
+
+    /* P08 — kick off the resolve-or-download decision now that we know
+     * what map the host is running. For a code-built descriptor
+     * (crc=0 size=0) this is a one-shot MAP_READY ack. */
+    LOG_I("client: pending map crc=%08x size=%u short=%s",
+          (unsigned)g->pending_map.crc32,
+          (unsigned)g->pending_map.size_bytes,
+          g->pending_map.short_name);
+    client_resolve_or_download(ns, g, &g->pending_map);
 }
 
 /* ---- M4 LOBBY-channel handlers (client side) -------------------- */
@@ -959,9 +1239,12 @@ static void client_handle_round_start(const uint8_t *body, int blen, Game *g) {
     if (blen < MATCH_SNAPSHOT_WIRE_BYTES) return;
     match_decode(&g->match, body);
     /* Rebuild the level for the chosen map. Reset the level arena so
-     * we don't leak across rounds. */
+     * we don't leak across rounds. P08 — when a descriptor is on hand
+     * (host advertised a real .lvl), prefer the cached / shipped file
+     * by CRC; otherwise fall back to the code-built map for this id. */
     arena_reset(&g->level_arena);
-    map_build((MapId)g->match.map_id, &g->world, &g->level_arena);
+    map_build_for_descriptor(&g->world, &g->level_arena,
+                             &g->pending_map, (MapId)g->match.map_id);
     decal_init((int)level_width_px(&g->world.level),
                (int)level_height_px(&g->world.level));
     /* Pools cleared so the snapshot stream can spawn mechs from
@@ -1454,6 +1737,10 @@ static void server_pump_events(NetState *ns, Game *g) {
                         server_handle_lobby_kick_or_ban(ns, p, body, blen, g, false); break;
                     case NET_MSG_LOBBY_BAN:
                         server_handle_lobby_kick_or_ban(ns, p, body, blen, g, true); break;
+                    case NET_MSG_MAP_REQUEST:
+                        server_handle_map_request(ns, p, g, body, blen); break;
+                    case NET_MSG_MAP_READY:
+                        server_handle_map_ready(p, body, blen); break;
                     case NET_MSG_CHAT:   /* legacy in-match chat — fan out unscrubbed at M4 */
                         break;
                     default:
@@ -1491,6 +1778,115 @@ static void server_pump_events(NetState *ns, Game *g) {
             default: break;
         }
     }
+}
+
+/* ---- M5 P08 — client-side map sharing ---------------------------- */
+
+#define NET_MAP_CACHE_CAP_BYTES (64ull * 1024ull * 1024ull)
+
+/* Verify CRC and either write to cache + send MAP_READY ok, or send
+ * one of the failure statuses. Always clears the download active flag
+ * so subsequent INITIAL_STATEs can start fresh. */
+static void client_finalize_map_download(NetState *ns, Game *g) {
+    MapDownload *d = &g->map_download;
+    if (!d->complete) {
+        LOG_E("client: finalize called before complete");
+        d->active = false;
+        return;
+    }
+    uint32_t computed = level_compute_buffer_crc(d->buffer, (int)d->total_size);
+    if (computed != d->crc32) {
+        LOG_E("client: MAP_CHUNK reassembly CRC mismatch (got %08x, want %08x)",
+              (unsigned)computed, (unsigned)d->crc32);
+        net_client_send_map_ready(ns, d->crc32, NET_MAP_READY_CRC_MISMATCH);
+        d->active   = false;
+        d->complete = false;
+        return;
+    }
+    if (!map_cache_write(d->crc32, d->buffer, d->total_size)) {
+        LOG_E("client: failed to write cache for crc=%08x", (unsigned)d->crc32);
+        net_client_send_map_ready(ns, d->crc32, NET_MAP_READY_PARSE_FAILURE);
+        d->active   = false;
+        d->complete = false;
+        return;
+    }
+    /* Evict after write so we don't briefly trip a cap that the new
+     * file just lifted us over. */
+    map_cache_evict_lru(NET_MAP_CACHE_CAP_BYTES);
+
+    LOG_I("client: map crc=%08x cached + ready (%u bytes)",
+          (unsigned)d->crc32, (unsigned)d->total_size);
+    net_client_send_map_ready(ns, d->crc32, NET_MAP_READY_OK);
+    d->active   = false;
+    d->complete = false;
+}
+
+static void client_handle_map_chunk(NetState *ns, Game *g,
+                                    const uint8_t *body, int blen)
+{
+    if (blen < NET_MAP_CHUNK_HEADER_BYTES) {
+        LOG_W("client: short MAP_CHUNK (%d)", blen);
+        return;
+    }
+    const uint8_t *r = body;
+    uint32_t crc          = r_u32(&r);
+    uint32_t total_size   = r_u32(&r);
+    uint32_t chunk_offset = r_u32(&r);
+    uint16_t chunk_len    = r_u16(&r);
+    uint8_t  is_last      = r_u8 (&r);
+    (void)r_u8(&r);   /* reserved */
+
+    int payload = blen - NET_MAP_CHUNK_HEADER_BYTES;
+    if ((int)chunk_len > payload) {
+        LOG_W("client: MAP_CHUNK payload underrun (len=%u, have %d)",
+              (unsigned)chunk_len, payload);
+        return;
+    }
+    if (!g->map_download.active) {
+        /* Stale — server flushing chunks for a download we cancelled
+         * or never started. Ignore. */
+        return;
+    }
+    if (g->map_download.crc32 != crc) {
+        LOG_W("client: MAP_CHUNK crc=%08x ≠ active download %08x — ignoring",
+              (unsigned)crc, (unsigned)g->map_download.crc32);
+        return;
+    }
+    if (total_size != g->map_download.total_size) {
+        LOG_W("client: MAP_CHUNK total_size=%u ≠ descriptor %u — aborting",
+              (unsigned)total_size, (unsigned)g->map_download.total_size);
+        map_download_cancel(&g->map_download);
+        return;
+    }
+    bool done = map_download_apply_chunk(&g->map_download,
+                                         chunk_offset, r, chunk_len,
+                                         ns->server_time);
+    /* `done` from apply_chunk is "this chunk completed the file"; we
+     * can also reach completion via is_last + last chunk (paranoia
+     * check; apply_chunk already covers it). */
+    (void)is_last;
+    if (done) {
+        client_finalize_map_download(ns, g);
+    }
+}
+
+static void client_handle_map_descriptor(NetState *ns, Game *g,
+                                         const uint8_t *body, int blen)
+{
+    if (blen < NET_MAP_DESCRIPTOR_BYTES) return;
+    MapDescriptor desc;
+    decode_map_descriptor(body, blen, &desc);
+    /* No-op if the descriptor matches what we already have. */
+    if (desc.crc32 == g->pending_map.crc32 &&
+        desc.size_bytes == g->pending_map.size_bytes) {
+        return;
+    }
+    LOG_I("client: MAP_DESCRIPTOR update — crc=%08x size=%u short=%s",
+          (unsigned)desc.crc32, (unsigned)desc.size_bytes, desc.short_name);
+    g->pending_map = desc;
+    /* Cancel any in-flight download so we restart cleanly. */
+    if (g->map_download.active) map_download_cancel(&g->map_download);
+    client_resolve_or_download(ns, g, &desc);
 }
 
 /* Route one event we just got from enet_host_service. Used both by
@@ -1547,6 +1943,10 @@ static void client_dispatch_event(NetState *ns, Game *g, ENetEvent *ev) {
                     client_handle_countdown(body, blen, g); break;
                 case NET_MSG_LOBBY_VOTE_STATE:
                     client_handle_vote_state(body, blen, g); break;
+                case NET_MSG_MAP_CHUNK:
+                    client_handle_map_chunk(ns, g, body, blen); break;
+                case NET_MSG_MAP_DESCRIPTOR:
+                    client_handle_map_descriptor(ns, g, body, blen); break;
                 default:
                     LOG_D("client: unhandled tag %u", tag);
                     break;
@@ -1598,6 +1998,19 @@ void net_poll(NetState *ns, Game *g, double dt_real) {
         }
     } else if (ns->role == NET_ROLE_CLIENT) {
         client_pump_events(ns, g);
+        /* P08 — stall watchdog. If the active download hasn't received
+         * a fresh chunk in 30 s, give up and disconnect. ENet's
+         * reliable channel should keep retrying chunks; a true 30 s
+         * gap usually means the host died. */
+        if (map_download_is_stalled(&g->map_download, ns->server_time, 30.0)) {
+            LOG_E("client: map download stalled for >30s — disconnecting");
+            net_client_send_map_ready(ns, g->map_download.crc32,
+                                      NET_MAP_READY_PARSE_FAILURE);
+            map_download_cancel(&g->map_download);
+            if (ns->server.enet_peer) {
+                enet_peer_disconnect((ENetPeer *)ns->server.enet_peer, 0);
+            }
+        }
     }
 
     discovery_pump(ns);

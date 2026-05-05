@@ -4,8 +4,10 @@
 #include "level.h"
 #include "level_io.h"
 #include "log.h"
+#include "map_cache.h"  /* P08 — file CRC + size probes for serve-info */
 #include "match.h"
 #include "mech.h"     /* ArmorId values for default-map pickup variants */
+#include "net.h"      /* MapDescriptor */
 
 #include <stdio.h>
 #include <string.h>
@@ -417,4 +419,125 @@ Vec2 map_spawn_point(MapId id, const Level *level, int slot_index,
     if (tx >= level->width - 4) tx = level->width - 5;
 
     return (Vec2){ (float)tx * (float)level->tile_size + 8.0f, floor_y };
+}
+
+/* ---- M5 P08 — client-side build by descriptor -------------------- */
+
+void map_build_for_descriptor(World *world, Arena *arena,
+                              const struct MapDescriptor *desc,
+                              MapId fallback_id)
+{
+    if (!world || !arena) return;
+    if (!desc || (desc->crc32 == 0 && desc->size_bytes == 0)) {
+        map_build(fallback_id, world, arena);
+        return;
+    }
+    /* 1. shipped */
+    char shipped[256];
+    if (map_cache_assets_path(desc->short_name, shipped, sizeof(shipped))) {
+        if (map_cache_file_crc(shipped) == desc->crc32 &&
+            map_cache_file_size(shipped) == desc->size_bytes) {
+            if (map_build_from_path(world, arena, shipped)) return;
+        }
+    }
+    /* 2. cache */
+    if (map_cache_has(desc->crc32)) {
+        const char *cached = map_cache_path(desc->crc32);
+        if (map_cache_file_crc(cached) == desc->crc32 &&
+            map_cache_file_size(cached) == desc->size_bytes) {
+            if (map_build_from_path(world, arena, cached)) return;
+        }
+    }
+    /* 3. fallback. The host shipped a descriptor we can't load — log
+     * and use the rotation map. start_round on the client built before
+     * the descriptor arrived will use this branch. */
+    LOG_W("map_build_for_descriptor: no local file for crc=%08x; falling back to MapId %d",
+          (unsigned)desc->crc32, (int)fallback_id);
+    map_build(fallback_id, world, arena);
+}
+
+/* ---- M5 P08 — host serve-info refresh ---------------------------- */
+
+/* Strip directory + extension from a filename. Used to derive a
+ * short_name for test-play maps where the host loads from an absolute
+ * path. */
+static void basename_no_ext(const char *path, char *out, size_t out_cap) {
+    if (!path || !out || out_cap == 0) {
+        if (out && out_cap) out[0] = '\0';
+        return;
+    }
+    const char *base = path;
+    for (const char *p = path; *p; ++p) {
+        if (*p == '/' || *p == '\\') base = p + 1;
+    }
+    size_t i = 0;
+    while (base[i] && base[i] != '.' && i + 1 < out_cap) {
+        out[i] = base[i];
+        ++i;
+    }
+    out[i] = '\0';
+}
+
+void maps_refresh_serve_info(const char *short_name,
+                             const char *serve_path_in,
+                             struct MapDescriptor *out_desc,
+                             char *out_serve_path,
+                             size_t out_serve_path_cap)
+{
+    if (!out_desc || !out_serve_path || out_serve_path_cap == 0) return;
+
+    memset(out_desc, 0, sizeof(*out_desc));
+    out_serve_path[0] = '\0';
+
+    /* Pick the candidate path the host will stream from. */
+    char candidate[256];
+    if (serve_path_in && *serve_path_in) {
+        snprintf(candidate, sizeof(candidate), "%s", serve_path_in);
+    } else if (short_name && *short_name) {
+        snprintf(candidate, sizeof(candidate), "assets/maps/%s.lvl", short_name);
+    } else {
+        candidate[0] = '\0';
+    }
+
+    /* Probe the file. */
+    uint32_t size = candidate[0] ? map_cache_file_size(candidate) : 0;
+    uint32_t crc  = (size > 0)   ? map_cache_file_crc (candidate) : 0;
+
+    if (size == 0 || size > NET_MAP_MAX_FILE_BYTES) {
+        /* No .lvl on disk (code-built fallback) or oversized — emit
+         * an empty descriptor. crc/size = 0 tells clients to use their
+         * own MapId-rotation fallback. */
+        if (size > NET_MAP_MAX_FILE_BYTES) {
+            LOG_W("maps: %s is %u bytes (> %u cap) — not advertising",
+                  candidate, (unsigned)size, (unsigned)NET_MAP_MAX_FILE_BYTES);
+        }
+        out_desc->crc32      = 0;
+        out_desc->size_bytes = 0;
+        out_desc->short_name_len = 0;
+        return;
+    }
+
+    /* Derive the short_name. For test-play we use the file's basename;
+     * otherwise the caller's short_name. Both get null-padded into the
+     * 24-byte slot. */
+    char nm[24];
+    if (serve_path_in && *serve_path_in) {
+        basename_no_ext(serve_path_in, nm, sizeof(nm));
+    } else if (short_name) {
+        snprintf(nm, sizeof(nm), "%s", short_name);
+    } else {
+        nm[0] = '\0';
+    }
+    size_t nlen = strlen(nm);
+    if (nlen > 23) nlen = 23;
+
+    out_desc->crc32          = crc;
+    out_desc->size_bytes     = size;
+    out_desc->short_name_len = (uint8_t)nlen;
+    memset(out_desc->short_name, 0, sizeof(out_desc->short_name));
+    memcpy(out_desc->short_name, nm, nlen);
+
+    snprintf(out_serve_path, out_serve_path_cap, "%s", candidate);
+    LOG_I("maps: serve %s (crc=%08x, %u bytes)", candidate,
+          (unsigned)crc, (unsigned)size);
 }
