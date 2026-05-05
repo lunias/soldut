@@ -189,11 +189,14 @@ static bool setup_map_supports_mode(int map_id, int mode_id,
 
 static int setup_next_map_for_mode(int cur_map, int mode_id,
                                    World *w, Arena *arena) {
-    /* Cycle through maps until we find one that supports `mode_id`.
-     * Falls back to the current pick if NO map supports the mode (which
-     * would be a bug — there's always at least one CTF map post-P07). */
-    for (int step = 1; step <= MAP_COUNT; ++step) {
-        int next = (cur_map + step) % MAP_COUNT;
+    /* Cycle through every entry in the runtime map registry (P08b)
+     * until we find one that supports `mode_id`. Falls back to the
+     * current pick if NO map supports the mode (which would be a bug
+     * — there's always at least one CTF map post-P07). */
+    int n = g_map_registry.count;
+    if (n <= 0) return cur_map;
+    for (int step = 1; step <= n; ++step) {
+        int next = (cur_map + step) % n;
         if (setup_map_supports_mode(next, mode_id, w, arena)) return next;
     }
     return cur_map;
@@ -857,8 +860,9 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                 arena_reset(&g->level_arena);
                 map_build((MapId)g->match.map_id, &g->world, &g->level_arena);
                 if (!(g->world.level.meta.mode_mask & (1u << g->match.mode))) {
-                    for (int step = 1; step <= MAP_COUNT; ++step) {
-                        int next = (g->match.map_id + step) % MAP_COUNT;
+                    int N = g_map_registry.count;
+                    for (int step = 1; step <= N; ++step) {
+                        int next = (g->match.map_id + step) % N;
                         arena_reset(&g->level_arena);
                         map_build((MapId)next, &g->world, &g->level_arena);
                         if (g->world.level.meta.mode_mask & (1u << g->match.mode)) {
@@ -894,8 +898,21 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     int map_w = S(180);
     Rectangle map_r = (Rectangle){map_x, mp_y, map_w, mp_h};
     char map_label[64];
+    /* P08b — when the host advertises a map_id outside the client's
+     * local registry (custom map only on the host side), fall through
+     * to the descriptor's short_name so the lobby still shows the right
+     * name. The descriptor arrives before/with ROUND_START and is the
+     * source of truth on the wire. */
+    const char *map_disp;
+    if (g->match.map_id >= 0 && g->match.map_id < g_map_registry.count) {
+        map_disp = g_map_registry.entries[g->match.map_id].display_name;
+    } else if (g->pending_map.short_name_len > 0) {
+        map_disp = g->pending_map.short_name;
+    } else {
+        map_disp = "(custom)";
+    }
     snprintf(map_label, sizeof map_label, "Map: %s%s",
-             map_def(g->match.map_id)->display_name,
+             map_disp,
              can_change ? "  ▶" : "");
     {
         bool hover = can_change && ui_point_in_rect(L->ui.mouse, map_r);
@@ -909,10 +926,13 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                      (int)(map_r.y + (map_r.height - 16*L->ui.scale) * 0.5f),
                      16, tc);
         if (can_change && hover && L->ui.mouse_pressed && !g->test_play_lvl[0]) {
-            /* Cycle to next map that supports the current mode. */
+            /* Cycle to next map that supports the current mode. P08b —
+             * the registry can include user-authored maps from
+             * assets/maps/, not just the four reserved indices. */
             int cur = g->match.map_id;
-            for (int step = 1; step <= MAP_COUNT; ++step) {
-                int next = (cur + step) % MAP_COUNT;
+            int N = g_map_registry.count;
+            for (int step = 1; step <= N; ++step) {
+                int next = (cur + step) % N;
                 arena_reset(&g->level_arena);
                 map_build((MapId)next, &g->world, &g->level_arena);
                 if (g->world.level.meta.mode_mask & (1u << g->match.mode)) {

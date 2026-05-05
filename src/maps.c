@@ -9,43 +9,324 @@
 #include "mech.h"     /* ArmorId values for default-map pickup variants */
 #include "net.h"      /* MapDescriptor */
 
+#include <ctype.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
 
 #define TILE_PX 32
 
-static const MapDef g_maps[MAP_COUNT] = {
-    [MAP_FOUNDRY]    = { MAP_FOUNDRY,    "foundry",
-                         "Foundry",
-                         "Open floor with cover columns. Ground-game.",
-                         100, 40 },
-    [MAP_SLIPSTREAM] = { MAP_SLIPSTREAM, "slipstream",
-                         "Slipstream",
-                         "Stacked catwalks. Vertical jet beats.",
-                         100, 50 },
-    [MAP_REACTOR]    = { MAP_REACTOR,    "reactor",
-                         "Reactor",
-                         "Central pillar, two flanking platforms.",
-                         110, 42 },
-    [MAP_CROSSFIRE]  = { MAP_CROSSFIRE,  "crossfire",
-                         "Crossfire",
-                         "Symmetric CTF arena. Two team bases, central run.",
-                         140, 42 },
-};
+/* Process-global runtime registry. Populated by map_registry_init from
+ * the four code-built defaults plus every `assets/maps/<name>.lvl` on
+ * disk. */
+MapRegistry g_map_registry = {0};
 
 const MapDef *map_def(int id) {
-    if ((unsigned)id >= MAP_COUNT) return &g_maps[0];
-    return &g_maps[id];
+    if (id < 0 || id >= g_map_registry.count) {
+        /* Out-of-range — clamp to entry 0 (Foundry). Callers that need
+         * to detect the out-of-range case (e.g. client display fallback
+         * to the host's pending_map.short_name) should check the index
+         * against g_map_registry.count themselves before calling. */
+        return &g_map_registry.entries[0];
+    }
+    return &g_map_registry.entries[id];
 }
 
 int map_id_from_name(const char *name) {
     if (!name) return -1;
-    for (int i = 0; i < MAP_COUNT; ++i) {
-        if (strcasecmp(name, g_maps[i].short_name) == 0) return i;
-        if (strcasecmp(name, g_maps[i].display_name) == 0) return i;
+    for (int i = 0; i < g_map_registry.count; ++i) {
+        const MapDef *d = &g_map_registry.entries[i];
+        if (d->short_name  [0] && strcasecmp(name, d->short_name)   == 0) return i;
+        if (d->display_name[0] && strcasecmp(name, d->display_name) == 0) return i;
     }
     return -1;
+}
+
+/* ---- P08b registry init: scan a directory for .lvl, populate g_map_registry --- */
+
+/* Tiny endian-explicit readers — same as level_io.c. Duplicated here so
+ * we don't widen level_io.h's surface for one helper used by one file. */
+static uint16_t u16_le(const uint8_t *p) {
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+static uint32_t u32_le(const uint8_t *p) {
+    return (uint32_t)p[0] |
+           ((uint32_t)p[1] <<  8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+/* Filename stem (no extension) → lowercased into out. */
+static void derive_short_name_from_path(const char *path, char *out,
+                                        size_t out_cap) {
+    if (!path || !out || out_cap == 0) {
+        if (out && out_cap) out[0] = '\0';
+        return;
+    }
+    const char *base = path;
+    for (const char *p = path; *p; ++p) {
+        if (*p == '/' || *p == '\\') base = p + 1;
+    }
+    size_t i = 0;
+    while (base[i] && base[i] != '.' && i + 1 < out_cap) {
+        unsigned char c = (unsigned char)base[i];
+        out[i] = (char)tolower(c);
+        ++i;
+    }
+    out[i] = '\0';
+}
+
+/* "my_arena" → "My Arena". Used as the display fallback when META has
+ * no name string. Splits on '_' / '-' / ' '; preserves the rest. */
+static void titlecase_short_name(const char *src, char *out, size_t out_cap) {
+    if (!out || out_cap == 0) return;
+    if (!src || !src[0]) { out[0] = '\0'; return; }
+    size_t i = 0;
+    int at_word_start = 1;
+    while (src[i] && i + 1 < out_cap) {
+        char c = src[i];
+        if (c == '_' || c == '-') {
+            out[i] = ' ';
+            at_word_start = 1;
+        } else if (at_word_start) {
+            out[i] = (char)toupper((unsigned char)c);
+            at_word_start = 0;
+        } else {
+            out[i] = c;
+        }
+        ++i;
+    }
+    out[i] = '\0';
+}
+
+/* Read a .lvl's header + META lump cheaply (no level_load). On success
+ * fills `out` with short_name / display_name / mode_mask / crc / size /
+ * tile_w / tile_h. Returns true if the file looked like a valid .lvl
+ * header (magic OK + parsable directory). */
+static bool scan_one_lvl(const char *path, MapDef *out) {
+    if (!path || !out) return false;
+    memset(out, 0, sizeof *out);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+
+    /* Header — 64 bytes. Offsets per src/level_io.c. */
+    uint8_t hdr[64];
+    if (fread(hdr, 1, 64, f) != 64) { fclose(f); return false; }
+    if (hdr[0] != 'S' || hdr[1] != 'D' ||
+        hdr[2] != 'L' || hdr[3] != 'V') { fclose(f); return false; }
+
+    uint32_t section_count = u32_le(hdr + 8);
+    uint32_t world_w       = u32_le(hdr + 16);
+    uint32_t world_h       = u32_le(hdr + 20);
+    uint32_t strt_off      = u32_le(hdr + 28);
+    uint32_t strt_size     = u32_le(hdr + 32);
+    uint32_t crc           = u32_le(hdr + 36);
+
+    /* Walk the directory looking for META. Each entry is 16 bytes:
+     * 4-byte tag + 4-byte reserved + 4-byte offset + 4-byte size. */
+    int meta_off = -1;
+    int meta_sz  = 0;
+    for (uint32_t i = 0; i < section_count && i < 64u; ++i) {
+        uint8_t e[16];
+        if (fseek(f, 64 + (long)i * 16, SEEK_SET) != 0) { fclose(f); return false; }
+        if (fread(e, 1, 16, f) != 16) { fclose(f); return false; }
+        if (e[0]=='M' && e[1]=='E' && e[2]=='T' && e[3]=='A') {
+            meta_off = (int)u32_le(e + 8);
+            meta_sz  = (int)u32_le(e + 12);
+            break;
+        }
+    }
+
+    /* META is 32 bytes: name_str_idx (u16, off 0), mode_mask (u16, off 12).
+     * If META is missing or wrong-sized, fall back to mode_mask=FFA|TDM
+     * (the safe code-built default — better than 0, which would lock the
+     * map out of every mode). */
+    uint16_t name_idx  = 0;
+    uint16_t mode_mask = 0;
+    if (meta_off > 0 && meta_sz == 32) {
+        uint8_t meta[32];
+        if (fseek(f, meta_off, SEEK_SET) == 0 && fread(meta, 1, 32, f) == 32) {
+            name_idx  = u16_le(meta + 0);
+            mode_mask = u16_le(meta + 12);
+        }
+    }
+
+    /* Resolve display name from string table (STRT lump). The string
+     * table is a packed sequence of null-terminated strings starting at
+     * byte 0 (offset 0 = "empty string"). */
+    char display[32] = {0};
+    if (name_idx > 0 && strt_size > 0 && (uint32_t)name_idx < strt_size) {
+        if (fseek(f, (long)strt_off + name_idx, SEEK_SET) == 0) {
+            size_t n = fread(display, 1, sizeof display - 1, f);
+            (void)n;
+            display[sizeof display - 1] = '\0';
+            /* Strings can run up to the next null; clip there. */
+            for (size_t k = 0; k < sizeof display; ++k) {
+                if (display[k] == '\0') break;
+            }
+        }
+    }
+
+    /* File size for the descriptor. */
+    fseek(f, 0, SEEK_END);
+    long flen = ftell(f);
+    fclose(f);
+
+    /* short_name from filename stem. */
+    derive_short_name_from_path(path, out->short_name, sizeof out->short_name);
+
+    /* display_name: META string if present, else titlecased short_name. */
+    if (display[0]) {
+        snprintf(out->display_name, sizeof out->display_name, "%s", display);
+    } else {
+        titlecase_short_name(out->short_name,
+                             out->display_name, sizeof out->display_name);
+    }
+
+    out->blurb[0]        = '\0';
+    out->tile_w          = (int)world_w;
+    out->tile_h          = (int)world_h;
+    out->mode_mask       = mode_mask
+                           ? mode_mask
+                           : (uint16_t)((1u << MATCH_MODE_FFA) |
+                                        (1u << MATCH_MODE_TDM));
+    out->has_lvl_on_disk = true;
+    out->file_crc        = crc;
+    out->file_size       = (flen > 0) ? (uint32_t)flen : 0u;
+    return true;
+}
+
+static void seed_builtins(void) {
+    /* Reserved indices: MAP_FOUNDRY (0) .. MAP_CROSSFIRE (3). Names +
+     * blurbs match the M4 hand-authored versions; tile dims match the
+     * code-built fallbacks. mode_mask values are the same the
+     * `build_*` functions stamp at build time. */
+    static const struct {
+        const char *short_name;
+        const char *display_name;
+        const char *blurb;
+        int         tile_w, tile_h;
+        uint16_t    mode_mask;
+    } seed[MAP_BUILTIN_COUNT] = {
+        [MAP_FOUNDRY]    = { "foundry",    "Foundry",
+                             "Open floor with cover columns. Ground-game.",
+                             100, 40,
+                             (1u << MATCH_MODE_FFA) | (1u << MATCH_MODE_TDM) },
+        [MAP_SLIPSTREAM] = { "slipstream", "Slipstream",
+                             "Stacked catwalks. Vertical jet beats.",
+                             100, 50,
+                             (1u << MATCH_MODE_FFA) | (1u << MATCH_MODE_TDM) },
+        [MAP_REACTOR]    = { "reactor",    "Reactor",
+                             "Central pillar, two flanking platforms.",
+                             110, 42,
+                             (1u << MATCH_MODE_FFA) | (1u << MATCH_MODE_TDM) },
+        [MAP_CROSSFIRE]  = { "crossfire",  "Crossfire",
+                             "Symmetric CTF arena. Two team bases, central run.",
+                             140, 42,
+                             (1u << MATCH_MODE_FFA) |
+                             (1u << MATCH_MODE_TDM) |
+                             (1u << MATCH_MODE_CTF) },
+    };
+    for (int i = 0; i < MAP_BUILTIN_COUNT; ++i) {
+        MapDef *e = &g_map_registry.entries[i];
+        memset(e, 0, sizeof *e);
+        e->id = i;
+        snprintf(e->short_name,   sizeof e->short_name,   "%s", seed[i].short_name);
+        snprintf(e->display_name, sizeof e->display_name, "%s", seed[i].display_name);
+        snprintf(e->blurb,        sizeof e->blurb,        "%s", seed[i].blurb);
+        e->tile_w          = seed[i].tile_w;
+        e->tile_h          = seed[i].tile_h;
+        e->mode_mask       = seed[i].mode_mask;
+        e->has_lvl_on_disk = false;
+        e->file_crc        = 0;
+        e->file_size       = 0;
+    }
+    g_map_registry.count = MAP_BUILTIN_COUNT;
+}
+
+void map_registry_init_from(const char *maps_dir) {
+    seed_builtins();
+
+    if (!maps_dir || !maps_dir[0]) {
+        LOG_I("map_registry: no scan dir; %d builtins only",
+              MAP_BUILTIN_COUNT);
+        return;
+    }
+
+    DIR *d = opendir(maps_dir);
+    if (!d) {
+        LOG_I("map_registry: %s not present; %d builtins only",
+              maps_dir, MAP_BUILTIN_COUNT);
+        return;
+    }
+
+    int added = 0;
+    int overrides = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        size_t L = strlen(de->d_name);
+        if (L < 5) continue;
+        if (strcasecmp(de->d_name + L - 4, ".lvl") != 0) continue;
+
+        char path[512];
+        snprintf(path, sizeof path, "%s/%s", maps_dir, de->d_name);
+
+        MapDef tmp;
+        if (!scan_one_lvl(path, &tmp)) {
+            LOG_W("map_registry: skipping unreadable %s", path);
+            continue;
+        }
+        if (!tmp.short_name[0]) {
+            LOG_W("map_registry: %s has empty short_name; skipping", path);
+            continue;
+        }
+
+        /* Match against existing entries. A disk file with a builtin's
+         * short_name overrides the builtin's CRC + size + mode_mask
+         * (so map-share streams the on-disk file and modes reflect
+         * what the file actually supports). */
+        int match = -1;
+        for (int i = 0; i < g_map_registry.count; ++i) {
+            if (strcasecmp(g_map_registry.entries[i].short_name,
+                           tmp.short_name) == 0) {
+                match = i; break;
+            }
+        }
+        if (match >= 0) {
+            tmp.id = match;
+            /* Preserve the builtin's blurb if the .lvl doesn't carry
+             * one (P08b doesn't read META blurb_str_idx). */
+            if (!tmp.blurb[0]) {
+                snprintf(tmp.blurb, sizeof tmp.blurb, "%s",
+                         g_map_registry.entries[match].blurb);
+            }
+            g_map_registry.entries[match] = tmp;
+            ++overrides;
+            LOG_I("map_registry: %s overrides builtin (crc=%08x, %u bytes)",
+                  tmp.short_name, (unsigned)tmp.file_crc,
+                  (unsigned)tmp.file_size);
+        } else if (g_map_registry.count >= MAP_REGISTRY_MAX) {
+            LOG_W("map_registry: cap %d reached, skipping %s",
+                  MAP_REGISTRY_MAX, tmp.short_name);
+        } else {
+            tmp.id = g_map_registry.count;
+            g_map_registry.entries[g_map_registry.count++] = tmp;
+            ++added;
+            LOG_I("map_registry: + %s (crc=%08x, %u bytes, mode_mask=0x%x)",
+                  tmp.short_name, (unsigned)tmp.file_crc,
+                  (unsigned)tmp.file_size, (unsigned)tmp.mode_mask);
+        }
+    }
+    closedir(d);
+
+    LOG_I("map_registry: %d entries (%d builtins, %d custom, %d overrides)",
+          g_map_registry.count, MAP_BUILTIN_COUNT, added, overrides);
+}
+
+void map_registry_init(void) {
+    map_registry_init_from("assets/maps");
 }
 
 static void set_tile(Level *l, int x, int y, TileKind k) {
@@ -322,19 +603,32 @@ void map_build(MapId id, World *world, Arena *arena) {
     LvlResult r = level_load(world, arena, path);
     if (r == LVL_OK) return;
 
-    /* P17 will produce assets/maps/<short>.lvl from the code-built maps;
-     * until then a fresh checkout has no .lvl files and we always end up
-     * here. Use LOG_W only when the file existed but failed validation —
-     * "file not found" is the expected case at M5 ship and shouldn't
-     * pollute logs. */
-    if (r == LVL_ERR_FILE_NOT_FOUND) {
-        LOG_I("map_build(%s): no .lvl on disk — using code-built fallback",
-              def->short_name);
+    /* P08b — fallback handling diverges by registry slot.
+     *   - Reserved indices (< MAP_BUILTIN_COUNT) have a code-built
+     *     fallback in `build_fallback`'s switch. P17 will produce
+     *     assets/maps/<short>.lvl files for these; until then a fresh
+     *     checkout always ends up here for builtins, and "file not
+     *     found" is the expected case (LOG_I), not WARN.
+     *   - Custom indices (>= MAP_BUILTIN_COUNT) registered at startup
+     *     mean a .lvl WAS on disk at scan time. Reaching this branch
+     *     means the file was deleted, truncated, or its CRC went bad
+     *     between scan and play. Log loudly and hard-fall-back to
+     *     Foundry's code-built (better than booting players into a
+     *     map they didn't pick). */
+    if ((int)id < MAP_BUILTIN_COUNT) {
+        if (r == LVL_ERR_FILE_NOT_FOUND) {
+            LOG_I("map_build(%s): no .lvl on disk — using code-built fallback",
+                  def->short_name);
+        } else {
+            LOG_W("map_build(%s): level_load failed (%s) — using code-built fallback",
+                  def->short_name, level_io_result_str(r));
+        }
+        build_fallback(id, &world->level, arena);
     } else {
-        LOG_W("map_build(%s): level_load failed (%s) — using code-built fallback",
+        LOG_E("map_build(%s): custom map's .lvl unavailable (%s) — falling back to Foundry",
               def->short_name, level_io_result_str(r));
+        build_fallback(MAP_FOUNDRY, &world->level, arena);
     }
-    build_fallback(id, &world->level, arena);
 }
 
 bool map_build_from_path(World *world, Arena *arena, const char *path) {

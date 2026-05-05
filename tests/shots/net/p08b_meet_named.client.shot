@@ -1,0 +1,22 @@
+# P08b — client connects with no local copy of the host's
+# `my_arena.lvl`, must download it via the P08 protocol before the round
+# starts. Walks LEFT to meet the host.
+
+window 1280 720
+out build/shots/net/p08b_meet_named_client
+network connect 127.0.0.1:24610
+name ClientB
+
+at 60   shot lobby_during_dl
+at 200  shot match_start
+
+# Walk left to meet the host. Spawns at ~x=2944; ~10s of left-walk
+# brings us back across the floor toward the host's spawn at x=256.
+at 220  press left
+at 460  release left
+
+at 380  shot midwalk
+at 520  shot meet
+at 600  end
+
+contact_sheet sheet cols 3 cell 320 180

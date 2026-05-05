@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-meet-custom shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named shot \
         debug gdb gdb-host gdb-client valgrind editor
 
 all: $(BIN)
@@ -159,6 +159,15 @@ $(BUILD_DIR)/map_chunk_test: tests/map_chunk_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB
 test-map-chunks: $(BUILD_DIR)/map_chunk_test
 	./$(BUILD_DIR)/map_chunk_test
 
+# M5 P08b — runtime map registry: builtins + scan of assets/maps/*.lvl.
+# Writes synthetic .lvl files into a tmpdir and exercises the registry
+# init path. Asserts and returns non-zero on failure; CI-runnable.
+$(BUILD_DIR)/map_registry_test: tests/map_registry_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/map_registry_test.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+test-map-registry: $(BUILD_DIR)/map_registry_test
+	./$(BUILD_DIR)/map_registry_test
+
 test-map-share: $(BIN) $(BUILD_DIR)/synth_map
 	./tests/net/run_map_share.sh
 
@@ -168,6 +177,12 @@ test-map-share: $(BIN) $(BUILD_DIR)/synth_map
 # XDG_DATA_HOME so the client genuinely has to download.
 test-meet-custom: $(BIN) editor
 	./tests/shots/net/run_meet_custom.sh
+
+# M5 P08b — same shape as test-meet-custom but with a NON-RESERVED map
+# name (`my_arena`). Proves the registry surfaces user-authored maps in
+# the lobby without requiring designers to overwrite a builtin slot.
+test-meet-named: $(BIN) editor
+	./tests/shots/net/run_meet_named.sh
 
 # End-to-end: editor shotmode authors a .lvl with a platform + spawn,
 # `./soldut --test-play <lvl>` loads it, soldut.log records the spawn
