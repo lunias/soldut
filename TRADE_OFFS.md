@@ -13,7 +13,7 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-05** (post P08b; runtime map registry surfaces user-authored `.lvl` files; the P08 follow-up entry is gone).
+Last updated: **2026-05-05** (post P09; controls + host-controls panel + `bans.txt` persistence + 3-card vote picker. Resolves three M4-era entries: "Map vote picker UI is partial", "Kick / ban UI not exposed", "`bans.txt` not persisted").
 
 ---
 
@@ -40,8 +40,11 @@ Last updated: **2026-05-05** (post P08b; runtime map registry surfaces user-auth
   slope kills passive downhill slide.
 - **Revisit when** —
   - We add a crouch animation. The anchor's knee-snap will break
-    crouch transitions; right now we gate by `ANIM_STAND` and skip
-    during run/jet/jump/death.
+    crouch transitions; we currently snap knees only in `ANIM_STAND`
+    (`ANIM_RUN` lets the stride drive knee X swing), so a crouch
+    state needs the same carve-out. The anchor itself runs in both
+    `ANIM_STAND` and `ANIM_RUN`; JET/FALL/DEATH skip naturally via
+    `grounded == false` or `alive == false`.
   - We move to PBD or XPBD (the design doc lists this as a one-week
     refactor). The proper solver doesn't need this hack.
   - We discover the anchor is masking a deeper bug. Symptom would be:
@@ -687,48 +690,6 @@ Last updated: **2026-05-05** (post P08b; runtime map registry surfaces user-auth
   TTF in `assets/fonts/`, load with `LoadFontEx` at, say, 32 px
   base size with codepoint set sized for the language, route all
   `ui_draw_text` calls through it.
-
-### Map vote picker UI is partial
-
-- **What we did** — The protocol carries `vote_map_a/b/c` candidates
-  and three uint32 bitmasks for tallies; the server picks a winner
-  via `lobby_vote_winner`. But the lobby UI doesn't surface a
-  three-card "pick A/B/C" modal at the end of a round — the next
-  round just uses `config_pick_map(round_counter+1)` from the
-  rotation.
-- **Why** — Plumbing is the load-bearing part; the modal is one
-  screen of layout work that's easier once we have map preview
-  thumbnails (M5 art pass).
-- **Revisit when** — M5 maps land with screenshots. At that point
-  the summary screen grows a "Vote next map" panel that calls
-  `net_client_send_map_vote`; the server tallies and broadcasts
-  `LOBBY_VOTE_STATE` (already wired).
-
-### Kick / ban UI not exposed
-
-- **What we did** — `LOBBY_KICK` / `LOBBY_BAN` messages are wired
-  end-to-end (`net_client_send_kick/ban`, `lobby_ban_addr`,
-  server-side host-only enforcement). The lobby UI doesn't render a
-  per-row [Kick] [Ban] button on the player list yet.
-- **Why** — Same shape as the vote picker: protocol first, UI
-  affordance second. A working kick path also needs `bans.txt`
-  persistence to be useful across host restarts.
-- **Revisit when** — A host actually wants to moderate, OR M5 ships
-  a "host controls" panel. At that point: row hover → buttons,
-  confirmation modal, plus `bans.txt` read-on-start /
-  write-on-update.
-
-### `bans.txt` not persisted
-
-- **What we did** — `lobby_ban_addr` adds bans to in-memory
-  `LobbyState.bans[]`. They survive across rounds in the same
-  process but vanish on restart.
-- **Why** — File I/O at the right layer is its own can of worms
-  (where does it live? what's the format? how do we handle
-  concurrent edits?). Ship in-memory, document the gap.
-- **Revisit when** — A host actually deals with a problem player and
-  asks "did the ban stick?" Add load-on-start / write-on-update of
-  a flat `bans.txt` next to the executable.
 
 ### `tick_hz` config field accepted but ignored
 

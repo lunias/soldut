@@ -66,6 +66,11 @@ typedef struct LobbyBan {
     char      name[LOBBY_NAME_BYTES];
 } LobbyBan;
 
+/* Bans persist across host restarts via a flat `bans.txt` file next to
+ * the binary (one entry per line — see lobby.c). The path is captured
+ * by `lobby_load_bans` so subsequent `lobby_ban_addr` calls auto-save. */
+#define LOBBY_BAN_PATH_BYTES 96
+
 typedef struct LobbyState {
     LobbySlot      slots[MAX_LOBBY_SLOTS];
     int            slot_count;        /* number of in_use slots */
@@ -93,6 +98,11 @@ typedef struct LobbyState {
     /* Bans persist across rounds. */
     LobbyBan       bans[LOBBY_BANS_MAX];
     int            ban_count;
+
+    /* Where to write the ban list when it changes. Set by
+     * lobby_load_bans; empty until then so unit tests can use
+     * lobby_ban_addr without any disk I/O. */
+    char           ban_path[LOBBY_BAN_PATH_BYTES];
 
     /* Has the lobby state changed in a way clients need to know about
      * since the last broadcast? Set true on every mutation; cleared by
@@ -145,6 +155,14 @@ void lobby_reset_round_stats(LobbyState *L);
  * substring; address match is exact. */
 bool lobby_is_banned    (const LobbyState *L, uint32_t addr, const char *name);
 void lobby_ban_addr     (LobbyState *L, uint32_t addr, const char *name);
+
+/* Persistence: read `path` into L->bans (one entry per line:
+ *   "<addr_hex> <name>"
+ * with addr_hex an 8-char hex u32, "00000000" for name-only bans).
+ * Records the path on L for subsequent auto-save from lobby_ban_addr.
+ * Missing file is OK — first-time hosts just have no bans on file. */
+void lobby_load_bans    (LobbyState *L, const char *path);
+void lobby_save_bans    (const LobbyState *L, const char *path);
 
 /* Wire encoding for NET_MSG_LOBBY_PLAYER_LIST.
  *

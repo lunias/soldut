@@ -23,7 +23,8 @@ enum {
     BTN_USE      = 1u << 9,
     BTN_SWAP     = 1u << 10,
     BTN_DASH     = 1u << 11,
-    /* 12..15 reserved for future binds */
+    BTN_FIRE_SECONDARY = 1u << 12,   /* RMB — fires inactive slot one-shot */
+    /* 13..15 reserved for future binds */
 };
 
 typedef struct {

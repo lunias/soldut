@@ -516,6 +516,55 @@ static void start_round(Game *g) {
           map_def(g->match.map_id)->display_name);
 }
 
+/* P09 — pick three distinct candidates from g_map_registry that support
+ * the current match mode (excluding the just-played map) and arm a vote.
+ * No-op for offline solo or when the registry doesn't have enough
+ * mode-compatible alternatives. Clients see vote state via the
+ * NET_MSG_LOBBY_VOTE_STATE broadcast. */
+static void host_start_map_vote(Game *g) {
+    if (g->offline_solo) {
+        lobby_vote_clear(&g->lobby);
+        return;
+    }
+    unsigned mode_bit = 1u << (unsigned)g->match.mode;
+    int candidates[MAP_REGISTRY_MAX];
+    int n = 0;
+    for (int i = 0; i < g_map_registry.count && n < MAP_REGISTRY_MAX; ++i) {
+        if (i == g->match.map_id) continue;
+        if (!(g_map_registry.entries[i].mode_mask & mode_bit)) continue;
+        candidates[n++] = i;
+    }
+    if (n == 0) {
+        lobby_vote_clear(&g->lobby);
+        return;
+    }
+    /* Fisher-Yates shuffle so the 3 cards vary across rounds. */
+    for (int i = n - 1; i > 0; --i) {
+        int j = (int)pcg32_range(g->world.rng, 0, i + 1);
+        int tmp = candidates[i];
+        candidates[i] = candidates[j];
+        candidates[j] = tmp;
+    }
+    int a = candidates[0];
+    int b = (n >= 2) ? candidates[1] : -1;
+    int c = (n >= 3) ? candidates[2] : -1;
+    /* Vote window must end before begin_next_lobby fires. The summary
+     * timer (`g->match.summary_remaining`, set by match_end_round) is
+     * the bound; clamp to 80% so the winner-pick at expiry doesn't race
+     * with the phase transition. */
+    float dur = (g->match.summary_remaining > 0.0f)
+                ? g->match.summary_remaining * 0.8f : 12.0f;
+    lobby_vote_start(&g->lobby, a, b, c, dur);
+    if (g->net.role == NET_ROLE_SERVER) {
+        net_server_broadcast_vote_state(&g->net, &g->lobby);
+    }
+    LOG_I("match_flow: map vote: %s / %s / %s (%.1fs)",
+          map_def(a) ? map_def(a)->display_name : "—",
+          (b >= 0 && map_def(b)) ? map_def(b)->display_name : "—",
+          (c >= 0 && map_def(c)) ? map_def(c)->display_name : "—",
+          (double)dur);
+}
+
 static void end_round(Game *g) {
     match_end_round(&g->match, &g->lobby);
     g->mode = MODE_SUMMARY;
@@ -532,14 +581,35 @@ static void end_round(Game *g) {
         g->lobby.dirty = false;
         net_server_broadcast_round_end (&g->net, &g->match);
     }
+    /* P09 — arm the three-card vote for the next map. Server-side only:
+     * the broadcast inside the helper informs clients. */
+    host_start_map_vote(g);
     LOG_I("match_flow: round %d end (mvp=%d)", g->round_counter, g->match.mvp_slot);
 }
 
 static void begin_next_lobby(Game *g) {
     g->round_counter++;
-    /* Pre-stage next round's mode/map for the lobby UI. */
+    /* Pre-stage next round's mode/map for the lobby UI. The default
+     * comes from the rotation table, but a finished P09 map vote
+     * overrides it (server-side; clients receive the new state via the
+     * lobby-list / match-state broadcasts emitted at the end of this
+     * function). */
     g->match.map_id = config_pick_map (&g->config, g->round_counter);
     g->match.mode   = config_pick_mode(&g->config, g->round_counter);
+    if (g->lobby.vote_map_a >= 0 || g->lobby.vote_map_b >= 0 ||
+        g->lobby.vote_map_c >= 0)
+    {
+        int winner = lobby_vote_winner(&g->lobby);
+        if (winner >= 0 && winner < g_map_registry.count) {
+            g->match.map_id = winner;
+            LOG_I("match_flow: vote winner → map %s",
+                  map_def(winner) ? map_def(winner)->display_name : "?");
+        }
+        lobby_vote_clear(&g->lobby);
+        if (g->net.role == NET_ROLE_SERVER) {
+            net_server_broadcast_vote_state(&g->net, &g->lobby);
+        }
+    }
     g->match.score_limit  = g->config.score_limit;
     g->match.time_limit   = g->config.time_limit;
     g->match.friendly_fire= g->config.friendly_fire;
@@ -681,6 +751,10 @@ static void host_match_flow_step(Game *g, float dt) {
             break;
         }
         case MATCH_PHASE_SUMMARY:
+            /* Tick the lobby too so the map-vote countdown decays during
+             * summary (host-side). The auto_start branch is a no-op
+             * here (auto_start_active was cleared on round start). */
+            (void)lobby_tick(&g->lobby, dt);
             if (match_tick(&g->match, dt)) {
                 begin_next_lobby(g);
             }
@@ -718,6 +792,11 @@ static bool bootstrap_host(Game *g, const LaunchArgs *args, bool offline) {
         g->net.role = NET_ROLE_OFFLINE;
         g->offline_solo = true;
     }
+
+    /* P09 — load any persisted bans before we start accepting peers.
+     * Records the path on lobby state so subsequent lobby_ban_addr
+     * calls (from the host-controls UI / kick wire path) auto-save. */
+    lobby_load_bans(&g->lobby, "bans.txt");
 
     /* Host's own slot — slot 0, peer_id = -1, is_host = true. */
     int slot = lobby_add_slot(&g->lobby, /*peer_id*/-1,

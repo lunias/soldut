@@ -1,0 +1,60 @@
+# 2p_secondary_fire — host. P09 RMB sync test.
+#
+# Pairs with 2p_secondary_fire.client.shot. Both spawn ~300 px apart on
+# the dummy platform and use RMB (BTN_FIRE_SECONDARY) to one-shot the
+# inactive slot — host throws a Frag Grenade, client fires the Grappling
+# Hook. Each side should see BOTH:
+#   - their own RMB-spawned projectile mid-flight (P09 fix #3:
+#     non-hitscan visuals weren't shown to the firer)
+#   - the remote player's RMB projectile mid-flight (P09 fixes #1+#2:
+#     WFIRE_GRAPPLE now broadcasts a FIRE_EVENT, and
+#     client_handle_fire_event spawns the visual head)
+#
+# What the host log should show:
+#   - t=120 spawn_proj mech=0 wpn=10 kind=7  (host throws grenade)
+#   - t=180 grapple_fire ph=N (RMB)          (would be on the client
+#                                              side; host sees rope via
+#                                              snapshot's grapple state +
+#                                              FIRE_EVENT-spawned head
+#                                              since wpn=13 kind=10)
+#   - One FIRE_EVENT broadcast per RMB shot.
+
+window 1280 720
+out build/shots/net/2p_secondary_fire_host
+network host 24091
+name HostA
+
+loadout - "Pulse Rifle" "Frag Grenades" Light Standard
+
+# Host on the spawn platform; client to the right ~300 px.
+spawn_at 2240 984
+peer_spawn 1 2540 984
+
+# Aim at the client's chest (slightly above their pelvis).
+aim 2540 956
+
+# The networked shot path doesn't tick `world.tick` during LOBBY /
+# COUNTDOWN — only inside MATCH. Auto_start is 1.0s + countdown 1.0s
+# in shot mode, so MATCH starts roughly at script tick 120. Schedule
+# the RMB fire well after that so simulate runs the edge.
+
+at 130 shot t130_pre_match
+
+# T=140-148: host holds RMB → Frag Grenade. Active slot stays primary.
+# Holding for 8 ticks gives the network code multiple inputs carrying
+# the bit; a single-tick `tap` is brittle because two adjacent input
+# packets in the same server poll cycle would have the latest
+# (no-button) overwrite the first. The edge still fires only once.
+at 140 press fire_secondary
+at 148 release fire_secondary
+at 155 shot t155_grenade_outgoing
+
+# Client RMB-fires the Grappling Hook at script tick 200 (well into
+# MATCH). The grapple head travels 1200 px/s — visible briefly between
+# 200 and ~220 on this side as it flies in from the client.
+at 215 shot t215_incoming_grapple
+
+# Settle so the grenade explosion / grapple miss fully resolves.
+at 260 shot t260_aftermath
+
+at 320 end

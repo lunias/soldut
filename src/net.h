@@ -377,6 +377,13 @@ void net_client_send_map_vote   (NetState *ns, int choice /*0/1/2*/);
 void net_client_send_kick       (NetState *ns, int target_slot);
 void net_client_send_ban        (NetState *ns, int target_slot);
 
+/* Server-side: enact a kick/ban directly (no wire round-trip). Used by
+ * the host's own lobby UI; the wire-driven kick/ban path goes through
+ * here after host-validation in server_handle_lobby_kick_or_ban. */
+struct Game;
+void net_server_kick_or_ban_slot(NetState *ns, struct Game *g,
+                                 int target_slot, bool ban);
+
 /* M5 P08 — map sharing client outbound. */
 void net_client_send_map_request(NetState *ns, uint32_t crc32, uint32_t resume_offset);
 void net_client_send_map_ready  (NetState *ns, uint32_t crc32, uint8_t status);

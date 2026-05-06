@@ -116,5 +116,12 @@ void weapons_spawn_projectiles(World *w, int mid, int weapon_id);
  * along the aim direction. Backstab does ×2.5 damage. */
 void weapons_fire_melee(World *w, int mid, int weapon_id);
 
+/* Server-side: queue a fire event for broadcast as NET_MSG_FIRE_EVENT.
+ * The standard fire paths (hitscan / spawn_projectiles / fire_melee)
+ * call this internally — only mech.c's bespoke WFIRE_GRAPPLE branch
+ * needs to call it directly (the grapple path doesn't go through
+ * weapons_spawn_projectiles since the head is non-damaging). */
+void weapons_record_fire(World *w, int mid, int weapon_id, Vec2 origin, Vec2 dir);
+
 /* Helper used by the HUD and the kill feed. */
 const char *weapon_short_name(int id);

@@ -1,0 +1,45 @@
+# m5_secondary_fire.shot — Trooper holds Pulse Rifle as primary, Frag
+# Grenades as secondary. LMB rapid-fires the rifle. RMB throws a grenade
+# (BTN_FIRE_SECONDARY) without flipping active_slot — the rifle stays
+# active. Both share fire_cooldown, so no double DPS — the LMB fires
+# resume only after Frag Grenade's 0.6s fire_rate cooldown clears.
+#
+# Verifies (read .log + screenshots):
+#   - LMB at T=15 → fire mech=0 wpn=0 (Pulse Rifle hitscan, ammo 30→29).
+#   - LMB held → second hit at ~T=23 (ammo 29→28).
+#   - RMB tap at T=40 → spawn_proj wpn=10 kind=7 (Frag Grenade) while
+#     primary slot still holds Pulse Rifle (ammo stays 28/30 max=30).
+#   - SHOT_LOG line `mech=0 fire_secondary edge active=0 prim=0 sec=10`
+#     confirms the dispatch ran on the inactive slot.
+#   - LMB resume at T=90 → fire mech=0 wpn=0 (still Pulse Rifle —
+#     active slot wasn't flipped by the RMB tap).
+
+window 1280 720
+seed   9 9
+out    build/shots/m5_secondary_fire
+loadout - "Pulse Rifle" "Frag Grenades" Light Standard
+contact_sheet sheet cols 4 cell 480 270
+
+# Park the player on the spawn platform and aim down-right at the dummy.
+spawn_at 2240 984
+aim 2540 984
+
+at  10 shot t010_idle
+
+# Primary fire — Pulse Rifle hitscan, full-auto while held.
+at  15 press fire
+at  25 release fire
+at  26 shot t026_after_primary
+
+# Secondary fire — RMB tap. Active slot stays primary (Pulse Rifle).
+at  40 tap fire_secondary
+at  42 shot t042_secondary_thrown
+
+# Primary still active — fire again to confirm we didn't swap. Frag
+# Grenade fire_rate_sec = 0.60s = ~36 ticks, so cooldown clears at
+# ~T=76; press at T=85 leaves comfortable slack.
+at  85 press fire
+at  95 release fire
+at  97 shot t097_primary_still_active
+
+at 120 end

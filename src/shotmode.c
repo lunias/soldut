@@ -161,6 +161,7 @@ static const struct { const char *name; uint16_t bit; } BUTTON_TABLE[] = {
     {"fire",   BTN_FIRE},   {"reload", BTN_RELOAD},
     {"melee",  BTN_MELEE},  {"use",    BTN_USE},
     {"swap",   BTN_SWAP},   {"dash",   BTN_DASH},
+    {"fire_secondary", BTN_FIRE_SECONDARY},  /* P09 — RMB one-shot */
 };
 
 static uint16_t button_bit(const char *s) {
@@ -767,7 +768,66 @@ static void networked_shot_bootstrap(Game *g, const Script *s) {
 
 /* Same kill-feed → lobby score path main.c uses. We re-implement it
  * here (rather than refactor main.c) to keep shotmode self-contained. */
-static int g_shot_kill_processed = 0;
+static int g_shot_kill_processed   = 0;
+static int g_shot_hit_processed    = 0;
+static int g_shot_fire_processed   = 0;
+static int g_shot_pickup_processed = 0;
+
+/* Mirror main.c's broadcast_new_hits — drain the world hitfeed and
+ * ship NET_MSG_HIT_EVENT to every peer. Without this, networked shot
+ * tests don't replicate blood/spark FX onto the client. */
+static void shot_broadcast_new_hits(Game *g) {
+    if (g->net.role != NET_ROLE_SERVER) return;
+    int cur = g->world.hitfeed_count;
+    int begin = g_shot_hit_processed;
+    if (cur - begin > HITFEED_CAPACITY) begin = cur - HITFEED_CAPACITY;
+    for (int n = begin; n < cur; ++n) {
+        int idx = n % HITFEED_CAPACITY;
+        if (idx < 0) idx += HITFEED_CAPACITY;
+        const HitFeedEntry *h = &g->world.hitfeed[idx];
+        net_server_broadcast_hit(&g->net,
+            (int)h->victim_mech_id, (int)h->hit_part,
+            h->pos_x, h->pos_y, h->dir_x, h->dir_y, (int)h->damage);
+    }
+    g_shot_hit_processed = cur;
+}
+
+/* Mirror broadcast_new_fires — without this, FIRE_EVENT never crosses
+ * the wire in shot tests, so the client sees no remote tracers /
+ * projectiles / grapple heads despite the server actually firing them. */
+static void shot_broadcast_new_fires(Game *g) {
+    if (g->net.role != NET_ROLE_SERVER) return;
+    int cur = g->world.firefeed_count;
+    int begin = g_shot_fire_processed;
+    if (cur - begin > FIREFEED_CAPACITY) begin = cur - FIREFEED_CAPACITY;
+    for (int n = begin; n < cur; ++n) {
+        int idx = n % FIREFEED_CAPACITY;
+        if (idx < 0) idx += FIREFEED_CAPACITY;
+        const FireFeedEntry *f = &g->world.firefeed[idx];
+        net_server_broadcast_fire(&g->net,
+            (int)f->shooter_mech_id, (int)f->weapon_id,
+            f->origin_x, f->origin_y, f->dir_x, f->dir_y);
+    }
+    g_shot_fire_processed = cur;
+}
+
+/* Mirror broadcast_new_pickups — drain pickupfeed for client mirror. */
+static void shot_broadcast_new_pickups(Game *g) {
+    if (g->net.role != NET_ROLE_SERVER) return;
+    int cur = g->world.pickupfeed_count;
+    int begin = g_shot_pickup_processed;
+    if (cur - begin > PICKUPFEED_CAPACITY) begin = cur - PICKUPFEED_CAPACITY;
+    for (int n = begin; n < cur; ++n) {
+        int idx = n % PICKUPFEED_CAPACITY;
+        if (idx < 0) idx += PICKUPFEED_CAPACITY;
+        int spawner_id = g->world.pickupfeed[idx];
+        if (spawner_id < 0 || spawner_id >= g->world.pickups.count) continue;
+        const PickupSpawner *s = &g->world.pickups.items[spawner_id];
+        net_server_broadcast_pickup_state(&g->net, spawner_id, s);
+    }
+    g_shot_pickup_processed = cur;
+}
+
 static void shot_apply_new_kills(Game *g) {
     int cur = g->world.killfeed_count;
     int begin = g_shot_kill_processed;
@@ -956,6 +1016,14 @@ static void shot_host_flow(Game *g, float dt) {
             /* P07 — CTF tick (server only). Same shape as main.c. */
             ctf_step(g, dt);
             shot_apply_new_kills(g);
+            /* Mirror main.c's per-tick fan-out queues. Without these,
+             * the client sees no remote HIT_EVENT / FIRE_EVENT /
+             * PICKUP_STATE during shot tests — and bugs like the P09
+             * "RMB grapple invisible to remote" gap can't be caught
+             * in the test scaffold. */
+            shot_broadcast_new_hits(g);
+            shot_broadcast_new_fires(g);
+            shot_broadcast_new_pickups(g);
             /* Drain CTF dirty bit on the host. */
             if (g->net.role == NET_ROLE_SERVER && g->world.flag_state_dirty) {
                 net_server_broadcast_flag_state(&g->net, &g->world);
