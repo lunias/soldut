@@ -1,0 +1,14 @@
+# 3p_kick_ban — ClientB (slot 1). Sits in the lobby until host kicks.
+# Host kicks at script tick 200; with the new main.c forced-disconnect
+# hook, ClientB should detect ns->connected==false on the very next
+# net_poll tick, log "client: server connection lost — returning to
+# title", clean up, and transition to MODE_TITLE.
+
+window 1280 720
+out build/shots/net/3p_kick_ban_clientB
+network connect 127.0.0.1:24105
+name ClientB
+
+at  60 shot t060_lobby
+at 230 shot t230_after_kicked
+at 320 end

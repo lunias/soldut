@@ -22,6 +22,10 @@ void match_init(MatchState *m, MatchModeId mode, int score_limit,
     m->friendly_fire    = friendly_fire;
     m->winner_team      = MATCH_TEAM_NONE;
     m->mvp_slot         = -1;
+    m->solo_warning_remaining = -1.0f;
+    m->rounds_per_match = 3;        /* config-driven, overridden in bootstrap */
+    m->rounds_played    = 0;
+    m->inter_round_countdown_default = 3.0f;
 }
 
 void match_begin_countdown(MatchState *m, float countdown_seconds) {
@@ -39,6 +43,7 @@ void match_begin_round(MatchState *m) {
     m->time_remaining  = m->time_limit;
     m->winner_team     = MATCH_TEAM_NONE;
     m->mvp_slot        = -1;
+    m->solo_warning_remaining = -1.0f;
     for (int t = 0; t < MATCH_TEAM_COUNT; ++t) m->team_score[t] = 0;
     LOG_I("match: round begin (mode=%s, map=%d, limit=%d)",
           match_mode_name(m->mode), m->map_id, m->score_limit);
@@ -169,6 +174,41 @@ bool match_round_should_end(const MatchState *m) {
     }
     /* FFA: a per-player kill cap — the caller checks lobby slot scores
      * because the score lives there, not in MatchState. */
+    return false;
+}
+
+bool match_step_solo_warning(MatchState *m, const struct World *w, float dt) {
+    if (!m || !w) return false;
+    if (m->phase != MATCH_PHASE_ACTIVE) {
+        m->solo_warning_remaining = -1.0f;
+        return false;
+    }
+    int mech_count = 0, alive_count = 0;
+    for (int i = 0; i < w->mech_count; ++i) {
+        const Mech *mm = &w->mechs[i];
+        if (mm->is_dummy) continue;
+        mech_count++;
+        if (mm->alive) alive_count++;
+    }
+    /* Single-player / pre-spawn (mech_count <= 1 from the start) is
+     * exempt — there's no "remaining" without a baseline. */
+    bool rule_active = (mech_count >= 2 && alive_count <= 1);
+    if (!rule_active) {
+        m->solo_warning_remaining = -1.0f;
+        return false;
+    }
+    if (m->solo_warning_remaining < 0.0f) {
+        /* First tick the rule matched — arm the 3-second timer. */
+        m->solo_warning_remaining = 3.0f;
+        LOG_I("match: only %d alive of %d — round ends in 3s",
+              alive_count, mech_count);
+        return false;
+    }
+    m->solo_warning_remaining -= dt;
+    if (m->solo_warning_remaining <= 0.0f) {
+        m->solo_warning_remaining = 0.0f;
+        return true;
+    }
     return false;
 }
 

@@ -1,0 +1,12 @@
+# 3p_kick_ban — phase 2 banned client. Reuses the same display name
+# (ClientC) that phase 1 banned. The host's lobby_is_banned check at
+# challenge-response time should reject this connection; the client
+# never reaches MODE_LOBBY and the new shotmode forced-disconnect
+# hook ends the script with "server connection lost".
+
+window 1280 720
+out build/shots/net/3p_kick_ban_phase2_banned
+network connect 127.0.0.1:24105
+name ClientC
+
+at 200 end

@@ -1,0 +1,10 @@
+# 3p_kick_ban — phase 2 host. Fresh host that loads bans.txt (written
+# by phase 1's ban directive) so a previously-banned player reconnect
+# attempt gets rejected on the wire. Just sits in lobby for ~3 s.
+
+window 1280 720
+out build/shots/net/3p_kick_ban_phase2_host
+network host 24105
+name HostA
+
+at 200 end

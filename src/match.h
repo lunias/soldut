@@ -62,6 +62,29 @@ typedef struct MatchState {
     /* Outcome — set when phase transitions to SUMMARY. */
     int          winner_team;              /* MATCH_TEAM_NONE = draw */
     int          mvp_slot;                 /* lobby slot id of the round MVP, -1 if none */
+
+    /* Match-as-set-of-rounds (P09 follow-up). A "match" is N rounds;
+     * `rounds_played` counts how many ACTIVE rounds have completed in
+     * the current match. When it reaches `rounds_per_match`, the next
+     * SUMMARY exit returns to the lobby for a fresh ready-up; before
+     * that, SUMMARY transitions seamlessly into a brief COUNTDOWN +
+     * the next round (no lobby in between).
+     *
+     * `inter_round_countdown_default` is the short countdown between
+     * rounds (e.g., 3 s) — distinct from the lobby→round
+     * `countdown_default` (5 s) which is used at the start of the
+     * first round. */
+    int          rounds_per_match;
+    int          rounds_played;
+    float        inter_round_countdown_default;
+
+    /* Solo-remaining warning: when only one non-dummy mech is alive
+     * AND mech_count was >= 2 (so we're not in single-player), arm a
+     * 3 s countdown; the round ends when it expires. -1 = inactive
+     * (cleared on every round start; re-armed each tick the rule
+     * matches, reset to -1 if it stops matching). Host-only state —
+     * not on the wire; clients see the round end via ROUND_END. */
+    float        solo_warning_remaining;
 } MatchState;
 
 /* Initialize defaults from a config snapshot. Called once at server
@@ -96,6 +119,16 @@ bool match_apply_kill(MatchState *m, struct LobbyState *lobby,
 /* True if the active round's win condition is met (score limit hit or
  * timer expired). Read by the simulation loop to know when to end. */
 bool match_round_should_end(const MatchState *m);
+
+/* Per-tick check for the "only one player remains" rule. When the
+ * round started with 2+ non-dummy mechs and the alive non-dummy count
+ * has dropped to <= 1 (kills, kicks, disconnects), arm a 3-second
+ * countdown; the round ends when it expires. Single-player matches
+ * (mech_count <= 1 throughout) are exempt. Returns true when the timer
+ * has just expired and the caller should end the round. Mutates
+ * `m->solo_warning_remaining` as the tracker. */
+struct World;
+bool match_step_solo_warning(MatchState *m, const struct World *w, float dt);
 
 /* Mode helpers. */
 const char *match_mode_name(MatchModeId mode);

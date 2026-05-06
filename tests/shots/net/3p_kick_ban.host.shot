@@ -1,0 +1,30 @@
+# 3p_kick_ban — host. P09 host-controls / kick / ban end-to-end test.
+#
+# Three-player setup:
+#   slot 0 = HostA (this script)
+#   slot 1 = ClientB
+#   slot 2 = ClientC
+#
+# Host script timing (networked shot mode advances world.tick only
+# during MATCH; the lobby-tick loop is wall-clock, so script ticks
+# 0..end run at 60Hz regardless of match phase):
+#   t=0..~120  lobby — wait for both clients to connect / handshake
+#   t=200      kick ClientB (slot 1). Server-side log "X was kicked",
+#              enet_peer_disconnect_later → ClientB receives DISCONNECT
+#              and returns to title via the new main.c hook.
+#   t=260      ban ClientC (slot 2). Same path + lobby_ban_addr +
+#              auto-write to bans.txt.
+#   t=320      end. Host should still be alive in slot 0; slots 1+2
+#              are empty.
+
+window 1280 720
+out build/shots/net/3p_kick_ban_host
+network host 24105
+name HostA
+
+at  60 shot t060_lobby_full
+at 200 kick 1
+at 230 shot t230_after_kick
+at 260 ban 2
+at 290 shot t290_after_ban
+at 320 end

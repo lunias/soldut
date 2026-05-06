@@ -1242,7 +1242,23 @@ static void client_handle_lobby_chat(const uint8_t *body, int blen, Game *g) {
 
 static void client_handle_match_state(const uint8_t *body, int blen, Game *g) {
     if (blen < MATCH_SNAPSHOT_WIRE_BYTES) return;
+    int prev_mode = g->mode;
     match_decode(&g->match, body);
+
+    /* When the host transitions back to LOBBY after a SUMMARY (the
+     * begin_next_lobby path), MATCH_STATE arrives with phase=LOBBY.
+     * The client needs to leave MODE_SUMMARY/MATCH and follow —
+     * without this, the summary screen sticks until the user clicks
+     * Leave. ROUND_START still drives the MODE_LOBBY → MODE_MATCH
+     * transition for the next round. */
+    if (g->match.phase == MATCH_PHASE_LOBBY &&
+        prev_mode != MODE_LOBBY && prev_mode != MODE_TITLE &&
+        prev_mode != MODE_BROWSER && prev_mode != MODE_CONNECT)
+    {
+        lobby_clear_round_mechs(&g->lobby, &g->world);
+        g->mode = MODE_LOBBY;
+        LOG_I("client: MATCH_STATE phase=LOBBY → returning to lobby");
+    }
 }
 
 static void client_handle_round_start(const uint8_t *body, int blen, Game *g) {
@@ -1412,26 +1428,40 @@ static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen
     const Weapon *wpn = weapon_def((int)weapon);
     if (!wpn) return;
 
-    /* Skip-self gating depends on what the local predict path already
-     * drew. The predict path (`weapons_predict_local_fire`, called from
-     * simulate.c's client branch) draws the muzzle sparks + recoil for
-     * every fire kind, AND the long tracer for HITSCAN; it does NOT
-     * spawn projectiles or grapple heads. So:
+    /* Skip-self gating depends on whether the local predict path
+     * already drew this shot. The predict path
+     * (`weapons_predict_local_fire`, called from simulate.c's client
+     * branch) only fires when BTN_FIRE is held — never for
+     * BTN_FIRE_SECONDARY (RMB) — and within that:
      *
-     *   - HITSCAN / MELEE → predict drew the full visual; skip self.
-     *   - PROJECTILE / SPREAD / BURST / THROW / GRAPPLE → predict did
-     *     NOT spawn the projectile; the firer needs the FIRE_EVENT to
-     *     see their own grenade / rocket / grapple head.
+     *   - HITSCAN: predict draws the long tracer + muzzle sparks
+     *     + recoil. So a self HITSCAN FIRE_EVENT for the ACTIVE slot
+     *     should be skipped (predict already drew it). But an
+     *     RMB-fired inactive-slot HITSCAN (e.g., Sidearm via RMB
+     *     while primary is active) was NOT predicted — the firer
+     *     needs the FIRE_EVENT visual.
+     *   - MELEE / PROJECTILE / SPREAD / BURST / THROW / GRAPPLE:
+     *     predict only does muzzle sparks + recoil, never the
+     *     swing tracer / projectile / head. The firer always needs
+     *     the FIRE_EVENT visual.
      *
-     * This is the bug behind P09's "RMB throws something but I don't
-     * see it" — pre-P09 the gap existed for any non-hitscan secondary
-     * fire (rare because BTN_SWAP-then-fire was the only entry), but
-     * RMB makes secondary fires routine. */
+     * The way we tell active-slot fire from RMB-on-inactive after the
+     * fact: compare the FIRE_EVENT's weapon_id against the firer's
+     * currently active slot's weapon. If they match, the predict path
+     * fired this shot. (Active slot only changes via BTN_SWAP, which
+     * is a deliberate user action — short window for misclassification.) */
     bool is_self = ((int)shooter == g->world.local_mech_id);
-
-    /* Muzzle sparks — only for remote shooters; self already has them
-     * via the predict path. */
-    if (!is_self) {
+    bool from_active_slot = false;
+    if (is_self && shooter < g->world.mech_count) {
+        const Mech *me = &g->world.mechs[shooter];
+        int active_wid = (me->active_slot == 0) ? me->primary_id
+                                                : me->secondary_id;
+        from_active_slot = (active_wid == (int)weapon);
+    }
+    /* Muzzle sparks — only for remote shooters or self RMB-on-inactive;
+     * the predict path already spawned them for self LMB-on-active. */
+    bool predict_drew = is_self && from_active_slot;
+    if (!predict_drew) {
         for (int k = 0; k < 3; ++k) {
             fx_spawn_spark(&g->world.fx, origin,
                 (Vec2){ dir.x * 350.0f, dir.y * 350.0f }, g->world.rng);
@@ -1439,7 +1469,10 @@ static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen
     }
 
     if (wpn->fire == WFIRE_HITSCAN) {
-        if (is_self) return;     /* predict drew the tracer */
+        /* Predict drew the tracer only for active-slot LMB hitscan;
+         * for RMB-on-inactive (Sidearm via RMB, etc.) the firer's
+         * predict didn't run at all — we need to draw it here. */
+        if (predict_drew) return;
         /* Tracer to the wall (or full range if open air). The actual
          * hit point lands via HIT_EVENT (blood/sparks at target);
          * the tracer just needs to look like the bullet's flight
@@ -1455,6 +1488,9 @@ static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen
         Vec2 end = { origin.x + dir.x * t_max,
                      origin.y + dir.y * t_max };
         fx_spawn_tracer(&g->world.fx, origin, end);
+        SHOT_LOG("t=%llu client_fire_event hitscan shooter=%d self=%d active=%d",
+                 (unsigned long long)g->world.tick, (int)shooter,
+                 (int)is_self, (int)from_active_slot);
     } else if (wpn->fire == WFIRE_PROJECTILE ||
                wpn->fire == WFIRE_SPREAD     ||
                wpn->fire == WFIRE_BURST      ||
@@ -1484,9 +1520,11 @@ static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen
             .bouncy        = wpn->bouncy,
         };
         projectile_spawn(&g->world, ps);
-        /* Short muzzle tracer (skip for self; predict path's recoil
-         * + sparks already account for the muzzle visual). */
-        if (!is_self) {
+        /* Short muzzle tracer — only redundant when the predict path
+         * already drew the muzzle visual (self LMB on the active
+         * slot). For self RMB-on-inactive, predict didn't run, so we
+         * draw it. */
+        if (!predict_drew) {
             Vec2 spark_end = { origin.x + dir.x * 80.0f,
                                origin.y + dir.y * 80.0f };
             fx_spawn_tracer(&g->world.fx, origin, spark_end);
@@ -1527,7 +1565,10 @@ static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen
                  (unsigned long long)g->world.tick, (int)shooter,
                  (int)is_self);
     } else if (wpn->fire == WFIRE_MELEE) {
-        if (is_self) return;     /* predict drew the swing */
+        /* Predict path doesn't draw the swing tracer for any kind —
+         * only the muzzle sparks. So the firer always needs the swing
+         * here. (Pre-fix this was `if (is_self) return;` based on a
+         * comment that didn't match the predict path's behavior.) */
         Vec2 end = { origin.x + dir.x * wpn->range_px,
                      origin.y + dir.y * wpn->range_px };
         fx_spawn_tracer(&g->world.fx, origin, end);

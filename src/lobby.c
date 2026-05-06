@@ -176,6 +176,10 @@ bool lobby_chat_post(LobbyState *L, int sender_slot, const char *text,
 }
 
 void lobby_chat_system(LobbyState *L, const char *text) {
+    /* Log system chat events too — tests + post-mortem diagnostics
+     * need a record of "X was kicked / banned / left" beyond the
+     * in-memory chat ring. */
+    if (text && *text) LOG_I("lobby: chat system: %s", text);
     lobby_chat_post(L, -1, text, 0.0f);
 }
 

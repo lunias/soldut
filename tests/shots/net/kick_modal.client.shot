@@ -1,0 +1,10 @@
+# kick_modal — client. Sits in the lobby for the full window so the
+# host has a non-host slot to render the kick/ban modal against.
+
+window 1280 720
+out build/shots/net/kick_modal_client
+network connect 127.0.0.1:24107
+name ClientB
+
+at  60 shot t060_client_lobby
+at 320 end

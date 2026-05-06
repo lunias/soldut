@@ -92,6 +92,7 @@ bool game_init(Game *g) {
     lobby_init(&g->lobby, g->config.auto_start_seconds);
     match_init(&g->match, g->config.mode, g->config.score_limit,
                g->config.time_limit, g->config.friendly_fire);
+    g->match.rounds_per_match = g->config.rounds_per_match;
     g->local_slot_id  = -1;
     g->round_counter  = 0;
     g->pending_port   = SOLDUT_DEFAULT_PORT;

@@ -13,7 +13,12 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-05** (post P09; controls + host-controls panel + `bans.txt` persistence + 3-card vote picker. Resolves three M4-era entries: "Map vote picker UI is partial", "Kick / ban UI not exposed", "`bans.txt` not persisted").
+Last updated: **2026-05-05** (post P09 — controls + host-controls panel
++ `bans.txt` persistence + 3-card vote picker + multi-round match flow.
+Resolves three M4-era entries: "Map vote picker UI is partial",
+"Kick / ban UI not exposed", "`bans.txt` not persisted". New
+post-P09 entries below cover the placeholder map-vote thumbnails and
+the ban-by-name simplification.).
 
 ---
 
@@ -704,6 +709,53 @@ Last updated: **2026-05-05** (post P09; controls + host-controls panel + `bans.t
 - **Revisit when** — We finish the fixed-step accumulator (the
   120 Hz refactor); at that point `tick_hz` becomes a meaningful
   knob.
+
+### Map-vote-card thumbnails are placeholder gray rectangles (P09)
+
+- **What we did** — The 3-card map vote picker on the summary
+  screen renders each map as a fixed gray rectangle at the top of
+  the card; only the display name + (truncated) blurb identify the
+  map.
+- **Why** — Real map preview thumbnails want a render-pass that
+  walks the level geometry (or a screenshot baked at editor save).
+  That's a couple of hours of art-pipeline work and only matters
+  once the maps look distinct enough that thumbnails would help
+  picking. P09 is the plumbing pass; thumbnails ride P13/P16's art
+  pipeline.
+- **Revisit when** —
+  - P13 (rendering kit) lands — the same atlas / decal pipeline
+    can output 1×-scale snapshots of each level into
+    `assets/maps/<short>_thumb.png`.
+  - P17/P18 ship 8 authored maps — at that point distinctive
+    thumbnails become real navigation aid (the map names alone
+    blur together when you have 8 of them in rotation).
+
+### Bans are by display name only (no IP) (P09)
+
+- **What we did** — `net_server_kick_or_ban_slot` calls
+  `lobby_ban_addr(L, /*addr*/0, ts->name)`. The `bans.txt` file
+  stores `addr_hex name` per line; with addr=0 only the name match
+  fires in `lobby_is_banned` (the address branch is gated on
+  `addr != 0`).
+- **Why** — IP bans want the peer's resolved `remote_addr_host`
+  threaded through the kick path (the field exists on `NetPeer`
+  and `lobby_is_banned` already supports addr matching) — but on a
+  shared LAN multiple players can NAT through one address, so a
+  hard-IP ban can punish unintended bystanders. Display-name bans
+  are good enough for the trolling-friend use case the host UI
+  serves; the wire format already carries the `addr_hex` field
+  ready to populate when we want it.
+- **Revisit when** —
+  - A host runs a public WAN server and reports "banned player
+    keeps coming back with a new name."
+  - We add display-name validation that prevents trivial rename
+    bypass (e.g. `Bob1` → `Bob2`).
+  - At that point: change the kick path to grab
+    `g->net.peers[i].remote_addr_host` before
+    `enet_peer_disconnect_later` and pass it as the `addr` arg to
+    `lobby_ban_addr`. The `bans.txt` schema already supports both
+    fields; only the `addr=0` literal in the kick handler needs to
+    move.
 
 ---
 

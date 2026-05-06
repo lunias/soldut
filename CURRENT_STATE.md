@@ -1490,6 +1490,148 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
     `client_fire_event grapple shooter=N self=1` SHOT_LOG showing the
     visual head spawned for the firer themselves, and active-slot
     persistence (ammo_max stays at 30 = primary's mag throughout).
+  - **Post-P09 kick/ban follow-up** (same day): user playtest reported
+    the kick UI was poorly displayed AND that kicked players didn't
+    actually leave. Three bugs:
+    1. **Client never returned to title on forced disconnect.** ENet
+       emits `ENET_EVENT_TYPE_DISCONNECT` on the client when the host
+       calls `enet_peer_disconnect_later`, which clears `ns->connected`
+       — but nothing in the main loop watched that flag. The kicked
+       client just sat there with no server. Added a hook in `main.c`
+       (and a parallel one in `shotmode.c`'s networked loop for
+       testability): when `role == NET_ROLE_CLIENT && !ns->connected`,
+       tear down net + lobby state and return to MODE_TITLE.
+    2. **Modal layout was rendering before the chat / loadout panels**,
+       so the chat panel painted over the lower half of the modal
+       (including the buttons) — that's why the user said "GUI
+       display is bad." Moved the modal block to the very end of
+       `lobby_screen_run`. Pixel inspection confirmed the buttons now
+       render at their intended colors instead of ~30% via the chat
+       panel's overlay.
+    3. **Modal lacked visual hierarchy.** Redesigned with an accent
+       top-stripe + border (orange for kick, red for ban), a
+       descriptive subtitle ("Disconnect this player. They can rejoin
+       freely." vs "Saved to bans.txt; persists across host
+       restarts."), explicit slate Cancel and full-saturation
+       destructive Confirm buttons sized 170×48. Player-row buttons
+       went 56×20→72×28 with brighter hover/border colors.
+  - **New shotmode directives** for kick/ban testing:
+    - `at <tick> kick <slot>` / `ban <slot>` — host-side, drives
+      `net_server_kick_or_ban_slot` directly (mirrors the production
+      lobby UI's confirmation modal).
+    - `at <tick> kick_modal <slot>` / `ban_modal <slot>` — host-side,
+      sets `LobbyUIState.kick_target_slot/ban_target_slot` so the
+      modal renders for layout-regression screenshots.
+  - **`lobby_chat_system` now logs** the system message via `LOG_I`
+    so kick/ban / "X joined" / "Y left" announcements are visible in
+    `soldut.log` for tests + post-mortems (chat ring contents alone
+    aren't reachable from a log file).
+  - **Networked shotmode now calls `lobby_load_bans("bans.txt")`** in
+    `networked_shot_bootstrap` so shot tests exercise the auto-save +
+    reload-on-restart paths (without this, the ban directive's
+    auto-save wouldn't fire — `lobby_ban_addr` only writes when
+    `L->ban_path` is non-empty).
+  - **New 3-player kick/ban test** `tests/shots/net/run_kick_ban.sh`
+    (20/20 — 17 phase-1 + 3 phase-2): host + ClientB + ClientC,
+    scripted `kick 1` then `ban 2`. Phase 1 asserts both clients
+    receive forced disconnect, host's chat ring records the kick/ban
+    announcement, peer disconnect events fire, `bans.txt` contains
+    ClientC (and NOT ClientB, since kick != ban). Phase 2 starts a
+    fresh host that reads the persisted `bans.txt`, ClientC tries to
+    reconnect, server logs "banned — rejecting" and the client
+    handshake errors out at `REJECT (bad challenge)`.
+  - **New layout-regression test** `tests/shots/net/run_kick_modal.sh`
+    captures the kick + ban modal screenshots so subsequent UI
+    regressions are visible. Uses the new `kick_modal` / `ban_modal`
+    directives + a temp `soldut.cfg` with `auto_start_seconds=20` so
+    the lobby stays open long enough.
+  - **Post-P09 round-loop refactor + multi-round match flow** (same
+    day): user playtest reported "killed an opponent and the next
+    round didn't start" + "voted a map but the next round didn't
+    start cleanly." Three structural fixes plus a new game-design
+    rule landed together:
+    1. **Client never returned to LOBBY after SUMMARY.** ENet
+       broadcasts MATCH_STATE phase=LOBBY when the host transitions
+       past summary, but `client_handle_match_state` only decoded the
+       new state — it didn't update `g->mode`, so the client got
+       stuck on the summary screen. Fixed: when phase becomes LOBBY
+       and the client isn't already there, run lobby_clear_round_mechs
+       and switch to MODE_LOBBY.
+    2. **Vote winner clobbered by start_round.** `begin_next_lobby`
+       applied the P09 vote winner to `match.map_id`, but
+       `start_round` re-ran `config_pick_map(round_counter)` at the
+       top, overwriting it. Fixed: only pick from rotation on the
+       FIRST round (`round_counter == 0`); subsequent rounds inherit
+       map/mode from `after_summary` (which honors the vote).
+       Mirrored in shotmode's COUNTDOWN→ACTIVE branch.
+    3. **"Only one player remains → 3 s warning → round end" rule.**
+       New `match_step_solo_warning` in `match.c`: when the active
+       round started with 2+ non-dummy mechs and the alive count
+       drops to ≤1 (kill / kick / disconnect), arm a 3-second timer;
+       when it expires, end the round. Single-player matches
+       (mech_count ≤ 1 from the start) are exempt.
+    4. **Multi-round match flow.** A "match" is now N rounds (config
+       `rounds_per_match`, default 3, also accepts `match_rounds`).
+       Inter-round transitions are seamless: SUMMARY → brief
+       COUNTDOWN (`inter_round_countdown_default`, 3 s for prod, 2 s
+       for shotmode) → next ACTIVE, with score persisting across
+       rounds. NO lobby UI between rounds. After the final round,
+       full reset → MODE_LOBBY for fresh ready-up. Implementation:
+       - `match.rounds_per_match` / `rounds_played` /
+         `inter_round_countdown_default` fields on MatchState
+         (host-side; not on the wire).
+       - `after_summary(g)` dispatcher in main.c: increments
+         `rounds_played`, applies vote winner, branches to
+         `end_match` (back to LOBBY, reset stats) or
+         `advance_to_next_round` (clear dead mechs, brief countdown).
+       - `apply_vote_winner_if_any(g)` factored out so both branches
+         honor the vote.
+       - Mirrored inline in shotmode's MATCH_PHASE_SUMMARY case.
+       - Summary screen UI is phase-aware: SUMMARY shows vote cards
+         + "Next round in N s" (or "Match over — back to lobby in
+         N s" on the last round); COUNTDOWN hides the cards and
+         shows a big "Round N / M starts in N s" banner.
+    5. **All-voted fast-forward.** When every active in-use slot has
+       a bit set in any of `vote_mask_a/b/c`, `summary_remaining` is
+       floored to 1 s so the picker doesn't drag for the full 4–8 s
+       window. Lets a 2-player match transition between rounds in
+       ~1 s + the inter-round countdown.
+  - **New paired test** `tests/shots/net/run_round_loop.sh` (14/14):
+    Two clients, `rounds_per_match=2`. Host kill_peers the client in
+    each round; solo-warning fires; both vote during SUMMARY; vote
+    winner becomes the next-round map; round 1 → round 2 transition
+    happens with NO lobby ("client: returning to lobby" only fires
+    AT MATCH END, not between rounds); after round 2 the host logs
+    "match over" and the client transitions back to LOBBY.
+  - **New shotmode directive** `vote_map <choice 0/1/2>` — drives the
+    map-vote picker code path. Host-side casts directly via
+    `lobby_vote_cast` + rebroadcast; client-side sends
+    `NET_MSG_LOBBY_MAP_VOTE`.
+
+  - **Post-P09 self-hitscan-RMB visual fix** (same day): user playtest
+    reported RMB-firing Sidearm shows projectiles on the server side
+    but not on the firer's own client. Root cause: the skip-self
+    guard for HITSCAN in `client_handle_fire_event` blanket-returned
+    when `shooter == local_mech_id` on the assumption that the local
+    predict path already drew the tracer. But predict only fires on
+    `BTN_FIRE` (LMB), never `BTN_FIRE_SECONDARY` (RMB). Same gap
+    existed for `WFIRE_MELEE` (predict never draws the swing tracer
+    for any path — the comment was just wrong). Fix: predict_drew is
+    now `is_self && (FIRE_EVENT's weapon == firer's active slot's
+    weapon)` — true only for self LMB-on-active. RMB-on-inactive and
+    self melee always render the visual via FIRE_EVENT. Also gates
+    the muzzle-spark loop and the projectile-path muzzle tracer on
+    `predict_drew` instead of `is_self` so RMB-fired projectile
+    secondaries (Frag Grenades, Micro-Rockets, etc.) get full muzzle
+    visuals on the firer's screen too.
+  - **New paired test** `tests/shots/net/2p_rmb_hitscan.{host,client}.shot`
+    + `run_rmb_hitscan.sh` (12 base + 5 RMB-hitscan assertions =
+    17/17): both players hold Pulse Rifle + Sidearm. Both RMB-fire.
+    Asserts host runs `weapons_fire_hitscan` server-side for both
+    mechs (the host's own visual path), and the client's
+    `client_fire_event hitscan` SHOT_LOG fires for BOTH `shooter=0
+    self=0 active=0` (host's RMB) AND `shooter=1 self=1 active=0`
+    (client's own RMB). The pre-fix behavior dropped the latter.
 
 ### Pending
 

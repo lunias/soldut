@@ -1,0 +1,33 @@
+# 2p_rmb_hitscan — client. Same setup as the host: Pulse Rifle primary,
+# Sidearm secondary. RMB-fires the Sidearm and expects to see the
+# tracer on its own screen (the bug the user reported: client RMB
+# Sidearm shows projectiles on server side but NOT on client side).
+#
+# Assertion target on the client log:
+#   `client_fire_event hitscan shooter=N self=1 active=0`
+# self=1 + active=0 means "this is my own RMB-on-inactive shot, predict
+# didn't draw it, FIRE_EVENT must — and now does".
+
+window 1280 720
+out build/shots/net/2p_rmb_hitscan_client
+network connect 127.0.0.1:24108
+name ClientB
+
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+
+spawn_at 2540 984
+aim 2240 956
+
+at 130 shot t130_pre_match
+
+# Host RMB fires at 140 → client sees HostA's tracer come in.
+at 155 shot t155_host_tracer_incoming
+
+# T=200-208: client RMB-fires Sidearm. The pre-fix bug made this
+# invisible on the firer's own screen. Post-fix, both the local
+# tracer AND the host-side tracer should render.
+at 200 press fire_secondary
+at 208 release fire_secondary
+at 215 shot t215_client_sidearm_rmb
+
+at 280 end
