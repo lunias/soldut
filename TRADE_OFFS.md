@@ -13,7 +13,12 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-05** (post P08b; runtime map registry surfaces user-authored `.lvl` files; the P08 follow-up entry is gone).
+Last updated: **2026-05-05** (post P09 — controls + host-controls panel
++ `bans.txt` persistence + 3-card vote picker + multi-round match flow.
+Resolves three M4-era entries: "Map vote picker UI is partial",
+"Kick / ban UI not exposed", "`bans.txt` not persisted". New
+post-P09 entries below cover the placeholder map-vote thumbnails and
+the ban-by-name simplification.).
 
 ---
 
@@ -40,8 +45,11 @@ Last updated: **2026-05-05** (post P08b; runtime map registry surfaces user-auth
   slope kills passive downhill slide.
 - **Revisit when** —
   - We add a crouch animation. The anchor's knee-snap will break
-    crouch transitions; right now we gate by `ANIM_STAND` and skip
-    during run/jet/jump/death.
+    crouch transitions; we currently snap knees only in `ANIM_STAND`
+    (`ANIM_RUN` lets the stride drive knee X swing), so a crouch
+    state needs the same carve-out. The anchor itself runs in both
+    `ANIM_STAND` and `ANIM_RUN`; JET/FALL/DEATH skip naturally via
+    `grounded == false` or `alive == false`.
   - We move to PBD or XPBD (the design doc lists this as a one-week
     refactor). The proper solver doesn't need this hack.
   - We discover the anchor is masking a deeper bug. Symptom would be:
@@ -688,48 +696,6 @@ Last updated: **2026-05-05** (post P08b; runtime map registry surfaces user-auth
   base size with codepoint set sized for the language, route all
   `ui_draw_text` calls through it.
 
-### Map vote picker UI is partial
-
-- **What we did** — The protocol carries `vote_map_a/b/c` candidates
-  and three uint32 bitmasks for tallies; the server picks a winner
-  via `lobby_vote_winner`. But the lobby UI doesn't surface a
-  three-card "pick A/B/C" modal at the end of a round — the next
-  round just uses `config_pick_map(round_counter+1)` from the
-  rotation.
-- **Why** — Plumbing is the load-bearing part; the modal is one
-  screen of layout work that's easier once we have map preview
-  thumbnails (M5 art pass).
-- **Revisit when** — M5 maps land with screenshots. At that point
-  the summary screen grows a "Vote next map" panel that calls
-  `net_client_send_map_vote`; the server tallies and broadcasts
-  `LOBBY_VOTE_STATE` (already wired).
-
-### Kick / ban UI not exposed
-
-- **What we did** — `LOBBY_KICK` / `LOBBY_BAN` messages are wired
-  end-to-end (`net_client_send_kick/ban`, `lobby_ban_addr`,
-  server-side host-only enforcement). The lobby UI doesn't render a
-  per-row [Kick] [Ban] button on the player list yet.
-- **Why** — Same shape as the vote picker: protocol first, UI
-  affordance second. A working kick path also needs `bans.txt`
-  persistence to be useful across host restarts.
-- **Revisit when** — A host actually wants to moderate, OR M5 ships
-  a "host controls" panel. At that point: row hover → buttons,
-  confirmation modal, plus `bans.txt` read-on-start /
-  write-on-update.
-
-### `bans.txt` not persisted
-
-- **What we did** — `lobby_ban_addr` adds bans to in-memory
-  `LobbyState.bans[]`. They survive across rounds in the same
-  process but vanish on restart.
-- **Why** — File I/O at the right layer is its own can of worms
-  (where does it live? what's the format? how do we handle
-  concurrent edits?). Ship in-memory, document the gap.
-- **Revisit when** — A host actually deals with a problem player and
-  asks "did the ban stick?" Add load-on-start / write-on-update of
-  a flat `bans.txt` next to the executable.
-
 ### `tick_hz` config field accepted but ignored
 
 - **What we did** — `config.c`'s parser silently accepts `tick_hz=`
@@ -743,6 +709,53 @@ Last updated: **2026-05-05** (post P08b; runtime map registry surfaces user-auth
 - **Revisit when** — We finish the fixed-step accumulator (the
   120 Hz refactor); at that point `tick_hz` becomes a meaningful
   knob.
+
+### Map-vote-card thumbnails are placeholder gray rectangles (P09)
+
+- **What we did** — The 3-card map vote picker on the summary
+  screen renders each map as a fixed gray rectangle at the top of
+  the card; only the display name + (truncated) blurb identify the
+  map.
+- **Why** — Real map preview thumbnails want a render-pass that
+  walks the level geometry (or a screenshot baked at editor save).
+  That's a couple of hours of art-pipeline work and only matters
+  once the maps look distinct enough that thumbnails would help
+  picking. P09 is the plumbing pass; thumbnails ride P13/P16's art
+  pipeline.
+- **Revisit when** —
+  - P13 (rendering kit) lands — the same atlas / decal pipeline
+    can output 1×-scale snapshots of each level into
+    `assets/maps/<short>_thumb.png`.
+  - P17/P18 ship 8 authored maps — at that point distinctive
+    thumbnails become real navigation aid (the map names alone
+    blur together when you have 8 of them in rotation).
+
+### Bans are by display name only (no IP) (P09)
+
+- **What we did** — `net_server_kick_or_ban_slot` calls
+  `lobby_ban_addr(L, /*addr*/0, ts->name)`. The `bans.txt` file
+  stores `addr_hex name` per line; with addr=0 only the name match
+  fires in `lobby_is_banned` (the address branch is gated on
+  `addr != 0`).
+- **Why** — IP bans want the peer's resolved `remote_addr_host`
+  threaded through the kick path (the field exists on `NetPeer`
+  and `lobby_is_banned` already supports addr matching) — but on a
+  shared LAN multiple players can NAT through one address, so a
+  hard-IP ban can punish unintended bystanders. Display-name bans
+  are good enough for the trolling-friend use case the host UI
+  serves; the wire format already carries the `addr_hex` field
+  ready to populate when we want it.
+- **Revisit when** —
+  - A host runs a public WAN server and reports "banned player
+    keeps coming back with a new name."
+  - We add display-name validation that prevents trivial rename
+    bypass (e.g. `Bob1` → `Bob2`).
+  - At that point: change the kick path to grab
+    `g->net.peers[i].remote_addr_host` before
+    `enet_peer_disconnect_later` and pass it as the `addr` arg to
+    `lobby_ban_addr`. The `bans.txt` schema already supports both
+    fields; only the `addr=0` literal in the kick handler needs to
+    move.
 
 ---
 

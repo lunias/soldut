@@ -1,0 +1,19 @@
+# 2p_round_loop — client. Plays through a 2-round match.
+
+window 1280 720
+out build/shots/net/2p_round_loop_client
+network connect 127.0.0.1:24110
+name ClientB
+
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+spawn_at 2540 984
+aim 2240 956
+
+at 130 shot t130_round1
+at 360 vote_map 0
+at 380 shot t380_summary_with_vote
+at 560 shot t560_round2_active
+at 900 vote_map 1
+at 920 shot t920_summary_round2
+at 1000 shot t1000_back_in_lobby
+at 1100 end

@@ -1251,11 +1251,156 @@ void mech_apply_environmental_damage(World *w, int mid, float dt) {
     }
 }
 
+/* ---- BTN_FIRE_SECONDARY (RMB) one-shot dispatch (P09) -----------------
+ *
+ * Fires the inactive slot for one shot without flipping active_slot.
+ * Per documents/m5/13-controls-and-residuals.md §"BTN_FIRE_SECONDARY".
+ *
+ * Pattern: temporarily swap the active-slot aliases (m->weapon_id /
+ * m->ammo / m->ammo_max) to the other slot, dispatch by fire kind, then
+ * restore. The weapons_fire_* helpers read m->weapon_id and m->ammo as
+ * authoritative, so the temporary swap covers them transparently —
+ * recoil, bink, cooldown, and FX all flow through the same paths.
+ *
+ * Gating mirrors mech_try_fire's outer guard:
+ *   - shared fire_cooldown / reload_timer (no LMB+RMB double DPS)
+ *   - charge weapons (charge_sec > 0) rejected — RMB is press-only
+ *   - flag carrier can't fire from the secondary slot via either path
+ */
+static void fire_other_slot_one_shot(World *w, int mid) {
+    Mech *m = &w->mechs[mid];
+    int   other_slot = m->active_slot ^ 1;
+    int   weapon_id  = (other_slot == 0) ? m->primary_id : m->secondary_id;
+    int  *ammo_ptr   = (other_slot == 0) ? &m->ammo_primary : &m->ammo_secondary;
+
+    const Weapon *wpn = weapon_def(weapon_id);
+    if (!wpn) return;
+
+    /* Charge weapons (Rail Cannon, Microgun spin-up) need the trigger
+     * held over `charge_sec` to fire — they can't be RMB one-shotted. */
+    if (wpn->charge_sec > 0.0f) return;
+
+    /* CTF carrier penalty: secondary slot is fully disabled while
+     * carrying a flag, regardless of which path triggers it. Active-slot
+     * gate (mech_try_fire) covers active==1; this gate covers active==0
+     * with RMB targeting the secondary. */
+    if (other_slot == 1 && ctf_is_carrier(w, mid)) return;
+
+    if (m->fire_cooldown > 0.0f) return;
+    if (m->reload_timer  > 0.0f) return;
+    if (wpn->mag_size > 0 && *ammo_ptr <= 0) return;
+
+    /* Save active-slot aliases; swap to the inactive slot's stats. */
+    int saved_weapon_id = m->weapon_id;
+    int saved_ammo      = m->ammo;
+    int saved_ammo_max  = m->ammo_max;
+    m->weapon_id = weapon_id;
+    m->ammo      = *ammo_ptr;
+    m->ammo_max  = wpn->mag_size;
+
+    switch ((int)wpn->fire) {
+        case WFIRE_HITSCAN:
+            weapons_fire_hitscan(w, mid);
+            if (wpn->mag_size > 0) m->ammo--;
+            break;
+        case WFIRE_PROJECTILE:
+        case WFIRE_SPREAD:
+        case WFIRE_THROW:
+            weapons_spawn_projectiles(w, mid, weapon_id);
+            if (wpn->mag_size > 0) m->ammo--;
+            break;
+        case WFIRE_BURST:
+            if (m->burst_pending_rounds == 0) {
+                weapons_spawn_projectiles(w, mid, weapon_id);   /* round 1 of N */
+                if (wpn->mag_size > 0) m->ammo--;
+                if (wpn->burst_rounds > 1) {
+                    m->burst_pending_rounds = (uint8_t)(wpn->burst_rounds - 1);
+                    m->burst_pending_timer  = wpn->burst_interval_sec;
+                }
+            }
+            break;
+        case WFIRE_MELEE:
+            weapons_fire_melee(w, mid, weapon_id);
+            m->fire_cooldown = wpn->fire_rate_sec;
+            break;
+        case WFIRE_GRAPPLE: {
+            /* Mirror the grapple branch from mech_try_fire — same
+             * spawn/anchor lifecycle, gated on RMB rather than LMB.
+             * ATTACHED → release-and-refire (chain); FLYING → swallow. */
+            if (m->grapple.state == GRAPPLE_FLYING) break;
+            if (m->grapple.state == GRAPPLE_ATTACHED) mech_grapple_release(w, mid);
+
+            Vec2 hand    = part_pos(w, m, PART_R_HAND);
+            Vec2 aim_dir = mech_aim_dir(w, mid);
+            float speed  = wpn->projectile_speed_pxs > 0.0f
+                           ? wpn->projectile_speed_pxs : 1200.0f;
+            Vec2 vel     = (Vec2){ aim_dir.x * speed, aim_dir.y * speed };
+            float life   = wpn->projectile_life_sec > 0.0f
+                           ? wpn->projectile_life_sec : (wpn->range_px / speed);
+            ProjectileSpawn ps = {
+                .kind          = (wpn->projectile_kind != 0)
+                                 ? wpn->projectile_kind : PROJ_GRAPPLE_HEAD,
+                .weapon_id     = weapon_id,
+                .owner_mech_id = mid,
+                .owner_team    = m->team,
+                .origin        = hand,
+                .velocity      = vel,
+                .damage        = 0.0f,
+                .aoe_radius    = 0.0f,
+                .aoe_damage    = 0.0f,
+                .aoe_impulse   = 0.0f,
+                .life          = life,
+                .gravity_scale = wpn->projectile_grav_scale,
+                .drag          = wpn->projectile_drag,
+                .bouncy        = false,
+            };
+            int ph = projectile_spawn(w, ps);
+            if (ph >= 0) {
+                m->grapple.state          = GRAPPLE_FLYING;
+                m->grapple.constraint_idx = -1;
+                m->grapple.anchor_mech    = -1;
+                m->fire_cooldown          = wpn->fire_rate_sec;
+                /* Broadcast the head spawn so remote clients can
+                 * render it during FLYING (snapshot only mirrors
+                 * grapple state, not the head projectile). */
+                weapons_record_fire(w, mid, weapon_id, hand, aim_dir);
+                SHOT_LOG("t=%llu mech=%d grapple_fire(RMB) ph=%d",
+                         (unsigned long long)w->tick, mid, ph);
+            }
+            break;
+        }
+        default: break;
+    }
+
+    /* Persist any ammo decrement back to the inactive slot's bucket;
+     * restore the active-slot aliases so subsequent reads (LMB next
+     * tick, snapshot encode, HUD) see the active weapon again. */
+    *ammo_ptr    = m->ammo;
+    m->weapon_id = saved_weapon_id;
+    m->ammo      = saved_ammo;
+    m->ammo_max  = saved_ammo_max;
+}
+
 /* ---- Try-fire: dispatched on weapon class -------------------------- */
 
 bool mech_try_fire(World *w, int mid, ClientInput in) {
     Mech *m = &w->mechs[mid];
     if (!m->alive || m->is_dummy)            return false;
+
+    /* P09 — BTN_FIRE_SECONDARY (RMB): edge-triggered one-shot of the
+     * inactive slot. Runs above the active-slot guards so the inactive
+     * primary stays usable when the active secondary is gated (e.g.,
+     * flag carrier). Shared fire_cooldown still prevents LMB+RMB double
+     * fire on the same tick — fire_other_slot_one_shot sets the
+     * cooldown via the inner weapons_fire_* call, and the active-slot
+     * dispatch below sees it and bails. */
+    if (((~m->prev_buttons) & in.buttons & BTN_FIRE_SECONDARY) != 0) {
+        SHOT_LOG("t=%llu mech=%d fire_secondary edge active=%d prim=%d sec=%d cd=%.3f",
+                 (unsigned long long)w->tick, mid, m->active_slot,
+                 m->primary_id, m->secondary_id, (double)m->fire_cooldown);
+        fire_other_slot_one_shot(w, mid);
+    }
+
     const Weapon *wpn = weapon_def(m->weapon_id);
     if (!wpn) return false;
     if (m->fire_cooldown > 0.0f)             return false;
@@ -1265,7 +1410,7 @@ bool mech_try_fire(World *w, int mid, ClientInput in) {
      * carrying a flag. Trade-off vs Soldat's partial restriction: see
      * TRADE_OFFS.md "Carrier secondary fully disabled". Primary still
      * fires normally. P09's BTN_FIRE_SECONDARY (RMB one-shot) inherits
-     * the same gate when it lands. */
+     * the same gate via fire_other_slot_one_shot's other_slot==1 check. */
     if (m->active_slot == 1 && ctf_is_carrier(w, mid)) return false;
 
     bool fire_held    = (in.buttons & BTN_FIRE) != 0;
@@ -1380,6 +1525,11 @@ bool mech_try_fire(World *w, int mid, ClientInput in) {
         m->grapple.constraint_idx = -1;
         m->grapple.anchor_mech    = -1;
         m->fire_cooldown          = wpn->fire_rate_sec;
+        /* P09 — broadcast the head spawn so remote clients can render
+         * the FLYING head. The snapshot only mirrors `grapple.state`,
+         * not the projectile itself, so without a FIRE_EVENT the
+         * remote view is empty between fire and attach. */
+        weapons_record_fire(w, mid, m->weapon_id, hand, aim_dir);
         SHOT_LOG("t=%llu mech=%d grapple_fire ph=%d aim=(%.2f,%.2f)",
                  (unsigned long long)w->tick, mid, ph,
                  aim_dir.x, aim_dir.y);

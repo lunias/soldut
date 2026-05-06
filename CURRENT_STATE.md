@@ -5,7 +5,7 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-05** (M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver, P02 — polygon collision + slope physics, P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote interp + `is_dummy` bit, P04 — standalone level editor at `tools/editor/` + `--test-play` flag, P05 — pickup runtime + powerups + Engineer deployable + Burst SMG cadence + practice dummy, P06 — grappling hook with `CSTR_FIXED_ANCHOR` + contracting distance constraint + state-bit-gated wire suffix, P07 — CTF mode with flag entities + capture rule + carrier penalties + 26-byte `NET_MSG_FLAG_STATE` event protocol; post-P07 — lobby UX pass, auto-balance ordering fix, editor → game CTF round-trip via F5, snapshot pos quant 8× → 4× to fit Crossfire's 4480 px width; P08 — map sharing across the network: `MapDescriptor` in `INITIAL_STATE`, `NET_MSG_MAP_REQUEST`/`MAP_CHUNK`/`MAP_READY`/`MAP_DESCRIPTOR`, `src/map_cache.{c,h}` + `src/map_download.{c,h}`, content-addressed cache at `<XDG/AppData>/soldut/maps/<crc>.lvl` with 64 MB LRU, lobby UI download progress, host gate on per-peer MAP_READY; P08b — runtime `MapRegistry` with up-to-32 entries; scans `assets/maps/*.lvl` at `game_init` so user-authored maps surface in the host's lobby cycle without overwriting a builtin slot).
+Last updated: **2026-05-05** (M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver, P02 — polygon collision + slope physics, P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote interp + `is_dummy` bit, P04 — standalone level editor at `tools/editor/` + `--test-play` flag, P05 — pickup runtime + powerups + Engineer deployable + Burst SMG cadence + practice dummy, P06 — grappling hook with `CSTR_FIXED_ANCHOR` + contracting distance constraint + state-bit-gated wire suffix, P07 — CTF mode with flag entities + capture rule + carrier penalties + 26-byte `NET_MSG_FLAG_STATE` event protocol; post-P07 — lobby UX pass, auto-balance ordering fix, editor → game CTF round-trip via F5, snapshot pos quant 8× → 4× to fit Crossfire's 4480 px width; P08 — map sharing across the network: `MapDescriptor` in `INITIAL_STATE`, `NET_MSG_MAP_REQUEST`/`MAP_CHUNK`/`MAP_READY`/`MAP_DESCRIPTOR`, `src/map_cache.{c,h}` + `src/map_download.{c,h}`, content-addressed cache at `<XDG/AppData>/soldut/maps/<crc>.lvl` with 64 MB LRU, lobby UI download progress, host gate on per-peer MAP_READY; P08b — runtime `MapRegistry` with up-to-32 entries; scans `assets/maps/*.lvl` at `game_init` so user-authored maps surface in the host's lobby cycle without overwriting a builtin slot; P09 — `BTN_FIRE_SECONDARY` (RMB) one-shot of inactive slot, host kick/ban modal in the lobby player list, `bans.txt` persistence, three-card map vote picker on the summary screen, title-screen Controls modal listing keybinds).
 
 ---
 
@@ -18,7 +18,7 @@ Last updated: **2026-05-05** (M4 lobby & matches in; M5 P01 — `.lvl` format + 
 | **M2**    | Foundation lands 2026-05-03. Host/client handshake works locally; per-tick input ship + 30 Hz snapshot broadcast + client-side prediction & replay + per-mech bone history for hitscan lag compensation are wired. LAN-only, full snapshots, no mid-tick interpolation of remote mechs (see TRADE_OFFS.md). Two-laptop bake test still pending. |
 | **M3**    | Combat depth in 2026-05-03. All 5 chassis (Trooper / Scout / Heavy / Sniper / Engineer) with passives. All 8 primaries (Pulse Rifle, Plasma SMG, Riot Cannon, Rail Cannon, Auto-Cannon, Mass Driver, Plasma Cannon, Microgun) and 6 secondaries (Sidearm, Burst SMG, Frag Grenades, Micro-Rockets, Combat Knife, Grappling Hook). Projectile pool with bone + tile collision. Explosions: damage falloff, line-of-sight check, impulse to ragdolls. Per-limb HP and dismemberment of all 5 limbs. Recoil + bink + self-bink fully wired. Friendly-fire toggle (`--ff` server flag). Kill feed with HEADSHOT/GIB/OVERKILL/RAGDOLL/SUICIDE flags. Loadout via CLI flags (`--chassis`, `--primary`, `--secondary`, `--armor`, `--jetpack`). Snapshot wire format widened to carry chassis/armor/jet/secondary; protocol id bumped to `S0LE`. |
 | **M4**    | Lobby & matches in 2026-05-03. Game flow is now title → browser → lobby → countdown → match → summary → next lobby. New modules: `match.{h,c}`, `lobby.{h,c}`, `lobby_ui.{h,c}`, `ui.{h,c}` (small immediate-mode raylib UI helpers, scale-aware for 4K), `config.{h,c}` (`soldut.cfg` key=value parser), `maps.{h,c}` (Foundry / Slipstream / Reactor — three code-built maps for the rotation; `.lvl` loader is M5). LOBBY-channel messages (player list with `mech_id`, slot delta, loadout, ready, team change, chat, vote, kick/ban, countdown, round start/end, match state). Server config file: port, max_players, mode, score_limit, time_limit, friendly_fire, auto_start_seconds, map_rotation, mode_rotation. Single-player flow auto-hosts an offline server and arms a 1s countdown. Protocol id bumped `S0LE` → `S0LF`. Network test scaffold under `tests/net/` runs the host/client end-to-end via real ENet loopback and asserts on log-line milestones. |
-| **M5**    | In progress. **P01–P08 + P08b** in. P02: per-particle contact normals (Q1.7 SoA fields + `PARTICLE_FLAG_CEILING`); polygon broadphase grid built at level load (`level_build_poly_broadphase`); `physics_constrain_and_collide` interleaves tile + polygon collision per relaxation iter (closest-point-on-triangle, push-out via pre-baked edge normals); `level_ray_hits` tests segments against polygons too; slope-tangent run velocity, slope-aware friction (`0.99 - 0.07*|ny|`, ICE→0.998), angled-ceiling jet redirection, slope-aware post-physics anchor (skips when `ny_avg > -0.92`); WIND/ZERO_G ambient zones; environmental damage tick for DEADLY tiles+polys+ACID zones. Renderer draws polygons (P02 stopgap, replaced by sprite art at P13). P03: per-particle `render_prev_x/_y` snapshot at the top of each `simulate_step`; renderer lerps `pos` ↔ `render_prev` by `alpha = accum/TICK_DT` (also threaded through projectile + FX draw); reconcile `visual_offset` is now read by `renderer_draw_frame` and applied additively to local-mech draws (decays over ~6 frames so server snaps don't read as glitches); per-mech remote snapshot ring (`remote_snap_ring[8]`) + `snapshot_interp_remotes` lerps remote mechs at `client_render_time_ms - 100ms` between bracketing entries (clamped to nearest if only one entry, snap+clear on >200 px corrections); `state_bits` widened u8→u16, `SNAP_STATE_IS_DUMMY` rides bit 11 so client dummies don't drive arm-aim; protocol id bumped `S0LF` → `S0LG`. P05: new `src/pickup.{c,h}` with PickupPool (capacity 64) on World; `pickup_init_round` populates from `level->pickups` and spawns practice-dummy mechs on the authoritative side; `pickup_step` (server-only, per tick) does 24 px touch detection + cooldown rollover + transient lifetime expiry; per-kind apply rules with full-state-rejects-grab guards; powerup timers `powerup_berserk/invis/godmode_remaining` on Mech with `SNAP_STATE_BERSERK/INVIS/GODMODE` bits in the snapshot (clients mirror to sentinel timers); berserk doubles outgoing damage and godmode zeroes incoming damage in `mech_apply_damage`; render alpha-mods invis-active mechs (0.2 / 0.5 local). Engineer's `BTN_USE` now spawns a TRANSIENT `PICKUP_REPAIR_PACK` at the engineer's feet (10 s lifetime, 30 s cooldown) instead of self-healing — allies + the engineer can grab it. Burst SMG fires round 1 on press tick + queues `burst_pending_rounds` to fire at `burst_interval_sec` cadence in `mech_step_drive`. New wire message `NET_MSG_PICKUP_STATE = 15` (20 bytes — full spawner data so transients propagate). New world ring `pickupfeed[64]` drained per tick by `broadcast_new_pickups` in main.c. New regression test `tests/pickup_test.c` (`make test-pickups`). P06: new per-Mech `Grapple` struct + `PROJ_GRAPPLE_HEAD` projectile + `CSTR_FIXED_ANCHOR` constraint (Constraint grows by `Vec2 fixed_pos`); `mech_try_fire`'s WFIRE_GRAPPLE branch spawns a 1200 px/s head from R_HAND (was `NOT YET IMPLEMENTED`); on hit `projectile_step` sets firer state to ATTACHED + calls `mech_grapple_attach` which appends a constraint to the global pool (CSTR_FIXED_ANCHOR for tile, CSTR_DISTANCE_LIMIT min=0/max=L for bone — both one-sided so the rope is slack when shorter than rest and taut when stretched). `mech_step_drive` keeps rest length fixed at hit-time distance (no auto-contract — the Tarzan/pendulum feel) and emits a per-second `grapple_swing` SHOT_LOG; releases on BTN_USE edge or anchor-mech death; `mech_kill` releases on firer death; `mech_grapple_release` flips `active=0` (slot leak bounded). BTN_FIRE while ATTACHED chain-releases + fires a new head (cooldown still gates back-to-back fires at 1.20 s). Snapshot: `SNAP_STATE_GRAPPLING` bit 12 gates an optional 8-byte trailing suffix on `EntitySnapshot` (state, anchor_mech, anchor_part, anchor_x_q, anchor_y_q) so idle bandwidth stays flat. Render: new `draw_grapple_rope` in `render.c` draws a 1.5-px gold line hand → live head (FLYING) or hand → anchor (ATTACHED, tile or bone particle). Two shot tests: `tests/shots/m5_grapple.shot` (basic fire/attach/swing/release) + `tests/shots/m5_grapple_swing.shot` (pendulum + chain re-fire while attached). Protocol id stays `S0LG`. P07: new `src/ctf.{c,h}` module — server-authoritative flag entities (`Flag flags[2]` + `flag_count` on World, populated by `ctf_init_round` from `level.flags` LvlFlag records; flags[0]=RED, flags[1]=BLUE convention). `ctf_step` per tick: 36 px touch detection, 30 s auto-return, both-flags-home capture rule (carrier touching own HOME flag while carrying enemy → +5 team, +1 slot, captured flag returns home). `ctf_drop_on_death` from `mech_kill` drops at pelvis pos with `FLAG_AUTO_RETURN_TICKS` pending. Carrier penalties: `apply_jet_force` halves thrust when `ctf_is_carrier`; `mech_try_fire` rejects when `active_slot == 1 && ctf_is_carrier`. New world fields: `flag_state_dirty` (mutation hint, broadcast site is `main.c::broadcast_flag_state_if_dirty`) + `match_mode_cached` (so `mech_kill` can branch without seeing Game). New wire message `NET_MSG_FLAG_STATE = 16` (variable: 1 byte tag + 1 byte flag_count + 12 bytes per flag — team / status / carrier_mech / pos_q / return_in_ticks; max 26 bytes for a both-flags broadcast). INITIAL_STATE appends optional flag-state suffix for joining clients. CTF score limit defaults to `FLAG_CAPTURE_DEFAULT = 5` when config has the FFA-default `>=25`. Mode-mask validation in `start_round`: if rotation lands on CTF and the picked map's META.mode_mask doesn't allow CTF (or has no Red+Blue flag pair), demote to TDM and log warning (the build-then-validate path takes one extra map_build per CTF round). Render: `draw_flags` after mech body — vertical staff + triangular pennant team-colored, sin-driven wobble while CARRIED, outline halo for DROPPED. HUD: `draw_flag_pips` (Red top-left + Blue top-right corner pips, alpha-pulse for CARRIED, outline-only for DROPPED) + `draw_flag_compass` (off-screen flag → triangular arrow at the nearest screen edge pointing at the flag, team-colored). New regression test `tests/ctf_test.c` (52 assertions, `make test-ctf`): init_round, flag_position, enemy pickup, friendly no-pickup, carrier-dies drop, friendly return, auto-return on timer, capture, ctf_is_carrier, no-capture-without-carry. Protocol id stays `S0LG` (FLAG_STATE event uses a free message id 16, no entity-snapshot widening). P08: new modules `src/map_cache.{c,h}` + `src/map_download.{c,h}`; 32-byte `MapDescriptor` (crc32 + size_bytes + short_name[24] padded to 36 wire bytes via reserved[3]) appended to every `INITIAL_STATE` body so connecting clients learn the host's current map; four new wire messages on `NET_CH_LOBBY` (`NET_MSG_MAP_REQUEST=40`/`MAP_CHUNK=41`/`MAP_READY=42`/`MAP_DESCRIPTOR=43`); chunk size 1180 bytes (matches the 1200-byte ENet MTU after the 16-byte chunk header); content-addressed cache at `<XDG_DATA_HOME or platform default>/soldut/maps/<crc32_hex>.lvl` with 64 MB LRU eviction (atomic write via `<crc>.lvl.tmp` + rename); resolve order on the client = `assets/maps/<short>.lvl` with matching CRC, then `<cache>/<crc>.lvl`, else download; `level_compute_buffer_crc` exposed from level_io.c so `client_finalize_map_download` can verify reassembled bytes against descriptor; `maps_refresh_serve_info` recomputes the host's serve descriptor + serve_path after every map_build (bootstrap_host, start_round, lobby UI mode/map cycle); host's auto-start countdown holds at ≥1.5 s while any peer's `map_ready_crc` doesn't match the current map crc (slow downloaders still join the round; the gate just defers the fire so they don't miss spawn); 30 s stall watchdog on the client cancels + disconnects if no chunks arrive; lobby UI shows `DOWNLOADING MAP NN%` progress strip when `g->map_download.active`; mid-lobby host map changes broadcast `NET_MSG_MAP_DESCRIPTOR` so clients re-resolve; protocol id stays `S0LG` (additive). New regression tests: `tests/map_chunk_test.c` (21 assertions, `make test-map-chunks`) covering chunk reassembly + duplicate detection + OOB rejection + bit-flip CRC fail; `tests/synth_map.c` writes a custom .lvl on demand; `tests/net/run_map_share.sh` (15 assertions) end-to-end host streams + client downloads + caches + plays. Version string `0.0.7-m5p08`. P08b: runtime `MapRegistry` (32-slot cap) replaces the static 4-entry `MapId` enum. `game_init` calls `map_registry_init` after `map_cache_init` (and before `config_load`, so `map_id_from_name` resolves `map_rotation=my_arena` against on-disk `.lvl` files). Scan reads each `assets/maps/*.lvl`'s 64-byte header + 32-byte META lump cheaply (no `level_load`) and pulls display name from STRT (falling back to titlecased filename stem like `my_arena` → `My Arena`). Builtin overrides are by short_name match — saving `assets/maps/foundry.lvl` from the editor stamps the builtin's slot with disk CRC + size + on-file mode_mask without losing the reserved index. Custom-map IDs (>= `MAP_BUILTIN_COUNT`) get a separate hard-fallback path in `map_build` (LOG_E + Foundry's code-built) instead of falling through to `build_fallback`'s switch default. Lobby UI cycle iterates `g_map_registry.count` (lobby_ui.c three sites). Client display falls back to `g->pending_map.short_name` when `match.map_id` is outside its local registry (host has a custom map the client doesn't, before INITIAL_STATE arrives). New regression test `tests/map_registry_test.c` (`make test-map-registry`) and end-to-end `tests/shots/net/run_meet_named.sh` (`make test-meet-named`, 18 assertions) — proves the editor → host → client flow works on a non-reserved map name (`my_arena`). Resolves the "Custom map names not in lobby rotation (P08 follow-up)" trade-off. **Pending**: P09–P18 (controls, art, audio, authored maps). |
+| **M5**    | In progress. **P01–P09** in. P02: per-particle contact normals (Q1.7 SoA fields + `PARTICLE_FLAG_CEILING`); polygon broadphase grid built at level load (`level_build_poly_broadphase`); `physics_constrain_and_collide` interleaves tile + polygon collision per relaxation iter (closest-point-on-triangle, push-out via pre-baked edge normals); `level_ray_hits` tests segments against polygons too; slope-tangent run velocity, slope-aware friction (`0.99 - 0.07*|ny|`, ICE→0.998), angled-ceiling jet redirection, slope-aware post-physics anchor (skips when `ny_avg > -0.92`); WIND/ZERO_G ambient zones; environmental damage tick for DEADLY tiles+polys+ACID zones. Renderer draws polygons (P02 stopgap, replaced by sprite art at P13). P03: per-particle `render_prev_x/_y` snapshot at the top of each `simulate_step`; renderer lerps `pos` ↔ `render_prev` by `alpha = accum/TICK_DT` (also threaded through projectile + FX draw); reconcile `visual_offset` is now read by `renderer_draw_frame` and applied additively to local-mech draws (decays over ~6 frames so server snaps don't read as glitches); per-mech remote snapshot ring (`remote_snap_ring[8]`) + `snapshot_interp_remotes` lerps remote mechs at `client_render_time_ms - 100ms` between bracketing entries (clamped to nearest if only one entry, snap+clear on >200 px corrections); `state_bits` widened u8→u16, `SNAP_STATE_IS_DUMMY` rides bit 11 so client dummies don't drive arm-aim; protocol id bumped `S0LF` → `S0LG`. P05: new `src/pickup.{c,h}` with PickupPool (capacity 64) on World; `pickup_init_round` populates from `level->pickups` and spawns practice-dummy mechs on the authoritative side; `pickup_step` (server-only, per tick) does 24 px touch detection + cooldown rollover + transient lifetime expiry; per-kind apply rules with full-state-rejects-grab guards; powerup timers `powerup_berserk/invis/godmode_remaining` on Mech with `SNAP_STATE_BERSERK/INVIS/GODMODE` bits in the snapshot (clients mirror to sentinel timers); berserk doubles outgoing damage and godmode zeroes incoming damage in `mech_apply_damage`; render alpha-mods invis-active mechs (0.2 / 0.5 local). Engineer's `BTN_USE` now spawns a TRANSIENT `PICKUP_REPAIR_PACK` at the engineer's feet (10 s lifetime, 30 s cooldown) instead of self-healing — allies + the engineer can grab it. Burst SMG fires round 1 on press tick + queues `burst_pending_rounds` to fire at `burst_interval_sec` cadence in `mech_step_drive`. New wire message `NET_MSG_PICKUP_STATE = 15` (20 bytes — full spawner data so transients propagate). New world ring `pickupfeed[64]` drained per tick by `broadcast_new_pickups` in main.c. New regression test `tests/pickup_test.c` (`make test-pickups`). P06: new per-Mech `Grapple` struct + `PROJ_GRAPPLE_HEAD` projectile + `CSTR_FIXED_ANCHOR` constraint (Constraint grows by `Vec2 fixed_pos`); `mech_try_fire`'s WFIRE_GRAPPLE branch spawns a 1200 px/s head from R_HAND (was `NOT YET IMPLEMENTED`); on hit `projectile_step` sets firer state to ATTACHED + calls `mech_grapple_attach` which appends a constraint to the global pool (CSTR_FIXED_ANCHOR for tile, CSTR_DISTANCE_LIMIT min=0/max=L for bone — both one-sided so the rope is slack when shorter than rest and taut when stretched). `mech_step_drive` keeps rest length fixed at hit-time distance (no auto-contract — the Tarzan/pendulum feel) and emits a per-second `grapple_swing` SHOT_LOG; releases on BTN_USE edge or anchor-mech death; `mech_kill` releases on firer death; `mech_grapple_release` flips `active=0` (slot leak bounded). BTN_FIRE while ATTACHED chain-releases + fires a new head (cooldown still gates back-to-back fires at 1.20 s). Snapshot: `SNAP_STATE_GRAPPLING` bit 12 gates an optional 8-byte trailing suffix on `EntitySnapshot` (state, anchor_mech, anchor_part, anchor_x_q, anchor_y_q) so idle bandwidth stays flat. Render: new `draw_grapple_rope` in `render.c` draws a 1.5-px gold line hand → live head (FLYING) or hand → anchor (ATTACHED, tile or bone particle). Two shot tests: `tests/shots/m5_grapple.shot` (basic fire/attach/swing/release) + `tests/shots/m5_grapple_swing.shot` (pendulum + chain re-fire while attached). Protocol id stays `S0LG`. P07: new `src/ctf.{c,h}` module — server-authoritative flag entities (`Flag flags[2]` + `flag_count` on World, populated by `ctf_init_round` from `level.flags` LvlFlag records; flags[0]=RED, flags[1]=BLUE convention). `ctf_step` per tick: 36 px touch detection, 30 s auto-return, both-flags-home capture rule (carrier touching own HOME flag while carrying enemy → +5 team, +1 slot, captured flag returns home). `ctf_drop_on_death` from `mech_kill` drops at pelvis pos with `FLAG_AUTO_RETURN_TICKS` pending. Carrier penalties: `apply_jet_force` halves thrust when `ctf_is_carrier`; `mech_try_fire` rejects when `active_slot == 1 && ctf_is_carrier`. New world fields: `flag_state_dirty` (mutation hint, broadcast site is `main.c::broadcast_flag_state_if_dirty`) + `match_mode_cached` (so `mech_kill` can branch without seeing Game). New wire message `NET_MSG_FLAG_STATE = 16` (variable: 1 byte tag + 1 byte flag_count + 12 bytes per flag — team / status / carrier_mech / pos_q / return_in_ticks; max 26 bytes for a both-flags broadcast). INITIAL_STATE appends optional flag-state suffix for joining clients. CTF score limit defaults to `FLAG_CAPTURE_DEFAULT = 5` when config has the FFA-default `>=25`. Mode-mask validation in `start_round`: if rotation lands on CTF and the picked map's META.mode_mask doesn't allow CTF (or has no Red+Blue flag pair), demote to TDM and log warning (the build-then-validate path takes one extra map_build per CTF round). Render: `draw_flags` after mech body — vertical staff + triangular pennant team-colored, sin-driven wobble while CARRIED, outline halo for DROPPED. HUD: `draw_flag_pips` (Red top-left + Blue top-right corner pips, alpha-pulse for CARRIED, outline-only for DROPPED) + `draw_flag_compass` (off-screen flag → triangular arrow at the nearest screen edge pointing at the flag, team-colored). New regression test `tests/ctf_test.c` (52 assertions, `make test-ctf`): init_round, flag_position, enemy pickup, friendly no-pickup, carrier-dies drop, friendly return, auto-return on timer, capture, ctf_is_carrier, no-capture-without-carry. Protocol id stays `S0LG` (FLAG_STATE event uses a free message id 16, no entity-snapshot widening). P08: new modules `src/map_cache.{c,h}` + `src/map_download.{c,h}`; 32-byte `MapDescriptor` (crc32 + size_bytes + short_name[24] padded to 36 wire bytes via reserved[3]) appended to every `INITIAL_STATE` body so connecting clients learn the host's current map; four new wire messages on `NET_CH_LOBBY` (`NET_MSG_MAP_REQUEST=40`/`MAP_CHUNK=41`/`MAP_READY=42`/`MAP_DESCRIPTOR=43`); chunk size 1180 bytes (matches the 1200-byte ENet MTU after the 16-byte chunk header); content-addressed cache at `<XDG_DATA_HOME or platform default>/soldut/maps/<crc32_hex>.lvl` with 64 MB LRU eviction (atomic write via `<crc>.lvl.tmp` + rename); resolve order on the client = `assets/maps/<short>.lvl` with matching CRC, then `<cache>/<crc>.lvl`, else download; `level_compute_buffer_crc` exposed from level_io.c so `client_finalize_map_download` can verify reassembled bytes against descriptor; `maps_refresh_serve_info` recomputes the host's serve descriptor + serve_path after every map_build (bootstrap_host, start_round, lobby UI mode/map cycle); host's auto-start countdown holds at ≥1.5 s while any peer's `map_ready_crc` doesn't match the current map crc (slow downloaders still join the round; the gate just defers the fire so they don't miss spawn); 30 s stall watchdog on the client cancels + disconnects if no chunks arrive; lobby UI shows `DOWNLOADING MAP NN%` progress strip when `g->map_download.active`; mid-lobby host map changes broadcast `NET_MSG_MAP_DESCRIPTOR` so clients re-resolve; protocol id stays `S0LG` (additive). New regression tests: `tests/map_chunk_test.c` (21 assertions, `make test-map-chunks`) covering chunk reassembly + duplicate detection + OOB rejection + bit-flip CRC fail; `tests/synth_map.c` writes a custom .lvl on demand; `tests/net/run_map_share.sh` (15 assertions) end-to-end host streams + client downloads + caches + plays. Version string `0.0.7-m5p08`. P08b: runtime `MapRegistry` (32-slot cap) replaces the static 4-entry `MapId` enum. `game_init` calls `map_registry_init` after `map_cache_init` (and before `config_load`, so `map_id_from_name` resolves `map_rotation=my_arena` against on-disk `.lvl` files). Scan reads each `assets/maps/*.lvl`'s 64-byte header + 32-byte META lump cheaply (no `level_load`) and pulls display name from STRT (falling back to titlecased filename stem like `my_arena` → `My Arena`). Builtin overrides are by short_name match — saving `assets/maps/foundry.lvl` from the editor stamps the builtin's slot with disk CRC + size + on-file mode_mask without losing the reserved index. Custom-map IDs (>= `MAP_BUILTIN_COUNT`) get a separate hard-fallback path in `map_build` (LOG_E + Foundry's code-built) instead of falling through to `build_fallback`'s switch default. Lobby UI cycle iterates `g_map_registry.count` (lobby_ui.c three sites). Client display falls back to `g->pending_map.short_name` when `match.map_id` is outside its local registry (host has a custom map the client doesn't, before INITIAL_STATE arrives). New regression test `tests/map_registry_test.c` (`make test-map-registry`) and end-to-end `tests/shots/net/run_meet_named.sh` (`make test-meet-named`, 18 assertions) — proves the editor → host → client flow works on a non-reserved map name (`my_arena`). Resolves the "Custom map names not in lobby rotation (P08 follow-up)" trade-off. P09: `BTN_FIRE_SECONDARY = 1u << 12` in `src/input.h`, RMB sampled in `src/platform.c`; new static `fire_other_slot_one_shot` in `src/mech.c` swap-dispatches the inactive slot via the existing `weapons_fire_*` helpers (HITSCAN / PROJECTILE / SPREAD / THROW / BURST / MELEE / GRAPPLE) and restores the active aliases — charge weapons rejected, flag carrier secondary still fully disabled, shared `fire_cooldown` gates LMB+RMB so neither path doubles DPS; mech_try_fire calls it on `BTN_FIRE_SECONDARY` edge ABOVE the active-slot guard so the inactive primary remains usable when the active secondary is gated. New `lobby_load_bans` / `lobby_save_bans` in `src/lobby.{c,h}` — flat one-line-per-ban `bans.txt` next to the binary (`<addr_hex> <name>`), loaded in `bootstrap_host` and auto-saved at the end of `lobby_ban_addr` (path captured on `LobbyState`). New `net_server_kick_or_ban_slot` in `src/net.{c,h}` — host-side direct call (no wire round-trip); the existing `server_handle_lobby_kick_or_ban` calls it after host validation. Lobby UI: `[Kick] [Ban]` buttons in `player_row` for non-host slots when `net.role == NET_ROLE_SERVER`; click stages a confirmation modal in `lobby_screen_run` with explicit Cancel/Confirm. Three-card map vote picker on the summary screen: `host_start_map_vote` picks 3 distinct mode-compatible maps from `g_map_registry` (Fisher-Yates shuffle), arms `lobby_vote_start` with 80% of the summary timer, broadcasts `NET_MSG_LOBBY_VOTE_STATE`; cards render in `summary_screen_run` with placeholder gray thumbnails (real art at P13/P16), live tally, and per-card Vote button; client routes through new `apply_map_vote` (wire for clients, in-process for host). `begin_next_lobby` reads `lobby_vote_winner` and overrides `g->match.map_id` before the lobby state reset. Title screen gains a small Controls button bottom-right that opens a 13-row keybinds modal — sourced from `src/platform.c` (the canonical source of truth) so it lists the actual game keys (`X` for prone, `F` for melee), with Right Mouse → "Secondary fire — inactive slot, NEW". `lobby_tick` is now also called during `MATCH_PHASE_SUMMARY` so the vote countdown decays. New shotmode button name `fire_secondary` (BTN_FIRE_SECONDARY); new shot test `tests/shots/m5_secondary_fire.shot` proves a Trooper LMB-fires Pulse Rifle, RMB-throws a Frag Grenade without flipping active_slot, then LMB-fires Pulse Rifle again. Resolves three M4-era trade-offs (deleted from `TRADE_OFFS.md`): "Map vote picker UI is partial", "Kick / ban UI not exposed", "`bans.txt` not persisted". **Pending**: P10–P18 (sprite atlases, weapon art, damage feedback, parallax / HUD final / TTF / halftone, audio, asset generation, authored maps). |
 
 ---
 
@@ -1333,11 +1333,311 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
     `tests/net/run_map_share.sh` 15/15. Protocol id stays `S0LG`
     (P08b is host-local — no wire changes).
 
+- **P09 — `BTN_FIRE_SECONDARY` + host controls + bans.txt + vote picker** (2026-05-05).
+  - **`BTN_FIRE_SECONDARY` (RMB).** New input bit `1u << 12` in
+    `src/input.h`; `src/platform.c::platform_sample_input` fills it
+    from `MOUSE_BUTTON_RIGHT`. Edge-triggered (one shot per RMB press)
+    while the existing `BTN_FIRE` stays level-triggered for full-auto
+    weapons.
+  - **`fire_other_slot_one_shot` in `src/mech.c`.** Static helper above
+    `mech_try_fire`. Pattern: save active-slot aliases (`m->weapon_id`
+    / `m->ammo` / `m->ammo_max`) → swap to inactive slot's stats →
+    dispatch by `wpn->fire` (HITSCAN → `weapons_fire_hitscan`;
+    PROJECTILE / SPREAD / THROW / BURST → `weapons_spawn_projectiles`
+    with the burst-pending queue for BURST; MELEE → `weapons_fire_melee`;
+    GRAPPLE → mirrors the inline grapple branch from `mech_try_fire`,
+    spawning `PROJ_GRAPPLE_HEAD` and setting `m->grapple.state =
+    GRAPPLE_FLYING`) → decrement the inactive slot's ammo bucket →
+    restore active-slot aliases. Charge weapons (`charge_sec > 0`) are
+    rejected — RMB is press-only. CTF carrier penalty applies to
+    `other_slot == 1` regardless of which slot is currently active, so
+    a flag carrier's secondary remains disabled via either fire path.
+    Shared `fire_cooldown` gates LMB+RMB on the same tick.
+  - **Hook in `mech_try_fire`.** BTN_FIRE_SECONDARY edge check sits at
+    the very top of the function, above the active-slot guards (alive
+    + cooldown + reload + carrier). Order matters: the inactive
+    primary stays usable when the active secondary is gated by the
+    carrier rule. The active-slot dispatch below sees the cooldown set
+    by the inner `weapons_fire_*` and bails — neither path doubles DPS.
+  - **`bans.txt` persistence.** New `lobby_load_bans` /
+    `lobby_save_bans` in `src/lobby.{c,h}`. Flat one-entry-per-line
+    format: `<addr_hex> <name>`, blank lines + `#`-comments tolerated.
+    `lobby_load_bans` records the path on
+    `LobbyState.ban_path[LOBBY_BAN_PATH_BYTES = 96]` so subsequent
+    `lobby_ban_addr` calls auto-save (re-write the whole file; bans
+    cap at 32 so this is trivial). Hooked into `bootstrap_host` after
+    network setup, before any peers can connect. Unit tests don't set
+    a path → no disk I/O during test runs.
+  - **Host-side kick/ban entry.** `server_handle_lobby_kick_or_ban` in
+    `src/net.c` factored: the wire-driven path now validates host
+    status and calls a new public `net_server_kick_or_ban_slot(ns, g,
+    target_slot, ban)` that does the actual ban + disconnect + chat
+    notification. The host's own UI calls the public directly without
+    wire round-trip (mirrors the `apply_team_change` / `apply_ready_toggle`
+    pattern in `lobby_ui.c`).
+  - **Lobby UI: kick/ban buttons + confirmation modal.**
+    `PlayerListCtx` grows two fields (`LobbyUIState *ui_state`,
+    `bool host_view`). `player_row` renders compact `[Kick]` `[Ban]`
+    buttons on the right edge of every non-host row when `host_view`
+    is true; click stages `L->kick_target_slot` / `L->ban_target_slot`
+    (only one set at a time). After the list iteration,
+    `lobby_screen_run` renders a centered confirmation modal with a
+    160-alpha dim overlay, the target's name in the title, "(persists
+    across host restarts)" subtitle for ban, and explicit Cancel /
+    Confirm buttons. Confirm calls `apply_kick_or_ban(g, slot, ban)`
+    which routes to `net_client_send_kick/ban` (clients) or
+    `net_server_kick_or_ban_slot` (host).
+  - **Three-card map vote picker.** New `host_start_map_vote` in
+    `src/main.c` walks `g_map_registry.count`, collects entries that
+    support the current `match.mode` (`mode_mask & (1u << mode)`)
+    excluding the just-played map, Fisher-Yates shuffles, picks up
+    to 3 candidates. Calls `lobby_vote_start(L, a, b, c, dur)` with
+    `dur = summary_remaining * 0.8` so the winner is decided before
+    `begin_next_lobby` fires. Broadcasts `NET_MSG_LOBBY_VOTE_STATE`
+    immediately. No-op on offline solo or when no compatible maps
+    other than the current one. `host_match_flow_step` now calls
+    `lobby_tick` during `MATCH_PHASE_SUMMARY` so the vote_remaining
+    countdown actually decays. `begin_next_lobby` reads
+    `lobby_vote_winner` (popcount-based) and overrides
+    `g->match.map_id` before the LOBBY broadcast — clients see the
+    winner via the standard `net_server_broadcast_match_state` /
+    `lobby_list` flow.
+  - **Vote-card UI in `summary_screen_run`.** When a vote is active
+    (any of `vote_map_a/b/c` >= 0), the scoreboard rect shrinks to
+    leave a `S(180)` strip above the bottom margin. Each card:
+    `S(220)`-wide, side-by-side, with a placeholder gray thumbnail
+    (real art at P13/P16), the map's `display_name` and `blurb`
+    (sourced from `MapDef`), live tally (popcount of the candidate's
+    `vote_mask`), and a per-card "Vote" button. The local slot's
+    chosen card is bordered + tinted green and labelled "VOTED". New
+    `apply_map_vote(g, choice)` helper mirrors the team-change pattern
+    — host calls `lobby_vote_cast` directly + rebroadcasts;
+    client sends `NET_MSG_LOBBY_MAP_VOTE`.
+  - **Title-screen Controls modal.** Small "Controls" button in the
+    bottom-right corner of `title_screen_run` toggles
+    `LobbyUIState.show_keybinds`. Modal is a 520×440 panel with a
+    13-row keybind table sourced from `src/platform.c` (the canonical
+    source of truth — code wins over docs per CLAUDE.md). Lists the
+    actual game keys (`X` for prone, `F` for melee, NOT the
+    `documents/m5/13-controls-and-residuals.md` placeholders Z/V),
+    with Right Mouse → "Secondary fire — inactive slot, NEW". Close
+    via the Close button or Esc.
+  - **Shotmode wiring.** `tests/shots/m5_secondary_fire.shot` — a
+    Trooper with Pulse Rifle + Frag Grenades fires LMB at T15 (rifle
+    hitscan, ammo 30→29), again at T23 (29→28), then RMB-taps at T40
+    (`spawn_proj wpn=10 kind=7` for the Frag Grenade) — active slot
+    stays primary throughout (ammo cap stays at 30). After the Frag
+    Grenade's 0.6 s `fire_rate_sec` clears, LMB resumes at T85 with
+    `fire mech=0 wpn=0` — proves the active slot wasn't flipped by
+    the RMB tap. New shotmode button name `fire_secondary` →
+    `BTN_FIRE_SECONDARY`. New SHOT_LOG line in `mech_try_fire` on
+    every BTN_FIRE_SECONDARY edge: `mech=N fire_secondary edge
+    active=A prim=P sec=S cd=…`.
+  - **Resolves three M4-era trade-offs** (deleted from `TRADE_OFFS.md`):
+    "Map vote picker UI is partial", "Kick / ban UI not exposed",
+    "`bans.txt` not persisted".
+  - Verification: `make` clean; `make test-physics` ok;
+    `make test-level-io` 25/25; `make test-pickups` 43/43;
+    `make test-ctf` 52/52; `make test-spawn` ok; `make test-map-chunks`
+    21/21; `make test-map-registry` ok; `tests/net/run.sh` 13/13;
+    `tests/net/run_3p.sh` 10/10; `tests/net/run_ctf.sh` 15/15;
+    `tests/net/run_map_share.sh` 15/15. Protocol id stays `S0LG`
+    (P09 is additive on `NET_MSG_LOBBY_VOTE_STATE` / `LOBBY_KICK` /
+    `LOBBY_BAN`, all already wired).
+  - **Post-P09 sync follow-up** (same day): user playtest reported the
+    grappling hook "disappearing" mid-flight and remote fires looking
+    inconsistent. Three gaps surfaced — two were pre-P09 (P06 / earlier
+    M2) but only became visible once RMB made secondary fires routine:
+    1. **`weapons_record_fire` was never called for `WFIRE_GRAPPLE`.**
+       Both the existing LMB-grapple branch in `mech_try_fire` and P09's
+       new `fire_other_slot_one_shot` GRAPPLE case now emit a
+       `FIRE_EVENT` so remote clients learn about the head spawn.
+       Pre-existing P06 oversight; the static `record_fire` helper in
+       `weapons.c` was renamed to public `weapons_record_fire` and
+       declared in `weapons.h`.
+    2. **`client_handle_fire_event` had no `WFIRE_GRAPPLE` case.**
+       Remote clients (and the firer themselves, see below) never spawned
+       a visual `PROJ_GRAPPLE_HEAD`, so the rope rendered nothing during
+       FLYING (it draws hand → head, but no head existed on the client).
+       New branch spawns a visual-only head; `projectile_step`'s alive=0
+       paths run unconditionally so the head dies cleanly on tile/bone
+       hit. The server still owns attach via `w->authoritative`.
+    3. **Firer's own non-hitscan visuals were dropped.** The
+       `if (shooter == local_mech_id) return;` guard at the top of
+       `client_handle_fire_event` skipped the FIRE_EVENT for the firer
+       on the assumption that the local predict path
+       (`weapons_predict_local_fire`) had already drawn it. But predict
+       only handles HITSCAN; for PROJECTILE/SPREAD/BURST/THROW/GRAPPLE,
+       the firer saw nothing of their own shot. Restructured the
+       handler: skip-self applies only to HITSCAN+MELEE (where predict
+       drew the tracer); for projectile/grapple kinds, the visual is
+       spawned for self too (predict's sparks+recoil aren't duplicated
+       because the muzzle-spark loop is now `if (!is_self)` gated).
+  - **Shot-test scaffold gap fixed too.** Networked shotmode never
+    drained `firefeed` / `hitfeed` / `pickupfeed` — only `killfeed`
+    via `shot_apply_new_kills`. So `FIRE_EVENT` / `HIT_EVENT` /
+    `PICKUP_STATE` never crossed the wire in shot tests, masking the
+    P09 grapple bug from the existing test scaffold. Added
+    `shot_broadcast_new_hits` / `_fires` / `_pickups` to `shotmode.c`
+    and call them from `shot_host_flow`'s `MATCH_PHASE_ACTIVE` branch.
+  - **New paired shot test** `tests/shots/net/2p_secondary_fire.{host,client}.shot`
+    + `run_secondary_fire.sh` (12 base + 7 RMB-specific = 19/19): host
+    holds Pulse Rifle + Frag Grenades, client holds Pulse Rifle +
+    Grappling Hook. Each side RMB-fires the inactive slot. Asserts:
+    host's spawn_proj for the Frag Grenade, host's BTN_FIRE_SECONDARY
+    edge for both mechs (own and the client's), server-side
+    `grapple_fire(RMB)` for the client's RMB, client-side
+    `client_fire_event grapple shooter=N self=1` SHOT_LOG showing the
+    visual head spawned for the firer themselves, and active-slot
+    persistence (ammo_max stays at 30 = primary's mag throughout).
+  - **Post-P09 kick/ban follow-up** (same day): user playtest reported
+    the kick UI was poorly displayed AND that kicked players didn't
+    actually leave. Three bugs:
+    1. **Client never returned to title on forced disconnect.** ENet
+       emits `ENET_EVENT_TYPE_DISCONNECT` on the client when the host
+       calls `enet_peer_disconnect_later`, which clears `ns->connected`
+       — but nothing in the main loop watched that flag. The kicked
+       client just sat there with no server. Added a hook in `main.c`
+       (and a parallel one in `shotmode.c`'s networked loop for
+       testability): when `role == NET_ROLE_CLIENT && !ns->connected`,
+       tear down net + lobby state and return to MODE_TITLE.
+    2. **Modal layout was rendering before the chat / loadout panels**,
+       so the chat panel painted over the lower half of the modal
+       (including the buttons) — that's why the user said "GUI
+       display is bad." Moved the modal block to the very end of
+       `lobby_screen_run`. Pixel inspection confirmed the buttons now
+       render at their intended colors instead of ~30% via the chat
+       panel's overlay.
+    3. **Modal lacked visual hierarchy.** Redesigned with an accent
+       top-stripe + border (orange for kick, red for ban), a
+       descriptive subtitle ("Disconnect this player. They can rejoin
+       freely." vs "Saved to bans.txt; persists across host
+       restarts."), explicit slate Cancel and full-saturation
+       destructive Confirm buttons sized 170×48. Player-row buttons
+       went 56×20→72×28 with brighter hover/border colors.
+  - **New shotmode directives** for kick/ban testing:
+    - `at <tick> kick <slot>` / `ban <slot>` — host-side, drives
+      `net_server_kick_or_ban_slot` directly (mirrors the production
+      lobby UI's confirmation modal).
+    - `at <tick> kick_modal <slot>` / `ban_modal <slot>` — host-side,
+      sets `LobbyUIState.kick_target_slot/ban_target_slot` so the
+      modal renders for layout-regression screenshots.
+  - **`lobby_chat_system` now logs** the system message via `LOG_I`
+    so kick/ban / "X joined" / "Y left" announcements are visible in
+    `soldut.log` for tests + post-mortems (chat ring contents alone
+    aren't reachable from a log file).
+  - **Networked shotmode now calls `lobby_load_bans("bans.txt")`** in
+    `networked_shot_bootstrap` so shot tests exercise the auto-save +
+    reload-on-restart paths (without this, the ban directive's
+    auto-save wouldn't fire — `lobby_ban_addr` only writes when
+    `L->ban_path` is non-empty).
+  - **New 3-player kick/ban test** `tests/shots/net/run_kick_ban.sh`
+    (20/20 — 17 phase-1 + 3 phase-2): host + ClientB + ClientC,
+    scripted `kick 1` then `ban 2`. Phase 1 asserts both clients
+    receive forced disconnect, host's chat ring records the kick/ban
+    announcement, peer disconnect events fire, `bans.txt` contains
+    ClientC (and NOT ClientB, since kick != ban). Phase 2 starts a
+    fresh host that reads the persisted `bans.txt`, ClientC tries to
+    reconnect, server logs "banned — rejecting" and the client
+    handshake errors out at `REJECT (bad challenge)`.
+  - **New layout-regression test** `tests/shots/net/run_kick_modal.sh`
+    captures the kick + ban modal screenshots so subsequent UI
+    regressions are visible. Uses the new `kick_modal` / `ban_modal`
+    directives + a temp `soldut.cfg` with `auto_start_seconds=20` so
+    the lobby stays open long enough.
+  - **Post-P09 round-loop refactor + multi-round match flow** (same
+    day): user playtest reported "killed an opponent and the next
+    round didn't start" + "voted a map but the next round didn't
+    start cleanly." Three structural fixes plus a new game-design
+    rule landed together:
+    1. **Client never returned to LOBBY after SUMMARY.** ENet
+       broadcasts MATCH_STATE phase=LOBBY when the host transitions
+       past summary, but `client_handle_match_state` only decoded the
+       new state — it didn't update `g->mode`, so the client got
+       stuck on the summary screen. Fixed: when phase becomes LOBBY
+       and the client isn't already there, run lobby_clear_round_mechs
+       and switch to MODE_LOBBY.
+    2. **Vote winner clobbered by start_round.** `begin_next_lobby`
+       applied the P09 vote winner to `match.map_id`, but
+       `start_round` re-ran `config_pick_map(round_counter)` at the
+       top, overwriting it. Fixed: only pick from rotation on the
+       FIRST round (`round_counter == 0`); subsequent rounds inherit
+       map/mode from `after_summary` (which honors the vote).
+       Mirrored in shotmode's COUNTDOWN→ACTIVE branch.
+    3. **"Only one player remains → 3 s warning → round end" rule.**
+       New `match_step_solo_warning` in `match.c`: when the active
+       round started with 2+ non-dummy mechs and the alive count
+       drops to ≤1 (kill / kick / disconnect), arm a 3-second timer;
+       when it expires, end the round. Single-player matches
+       (mech_count ≤ 1 from the start) are exempt.
+    4. **Multi-round match flow.** A "match" is now N rounds (config
+       `rounds_per_match`, default 3, also accepts `match_rounds`).
+       Inter-round transitions are seamless: SUMMARY → brief
+       COUNTDOWN (`inter_round_countdown_default`, 3 s for prod, 2 s
+       for shotmode) → next ACTIVE, with score persisting across
+       rounds. NO lobby UI between rounds. After the final round,
+       full reset → MODE_LOBBY for fresh ready-up. Implementation:
+       - `match.rounds_per_match` / `rounds_played` /
+         `inter_round_countdown_default` fields on MatchState
+         (host-side; not on the wire).
+       - `after_summary(g)` dispatcher in main.c: increments
+         `rounds_played`, applies vote winner, branches to
+         `end_match` (back to LOBBY, reset stats) or
+         `advance_to_next_round` (clear dead mechs, brief countdown).
+       - `apply_vote_winner_if_any(g)` factored out so both branches
+         honor the vote.
+       - Mirrored inline in shotmode's MATCH_PHASE_SUMMARY case.
+       - Summary screen UI is phase-aware: SUMMARY shows vote cards
+         + "Next round in N s" (or "Match over — back to lobby in
+         N s" on the last round); COUNTDOWN hides the cards and
+         shows a big "Round N / M starts in N s" banner.
+    5. **All-voted fast-forward.** When every active in-use slot has
+       a bit set in any of `vote_mask_a/b/c`, `summary_remaining` is
+       floored to 1 s so the picker doesn't drag for the full 4–8 s
+       window. Lets a 2-player match transition between rounds in
+       ~1 s + the inter-round countdown.
+  - **New paired test** `tests/shots/net/run_round_loop.sh` (14/14):
+    Two clients, `rounds_per_match=2`. Host kill_peers the client in
+    each round; solo-warning fires; both vote during SUMMARY; vote
+    winner becomes the next-round map; round 1 → round 2 transition
+    happens with NO lobby ("client: returning to lobby" only fires
+    AT MATCH END, not between rounds); after round 2 the host logs
+    "match over" and the client transitions back to LOBBY.
+  - **New shotmode directive** `vote_map <choice 0/1/2>` — drives the
+    map-vote picker code path. Host-side casts directly via
+    `lobby_vote_cast` + rebroadcast; client-side sends
+    `NET_MSG_LOBBY_MAP_VOTE`.
+
+  - **Post-P09 self-hitscan-RMB visual fix** (same day): user playtest
+    reported RMB-firing Sidearm shows projectiles on the server side
+    but not on the firer's own client. Root cause: the skip-self
+    guard for HITSCAN in `client_handle_fire_event` blanket-returned
+    when `shooter == local_mech_id` on the assumption that the local
+    predict path already drew the tracer. But predict only fires on
+    `BTN_FIRE` (LMB), never `BTN_FIRE_SECONDARY` (RMB). Same gap
+    existed for `WFIRE_MELEE` (predict never draws the swing tracer
+    for any path — the comment was just wrong). Fix: predict_drew is
+    now `is_self && (FIRE_EVENT's weapon == firer's active slot's
+    weapon)` — true only for self LMB-on-active. RMB-on-inactive and
+    self melee always render the visual via FIRE_EVENT. Also gates
+    the muzzle-spark loop and the projectile-path muzzle tracer on
+    `predict_drew` instead of `is_self` so RMB-fired projectile
+    secondaries (Frag Grenades, Micro-Rockets, etc.) get full muzzle
+    visuals on the firer's screen too.
+  - **New paired test** `tests/shots/net/2p_rmb_hitscan.{host,client}.shot`
+    + `run_rmb_hitscan.sh` (12 base + 5 RMB-hitscan assertions =
+    17/17): both players hold Pulse Rifle + Sidearm. Both RMB-fire.
+    Asserts host runs `weapons_fire_hitscan` server-side for both
+    mechs (the host's own visual path), and the client's
+    `client_fire_event hitscan` SHOT_LOG fires for BOTH `shooter=0
+    self=0 active=0` (host's RMB) AND `shooter=1 self=1 active=0`
+    (client's own RMB). The pre-fix behavior dropped the latter.
+
 ### Pending
 
-- **P09–P14** — Controls (`BTN_FIRE_SECONDARY` / keybinds / UI panel),
-  mech atlas runtime, weapon art, damage feedback, parallax / HUD /
-  TTF / halftone / decal chunking, audio.
+- **P10–P14** — Mech sprite atlases, per-weapon visible art, damage
+  feedback (hit-flash + decals + stump caps + smoke), parallax / HUD
+  final art / TTF font / halftone post / decal chunking, audio module.
 - **P15–P18** — ComfyUI asset generation + the 8 maps + bake test.
 
 ## Headless test

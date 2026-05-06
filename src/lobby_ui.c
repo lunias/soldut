@@ -88,6 +88,8 @@ void lobby_ui_init(LobbyUIState *L) {
     L->lobby_jet       = JET_STANDARD;
     L->lobby_team      = MATCH_TEAM_FFA;
     L->browser_refresh_timer = 0.0f;
+    L->kick_target_slot = -1;
+    L->ban_target_slot  = -1;
     snprintf(L->connect_addr, sizeof L->connect_addr, "127.0.0.1:%u",
              (unsigned)SOLDUT_DEFAULT_PORT);
 }
@@ -153,6 +155,71 @@ void title_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     ui_text_input(&L->ui, (Rectangle){nx, ny, nw, nh},
                   L->player_name, LOBBY_UI_NAME_BYTES,
                   UI_ID(), "player");
+
+    /* P09 — small "Controls" link in the bottom-right corner toggles a
+     * keybinds modal. The modal itself is rendered at the bottom of
+     * this function so it overlays everything else. */
+    Rectangle ctrl_r = (Rectangle){ sw - S(132), sh - S(40),
+                                     S(116), S(28) };
+    if (ui_button(&L->ui, ctrl_r, "Controls", true)) {
+        L->show_keybinds = true;
+    }
+
+    if (L->show_keybinds) {
+        DrawRectangle(0, 0, sw, sh, (Color){0, 0, 0, 180});
+        int dw = S(520), dh = S(440);
+        int dx = (sw - dw) / 2, dy = (sh - dh) / 2;
+        Rectangle dr = (Rectangle){dx, dy, dw, dh};
+        ui_panel_default(&L->ui, dr);
+
+        const char *hdr = "CONTROLS";
+        int hw = ui_measure(&L->ui, hdr, 24);
+        ui_draw_text(&L->ui, hdr, dx + (dw - hw) / 2, dy + S(18), 24,
+                     (Color){240, 220, 180, 255});
+
+        /* Two-column table of keybind rows. Mirrors the actual platform
+         * layer (src/platform.c) — the canonical source of truth, since
+         * code wins over docs per CLAUDE.md. RMB → BTN_FIRE_SECONDARY
+         * is the new entry at M5 P09. */
+        struct { const char *key, *action; } rows[] = {
+            { "A / D",                 "Move left / right" },
+            { "Space",                 "Jump" },
+            { "W",                     "Jet" },
+            { "Ctrl / S",              "Crouch (drops through one-way)" },
+            { "X",                     "Prone" },
+            { "Left Mouse",            "Primary fire (active slot)" },
+            { "Right Mouse",           "Secondary fire — inactive slot, NEW" },
+            { "Q",                     "Swap weapon (toggle slot)" },
+            { "R",                     "Reload" },
+            { "F",                     "Melee" },
+            { "E",                     "Use / interact (Engineer pack)" },
+            { "Shift",                 "Dash / burst-jet boost" },
+            { "Esc",                   "Leave to title (in lobby/match)" },
+        };
+        int n_rows = (int)(sizeof(rows) / sizeof(rows[0]));
+        int row_y = dy + S(60);
+        int row_h = S(24);
+        int kx    = dx + S(28);
+        int ax    = dx + S(180);
+        for (int i = 0; i < n_rows; ++i) {
+            ui_draw_text(&L->ui, rows[i].key, kx, row_y, 16,
+                         (Color){200, 220, 240, 255});
+            ui_draw_text(&L->ui, rows[i].action, ax, row_y, 16,
+                         (Color){170, 190, 210, 255});
+            row_y += row_h;
+        }
+
+        Rectangle close_r = (Rectangle){
+            dx + dw - S(140), dy + dh - S(48),
+            S(120), S(36)
+        };
+        if (ui_button(&L->ui, close_r, "Close", true)) {
+            L->show_keybinds = false;
+        }
+        if (IsKeyPressed(KEY_ESCAPE)) {
+            L->show_keybinds = false;
+        }
+    }
 
     ui_end(&L->ui);
 }
@@ -606,6 +673,38 @@ static const int g_armor_choices[]   = { ARMOR_NONE, ARMOR_LIGHT, ARMOR_HEAVY, A
 static const int g_jet_choices[]     = { JET_NONE, JET_STANDARD, JET_BURST, JET_GLIDE_WING, JET_JUMP_JET };
 static const int g_chassis_choices[] = { CHASSIS_TROOPER, CHASSIS_SCOUT, CHASSIS_HEAVY, CHASSIS_SNIPER, CHASSIS_ENGINEER };
 
+/* Draw text inside a fixed pixel width, truncating with "..." if the
+ * full string overflows. ui_draw_text doesn't clamp — long map blurbs
+ * in the vote card spilled past the card edge before this. */
+static void ui_draw_text_clipped(const UIContext *u, const char *text,
+                                 int x, int y, int base_size, Color col,
+                                 int max_width)
+{
+    if (!text || !*text) return;
+    int full = ui_measure(u, text, base_size);
+    if (full <= max_width) {
+        ui_draw_text(u, text, x, y, base_size, col);
+        return;
+    }
+    char buf[160];
+    int len = (int)strlen(text);
+    if (len >= (int)sizeof buf) len = (int)sizeof buf - 1;
+    memcpy(buf, text, (size_t)len);
+    buf[len] = '\0';
+    /* Trim from the right until "<trimmed>..." fits. */
+    while (len > 0) {
+        buf[len] = '\0';
+        char tmp[164];
+        snprintf(tmp, sizeof tmp, "%s...", buf);
+        if (ui_measure(u, tmp, base_size) <= max_width) {
+            ui_draw_text(u, tmp, x, y, base_size, col);
+            return;
+        }
+        len--;
+    }
+    /* Even "..." overflows — bail. */
+}
+
 static int next_in_cycle(int current, const int *choices, int n) {
     int idx = 0;
     for (int i = 0; i < n; ++i) if (choices[i] == current) { idx = i; break; }
@@ -675,6 +774,33 @@ static void apply_ready_toggle(Game *g, bool ready) {
     }
 }
 
+/* P09 — cast a map-vote on the local slot. Host calls the lobby state
+ * directly + rebroadcasts vote state; client sends to server. */
+static void apply_map_vote(Game *g, int choice) {
+    if (g->local_slot_id < 0) return;
+    if (choice < 0 || choice > 2) return;
+    if (g->net.role == NET_ROLE_CLIENT) {
+        net_client_send_map_vote(&g->net, choice);
+    } else {
+        lobby_vote_cast(&g->lobby, g->local_slot_id, choice);
+        if (g->net.role == NET_ROLE_SERVER) {
+            net_server_broadcast_vote_state(&g->net, &g->lobby);
+        }
+    }
+}
+
+static void apply_kick_or_ban(Game *g, int target_slot, bool ban) {
+    if (target_slot < 0) return;
+    if (g->net.role == NET_ROLE_CLIENT) {
+        if (ban) net_client_send_ban (&g->net, target_slot);
+        else     net_client_send_kick(&g->net, target_slot);
+    } else {
+        /* Host (or offline-solo with peers — unlikely but harmless): go
+         * straight to the server-side path, no wire round-trip. */
+        net_server_kick_or_ban_slot(&g->net, g, target_slot, ban);
+    }
+}
+
 static void apply_chat_send(Game *g, const char *text) {
     if (!text || !*text) return;
     if (g->net.role == NET_ROLE_CLIENT) {
@@ -698,13 +824,15 @@ typedef struct PlayerListCtx {
     const int        *order;
     int               n;
     int               mode;       /* MatchModeId — drives team chip text/colour */
+    LobbyUIState     *ui_state;   /* writable — player_row sets confirm targets */
+    bool              host_view;  /* true → show [Kick] [Ban] on non-host rows */
 } PlayerListCtx;
 
 static void player_row(const UIContext *u, Rectangle row, int idx,
                        bool hover, bool selected, void *user)
 {
     (void)hover; (void)selected;
-    const PlayerListCtx *ctx = (const PlayerListCtx *)user;
+    PlayerListCtx *ctx = (PlayerListCtx *)user;
     if (idx >= ctx->n) return;
     int slot = ctx->order[idx];
     const LobbySlot *s = &ctx->lobby->slots[slot];
@@ -760,6 +888,52 @@ static void player_row(const UIContext *u, Rectangle row, int idx,
     snprintf(score, sizeof score, "%d / %d", s->kills, s->deaths);
     ui_draw_text(u, score, (int)row.x + (int)(580 * u->scale), ty,
                  u->font_size, u->text_col);
+
+    /* P09 — host controls: [Kick] [Ban] on every non-host row when the
+     * local player is the host. Click stages the slot in the
+     * confirmation-modal state on the lobby UI; the modal itself is
+     * rendered in lobby_screen_run after the list iteration.
+     *
+     * Sized for click-target legibility (~72×28 at 1× scale). The
+     * buttons sit flush with the right edge of the row; layout above
+     * leaves a comfortable ~120 px gap after the K/D score column. */
+    if (ctx->host_view && !s->is_host && ctx->ui_state) {
+        float bw = 72.0f * u->scale;
+        float bh = row.height - 8.0f * u->scale;
+        float by = row.y + 4.0f * u->scale;
+        float bx_ban  = row.x + row.width - bw - 8.0f * u->scale;
+        float bx_kick = bx_ban - bw - 8.0f * u->scale;
+        Rectangle rk = (Rectangle){ bx_kick, by, bw, bh };
+        Rectangle rb = (Rectangle){ bx_ban,  by, bw, bh };
+
+        bool hk = ui_point_in_rect(u->mouse, rk);
+        DrawRectangleRec(rk, hk ? (Color){180, 150,  90, 240}
+                                : (Color){ 90,  70,  50, 220});
+        DrawRectangleLinesEx(rk, u->scale, (Color){200, 170, 110, 255});
+        int twk = ui_measure(u, "Kick", 16);
+        ui_draw_text(u, "Kick",
+                     (int)(rk.x + (rk.width  - twk) * 0.5f),
+                     (int)(rk.y + (rk.height - 16*u->scale) * 0.5f),
+                     16, hk ? (Color){20, 18, 12, 255} : u->text_col);
+        if (hk && u->mouse_pressed) {
+            ctx->ui_state->kick_target_slot = slot;
+            ctx->ui_state->ban_target_slot  = -1;
+        }
+
+        bool hb = ui_point_in_rect(u->mouse, rb);
+        DrawRectangleRec(rb, hb ? (Color){200,  80,  80, 240}
+                                : (Color){120,  40,  50, 220});
+        DrawRectangleLinesEx(rb, u->scale, (Color){220, 110, 110, 255});
+        int twb = ui_measure(u, "Ban", 16);
+        ui_draw_text(u, "Ban",
+                     (int)(rb.x + (rb.width  - twb) * 0.5f),
+                     (int)(rb.y + (rb.height - 16*u->scale) * 0.5f),
+                     16, hb ? (Color){20, 12, 14, 255} : u->text_col);
+        if (hb && u->mouse_pressed) {
+            ctx->ui_state->ban_target_slot  = slot;
+            ctx->ui_state->kick_target_slot = -1;
+        }
+    }
 }
 
 void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
@@ -1025,11 +1199,21 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     int n = 0;
     for (int i = 0; i < MAX_LOBBY_SLOTS; ++i)
         if (g->lobby.slots[i].in_use) order[n++] = i;
+    bool host_view = (g->net.role == NET_ROLE_SERVER);
     PlayerListCtx pctx = {
         .lobby = &g->lobby, .order = order, .n = n,
-        .mode = (int)g->match.mode
+        .mode = (int)g->match.mode,
+        .ui_state = L,
+        .host_view = host_view,
     };
     ui_list_custom(&L->ui, list_r, n, 32, -1, player_row, &pctx);
+
+    /* P09 — kick/ban confirmation modal: rendered LAST in
+     * lobby_screen_run (see end of function) so it overlays the chat
+     * panel and loadout column. The original placement here meant the
+     * chat panel was painted on top of the modal's lower half,
+     * obscuring the buttons. Empty placeholder kept here as a marker;
+     * the actual draw is at the bottom. */
 
     /* ---- Loadout panel (right) ---- */
     int lx = lp_x;
@@ -1256,6 +1440,101 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
         g->mode = MODE_TITLE;
     }
 
+    /* P09 — kick/ban confirmation modal. Rendered LAST so it lands on
+     * top of the chat panel, loadout column, and bottom button row.
+     * Distinct color theming (orange for kick, red for ban), an
+     * informative subtitle, and a destructive-styled Confirm button
+     * make the action unambiguous. */
+    if (L->kick_target_slot >= 0 || L->ban_target_slot >= 0) {
+        bool ban = (L->ban_target_slot >= 0);
+        int  target = ban ? L->ban_target_slot : L->kick_target_slot;
+        const LobbySlot *ts = (target >= 0 && target < MAX_LOBBY_SLOTS)
+                              ? &g->lobby.slots[target] : NULL;
+        if (!ts || !ts->in_use) {
+            L->kick_target_slot = L->ban_target_slot = -1;
+        } else {
+            DrawRectangle(0, 0, sw, sh, (Color){0, 0, 0, 200});
+
+            int dw = S(520), dh = S(220);
+            int dx = (sw - dw) / 2, dy = (sh - dh) / 2;
+
+            Color accent = ban
+                         ? (Color){220,  90,  90, 255}    /* red */
+                         : (Color){230, 170,  90, 255};   /* orange */
+
+            DrawRectangle(dx, dy, dw, dh, (Color){18, 22, 30, 250});
+            DrawRectangle(dx, dy, dw, S(6), accent);
+            DrawRectangleLinesEx((Rectangle){dx, dy, dw, dh},
+                                 2.0f * L->ui.scale, accent);
+
+            char title[80];
+            snprintf(title, sizeof title, "%s %s?",
+                     ban ? "Ban"  : "Kick", ts->name);
+            int tsz = 26;
+            int tw  = ui_measure(&L->ui, title, tsz);
+            ui_draw_text(&L->ui, title, dx + (dw - tw) / 2, dy + S(22), tsz,
+                         (Color){240, 235, 220, 255});
+
+            const char *sub1 = ban
+                             ? "Disconnect AND prevent reconnect."
+                             : "Disconnect this player.";
+            const char *sub2 = ban
+                             ? "Saved to bans.txt; persists across host restarts."
+                             : "They can rejoin freely.";
+            int s1 = ui_measure(&L->ui, sub1, 16);
+            int s2 = ui_measure(&L->ui, sub2, 14);
+            ui_draw_text(&L->ui, sub1, dx + (dw - s1) / 2, dy + S(72), 16,
+                         (Color){210, 220, 235, 255});
+            ui_draw_text(&L->ui, sub2, dx + (dw - s2) / 2, dy + S(98), 14,
+                         (Color){170, 185, 205, 230});
+
+            int bw = S(170), bh = S(48);
+            int by = dy + dh - bh - S(20);
+            int bx_cancel  = dx + S(24);
+            int bx_confirm = dx + dw - bw - S(24);
+            Rectangle rc = (Rectangle){bx_cancel,  by, bw, bh};
+            Rectangle rf = (Rectangle){bx_confirm, by, bw, bh};
+
+            bool canc_hover = ui_point_in_rect(L->ui.mouse, rc);
+            Color canc_bg = canc_hover
+                          ? (Color){140, 160, 190, 255}
+                          : (Color){ 95, 115, 145, 255};
+            DrawRectangleRec(rc, canc_bg);
+            DrawRectangleLinesEx(rc, 2.0f * L->ui.scale,
+                                 (Color){170, 195, 225, 255});
+            int wlab = ui_measure(&L->ui, "Cancel", 20);
+            ui_draw_text(&L->ui, "Cancel",
+                         (int)(rc.x + (rc.width - wlab) * 0.5f),
+                         (int)(rc.y + (rc.height - 20 * L->ui.scale) * 0.5f),
+                         20, RAYWHITE);
+            bool cancel = canc_hover && L->ui.mouse_pressed;
+
+            bool conf_hover = ui_point_in_rect(L->ui.mouse, rf);
+            Color conf_bg = conf_hover
+                          ? (Color){(uint8_t)fminf(255, accent.r + 30),
+                                    (uint8_t)fminf(255, accent.g + 30),
+                                    (uint8_t)fminf(255, accent.b + 30), 255}
+                          : accent;
+            DrawRectangleRec(rf, conf_bg);
+            DrawRectangleLinesEx(rf, 2.0f * L->ui.scale,
+                                 (Color){255, 255, 255, 200});
+            const char *clab = ban ? "Ban" : "Kick";
+            int cwid = ui_measure(&L->ui, clab, 20);
+            ui_draw_text(&L->ui, clab,
+                         (int)(rf.x + (rf.width - cwid) * 0.5f),
+                         (int)(rf.y + (rf.height - 20 * L->ui.scale) * 0.5f),
+                         20, (Color){20, 14, 10, 255});
+            bool confirm = conf_hover && L->ui.mouse_pressed;
+
+            if (cancel) {
+                L->kick_target_slot = L->ban_target_slot = -1;
+            } else if (confirm) {
+                apply_kick_or_ban(g, target, ban);
+                L->kick_target_slot = L->ban_target_slot = -1;
+            }
+        }
+    }
+
     ui_end(&L->ui);
 }
 
@@ -1311,10 +1590,25 @@ void summary_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     ui_draw_text(&L->ui, sub, (sw - sub_w) / 2, S(112), 22,
                  (Color){200, 220, 240, 255});
 
-    /* Scoreboard. */
+    /* Scoreboard. Shrinks to make room for the P09 map-vote panel when
+     * a vote is active; otherwise expands to the full bottom margin. */
+    /* Phase-aware: vote picker only renders in SUMMARY phase. After
+     * the summary expires, the host transitions to COUNTDOWN (the
+     * inter-round bridge before the next round); during that the
+     * picker is gone but the scoreboard still reads. */
+    bool in_summary  = (g->match.phase == MATCH_PHASE_SUMMARY);
+    bool in_countdown= (g->match.phase == MATCH_PHASE_COUNTDOWN);
+    bool vote_show = in_summary && (g->lobby.vote_map_a >= 0 ||
+                                     g->lobby.vote_map_b >= 0 ||
+                                     g->lobby.vote_map_c >= 0);
+    int  vote_panel_h   = S(180);
+    int  vote_panel_top = sh - S(120) - vote_panel_h;
     int sboard_w = S(720);
     int sx = (sw - sboard_w) / 2, sy = S(170);
-    Rectangle sr = (Rectangle){sx, sy, sboard_w, sh - sy - S(120)};
+    int sboard_h = vote_show ? (vote_panel_top - sy - S(20))
+                             : (sh - sy - S(120));
+    if (sboard_h < S(80)) sboard_h = S(80);
+    Rectangle sr = (Rectangle){sx, sy, sboard_w, sboard_h};
     ui_panel_default(&L->ui, sr);
 
     int hdr_y = sy + S(10);
@@ -1338,13 +1632,142 @@ void summary_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
         rowy += S(28);
     }
 
-    /* Countdown to next lobby. */
-    char cd[64];
-    snprintf(cd, sizeof cd, "Next round in %.0fs",
-             (double)g->match.summary_remaining);
-    int cd_w = ui_measure(&L->ui, cd, 20);
-    ui_draw_text(&L->ui, cd, (sw - cd_w) / 2, sh - S(80), 20,
-                 (Color){180, 200, 220, 255});
+    /* P09 — three-card map vote panel. Drawn between the scoreboard and
+     * the "Next round" line when a vote is active. Cards are side-by-
+     * side; the local player's choice (if any) gets a highlighted
+     * border. Click "Vote" → apply_map_vote → server tally + rebroadcast.
+     * Thumbnails are placeholder gray rects — real art comes with P13. */
+    if (vote_show) {
+        int candidates[3] = { g->lobby.vote_map_a, g->lobby.vote_map_b,
+                              g->lobby.vote_map_c };
+        uint32_t masks[3] = { g->lobby.vote_mask_a, g->lobby.vote_mask_b,
+                              g->lobby.vote_mask_c };
+        int n_cards = 0;
+        for (int i = 0; i < 3; ++i) if (candidates[i] >= 0) n_cards++;
+        int card_w = S(220), card_gap = S(16);
+        int total_w = n_cards * card_w + (n_cards > 1 ? (n_cards - 1) * card_gap : 0);
+        int vx = (sw - total_w) / 2;
+
+        const char *vote_hdr = "VOTE NEXT MAP";
+        int hw = ui_measure(&L->ui, vote_hdr, 18);
+        ui_draw_text(&L->ui, vote_hdr, (sw - hw) / 2, vote_panel_top - S(2),
+                     18, (Color){240, 220, 180, 255});
+
+        /* Find which candidate this slot voted for, if any. */
+        int my_choice = -1;
+        if (g->local_slot_id >= 0) {
+            uint32_t my_bit = 1u << (uint32_t)g->local_slot_id;
+            if      (masks[0] & my_bit) my_choice = 0;
+            else if (masks[1] & my_bit) my_choice = 1;
+            else if (masks[2] & my_bit) my_choice = 2;
+        }
+
+        int drawn = 0;
+        for (int i = 0; i < 3; ++i) {
+            if (candidates[i] < 0) continue;
+            Rectangle cr = (Rectangle){
+                vx + drawn * (card_w + card_gap),
+                vote_panel_top + S(22),
+                card_w, vote_panel_h - S(30)
+            };
+            bool mine = (my_choice == i);
+            Color bg = mine ? (Color){52, 86, 56, 240}
+                            : (Color){28, 34, 44, 240};
+            DrawRectangleRec(cr, bg);
+            DrawRectangleLinesEx(cr, L->ui.scale,
+                                 mine ? (Color){180, 230, 130, 255}
+                                      : L->ui.panel_edge);
+            /* Placeholder thumbnail (real art lands at P13/P16). */
+            Rectangle thr = (Rectangle){
+                cr.x + S(10), cr.y + S(10),
+                cr.width - 2 * S(10), S(64)
+            };
+            DrawRectangleRec(thr, (Color){50, 56, 70, 255});
+            DrawRectangleLinesEx(thr, L->ui.scale, (Color){70, 80, 100, 255});
+
+            /* Card content width = thumbnail width = card_w - 20.
+             * Both name + blurb are clipped to fit; long blurbs
+             * (e.g. Foundry's "Open floor with cover columns. Ground-
+             * level chokepoints.") would otherwise spill past the
+             * card edge. */
+            int text_max_w = (int)thr.width;
+            const MapDef *md = map_def(candidates[i]);
+            const char *name = (md && md->display_name[0]) ? md->display_name : "?";
+            ui_draw_text_clipped(&L->ui, name, (int)thr.x,
+                                 (int)(thr.y + thr.height + S(6)),
+                                 16, (Color){220, 230, 240, 255},
+                                 text_max_w);
+            if (md && md->blurb[0]) {
+                ui_draw_text_clipped(&L->ui, md->blurb, (int)thr.x,
+                                     (int)(thr.y + thr.height + S(26)),
+                                     12, (Color){170, 190, 210, 255},
+                                     text_max_w);
+            }
+
+            /* Live tally — popcount of the candidate's vote mask. */
+            int votes = 0;
+            for (uint32_t m = masks[i]; m; m >>= 1) votes += (int)(m & 1u);
+            char tally[24];
+            snprintf(tally, sizeof tally, "Votes: %d", votes);
+            int tw = ui_measure(&L->ui, tally, 14);
+            ui_draw_text(&L->ui, tally,
+                         (int)(cr.x + cr.width - tw - S(8)),
+                         (int)cr.y + S(6),
+                         14, mine ? (Color){240, 240, 220, 255}
+                                  : L->ui.text_dim);
+
+            /* Vote button at the bottom of the card. */
+            Rectangle vbr = (Rectangle){
+                cr.x + S(10),
+                cr.y + cr.height - S(34),
+                cr.width - 2 * S(10), S(28)
+            };
+            bool can_vote = (g->local_slot_id >= 0) && !mine;
+            const char *vlbl = mine ? "VOTED" : "Vote";
+            if (ui_button(&L->ui, vbr, vlbl, can_vote)) {
+                apply_map_vote(g, i);
+            }
+            drawn++;
+        }
+    }
+
+    /* Status line — phase-aware:
+     *   SUMMARY  → "Next round in N s" using summary_remaining.
+     *   COUNTDOWN→ big "Round X / Y starts in N s" using countdown_remaining
+     *              (inter-round bridge — no lobby in between).
+     * For the last round of a match (rounds_played + 1 ==
+     * rounds_per_match), a SUMMARY → LOBBY transition fires instead;
+     * the message reflects "Match over" so players know they're
+     * heading back to ready-up. */
+    if (in_countdown) {
+        int round_n = g->match.rounds_played + 1;
+        int round_total = g->match.rounds_per_match > 0
+                          ? g->match.rounds_per_match : 1;
+        char banner[80];
+        snprintf(banner, sizeof banner,
+                 "Round %d / %d starts in %.0fs",
+                 round_n, round_total,
+                 (double)g->match.countdown_remaining);
+        int bsz = 32;
+        int bw  = ui_measure(&L->ui, banner, bsz);
+        ui_draw_text(&L->ui, banner, (sw - bw) / 2, sh - S(120), bsz,
+                     (Color){240, 220, 140, 255});
+    } else {
+        const char *label = "Next round in";
+        if (g->match.rounds_per_match > 0 &&
+            g->match.rounds_played + 1 >= g->match.rounds_per_match)
+        {
+            /* ASCII-only — raylib's default font glyph table doesn't
+             * cover U+2014 (em-dash); it rendered as a fallback "?" */
+            label = "Match over - back to lobby in";
+        }
+        char cd[80];
+        snprintf(cd, sizeof cd, "%s %.0fs",
+                 label, (double)g->match.summary_remaining);
+        int cd_w = ui_measure(&L->ui, cd, 20);
+        ui_draw_text(&L->ui, cd, (sw - cd_w) / 2, sh - S(80), 20,
+                     (Color){180, 200, 220, 255});
+    }
 
     if (ui_button(&L->ui,
                   (Rectangle){sw - S(220), sh - S(60), S(180), S(44)},

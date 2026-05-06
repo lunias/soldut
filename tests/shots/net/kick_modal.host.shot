@@ -1,0 +1,31 @@
+# kick_modal — host. Captures the kick / ban confirmation modal so we
+# can visually regress the layout. Pairs with kick_modal.client.shot.
+#
+# The runner uses a soldut.cfg with auto_start_seconds=20 + time_limit=30
+# so we stay in MODE_LOBBY long enough to drive the modal at multiple
+# ticks. `kick_modal <slot>` and `ban_modal <slot>` are debug-only
+# shotmode directives that set L->kick/ban_target_slot directly so the
+# modal renders without simulating a mouse click on the row buttons.
+
+window 1280 720
+out build/shots/net/kick_modal_host
+network host 24107
+name HostA
+
+# Settle, both clients connect.
+at  60  shot t060_lobby_full
+
+# Show the kick confirmation modal for slot 1 (ClientB).
+at 120  kick_modal 1
+at 130  shot t130_kick_modal
+
+# Dismiss + show ban modal for slot 1.
+at 180  kick_modal -1
+at 200  ban_modal 1
+at 210  shot t210_ban_modal
+
+# Dismiss the modal so the lobby is clean before end.
+at 260  ban_modal -1
+at 270  shot t270_after_dismiss
+
+at 320 end

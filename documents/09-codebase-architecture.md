@@ -388,7 +388,7 @@ We do **not** integrate Tracy or Optick at v1. If we need deep traces, we add th
 | **Total .c** | **~17,720 LOC** | + ~3,915 LOC of headers |
 
 `net.c`, `mech.c`, and `shotmode.c` are well past the ~1500 line split
-guideline; `lobby_ui.c` (1383) is approaching it. P08 added another
+guideline; `lobby_ui.c` (1403) is approaching it. P08 added another
 ~415 LOC to `net.c` (four new lobby-channel handlers + chunk reassembly);
 the extraction (e.g., `net_lobby.c` / `net_ctf.c` / `net_map_share.c`)
 is worth scheduling before P09 (controls/UI) and the audio module add

@@ -68,6 +68,16 @@ typedef struct LobbyUIState {
     bool       setup_friendly_fire;
     bool       setup_initialized;     /* false until first entry → seeds from g->config */
     bool       request_start_host;    /* one-shot: setup confirmed → main.c bootstraps */
+
+    /* P09 — host kick/ban confirmation modal. -1 = no modal showing.
+     * The lobby player-list row writes one of these when the host
+     * clicks [Kick] / [Ban]; the modal is rendered + dismissed in
+     * lobby_screen_run after the list iteration. */
+    int        kick_target_slot;
+    int        ban_target_slot;
+
+    /* P09 — title-screen keybinds modal. Toggle via the About button. */
+    bool       show_keybinds;
 } LobbyUIState;
 
 void lobby_ui_init(LobbyUIState *L);

@@ -19,6 +19,7 @@ void config_defaults(ServerConfig *cfg) {
     cfg->time_limit         = 600.0f;       /* 10 min */
     cfg->friendly_fire      = false;
     cfg->auto_start_seconds = 60.0f;
+    cfg->rounds_per_match   = 3;
     cfg->map_rotation[0]    = MAP_FOUNDRY;
     cfg->map_rotation_count = 1;
     cfg->mode_rotation[0]   = MATCH_MODE_FFA;
@@ -89,6 +90,12 @@ static void apply_kv(ServerConfig *cfg, const char *key, char *val) {
     else if (strcasecmp(key, "auto_start_seconds") == 0) {
         float s = (float)atof(val);
         if (s > 0.0f) cfg->auto_start_seconds = s;
+    }
+    else if (strcasecmp(key, "rounds_per_match") == 0 ||
+             strcasecmp(key, "match_rounds") == 0) {
+        int n = atoi(val);
+        if (n > 0 && n <= 32) cfg->rounds_per_match = n;
+        else LOG_W("config: rounds_per_match '%s' out of range (1..32)", val);
     }
     else if (strcasecmp(key, "map_rotation") == 0) {
         char buf[256]; snprintf(buf, sizeof buf, "%s", val);

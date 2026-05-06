@@ -301,9 +301,16 @@ static void apply_new_kills(Game *g) {
 }
 
 static void start_round(Game *g) {
-    /* Pick map + mode from rotation. */
-    g->match.map_id = config_pick_map (&g->config, g->round_counter);
-    g->match.mode   = config_pick_mode(&g->config, g->round_counter);
+    /* For the FIRST round, derive map+mode from the rotation table
+     * (match_init left them at defaults). Subsequent rounds get
+     * map/mode from begin_next_lobby — which honors the P09 map-vote
+     * winner. Re-deriving here would clobber the vote winner with
+     * the rotation default, which was the user-reported "voted a
+     * map but the next round didn't start cleanly" symptom. */
+    if (g->round_counter == 0) {
+        g->match.map_id = config_pick_map (&g->config, 0);
+        g->match.mode   = config_pick_mode(&g->config, 0);
+    }
 
     /* P07 — CTF mode-mask validation. If the rotation lands on CTF and
      * the picked map's META.mode_mask doesn't allow CTF (or the map
@@ -516,6 +523,55 @@ static void start_round(Game *g) {
           map_def(g->match.map_id)->display_name);
 }
 
+/* P09 — pick three distinct candidates from g_map_registry that support
+ * the current match mode (excluding the just-played map) and arm a vote.
+ * No-op for offline solo or when the registry doesn't have enough
+ * mode-compatible alternatives. Clients see vote state via the
+ * NET_MSG_LOBBY_VOTE_STATE broadcast. */
+static void host_start_map_vote(Game *g) {
+    if (g->offline_solo) {
+        lobby_vote_clear(&g->lobby);
+        return;
+    }
+    unsigned mode_bit = 1u << (unsigned)g->match.mode;
+    int candidates[MAP_REGISTRY_MAX];
+    int n = 0;
+    for (int i = 0; i < g_map_registry.count && n < MAP_REGISTRY_MAX; ++i) {
+        if (i == g->match.map_id) continue;
+        if (!(g_map_registry.entries[i].mode_mask & mode_bit)) continue;
+        candidates[n++] = i;
+    }
+    if (n == 0) {
+        lobby_vote_clear(&g->lobby);
+        return;
+    }
+    /* Fisher-Yates shuffle so the 3 cards vary across rounds. */
+    for (int i = n - 1; i > 0; --i) {
+        int j = (int)pcg32_range(g->world.rng, 0, i + 1);
+        int tmp = candidates[i];
+        candidates[i] = candidates[j];
+        candidates[j] = tmp;
+    }
+    int a = candidates[0];
+    int b = (n >= 2) ? candidates[1] : -1;
+    int c = (n >= 3) ? candidates[2] : -1;
+    /* Vote window must end before begin_next_lobby fires. The summary
+     * timer (`g->match.summary_remaining`, set by match_end_round) is
+     * the bound; clamp to 80% so the winner-pick at expiry doesn't race
+     * with the phase transition. */
+    float dur = (g->match.summary_remaining > 0.0f)
+                ? g->match.summary_remaining * 0.8f : 12.0f;
+    lobby_vote_start(&g->lobby, a, b, c, dur);
+    if (g->net.role == NET_ROLE_SERVER) {
+        net_server_broadcast_vote_state(&g->net, &g->lobby);
+    }
+    LOG_I("match_flow: map vote: %s / %s / %s (%.1fs)",
+          map_def(a) ? map_def(a)->display_name : "—",
+          (b >= 0 && map_def(b)) ? map_def(b)->display_name : "—",
+          (c >= 0 && map_def(c)) ? map_def(c)->display_name : "—",
+          (double)dur);
+}
+
 static void end_round(Game *g) {
     match_end_round(&g->match, &g->lobby);
     g->mode = MODE_SUMMARY;
@@ -532,33 +588,94 @@ static void end_round(Game *g) {
         g->lobby.dirty = false;
         net_server_broadcast_round_end (&g->net, &g->match);
     }
+    /* P09 — arm the three-card vote for the next map. Server-side only:
+     * the broadcast inside the helper informs clients. */
+    host_start_map_vote(g);
     LOG_I("match_flow: round %d end (mvp=%d)", g->round_counter, g->match.mvp_slot);
 }
 
-static void begin_next_lobby(Game *g) {
-    g->round_counter++;
-    /* Pre-stage next round's mode/map for the lobby UI. */
-    g->match.map_id = config_pick_map (&g->config, g->round_counter);
-    g->match.mode   = config_pick_mode(&g->config, g->round_counter);
-    g->match.score_limit  = g->config.score_limit;
-    g->match.time_limit   = g->config.time_limit;
-    g->match.friendly_fire= g->config.friendly_fire;
-    g->match.phase        = MATCH_PHASE_LOBBY;
-    /* Tear down mechs; lobby drawing doesn't need them. */
+/* Apply the just-finished SUMMARY's map-vote winner to match.map_id
+ * and clear the vote state. Both the inter-round and end-match paths
+ * call this so the next round (or the lobby's pre-staged map) reflects
+ * whatever the players picked. */
+static void apply_vote_winner_if_any(Game *g) {
+    bool any_candidate = (g->lobby.vote_map_a >= 0 ||
+                          g->lobby.vote_map_b >= 0 ||
+                          g->lobby.vote_map_c >= 0);
+    if (!any_candidate) return;
+    int winner = lobby_vote_winner(&g->lobby);
+    if (winner >= 0 && winner < g_map_registry.count) {
+        g->match.map_id = winner;
+        LOG_I("match_flow: vote winner → map %s",
+              map_def(winner) ? map_def(winner)->display_name : "?");
+    }
+    lobby_vote_clear(&g->lobby);
+    if (g->net.role == NET_ROLE_SERVER) {
+        net_server_broadcast_vote_state(&g->net, &g->lobby);
+    }
+}
+
+/* End the match: full reset back to LOBBY for a fresh ready-up. Called
+ * when rounds_played reaches rounds_per_match. Score, kills, deaths,
+ * ready flags are wiped — the next match starts from zero. */
+static void end_match(Game *g) {
+    LOG_I("match_flow: match over (%d rounds played) — back to lobby",
+          g->match.rounds_played);
+    g->match.rounds_played = 0;
+    g->match.phase         = MATCH_PHASE_LOBBY;
+    g->match.score_limit   = g->config.score_limit;
+    g->match.time_limit    = g->config.time_limit;
+    g->match.friendly_fire = g->config.friendly_fire;
+    /* Tear down mechs; lobby UI draws over a clean world. */
     lobby_clear_round_mechs(&g->lobby, &g->world);
-    /* Reset round stats + ready flags. */
+    /* Reset round stats + ready flags so players READY UP for the
+     * next match (no auto-arm here — wait for ready, that's the
+     * design rule per the user's "ready up again for a new game"). */
     lobby_reset_round_stats(&g->lobby);
     g->mode = MODE_LOBBY;
-
-    /* If we have at least 2 active slots, auto-arm the start countdown. */
-    int active = 0;
-    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i)
-        if (g->lobby.slots[i].in_use && g->lobby.slots[i].team != MATCH_TEAM_NONE) active++;
-    if (active >= 2) lobby_auto_start_arm(&g->lobby, g->lobby.auto_start_default);
-
     if (g->net.role == NET_ROLE_SERVER) {
         net_server_broadcast_match_state(&g->net, &g->match);
         net_server_broadcast_lobby_list (&g->net, &g->lobby);
+    }
+}
+
+/* Inter-round transition: the just-finished round wasn't the last in
+ * the match, so we go SUMMARY → COUNTDOWN(brief) → ACTIVE without
+ * showing the lobby. Score persists. Mech-spawn happens at the
+ * COUNTDOWN→ACTIVE edge via start_round. */
+static void advance_to_next_round(Game *g) {
+    /* Tear down dead mechs from the previous round. start_round will
+     * re-spawn fresh ones. */
+    lobby_clear_round_mechs(&g->lobby, &g->world);
+    /* Brief inter-round countdown (default 3 s) so players see "Round
+     * X starts in 3..." instead of an instant snap into the new round. */
+    match_begin_countdown(&g->match, g->match.inter_round_countdown_default);
+    if (g->net.role == NET_ROLE_SERVER) {
+        net_server_broadcast_match_state(&g->net, &g->match);
+        /* lobby_list ships current scores; keep the summary scoreboard
+         * accurate while the countdown ticks. */
+        net_server_broadcast_lobby_list (&g->net, &g->lobby);
+    }
+}
+
+/* SUMMARY → next-phase dispatcher. Decides whether to run another
+ * round seamlessly or end the match and return to lobby. Called when
+ * the SUMMARY timer expires (or when all players have voted, see the
+ * fast-forward path in host_match_flow_step). */
+static void after_summary(Game *g) {
+    g->round_counter++;
+    g->match.rounds_played++;
+    /* Default next map/mode from rotation; vote winner overrides. */
+    g->match.map_id = config_pick_map (&g->config, g->round_counter);
+    g->match.mode   = config_pick_mode(&g->config, g->round_counter);
+    apply_vote_winner_if_any(g);
+
+    if (g->match.rounds_played >= g->match.rounds_per_match) {
+        end_match(g);
+    } else {
+        LOG_I("match_flow: round %d/%d — continuing match",
+              g->match.rounds_played + 1, g->match.rounds_per_match);
+        advance_to_next_round(g);
     }
 }
 
@@ -677,14 +794,47 @@ static void host_match_flow_step(Game *g, float dt) {
             }
             if (!end && match_round_should_end(&g->match)) end = true;
             if (match_tick(&g->match, dt)) end = true;
+            /* "Only one alive" → 3s countdown → end. Catches kill,
+             * kick, disconnect; covers the "I killed the opponent
+             * but the round didn't end" complaint. */
+            if (!end && match_step_solo_warning(&g->match, &g->world, dt))
+                end = true;
             if (end) end_round(g);
             break;
         }
-        case MATCH_PHASE_SUMMARY:
+        case MATCH_PHASE_SUMMARY: {
+            /* Tick the lobby too so the map-vote countdown decays
+             * during summary. */
+            (void)lobby_tick(&g->lobby, dt);
+
+            /* Fast-forward when every active in-use slot has voted.
+             * Drops `summary_remaining` to a small floor (1 s) so the
+             * banner reads briefly, then lets match_tick fire the
+             * transition. Without this, a quick 2-player vote would
+             * still wait the full ~4–8 s summary window. */
+            if (g->match.summary_remaining > 1.0f) {
+                int active = 0, voted = 0;
+                uint32_t cast_mask = g->lobby.vote_mask_a |
+                                     g->lobby.vote_mask_b |
+                                     g->lobby.vote_mask_c;
+                for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+                    if (!g->lobby.slots[i].in_use) continue;
+                    if (g->lobby.slots[i].team == MATCH_TEAM_NONE) continue;
+                    active++;
+                    if (cast_mask & (1u << i)) voted++;
+                }
+                if (active >= 1 && voted == active) {
+                    g->match.summary_remaining = 1.0f;
+                    LOG_I("match_flow: all %d voted — fast-forwarding summary",
+                          voted);
+                }
+            }
+
             if (match_tick(&g->match, dt)) {
-                begin_next_lobby(g);
+                after_summary(g);
             }
             break;
+        }
     }
 }
 
@@ -718,6 +868,11 @@ static bool bootstrap_host(Game *g, const LaunchArgs *args, bool offline) {
         g->net.role = NET_ROLE_OFFLINE;
         g->offline_solo = true;
     }
+
+    /* P09 — load any persisted bans before we start accepting peers.
+     * Records the path on lobby state so subsequent lobby_ban_addr
+     * calls (from the host-controls UI / kick wire path) auto-save. */
+    lobby_load_bans(&g->lobby, "bans.txt");
 
     /* Host's own slot — slot 0, peer_id = -1, is_host = true. */
     int slot = lobby_add_slot(&g->lobby, /*peer_id*/-1,
@@ -938,6 +1093,7 @@ int main(int argc, char **argv) {
     /* Re-apply MatchState defaults from the loaded config. */
     match_init(&game.match, game.config.mode, game.config.score_limit,
                game.config.time_limit, game.config.friendly_fire);
+    game.match.rounds_per_match = game.config.rounds_per_match;
     if (args.test_play_lvl[0]) {
         /* Drop the in-match countdown to 1 s as well so a designer's
          * F5 round-trip time stays short (default is 5 s). */
@@ -1008,6 +1164,33 @@ int main(int argc, char **argv) {
             net_poll(&game.net, &game, dt);
         }
 
+        /* Forced-disconnect detection (kick/ban/timeout). When the
+         * server drops a client, ENet emits DISCONNECT on the client
+         * which clears `ns->connected`. Without this hook the client
+         * just sits in whatever mode it was in (lobby, match, summary)
+         * with no server to talk to — so the kick/ban functionality
+         * looked broken from the user's perspective. We tear the client
+         * state down here and bounce back to title; the kick reason is
+         * already in the chat ring (server posted "X was kicked by host"
+         * before the disconnect), so the user gets context.
+         *
+         * Skipped for offline / server roles. */
+        if (game.net.role == NET_ROLE_CLIENT && !game.net.connected &&
+            game.mode != MODE_TITLE && game.mode != MODE_QUIT)
+        {
+            LOG_I("client: server connection lost — returning to title");
+            net_close(&game.net);
+            net_shutdown();
+            lobby_clear_round_mechs(&game.lobby, &game.world);
+            lobby_init(&game.lobby, game.config.auto_start_seconds);
+            game.local_slot_id = -1;
+            game.world.local_mech_id = -1;
+            game.world.authoritative = false;
+            game.offline_solo = false;
+            game.mode = MODE_TITLE;
+            continue;       /* skip this frame's mode dispatch */
+        }
+
         /* Per-mode update + render. */
         switch (game.mode) {
 
@@ -1074,6 +1257,7 @@ int main(int argc, char **argv) {
                            game.config.score_limit,
                            game.config.time_limit,
                            game.config.friendly_fire);
+                game.match.rounds_per_match = game.config.rounds_per_match;
                 game.match.map_id = ui.setup_map_id;
                 game.world.friendly_fire = game.config.friendly_fire ||
                                             (game.match.mode == MATCH_MODE_FFA);
@@ -1172,6 +1356,7 @@ int main(int argc, char **argv) {
                 lobby_init(&game.lobby, game.config.auto_start_seconds);
                 match_init(&game.match, game.config.mode, game.config.score_limit,
                            game.config.time_limit, game.config.friendly_fire);
+                game.match.rounds_per_match = game.config.rounds_per_match;
                 game.local_slot_id = -1;
                 game.offline_solo  = false;
             }
@@ -1332,11 +1517,22 @@ int main(int argc, char **argv) {
             if (game.net.role == NET_ROLE_SERVER || game.offline_solo) {
                 host_match_flow_step(&game, (float)dt);
             } else if (game.net.role == NET_ROLE_CLIENT) {
-                /* Decay the visible countdown locally. */
-                if (game.match.summary_remaining > 0.0f) {
+                /* Decay the visible summary timer locally. */
+                if (game.match.phase == MATCH_PHASE_SUMMARY &&
+                    game.match.summary_remaining > 0.0f) {
                     game.match.summary_remaining -= (float)dt;
                     if (game.match.summary_remaining < 0.0f)
                         game.match.summary_remaining = 0.0f;
+                }
+                /* During the inter-round COUNTDOWN, mode stays SUMMARY
+                 * (no lobby in between rounds — see after_summary).
+                 * Decay countdown_remaining so the "Round X starts in
+                 * N s" banner ticks down between server broadcasts. */
+                if (game.match.phase == MATCH_PHASE_COUNTDOWN &&
+                    game.match.countdown_remaining > 0.0f) {
+                    game.match.countdown_remaining -= (float)dt;
+                    if (game.match.countdown_remaining < 0.0f)
+                        game.match.countdown_remaining = 0.0f;
                 }
             }
 
@@ -1362,6 +1558,7 @@ int main(int argc, char **argv) {
                 lobby_init(&game.lobby, game.config.auto_start_seconds);
                 match_init(&game.match, game.config.mode, game.config.score_limit,
                            game.config.time_limit, game.config.friendly_fire);
+                game.match.rounds_per_match = game.config.rounds_per_match;
                 game.local_slot_id = -1;
                 game.offline_solo  = false;
             }

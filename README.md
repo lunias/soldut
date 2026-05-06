@@ -2,8 +2,8 @@
 
 A 2D side-scrolling multiplayer mech shooter in C, in the lineage of Soldat.
 
-The project is in **M5 — Maps & content** (in progress; P01–P08 in,
-P09 next). M4 shipped the lobby & matches layer: full game flow
+The project is in **M5 — Maps & content** (in progress; P01–P09 in).
+M4 shipped the lobby & matches layer: full game flow
 (title → server browser → lobby → countdown → match → summary →
 next round), FFA + TDM + CTF modes, per-slot loadout picker,
 ready/team toggles, LAN-broadcast server discovery, `soldut.cfg`
@@ -14,30 +14,31 @@ pool, explosions, per-limb HP + dismemberment, recoil + bink +
 self-bink, friendly-fire), **M2** (authoritative server / client
 prediction + reconciliation / hitscan lag comp / blood + decal
 sync), and **M1** (Verlet skeleton physics + ragdoll). M5 so far:
-**P01** — `.lvl` binary format + loader/saver
-(`src/level_io.{c,h}`); **P02** — polygon collision + slope physics
-+ slope-aware post-physics anchor; **P03** — render-side
-accumulator + interp alpha + reconcile smoothing + two-snapshot
-remote-mech interp + hit/fire event sync; **P04** — standalone
-level editor (`tools/editor/`, raygui-based) + game-side
-`--test-play <path>` flag + test-play loadout GUI modal (`L` key);
-**P05** — pickup runtime (HEALTH / AMMO / ARMOR / WEAPON /
-POWERUP / JET_FUEL), Engineer's deployable repair pack, Burst SMG
-70 ms cadence, practice-dummy spawner kind, and active-powerup
-HUD pill; **P06** — Grappling Hook (one-sided "Tarzan" rope,
-hold W to retract, BTN_FIRE chain-refire while attached, BTN_USE
-to release; rope length capped at 300 px for tight swings); **P07**
-— CTF mode (`src/ctf.{c,h}`, both-flags-home capture rule, 36 px
-touch / 30 s auto-return, half-jet + secondary-disabled carrier
-penalties, drop-on-death, `NET_MSG_FLAG_STATE` event protocol,
-team-colored staff-and-pennant render with off-screen HUD compass);
-**P08** — Map sharing across the network (`src/map_cache.{c,h}` +
-`src/map_download.{c,h}`, `MapDescriptor` in `INITIAL_STATE`,
-`NET_MSG_MAP_REQUEST/CHUNK/READY/DESCRIPTOR`, content-addressed
-cache at `<XDG/AppData>/soldut/maps/<crc>.lvl` with 64 MB LRU,
-2 MB descriptor cap + 30 s stall watchdog, lobby UI download
-progress, host gate on per-peer MAP_READY).
-Controls + sprite atlases + audio + 8 authored maps land in P09–P18.
+**P01** — `.lvl` binary format + loader/saver; **P02** — polygon
+collision + slope physics + slope-aware post-physics anchor;
+**P03** — render-side accumulator + interp alpha + reconcile
+smoothing + two-snapshot remote-mech interp + hit/fire event sync;
+**P04** — standalone level editor (`tools/editor/`, raygui-based)
++ game-side `--test-play <path>` flag; **P05** — pickup runtime,
+Engineer's deployable repair pack, Burst SMG 70 ms cadence,
+practice-dummy spawner kind, active-powerup HUD pill; **P06** —
+Grappling Hook (one-sided "Tarzan" rope, hold W to retract, BTN_FIRE
+chain-refire while attached, BTN_USE to release); **P07** — CTF
+mode (`src/ctf.{c,h}`, both-flags-home capture rule, 36 px touch /
+30 s auto-return, half-jet + secondary-disabled carrier penalties,
+drop-on-death, team-colored staff-and-pennant render with
+off-screen HUD compass); **P08** — Map sharing across the network
+(content-addressed cache, lobby UI download progress, host gate on
+per-peer MAP_READY); **P08b** — runtime `MapRegistry` that surfaces
+user-authored `assets/maps/*.lvl` files in the lobby cycle without
+overwriting builtin slots; **P09** — `BTN_FIRE_SECONDARY` (RMB)
+one-shot of inactive slot, host kick/ban modal + `bans.txt`
+persistence, three-card map vote picker on summary, title-screen
+Controls modal, plus the **multi-round match flow**: configurable
+`rounds_per_match`, "1 player remaining → 3 s warning → end"
+auto-end rule, all-voted summary fast-forward, seamless inter-round
+COUNTDOWN (no lobby between rounds), and back-to-lobby on match-over.
+Sprite atlases + audio + 8 authored maps land in P10–P18.
 See [documents/11-roadmap.md](documents/11-roadmap.md) and
 [documents/m5/](documents/m5/).
 
@@ -78,9 +79,8 @@ Controls:
 | `F`            | Melee swing |
 | `E`            | Use ability (Engineer pack drop / release grapple rope) |
 | `Mouse`        | Aim |
-| `Left Mouse`   | Fire (re-press while grappled chains a new grapple) |
-
-(Right Mouse is currently unbound; `BTN_FIRE_SECONDARY` lands at P09.)
+| `Left Mouse`   | Fire active slot (re-press while grappled chains a new grapple) |
+| `Right Mouse`  | Fire **inactive** slot (one-shot RMB) — primary stays active |
 
 Hit the dummy enough and a) it ragdolls, b) limbs come off as their
 per-limb HP drops to zero (head, both arms, both legs).
@@ -116,9 +116,15 @@ score_limit=25
 time_limit=600                 # seconds
 friendly_fire=0
 auto_start_seconds=60
+rounds_per_match=3             # also accepts match_rounds=
 map_rotation=foundry,slipstream,reactor
 mode_rotation=ffa,ffa,tdm
 ```
+
+A "match" is `rounds_per_match` rounds. Players ready up once at the
+start of a match; rounds within a match transition seamlessly (vote
+picker → brief countdown → respawn) without showing the lobby. After
+the final round, the lobby reopens for fresh ready-up.
 
 Chassis names: `Trooper`, `Scout`, `Heavy`, `Sniper`, `Engineer`.
 Primary weapons: `Pulse Rifle`, `Plasma SMG`, `Riot Cannon`,

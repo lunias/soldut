@@ -1,0 +1,15 @@
+# 3p_kick_ban — ClientC (slot 2). Sits in lobby until host bans.
+# Same forced-disconnect path as ClientB; difference is the host
+# wrote ClientC's name into bans.txt before the disconnect, so a
+# subsequent reconnect attempt (out of scope for this script — see
+# 3p_kick_ban.banned_reconnect.shot for the reconnect rejection
+# coverage) would be rejected on lobby_is_banned.
+
+window 1280 720
+out build/shots/net/3p_kick_ban_clientC
+network connect 127.0.0.1:24105
+name ClientC
+
+at  60 shot t060_lobby
+at 290 shot t290_after_banned
+at 320 end

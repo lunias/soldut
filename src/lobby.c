@@ -176,6 +176,10 @@ bool lobby_chat_post(LobbyState *L, int sender_slot, const char *text,
 }
 
 void lobby_chat_system(LobbyState *L, const char *text) {
+    /* Log system chat events too — tests + post-mortem diagnostics
+     * need a record of "X was kicked / banned / left" beyond the
+     * in-memory chat ring. */
+    if (text && *text) LOG_I("lobby: chat system: %s", text);
     lobby_chat_post(L, -1, text, 0.0f);
 }
 
@@ -321,6 +325,72 @@ void lobby_ban_addr(LobbyState *L, uint32_t addr, const char *name) {
         snprintf(b->name, sizeof b->name, "%s", name);
         b->name[sizeof b->name - 1] = '\0';
     }
+    /* Auto-persist when a path was registered via lobby_load_bans. */
+    if (L->ban_path[0]) lobby_save_bans(L, L->ban_path);
+}
+
+/* ---- Bans: persistence (P09) -------------------------------------- *
+ *
+ * Format: one ban per line, "<addr_hex> <name>" — addr_hex is an 8-char
+ * hex u32 ("00000000" for name-only bans, since the current kick/ban
+ * path passes addr=0). Trailing whitespace and blank lines are
+ * tolerated. Lines starting with '#' are comments. The file is
+ * rewritten in full on every change (the ban list caps at 32 entries,
+ * so this is trivial). Atomic-write isn't worth the complexity here:
+ * losing one ban entry on a host-crash mid-write is acceptable; the
+ * trade-off doc was up-front about that.
+ */
+
+void lobby_load_bans(LobbyState *L, const char *path) {
+    if (!L || !path) return;
+    /* Record the path so subsequent lobby_ban_addr calls auto-save. */
+    snprintf(L->ban_path, sizeof L->ban_path, "%s", path);
+    L->ban_path[sizeof L->ban_path - 1] = '\0';
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        /* First-time host: no file yet. Not an error. */
+        return;
+    }
+    char line[256];
+    int loaded = 0;
+    while (fgets(line, sizeof line, f) && L->ban_count < LOBBY_BANS_MAX) {
+        /* Skip leading whitespace + blank/comment lines. */
+        char *s = line;
+        while (*s && (*s == ' ' || *s == '\t')) s++;
+        if (*s == '\0' || *s == '\n' || *s == '#') continue;
+
+        unsigned addr = 0;
+        char nbuf[LOBBY_NAME_BYTES] = {0};
+        /* "%23s" caps name to LOBBY_NAME_BYTES-1 = 23 chars. */
+        int n = sscanf(s, "%x %23s", &addr, nbuf);
+        if (n < 1) continue;
+        LobbyBan *b = &L->bans[L->ban_count++];
+        memset(b, 0, sizeof *b);
+        b->in_use    = true;
+        b->addr_host = (uint32_t)addr;
+        if (n >= 2) snprintf(b->name, sizeof b->name, "%s", nbuf);
+        loaded++;
+    }
+    fclose(f);
+    if (loaded > 0) LOG_I("lobby: loaded %d ban(s) from %s", loaded, path);
+}
+
+void lobby_save_bans(const LobbyState *L, const char *path) {
+    if (!L || !path) return;
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        LOG_W("lobby: bans save failed: cannot write %s", path);
+        return;
+    }
+    fprintf(f, "# soldut bans — addr_hex name (one per line)\n");
+    for (int i = 0; i < L->ban_count; ++i) {
+        const LobbyBan *b = &L->bans[i];
+        if (!b->in_use) continue;
+        const char *name = b->name[0] ? b->name : "-";
+        fprintf(f, "%08x %s\n", (unsigned)b->addr_host, name);
+    }
+    fclose(f);
 }
 
 /* ---- Wire codec --------------------------------------------------- */

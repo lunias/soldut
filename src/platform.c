@@ -84,6 +84,7 @@ void platform_sample_input(ClientInput *out) {
         IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN))   b |= BTN_CROUCH;
     if (IsKeyDown(KEY_X))                          b |= BTN_PRONE;
     if (IsMouseButtonDown(MOUSE_BUTTON_LEFT))      b |= BTN_FIRE;
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))     b |= BTN_FIRE_SECONDARY;
     if (IsKeyDown(KEY_R))                          b |= BTN_RELOAD;
     if (IsKeyDown(KEY_F))                          b |= BTN_MELEE;
     if (IsKeyDown(KEY_E))                          b |= BTN_USE;

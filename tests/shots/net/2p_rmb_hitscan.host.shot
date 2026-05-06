@@ -1,0 +1,38 @@
+# 2p_rmb_hitscan — host. Verifies P09's RMB-fired HITSCAN secondary
+# (Sidearm) renders a tracer on the firer's own client AND on the
+# remote viewer's client.
+#
+# Pairs with 2p_rmb_hitscan.client.shot. The bug this catches:
+# client_handle_fire_event used to skip ALL self-hitscan FIRE_EVENTs
+# under the assumption that the local predict path already drew the
+# tracer. But predict only fires on BTN_FIRE (LMB) — never
+# BTN_FIRE_SECONDARY (RMB). So an RMB-fired Sidearm was invisible on
+# the firer's screen until the fix made skip-self gate on
+# "FIRE_EVENT's weapon == firer's active slot's weapon" instead of
+# blanket is_self.
+
+window 1280 720
+out build/shots/net/2p_rmb_hitscan_host
+network host 24108
+name HostA
+
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+
+spawn_at 2240 984
+peer_spawn 1 2540 984
+
+aim 2540 956
+
+at 130 shot t130_pre_match
+
+# T=140-148: host RMB-fires Sidearm (HITSCAN secondary). Active stays
+# Pulse Rifle. The fix makes BOTH the host's local view AND the
+# client's remote view spawn the tracer.
+at 140 press fire_secondary
+at 148 release fire_secondary
+at 155 shot t155_host_sidearm_rmb
+
+# Client RMBs at T=200 (see client script).
+at 215 shot t215_client_sidearm_rmb_visible
+
+at 280 end

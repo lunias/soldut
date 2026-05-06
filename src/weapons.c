@@ -290,8 +290,12 @@ static Vec2 apply_self_bink(World *w, Mech *me, Vec2 base_dir) {
 
 /* Server-side: queue a fire event so main.c can broadcast it to
  * clients. They use it to spawn matching tracer/projectile visuals.
- * Authoritative-only — clients run their own predict path. */
-static void record_fire(World *w, int mid, int weapon_id, Vec2 origin, Vec2 dir) {
+ * Authoritative-only — clients run their own predict path.
+ *
+ * Exposed via weapons.h as `weapons_record_fire` so mech.c's grapple
+ * fire branch can broadcast its head spawn (P09 sync fix — pre-P09 the
+ * grapple head's flight was invisible to remote clients). */
+void weapons_record_fire(World *w, int mid, int weapon_id, Vec2 origin, Vec2 dir) {
     if (!w->authoritative) return;
     int slot = w->firefeed_count % FIREFEED_CAPACITY;
     if (slot < 0) slot += FIREFEED_CAPACITY;
@@ -316,7 +320,7 @@ void weapons_fire_hitscan(World *w, int mid) {
     Vec2 dir  = apply_self_bink(w, me, mech_aim_dir(w, mid));
     Vec2 origin = { hand.x + dir.x * wpn->muzzle_offset,
                     hand.y + dir.y * wpn->muzzle_offset };
-    record_fire(w, mid, me->weapon_id, origin, dir);
+    weapons_record_fire(w, mid, me->weapon_id, origin, dir);
     float t_max = wpn->range_px;
 
     float wall_t;
@@ -421,7 +425,7 @@ void weapons_fire_hitscan_lag_comp(World *w, int mid, uint64_t shot_at_tick) {
     Vec2 dir  = apply_self_bink(w, me, mech_aim_dir(w, mid));
     Vec2 origin = { hand.x + dir.x * wpn->muzzle_offset,
                     hand.y + dir.y * wpn->muzzle_offset };
-    record_fire(w, mid, me->weapon_id, origin, dir);
+    weapons_record_fire(w, mid, me->weapon_id, origin, dir);
     float t_max = wpn->range_px;
 
     float wall_t;
@@ -558,7 +562,7 @@ static void spawn_one_projectile(World *w, int mid, const Weapon *wpn,
     projectile_spawn(w, ps);
     /* One fire event per projectile (spread weapons emit one per
      * pellet, after the spread cone has been applied to dir). */
-    record_fire(w, mid, weapon_id, origin, dir);
+    weapons_record_fire(w, mid, weapon_id, origin, dir);
 }
 
 void weapons_spawn_projectiles(World *w, int mid, int weapon_id) {
@@ -626,7 +630,7 @@ void weapons_fire_melee(World *w, int mid, int weapon_id) {
 
     Vec2 chest = mech_chest_pos(w, mid);
     Vec2 dir   = mech_aim_dir(w, mid);
-    record_fire(w, mid, weapon_id, chest, dir);
+    weapons_record_fire(w, mid, weapon_id, chest, dir);
     Vec2 end   = { chest.x + dir.x * wpn->range_px,
                    chest.y + dir.y * wpn->range_px };
 

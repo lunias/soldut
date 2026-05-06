@@ -905,21 +905,16 @@ static void server_handle_lobby_vote(NetState *ns, NetPeer *p,
     net_server_broadcast_vote_state(ns, &g->lobby);
 }
 
-static void server_handle_lobby_kick_or_ban(NetState *ns, NetPeer *p,
-                                            const uint8_t *body, int blen,
-                                            Game *g, bool ban)
-{
+/* Public: enact a kick/ban on a target slot. Used by the wire handler
+ * (after host validation) and by the host's own UI (which has already
+ * validated host-ness by being in this code path at all). Bans by name
+ * for now — peer IP banning is captured via the addr field but the
+ * existing wire path passes 0; expansion is tracked separately. */
+void net_server_kick_or_ban_slot(NetState *ns, Game *g, int target_slot, bool ban) {
     (void)ns;
-    if (blen < 1) return;
-    int requester = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
-    if (requester < 0) return;
-    if (!g->lobby.slots[requester].is_host) {
-        LOG_W("server: non-host slot %d tried to %s", requester, ban ? "ban" : "kick");
-        return;
-    }
-    int target = (int)body[0];
-    LobbySlot *ts = lobby_slot(&g->lobby, target);
-    if (!ts || ts->is_host) return;       /* can't kick the host */
+    if (!g) return;
+    LobbySlot *ts = lobby_slot(&g->lobby, target_slot);
+    if (!ts || !ts->in_use || ts->is_host) return;       /* can't kick the host */
     if (ban) lobby_ban_addr(&g->lobby, 0, ts->name);
     /* Disconnect the corresponding peer. */
     if (ts->peer_id >= 0) {
@@ -935,6 +930,21 @@ static void server_handle_lobby_kick_or_ban(NetState *ns, NetPeer *p,
     char msg[80];
     snprintf(msg, sizeof msg, "%s was %s by host", ts->name, ban ? "banned" : "kicked");
     lobby_chat_system(&g->lobby, msg);
+}
+
+static void server_handle_lobby_kick_or_ban(NetState *ns, NetPeer *p,
+                                            const uint8_t *body, int blen,
+                                            Game *g, bool ban)
+{
+    if (blen < 1) return;
+    int requester = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
+    if (requester < 0) return;
+    if (!g->lobby.slots[requester].is_host) {
+        LOG_W("server: non-host slot %d tried to %s", requester, ban ? "ban" : "kick");
+        return;
+    }
+    int target = (int)body[0];
+    net_server_kick_or_ban_slot(ns, g, target, ban);
 }
 
 /* ---- M5 P08 — server-side map sharing ---------------------------- */
@@ -1232,7 +1242,23 @@ static void client_handle_lobby_chat(const uint8_t *body, int blen, Game *g) {
 
 static void client_handle_match_state(const uint8_t *body, int blen, Game *g) {
     if (blen < MATCH_SNAPSHOT_WIRE_BYTES) return;
+    int prev_mode = g->mode;
     match_decode(&g->match, body);
+
+    /* When the host transitions back to LOBBY after a SUMMARY (the
+     * begin_next_lobby path), MATCH_STATE arrives with phase=LOBBY.
+     * The client needs to leave MODE_SUMMARY/MATCH and follow —
+     * without this, the summary screen sticks until the user clicks
+     * Leave. ROUND_START still drives the MODE_LOBBY → MODE_MATCH
+     * transition for the next round. */
+    if (g->match.phase == MATCH_PHASE_LOBBY &&
+        prev_mode != MODE_LOBBY && prev_mode != MODE_TITLE &&
+        prev_mode != MODE_BROWSER && prev_mode != MODE_CONNECT)
+    {
+        lobby_clear_round_mechs(&g->lobby, &g->world);
+        g->mode = MODE_LOBBY;
+        LOG_I("client: MATCH_STATE phase=LOBBY → returning to lobby");
+    }
 }
 
 static void client_handle_round_start(const uint8_t *body, int blen, Game *g) {
@@ -1396,25 +1422,57 @@ static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen
     int16_t  dxq     = (int16_t)r_u16(&r);
     int16_t  dyq     = (int16_t)r_u16(&r);
 
-    /* Skip our own fires — local predict path already spawned the
-     * tracer / spark FX for them. Replaying here would double up. */
-    if ((int)shooter == g->world.local_mech_id) return;
-
     Vec2 origin = { (float)oxq / 4.0f, (float)oyq / 4.0f };
     Vec2 dir    = { (float)dxq / 32767.0f, (float)dyq / 32767.0f };
 
     const Weapon *wpn = weapon_def((int)weapon);
     if (!wpn) return;
 
-    /* Tracer + sparks at the muzzle for every shot — gives the client
-     * a visible "muzzle flash" for remote players regardless of fire
-     * kind. The HIT_EVENT path handles blood/sparks at the hit end. */
-    for (int k = 0; k < 3; ++k) {
-        fx_spawn_spark(&g->world.fx, origin,
-            (Vec2){ dir.x * 350.0f, dir.y * 350.0f }, g->world.rng);
+    /* Skip-self gating depends on whether the local predict path
+     * already drew this shot. The predict path
+     * (`weapons_predict_local_fire`, called from simulate.c's client
+     * branch) only fires when BTN_FIRE is held — never for
+     * BTN_FIRE_SECONDARY (RMB) — and within that:
+     *
+     *   - HITSCAN: predict draws the long tracer + muzzle sparks
+     *     + recoil. So a self HITSCAN FIRE_EVENT for the ACTIVE slot
+     *     should be skipped (predict already drew it). But an
+     *     RMB-fired inactive-slot HITSCAN (e.g., Sidearm via RMB
+     *     while primary is active) was NOT predicted — the firer
+     *     needs the FIRE_EVENT visual.
+     *   - MELEE / PROJECTILE / SPREAD / BURST / THROW / GRAPPLE:
+     *     predict only does muzzle sparks + recoil, never the
+     *     swing tracer / projectile / head. The firer always needs
+     *     the FIRE_EVENT visual.
+     *
+     * The way we tell active-slot fire from RMB-on-inactive after the
+     * fact: compare the FIRE_EVENT's weapon_id against the firer's
+     * currently active slot's weapon. If they match, the predict path
+     * fired this shot. (Active slot only changes via BTN_SWAP, which
+     * is a deliberate user action — short window for misclassification.) */
+    bool is_self = ((int)shooter == g->world.local_mech_id);
+    bool from_active_slot = false;
+    if (is_self && shooter < g->world.mech_count) {
+        const Mech *me = &g->world.mechs[shooter];
+        int active_wid = (me->active_slot == 0) ? me->primary_id
+                                                : me->secondary_id;
+        from_active_slot = (active_wid == (int)weapon);
+    }
+    /* Muzzle sparks — only for remote shooters or self RMB-on-inactive;
+     * the predict path already spawned them for self LMB-on-active. */
+    bool predict_drew = is_self && from_active_slot;
+    if (!predict_drew) {
+        for (int k = 0; k < 3; ++k) {
+            fx_spawn_spark(&g->world.fx, origin,
+                (Vec2){ dir.x * 350.0f, dir.y * 350.0f }, g->world.rng);
+        }
     }
 
     if (wpn->fire == WFIRE_HITSCAN) {
+        /* Predict drew the tracer only for active-slot LMB hitscan;
+         * for RMB-on-inactive (Sidearm via RMB, etc.) the firer's
+         * predict didn't run at all — we need to draw it here. */
+        if (predict_drew) return;
         /* Tracer to the wall (or full range if open air). The actual
          * hit point lands via HIT_EVENT (blood/sparks at target);
          * the tracer just needs to look like the bullet's flight
@@ -1430,6 +1488,9 @@ static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen
         Vec2 end = { origin.x + dir.x * t_max,
                      origin.y + dir.y * t_max };
         fx_spawn_tracer(&g->world.fx, origin, end);
+        SHOT_LOG("t=%llu client_fire_event hitscan shooter=%d self=%d active=%d",
+                 (unsigned long long)g->world.tick, (int)shooter,
+                 (int)is_self, (int)from_active_slot);
     } else if (wpn->fire == WFIRE_PROJECTILE ||
                wpn->fire == WFIRE_SPREAD     ||
                wpn->fire == WFIRE_BURST      ||
@@ -1437,7 +1498,8 @@ static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen
     {
         /* Spawn a visual-only projectile. w->authoritative is false
          * on the client so projectile_step won't apply damage when
-         * it hits a mech; it just renders + leaves sparks at impact. */
+         * it hits a mech; it just renders + leaves sparks at impact.
+         * Spawned for self too (predict didn't). */
         int sm = (int)shooter;
         ProjectileSpawn ps = {
             .kind          = wpn->projectile_kind,
@@ -1458,11 +1520,55 @@ static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen
             .bouncy        = wpn->bouncy,
         };
         projectile_spawn(&g->world, ps);
-        /* Short muzzle tracer so the launch reads cleanly. */
-        Vec2 spark_end = { origin.x + dir.x * 80.0f,
-                           origin.y + dir.y * 80.0f };
-        fx_spawn_tracer(&g->world.fx, origin, spark_end);
+        /* Short muzzle tracer — only redundant when the predict path
+         * already drew the muzzle visual (self LMB on the active
+         * slot). For self RMB-on-inactive, predict didn't run, so we
+         * draw it. */
+        if (!predict_drew) {
+            Vec2 spark_end = { origin.x + dir.x * 80.0f,
+                               origin.y + dir.y * 80.0f };
+            fx_spawn_tracer(&g->world.fx, origin, spark_end);
+        }
+    } else if (wpn->fire == WFIRE_GRAPPLE) {
+        /* P09 — visual-only grapple head for remote viewers AND for
+         * the firer themselves. The server owns the actual hit
+         * decision (grapple_attach is gated on `w->authoritative` in
+         * projectile_step) and snapshots the firer's grapple state,
+         * so the client's head is purely cosmetic — it disappears on
+         * tile/bone hit at the correct position because
+         * `projectile_step`'s alive=0 path runs unconditionally. */
+        int sm = (int)shooter;
+        float speed = wpn->projectile_speed_pxs > 0.0f
+                      ? wpn->projectile_speed_pxs : 1200.0f;
+        float life  = wpn->projectile_life_sec > 0.0f
+                      ? wpn->projectile_life_sec : (wpn->range_px / speed);
+        ProjectileSpawn ps = {
+            .kind          = (wpn->projectile_kind != 0)
+                             ? wpn->projectile_kind : PROJ_GRAPPLE_HEAD,
+            .weapon_id     = (int)weapon,
+            .owner_mech_id = sm,
+            .owner_team    = (sm < g->world.mech_count)
+                              ? g->world.mechs[sm].team : 0,
+            .origin        = origin,
+            .velocity      = (Vec2){ dir.x * speed, dir.y * speed },
+            .damage        = 0.0f,
+            .aoe_radius    = 0.0f,
+            .aoe_damage    = 0.0f,
+            .aoe_impulse   = 0.0f,
+            .life          = life,
+            .gravity_scale = wpn->projectile_grav_scale,
+            .drag          = wpn->projectile_drag,
+            .bouncy        = false,
+        };
+        projectile_spawn(&g->world, ps);
+        SHOT_LOG("t=%llu client_fire_event grapple shooter=%d self=%d",
+                 (unsigned long long)g->world.tick, (int)shooter,
+                 (int)is_self);
     } else if (wpn->fire == WFIRE_MELEE) {
+        /* Predict path doesn't draw the swing tracer for any kind —
+         * only the muzzle sparks. So the firer always needs the swing
+         * here. (Pre-fix this was `if (is_self) return;` based on a
+         * comment that didn't match the predict path's behavior.) */
         Vec2 end = { origin.x + dir.x * wpn->range_px,
                      origin.y + dir.y * wpn->range_px };
         fx_spawn_tracer(&g->world.fx, origin, end);

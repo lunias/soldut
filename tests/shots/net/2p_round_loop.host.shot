@@ -1,0 +1,45 @@
+# 2p_round_loop — host. End-to-end multi-round match flow.
+#
+# rounds_per_match=2 (cfg). Each round ends via the "1 alive remaining
+# → 3 s warning" path. Inter-round transition is seamless (NO lobby).
+# After round 2, match-over → return to lobby for ready-up.
+#
+# Timing (60 ticks/s, world.tick advances only during MATCH):
+#   t=0..~120   LOBBY + initial 1 s countdown.
+#   t=120..    round 1 ACTIVE.
+#   t=160      kill_peer 1 → solo-warning arms.
+#   t=340     round 1 ends (3 s after kill) → SUMMARY (4 s default).
+#   t=360     both vote → fast-forward summary to ~1 s floor.
+#   t=420     SUMMARY ends → inter-round COUNTDOWN (2 s).
+#   t=540     round 2 ACTIVE.
+#   t=700     kill_peer 1 again.
+#   t=880     round 2 ends → SUMMARY.
+#   t=900     both vote → fast-forward.
+#   t=960     match over (rounds_played == rounds_per_match) → LOBBY.
+
+window 1280 720
+out build/shots/net/2p_round_loop_host
+network host 24110
+name HostA
+
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+spawn_at 2240 984
+peer_spawn 1 2540 984
+aim 2540 956
+
+# --- Round 1 ---
+at 130 shot t130_round1
+at 160 kill_peer 1
+# Vote DURING summary (after round 1 ends at ~t=340).
+at 360 vote_map 0
+at 380 shot t380_summary_with_vote
+# After fast-forward + COUNTDOWN, round 2 begins.
+at 560 shot t560_round2_active
+
+# --- Round 2 ---
+at 700 kill_peer 1
+at 900 vote_map 1
+at 920 shot t920_summary_round2
+# After fast-forward, match-over → LOBBY.
+at 1000 shot t1000_back_in_lobby
+at 1100 end

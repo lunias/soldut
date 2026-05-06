@@ -56,6 +56,11 @@ typedef enum {
     EV_TEAM_CHANGE,   /* lobby UX test — send/apply team-change for the local slot */
     EV_KILL_PEER,     /* P07 host-only — directly mech_kill the named peer (ax = mech_id) */
     EV_ARM_CARRY,     /* P07 host-only — arm flag (ax) with carrier mech (ay) on the server */
+    EV_KICK,          /* P09 host-only — kick lobby slot (ax = slot) */
+    EV_BAN,           /* P09 host-only — ban lobby slot (ax = slot) */
+    EV_KICK_MODAL,    /* P09 host-only — show confirmation modal for slot (ax) */
+    EV_BAN_MODAL,     /* P09 host-only — show ban confirmation modal for slot (ax) */
+    EV_VOTE_MAP,      /* P09 — cast a map vote (ax = choice 0/1/2) */
 } EventKind;
 
 typedef struct {
@@ -161,6 +166,7 @@ static const struct { const char *name; uint16_t bit; } BUTTON_TABLE[] = {
     {"fire",   BTN_FIRE},   {"reload", BTN_RELOAD},
     {"melee",  BTN_MELEE},  {"use",    BTN_USE},
     {"swap",   BTN_SWAP},   {"dash",   BTN_DASH},
+    {"fire_secondary", BTN_FIRE_SECONDARY},  /* P09 — RMB one-shot */
 };
 
 static uint16_t button_bit(const char *s) {
@@ -480,6 +486,42 @@ static bool parse_script(const char *path, Script *out) {
                 ev.kind = EV_FLAG_CARRY;
                 ev.ax = (float)fidx;
                 script_push(out, ev);
+            } else if (strcmp(ev_kind, "kick") == 0 ||
+                       strcmp(ev_kind, "ban")  == 0) {
+                /* "at <tick> kick <slot>" / "ban <slot>" — host-only.
+                 * Drives the same codepath as the lobby UI's [Kick] /
+                 * [Ban] confirmation modal: net_server_kick_or_ban_slot
+                 * disconnects the peer + (for ban) records the name in
+                 * the bans list + lobby_chat_systems the announcement.
+                 * No-op on a client. */
+                int slot = -1;
+                if (args[0]) sscanf(args, "%d", &slot);
+                ev.kind = (strcmp(ev_kind, "ban") == 0) ? EV_BAN : EV_KICK;
+                ev.ax = (float)slot;
+                script_push(out, ev);
+            } else if (strcmp(ev_kind, "vote_map") == 0) {
+                /* "at <tick> vote_map <choice 0/1/2>" — drives the
+                 * 3-card map vote picker. Host slot calls
+                 * lobby_vote_cast directly + rebroadcasts; client
+                 * slot sends NET_MSG_LOBBY_MAP_VOTE. */
+                int choice = -1;
+                if (args[0]) sscanf(args, "%d", &choice);
+                ev.kind = EV_VOTE_MAP;
+                ev.ax = (float)choice;
+                script_push(out, ev);
+            } else if (strcmp(ev_kind, "kick_modal") == 0 ||
+                       strcmp(ev_kind, "ban_modal")  == 0) {
+                /* "at <tick> kick_modal <slot>" / "ban_modal <slot>" —
+                 * host-only. Sets LobbyUIState's kick/ban target so the
+                 * confirmation modal renders on the next frame. Used by
+                 * GUI-layout regression shots to capture the modal
+                 * without simulating a mouse click on the row buttons. */
+                int slot = -1;
+                if (args[0]) sscanf(args, "%d", &slot);
+                ev.kind = (strcmp(ev_kind, "ban_modal") == 0)
+                          ? EV_BAN_MODAL : EV_KICK_MODAL;
+                ev.ax = (float)slot;
+                script_push(out, ev);
             } else {
                 LOG_E("shotmode: %s:%d unknown event '%s'", path, lineno, ev_kind);
                 ok = false;
@@ -711,6 +753,8 @@ static void networked_shot_bootstrap(Game *g, const Script *s) {
     g->match.summary_default     = 4.0f;   /* 15 s default; 4 s for tests */
     g->match.time_limit          = g->config.time_limit;
     g->match.score_limit         = g->config.score_limit;
+    g->match.rounds_per_match    = g->config.rounds_per_match;
+    g->match.inter_round_countdown_default = 2.0f;  /* tighter for shot tests */
 
     if (s->netmode == NETMODE_HOST) {
         if (!net_init()) {
@@ -721,6 +765,11 @@ static void networked_shot_bootstrap(Game *g, const Script *s) {
             return;
         }
         net_discovery_open(&g->net);
+        /* Mirror main.c::bootstrap_host — load any persisted bans so
+         * shotmode tests can exercise the auto-save+reload of bans.txt
+         * (without this, ban directives in scripts wouldn't write the
+         * file because L->ban_path stays empty). */
+        lobby_load_bans(&g->lobby, "bans.txt");
         const char *nm = s->netname[0] ? s->netname : "host-shot";
         int slot = lobby_add_slot(&g->lobby, /*peer_id*/-1, nm, /*is_host*/true);
         g->local_slot_id = slot;
@@ -767,7 +816,111 @@ static void networked_shot_bootstrap(Game *g, const Script *s) {
 
 /* Same kill-feed → lobby score path main.c uses. We re-implement it
  * here (rather than refactor main.c) to keep shotmode self-contained. */
-static int g_shot_kill_processed = 0;
+static int g_shot_kill_processed   = 0;
+static int g_shot_hit_processed    = 0;
+static int g_shot_fire_processed   = 0;
+static int g_shot_pickup_processed = 0;
+
+/* Mirror main.c's broadcast_new_hits — drain the world hitfeed and
+ * ship NET_MSG_HIT_EVENT to every peer. Without this, networked shot
+ * tests don't replicate blood/spark FX onto the client. */
+static void shot_broadcast_new_hits(Game *g) {
+    if (g->net.role != NET_ROLE_SERVER) return;
+    int cur = g->world.hitfeed_count;
+    int begin = g_shot_hit_processed;
+    if (cur - begin > HITFEED_CAPACITY) begin = cur - HITFEED_CAPACITY;
+    for (int n = begin; n < cur; ++n) {
+        int idx = n % HITFEED_CAPACITY;
+        if (idx < 0) idx += HITFEED_CAPACITY;
+        const HitFeedEntry *h = &g->world.hitfeed[idx];
+        net_server_broadcast_hit(&g->net,
+            (int)h->victim_mech_id, (int)h->hit_part,
+            h->pos_x, h->pos_y, h->dir_x, h->dir_y, (int)h->damage);
+    }
+    g_shot_hit_processed = cur;
+}
+
+/* Mirror broadcast_new_fires — without this, FIRE_EVENT never crosses
+ * the wire in shot tests, so the client sees no remote tracers /
+ * projectiles / grapple heads despite the server actually firing them. */
+static void shot_broadcast_new_fires(Game *g) {
+    if (g->net.role != NET_ROLE_SERVER) return;
+    int cur = g->world.firefeed_count;
+    int begin = g_shot_fire_processed;
+    if (cur - begin > FIREFEED_CAPACITY) begin = cur - FIREFEED_CAPACITY;
+    for (int n = begin; n < cur; ++n) {
+        int idx = n % FIREFEED_CAPACITY;
+        if (idx < 0) idx += FIREFEED_CAPACITY;
+        const FireFeedEntry *f = &g->world.firefeed[idx];
+        net_server_broadcast_fire(&g->net,
+            (int)f->shooter_mech_id, (int)f->weapon_id,
+            f->origin_x, f->origin_y, f->dir_x, f->dir_y);
+    }
+    g_shot_fire_processed = cur;
+}
+
+/* Mirror main.c::host_start_map_vote — pick 3 distinct mode-compatible
+ * map candidates from g_map_registry, arm lobby_vote_start, broadcast.
+ * Without this, shotmode's host doesn't drive the vote-picker code at
+ * round-end and tests can't verify the next-round transition through
+ * a real vote. */
+static void shot_host_start_map_vote(Game *g) {
+    if (g->offline_solo) {
+        lobby_vote_clear(&g->lobby);
+        return;
+    }
+    unsigned mode_bit = 1u << (unsigned)g->match.mode;
+    int candidates[MAP_REGISTRY_MAX];
+    int n = 0;
+    for (int i = 0; i < g_map_registry.count && n < MAP_REGISTRY_MAX; ++i) {
+        if (i == g->match.map_id) continue;
+        if (!(g_map_registry.entries[i].mode_mask & mode_bit)) continue;
+        candidates[n++] = i;
+    }
+    if (n == 0) {
+        lobby_vote_clear(&g->lobby);
+        return;
+    }
+    /* Fisher-Yates shuffle. */
+    for (int i = n - 1; i > 0; --i) {
+        int j = (int)pcg32_range(g->world.rng, 0, i + 1);
+        int tmp = candidates[i];
+        candidates[i] = candidates[j];
+        candidates[j] = tmp;
+    }
+    int a = candidates[0];
+    int b = (n >= 2) ? candidates[1] : -1;
+    int c = (n >= 3) ? candidates[2] : -1;
+    float dur = (g->match.summary_remaining > 0.0f)
+                ? g->match.summary_remaining * 0.8f : 12.0f;
+    lobby_vote_start(&g->lobby, a, b, c, dur);
+    if (g->net.role == NET_ROLE_SERVER) {
+        net_server_broadcast_vote_state(&g->net, &g->lobby);
+    }
+    LOG_I("match_flow: map vote: %s / %s / %s (%.1fs)",
+          map_def(a) ? map_def(a)->display_name : "—",
+          (b >= 0 && map_def(b)) ? map_def(b)->display_name : "—",
+          (c >= 0 && map_def(c)) ? map_def(c)->display_name : "—",
+          (double)dur);
+}
+
+/* Mirror broadcast_new_pickups — drain pickupfeed for client mirror. */
+static void shot_broadcast_new_pickups(Game *g) {
+    if (g->net.role != NET_ROLE_SERVER) return;
+    int cur = g->world.pickupfeed_count;
+    int begin = g_shot_pickup_processed;
+    if (cur - begin > PICKUPFEED_CAPACITY) begin = cur - PICKUPFEED_CAPACITY;
+    for (int n = begin; n < cur; ++n) {
+        int idx = n % PICKUPFEED_CAPACITY;
+        if (idx < 0) idx += PICKUPFEED_CAPACITY;
+        int spawner_id = g->world.pickupfeed[idx];
+        if (spawner_id < 0 || spawner_id >= g->world.pickups.count) continue;
+        const PickupSpawner *s = &g->world.pickups.items[spawner_id];
+        net_server_broadcast_pickup_state(&g->net, spawner_id, s);
+    }
+    g_shot_pickup_processed = cur;
+}
+
 static void shot_apply_new_kills(Game *g) {
     int cur = g->world.killfeed_count;
     int begin = g_shot_kill_processed;
@@ -833,9 +986,15 @@ static void shot_host_flow(Game *g, float dt) {
             if (match_tick(&g->match, dt)) {
                 /* start_round equivalent — inlined from main.c. Mirror
                  * P07: CTF mode-mask validation, score-limit clamp,
-                 * team auto-balance, ctf_init_round, match_mode_cached. */
-                g->match.map_id = config_pick_map(&g->config, g->round_counter);
-                g->match.mode   = config_pick_mode(&g->config, g->round_counter);
+                 * team auto-balance, ctf_init_round, match_mode_cached.
+                 *
+                 * Mirrors main.c::start_round — first round derives
+                 * map/mode from rotation; subsequent rounds inherit
+                 * from begin_next_lobby (which honors the vote winner). */
+                if (g->round_counter == 0) {
+                    g->match.map_id = config_pick_map(&g->config, 0);
+                    g->match.mode   = config_pick_mode(&g->config, 0);
+                }
 
                 /* P07 — CTF mode-mask validation. Build, check,
                  * demote to TDM if the map can't host CTF. */
@@ -956,6 +1115,14 @@ static void shot_host_flow(Game *g, float dt) {
             /* P07 — CTF tick (server only). Same shape as main.c. */
             ctf_step(g, dt);
             shot_apply_new_kills(g);
+            /* Mirror main.c's per-tick fan-out queues. Without these,
+             * the client sees no remote HIT_EVENT / FIRE_EVENT /
+             * PICKUP_STATE during shot tests — and bugs like the P09
+             * "RMB grapple invisible to remote" gap can't be caught
+             * in the test scaffold. */
+            shot_broadcast_new_hits(g);
+            shot_broadcast_new_fires(g);
+            shot_broadcast_new_pickups(g);
             /* Drain CTF dirty bit on the host. */
             if (g->net.role == NET_ROLE_SERVER && g->world.flag_state_dirty) {
                 net_server_broadcast_flag_state(&g->net, &g->world);
@@ -971,6 +1138,9 @@ static void shot_host_flow(Game *g, float dt) {
             }
             if (!end && match_round_should_end(&g->match)) end = true;
             if (match_tick(&g->match, dt)) end = true;
+            /* "Only one alive" → 3s countdown → end. Mirrors main.c. */
+            if (!end && match_step_solo_warning(&g->match, &g->world, dt))
+                end = true;
             if (end) {
                 match_end_round(&g->match, &g->lobby);
                 g->mode = MODE_SUMMARY;
@@ -979,23 +1149,90 @@ static void shot_host_flow(Game *g, float dt) {
                     g->lobby.dirty = false;
                     net_server_broadcast_round_end  (&g->net, &g->match);
                 }
+                /* Arm the 3-card vote picker (P09) so the lobby UI's
+                 * summary screen has candidates to render. */
+                shot_host_start_map_vote(g);
+                LOG_I("match_flow: round %d end (mvp=%d)",
+                      g->round_counter, g->match.mvp_slot);
             }
             break;
         }
-        case MATCH_PHASE_SUMMARY:
+        case MATCH_PHASE_SUMMARY: {
+            (void)lobby_tick(&g->lobby, dt);
+
+            /* Fast-forward when every active in-use slot has voted —
+             * mirrors main.c. Floors summary_remaining at 1 s so the
+             * banner reads briefly. */
+            if (g->match.summary_remaining > 1.0f) {
+                int active = 0, voted = 0;
+                uint32_t cast_mask = g->lobby.vote_mask_a |
+                                     g->lobby.vote_mask_b |
+                                     g->lobby.vote_mask_c;
+                for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+                    if (!g->lobby.slots[i].in_use) continue;
+                    if (g->lobby.slots[i].team == MATCH_TEAM_NONE) continue;
+                    active++;
+                    if (cast_mask & (1u << i)) voted++;
+                }
+                if (active >= 1 && voted == active) {
+                    g->match.summary_remaining = 1.0f;
+                    LOG_I("match_flow: all %d voted — fast-forwarding summary",
+                          voted);
+                }
+            }
+
             if (match_tick(&g->match, dt)) {
                 g->round_counter++;
-                g->match.phase = MATCH_PHASE_LOBBY;
-                lobby_clear_round_mechs(&g->lobby, &g->world);
-                lobby_reset_round_stats(&g->lobby);
-                g->mode = MODE_LOBBY;
-                if (g->net.role == NET_ROLE_SERVER) {
-                    net_server_broadcast_lobby_list (&g->net, &g->lobby);
-                    g->lobby.dirty = false;
-                    net_server_broadcast_match_state(&g->net, &g->match);
+                g->match.rounds_played++;
+                /* Default next map/mode from rotation; vote winner overrides. */
+                g->match.map_id = config_pick_map(&g->config, g->round_counter);
+                g->match.mode   = config_pick_mode(&g->config, g->round_counter);
+                if (g->lobby.vote_map_a >= 0 || g->lobby.vote_map_b >= 0 ||
+                    g->lobby.vote_map_c >= 0)
+                {
+                    int winner = lobby_vote_winner(&g->lobby);
+                    if (winner >= 0 && winner < g_map_registry.count) {
+                        g->match.map_id = winner;
+                        LOG_I("match_flow: vote winner → map %s",
+                              map_def(winner) ? map_def(winner)->display_name : "?");
+                    }
+                    lobby_vote_clear(&g->lobby);
+                    if (g->net.role == NET_ROLE_SERVER) {
+                        net_server_broadcast_vote_state(&g->net, &g->lobby);
+                    }
+                }
+
+                if (g->match.rounds_played >= g->match.rounds_per_match) {
+                    /* Match over — full reset + back to lobby. */
+                    LOG_I("match_flow: match over (%d rounds played) — back to lobby",
+                          g->match.rounds_played);
+                    g->match.rounds_played = 0;
+                    g->match.score_limit  = g->config.score_limit;
+                    g->match.time_limit   = g->config.time_limit;
+                    g->match.friendly_fire= g->config.friendly_fire;
+                    g->match.phase        = MATCH_PHASE_LOBBY;
+                    lobby_clear_round_mechs(&g->lobby, &g->world);
+                    lobby_reset_round_stats(&g->lobby);
+                    g->mode = MODE_LOBBY;
+                    if (g->net.role == NET_ROLE_SERVER) {
+                        net_server_broadcast_match_state(&g->net, &g->match);
+                        net_server_broadcast_lobby_list (&g->net, &g->lobby);
+                    }
+                } else {
+                    /* Inter-round: brief countdown, no lobby. */
+                    LOG_I("match_flow: round %d/%d — continuing match",
+                          g->match.rounds_played + 1, g->match.rounds_per_match);
+                    lobby_clear_round_mechs(&g->lobby, &g->world);
+                    match_begin_countdown(&g->match,
+                                          g->match.inter_round_countdown_default);
+                    if (g->net.role == NET_ROLE_SERVER) {
+                        net_server_broadcast_match_state(&g->net, &g->match);
+                        net_server_broadcast_lobby_list (&g->net, &g->lobby);
+                    }
                 }
             }
             break;
+        }
     }
 }
 
@@ -1423,6 +1660,52 @@ int shotmode_run(const char *script_path) {
                     }
                     break;
                 }
+                case EV_KICK:
+                case EV_BAN: {
+                    int slot = (int)ev->ax;
+                    bool ban = (ev->kind == EV_BAN);
+                    if (game.net.role == NET_ROLE_SERVER && slot >= 0) {
+                        net_server_kick_or_ban_slot(&game.net, &game,
+                                                    slot, ban);
+                        LOG_I("shot: %s slot=%d (host-side)",
+                              ban ? "ban" : "kick", slot);
+                    }
+                    break;
+                }
+                case EV_VOTE_MAP: {
+                    int choice = (int)ev->ax;
+                    if (choice < 0 || choice > 2) break;
+                    if (game.net.role == NET_ROLE_CLIENT) {
+                        net_client_send_map_vote(&game.net, choice);
+                        LOG_I("shot: vote_map=%d (sent to host)", choice);
+                    } else if (game.net.role == NET_ROLE_SERVER &&
+                               game.local_slot_id >= 0) {
+                        lobby_vote_cast(&game.lobby,
+                                        game.local_slot_id, choice);
+                        net_server_broadcast_vote_state(&game.net,
+                                                        &game.lobby);
+                        LOG_I("shot: vote_map=%d (host slot=%d)",
+                              choice, game.local_slot_id);
+                    }
+                    break;
+                }
+                case EV_KICK_MODAL:
+                case EV_BAN_MODAL: {
+                    int slot = (int)ev->ax;
+                    bool ban = (ev->kind == EV_BAN_MODAL);
+                    if (game.net.role == NET_ROLE_SERVER && slot >= 0) {
+                        if (ban) {
+                            ui_n.ban_target_slot  = slot;
+                            ui_n.kick_target_slot = -1;
+                        } else {
+                            ui_n.kick_target_slot = slot;
+                            ui_n.ban_target_slot  = -1;
+                        }
+                        LOG_I("shot: %s_modal slot=%d (host UI)",
+                              ban ? "ban" : "kick", slot);
+                    }
+                    break;
+                }
                 default:         break;  /* mouse-screen / tap unused here */
                 }
                 ev_idx_n++;
@@ -1430,6 +1713,18 @@ int shotmode_run(const char *script_path) {
 
             /* Pump network FIRST. */
             net_poll(&game.net, &game, TICK_DT);
+
+            /* Forced-disconnect detection — same hook as main.c so
+             * shotmode tests can verify the kick/ban path. When the
+             * server drops a client, ENet sets ns->connected=false on
+             * the client. We log it (the runner asserts on the log
+             * line) and stop the script — there's nothing to render
+             * once the connection is gone. */
+            if (game.net.role == NET_ROLE_CLIENT && !game.net.connected) {
+                LOG_I("client: server connection lost — ending shot script");
+                ended_n = true;
+                break;
+            }
 
             /* Per-mode dispatch. */
             switch (game.mode) {
@@ -1777,6 +2072,13 @@ int shotmode_run(const char *script_path) {
                 }
                 break;
             }
+            case EV_KICK:
+            case EV_BAN:
+            case EV_KICK_MODAL:
+            case EV_BAN_MODAL:
+            case EV_VOTE_MAP:
+                /* Single-player has no peers / lobby vote state. */
+                break;
             }
             ev_idx++;
         }

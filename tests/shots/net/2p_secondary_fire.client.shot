@@ -1,0 +1,44 @@
+# 2p_secondary_fire — client. P09 RMB sync test.
+#
+# Pairs with 2p_secondary_fire.host.shot. The client carries Pulse Rifle
+# (primary) + Grappling Hook (secondary) and RMB-fires the hook. The
+# host carries Frag Grenades secondary and RMB-throws one; the client
+# should see the host's incoming grenade (FIRE_EVENT replicates).
+#
+# What the client log should show:
+#   - t=170 mech=N fire_secondary edge active=0 prim=0 sec=13 cd=...
+#   - t=170 grapple_fire(RMB) ph=N        (server fires for the client)
+#   - The client's local view spawns a visual PROJ_GRAPPLE_HEAD (kind=10)
+#     via the FIRE_EVENT reply — this was the missing piece that made
+#     the grapple "disappear" in P09's first ship.
+
+window 1280 720
+out build/shots/net/2p_secondary_fire_client
+network connect 127.0.0.1:24091
+name ClientB
+
+loadout - "Pulse Rifle" "Grappling Hook" Light Standard
+
+# Match host's peer_spawn so we predict from the right starting point.
+spawn_at 2540 984
+
+# Aim at the host's chest (300 px to the left).
+aim 2240 956
+
+at 130 shot t130_pre_match
+
+# Host throws its grenade at script tick 140 — client should see it
+# incoming around tick 155.
+at 155 shot t155_incoming_grenade
+
+# T=200-208: client RMB-holds → Grappling Hook fires. Active slot
+# stays primary (Pulse Rifle); the grapple head flies left toward
+# the host. Held for 8 ticks for the same input-durability reason as
+# the host script.
+at 200 press fire_secondary
+at 208 release fire_secondary
+at 215 shot t215_grapple_outgoing
+
+at 260 shot t260_aftermath
+
+at 320 end

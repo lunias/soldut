@@ -48,6 +48,12 @@ typedef struct ServerConfig {
     bool        friendly_fire;
     float       auto_start_seconds;
 
+    /* Number of rounds played per "match." Players ready up once at
+     * the start of a match; rounds within a match transition
+     * seamlessly (no return to the lobby UI). After the last round
+     * the game returns to the lobby for the next match. */
+    int         rounds_per_match;
+
     /* Rotations. */
     int       map_rotation [CONFIG_ROTATION_MAX];
     int       map_rotation_count;
