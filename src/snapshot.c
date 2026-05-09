@@ -137,6 +137,7 @@ void snapshot_capture(const World *w, SnapshotFrame *out, uint16_t ack_input_seq
         e->chassis_id     = (uint8_t)m->chassis_id;
         e->armor_id       = (uint8_t)m->armor_id;
         e->jetpack_id     = (uint8_t)m->jetpack_id;
+        e->primary_id     = (uint8_t)m->primary_id;
         e->secondary_id   = (uint8_t)m->secondary_id;
         e->ammo_secondary = (uint8_t)(m->ammo_secondary > 255 ? 255
                                 : (m->ammo_secondary < 0 ? 0 : m->ammo_secondary));
@@ -211,10 +212,14 @@ int snapshot_encode(const SnapshotFrame *cur,
         *p++ = e->team;
         /* limb_bits(2) */
         *p++ = (uint8_t)e->limb_bits; *p++ = (uint8_t)(e->limb_bits >> 8);
-        /* loadout (M3): chassis, armor, jetpack, secondary, ammo_secondary */
+        /* loadout (M3 + P10-followup): chassis, armor, jetpack,
+         * primary, secondary, ammo_secondary. `primary_id` joins
+         * the wire so the client doesn't have to infer it from
+         * the active-slot weapon at first-snapshot time. */
         *p++ = e->chassis_id;
         *p++ = e->armor_id;
         *p++ = e->jetpack_id;
+        *p++ = e->primary_id;
         *p++ = e->secondary_id;
         *p++ = e->ammo_secondary;
         /* P06 — Optional grapple suffix (8 bytes when SNAP_STATE_GRAPPLING). */
@@ -294,6 +299,7 @@ bool snapshot_decode(const uint8_t *buf, int len,
         e->chassis_id     = *p++;
         e->armor_id       = *p++;
         e->jetpack_id     = *p++;
+        e->primary_id     = *p++;
         e->secondary_id   = *p++;
         e->ammo_secondary = *p++;
         /* P06 — Optional grapple suffix. */
@@ -330,7 +336,15 @@ static int ensure_mech_slot(World *w, int desired_id, Vec2 spawn,
             lo.chassis_id   = e->chassis_id   < CHASSIS_COUNT ? e->chassis_id   : CHASSIS_TROOPER;
             lo.armor_id     = e->armor_id     < ARMOR_COUNT   ? e->armor_id     : ARMOR_NONE;
             lo.jetpack_id   = e->jetpack_id   < JET_COUNT     ? e->jetpack_id   : JET_NONE;
-            lo.primary_id   = e->weapon_id    < WEAPON_COUNT  ? e->weapon_id    : WEAPON_PULSE_RIFLE;
+            /* P10-followup — `primary_id` rides the wire directly so we
+             * use it as-is. Pre-fix this used `e->weapon_id` (the active
+             * slot's weapon), which broke when a mid-round-join client
+             * received a first snapshot whose mech had its secondary
+             * equipped (active_slot==1) — the inferred primary_id ended
+             * up equal to the secondary's weapon, which then made the
+             * `active_slot == (weapon_id == primary_id)` derivation in
+             * snapshot_apply return 0 (wrong) for the entire session. */
+            lo.primary_id   = e->primary_id   < WEAPON_COUNT  ? e->primary_id   : WEAPON_PULSE_RIFLE;
             lo.secondary_id = e->secondary_id < WEAPON_COUNT  ? e->secondary_id : WEAPON_SIDEARM;
         }
         int got = mech_create_loadout(w, lo, spawn, team, /*is_dummy*/false);
@@ -453,6 +467,11 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
         m->weapon_id     = e->weapon_id;
         m->ammo          = e->ammo;
         m->team          = e->team;
+        /* P10-followup — keep primary/secondary in lockstep with the
+         * host's authoritative loadout so a mid-round PICKUP_WEAPON or
+         * a delayed first snapshot with active_slot==1 doesn't strand
+         * the client on a stale primary inferred at spawn time. */
+        m->primary_id    = e->primary_id;
         m->secondary_id  = e->secondary_id;
         m->ammo_secondary= e->ammo_secondary;
         /* Active slot: derived from which weapon_id matches. */

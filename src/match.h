@@ -140,3 +140,15 @@ const char *match_phase_name(MatchPhase phase);
 #define MATCH_SNAPSHOT_WIRE_BYTES  20
 void match_encode(const MatchState *m, uint8_t *out);
 void match_decode(MatchState *m, const uint8_t *in);
+
+/* Phase-transition diagnostic line (P10 follow-up — round-sync test).
+ * Emits a SHOT_LOG with `tag`, phase, mode, map, rounds_played/_per_match,
+ * summary_remaining, and countdown_remaining so a paired host/client
+ * shot test can grep both logs at the same transition tick and confirm
+ * they agree on the round number. Free in non-shot-mode runs (the
+ * macro short-circuits). Call on the host at phase begin/end sites and
+ * on the client right after `match_decode` in the various
+ * NET_MSG_LOBBY_* handlers. `tag` should be a stable short string like
+ * "begin_round" / "begin_countdown" / "end_round" / "rx" so the test
+ * runner can grep for a specific event. */
+void match_shot_log_phase(const char *tag, const MatchState *m);

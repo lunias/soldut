@@ -5,7 +5,7 @@
 #define SOLDUT_VERSION_MAJOR  0
 #define SOLDUT_VERSION_MINOR  0
 #define SOLDUT_VERSION_PATCH  7
-#define SOLDUT_VERSION_STRING "0.0.7-m5p08"
+#define SOLDUT_VERSION_STRING "0.0.7-m5p10"
 
 /* 'S0LD' — stamped on every connection handshake. Bump on netcode
  * changes. Lineage:
@@ -15,8 +15,14 @@
  *                              spawns the joining client straight into
  *                              the world).
  *   M5/P03 = 0x53304C47 ('S0LG')  (state_bits widened u8 → u16 for
- *                                  SNAP_STATE_IS_DUMMY). */
-#define SOLDUT_PROTOCOL_ID    ((uint32_t)0x53304C47u)   /* 'S0LG' */
+ *                                  SNAP_STATE_IS_DUMMY).
+ *   M5/P10-followup = 0x53304C48 ('S0LH')  (EntitySnapshot widened
+ *                                  by 1 byte — primary_id now on the
+ *                                  wire so a mid-round-join client
+ *                                  reads the right active_slot when
+ *                                  the host's mech is on its
+ *                                  secondary at first snapshot time). */
+#define SOLDUT_PROTOCOL_ID    ((uint32_t)0x53304C48u)   /* 'S0LH' */
 
 /* Default UDP port for the listen socket. 23073 is a Soldat homage
  * (the original used the same port). */

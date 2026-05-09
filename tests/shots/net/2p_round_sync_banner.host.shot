@@ -1,0 +1,29 @@
+# 2p_round_sync_banner — host. Drives a 2-round match and captures
+# screenshots during the inter-round COUNTDOWN so a reviewer can
+# eyeball the "Round 2 / 2 starts in N s" banner side-by-side with
+# the client's view.
+#
+# Pre-fix: client banner reads "Round 1 / 2 starts in 0s" (wrong).
+# Post-fix: client banner agrees with host on the round number; the
+# countdown_remaining still ticks server-side only (separate trade-off).
+
+window 1280 720
+out build/shots/net/2p_round_sync_banner_host
+network host 24114
+name HostA
+
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+spawn_at 2240 984
+peer_spawn 1 2540 984
+aim 2540 956
+
+# Same shape as 2p_round_loop: kill peer at t=160, vote at t=360,
+# fast-forward summary, COUNTDOWN at ~t=420..540.
+at 160 kill_peer 1
+at 360 vote_map 0
+at 380 shot t380_summary
+# COUNTDOWN window — capture "Round 2/2 starts in ..." here.
+at 460 shot t460_countdown
+at 500 shot t500_countdown
+at 600 shot t600_round2_active
+at 700 end

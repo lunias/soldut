@@ -10,6 +10,7 @@
 #include "maps.h"
 #include "match.h"
 #include "mech.h"
+#include "mech_sprites.h"
 #include "net.h"
 #include "pickup.h"
 #include "platform.h"
@@ -1113,6 +1114,13 @@ int main(int argc, char **argv) {
     if (!platform_init(&pcfg)) {
         game_shutdown(&game); log_shutdown(); return EXIT_FAILURE;
     }
+
+    /* M5 P10 — load per-chassis sprite atlases. Missing files log INFO
+     * and leave that chassis at atlas.id == 0, which `draw_mech` reads
+     * as "fall back to capsule rendering for that chassis". So a fresh
+     * checkout without sprite PNGs in `assets/sprites/` still renders
+     * cleanly. */
+    mech_sprites_load_all();
 
     LobbyUIState ui = (LobbyUIState){0};
     lobby_ui_init(&ui);

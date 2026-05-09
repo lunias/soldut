@@ -7,6 +7,16 @@
 #include <string.h>
 #include <strings.h>
 
+void match_shot_log_phase(const char *tag, const MatchState *m) {
+    if (!m) return;
+    SHOT_LOG("match_state: tag=%s phase=%d mode=%d map=%d rounds=%d/%d "
+             "summary=%.2f countdown=%.2f",
+             tag ? tag : "?", (int)m->phase, (int)m->mode, m->map_id,
+             m->rounds_played, m->rounds_per_match,
+             (double)m->summary_remaining,
+             (double)m->countdown_remaining);
+}
+
 void match_init(MatchState *m, MatchModeId mode, int score_limit,
                 float time_limit, bool friendly_fire)
 {
@@ -36,6 +46,7 @@ void match_begin_countdown(MatchState *m, float countdown_seconds) {
     LOG_I("match: countdown %.1fs (mode=%s, limit=%d, time=%.0fs)",
           (double)m->countdown_remaining, match_mode_name(m->mode),
           m->score_limit, (double)m->time_limit);
+    match_shot_log_phase("begin_countdown", m);
 }
 
 void match_begin_round(MatchState *m) {
@@ -47,6 +58,7 @@ void match_begin_round(MatchState *m) {
     for (int t = 0; t < MATCH_TEAM_COUNT; ++t) m->team_score[t] = 0;
     LOG_I("match: round begin (mode=%s, map=%d, limit=%d)",
           match_mode_name(m->mode), m->map_id, m->score_limit);
+    match_shot_log_phase("begin_round", m);
 }
 
 void match_end_round(MatchState *m, const LobbyState *lobby) {
@@ -86,6 +98,7 @@ void match_end_round(MatchState *m, const LobbyState *lobby) {
     LOG_I("match: round end (mvp_slot=%d, winner_team=%d, R%d/B%d)",
           m->mvp_slot, m->winner_team,
           m->team_score[MATCH_TEAM_RED], m->team_score[MATCH_TEAM_BLUE]);
+    match_shot_log_phase("end_round", m);
 }
 
 bool match_tick(MatchState *m, float dt) {
@@ -274,6 +287,19 @@ static float r_f32(const uint8_t **p) {
     *p += 4; float v; memcpy(&v, &u, 4); return v;
 }
 
+/* Quantize a float seconds value to u8 deciseconds (1/10 s units,
+ * max 25.5 s). Clamps to [0, 25.5]. Used for summary_remaining and
+ * countdown_remaining, both bounded in practice (countdowns are
+ * single-digit seconds, summaries 4–15 s). 1/10 s resolution reads
+ * fine for the "Next round in N s" banner which only displays
+ * integer seconds. */
+static uint8_t quant_secs_q(float s) {
+    if (s <= 0.0f) return 0;
+    float q = s * 10.0f + 0.5f;
+    if (q >= 255.0f) return 255;
+    return (uint8_t)q;
+}
+
 void match_encode(const MatchState *m, uint8_t *out) {
     uint8_t *p = out;
     w_u8 (&p, (uint8_t)m->mode);
@@ -281,10 +307,32 @@ void match_encode(const MatchState *m, uint8_t *out) {
     w_u8 (&p, (uint8_t)m->map_id);
     w_u8 (&p, m->friendly_fire ? 1u : 0u);
     w_u16(&p, (uint16_t)m->score_limit);
-    w_u16(&p, 0);
+    /* Pre-P10-followup this slot was a 2-byte reserved zero. We now
+     * pack `rounds_played` (u8) + `rounds_per_match` (u8) into it so
+     * the client's "Round X / Y starts in N s" banner agrees with the
+     * host's across inter-round COUNTDOWN transitions, and so a
+     * connecting client gets the host's authoritative
+     * `rounds_per_match` regardless of its local soldut.cfg.
+     * Wire size unchanged at MATCH_SNAPSHOT_WIRE_BYTES = 20. Values
+     * clamp to 255 — practical N is well under that. */
+    int rp = m->rounds_played    < 0 ? 0 : (m->rounds_played    > 255 ? 255 : m->rounds_played);
+    int rt = m->rounds_per_match < 0 ? 0 : (m->rounds_per_match > 255 ? 255 : m->rounds_per_match);
+    w_u8 (&p, (uint8_t)rp);
+    w_u8 (&p, (uint8_t)rt);
     w_f32(&p, m->time_remaining);
     for (int t = 0; t < MATCH_TEAM_COUNT; ++t)
         w_i16(&p, (int16_t)m->team_score[t]);
+    /* Trailing 2 bytes (offsets 18–19 in the 20-byte slot) carry the
+     * SUMMARY/COUNTDOWN remaining timers as u8 deciseconds. Pre-fix,
+     * these bytes were uninitialized stack memory the encoder never
+     * wrote (the buffer is sized to MATCH_SNAPSHOT_WIRE_BYTES = 20 but
+     * the encoder previously stopped at byte 18). The client's
+     * "Round X / Y starts in N s" banner stuck at "0s" because
+     * countdown_remaining is host-side only and was never on the wire;
+     * the SUMMARY "Next round in N s" diverged similarly when the host
+     * fast-forwarded after all peers voted. */
+    w_u8(&p, quant_secs_q(m->summary_remaining));
+    w_u8(&p, quant_secs_q(m->countdown_remaining));
 }
 
 void match_decode(MatchState *m, const uint8_t *in) {
@@ -294,8 +342,11 @@ void match_decode(MatchState *m, const uint8_t *in) {
     m->map_id           = (int)r_u8(&p);
     m->friendly_fire    = r_u8(&p) ? true : false;
     m->score_limit      = (int)r_u16(&p);
-    (void)r_u16(&p);
+    m->rounds_played    = (int)r_u8(&p);
+    m->rounds_per_match = (int)r_u8(&p);
     m->time_remaining   = r_f32(&p);
     for (int t = 0; t < MATCH_TEAM_COUNT; ++t)
         m->team_score[t] = (int)r_i16(&p);
+    m->summary_remaining   = (float)r_u8(&p) * 0.1f;
+    m->countdown_remaining = (float)r_u8(&p) * 0.1f;
 }

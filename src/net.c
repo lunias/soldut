@@ -1244,6 +1244,7 @@ static void client_handle_match_state(const uint8_t *body, int blen, Game *g) {
     if (blen < MATCH_SNAPSHOT_WIRE_BYTES) return;
     int prev_mode = g->mode;
     match_decode(&g->match, body);
+    match_shot_log_phase("rx_match_state", &g->match);
 
     /* When the host transitions back to LOBBY after a SUMMARY (the
      * begin_next_lobby path), MATCH_STATE arrives with phase=LOBBY.
@@ -1297,23 +1298,20 @@ static void client_handle_round_start(const uint8_t *body, int blen, Game *g) {
     g->mode = MODE_MATCH;
     LOG_I("client: ROUND_START map=%d mode=%s",
           g->match.map_id, match_mode_name(g->match.mode));
+    match_shot_log_phase("rx_round_start", &g->match);
 }
 
 static void client_handle_round_end(const uint8_t *body, int blen, Game *g) {
     if (blen < MATCH_SNAPSHOT_WIRE_BYTES) return;
     match_decode(&g->match, body);
-    /* match.summary_remaining isn't on the wire (it's a host-side
-     * countdown). Reset the client's local copy to summary_default
-     * so the "Next round in N s" overlay starts from the correct
-     * value and ticks down via the per-frame decay in the
-     * MODE_SUMMARY case of the run loop. Without this, the client
-     * inherits whatever value it had before (often 0), and the
-     * countdown reads "0s" the entire summary. */
-    g->match.summary_remaining = g->match.summary_default;
+    /* `summary_remaining` rides the wire as u8 deciseconds (post-P10
+     * follow-up); the per-frame decay in the MODE_SUMMARY run-loop
+     * case keeps the banner ticking smoothly between broadcasts. */
     g->mode = MODE_SUMMARY;
     LOG_I("client: ROUND_END mvp=%d winner_team=%d (summary %.1fs)",
           g->match.mvp_slot, g->match.winner_team,
           (double)g->match.summary_remaining);
+    match_shot_log_phase("rx_round_end", &g->match);
 }
 
 static void client_handle_countdown(const uint8_t *body, int blen, Game *g) {
