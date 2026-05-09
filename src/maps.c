@@ -5,6 +5,7 @@
 #include "level_io.h"
 #include "log.h"
 #include "map_cache.h"  /* P08 — file CRC + size probes for serve-info */
+#include "map_kit.h"   /* P13 — per-map parallax + tile-atlas bundle */
 #include "match.h"
 #include "mech.h"     /* ArmorId values for default-map pickup variants */
 #include "net.h"      /* MapDescriptor */
@@ -14,6 +15,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+
+/* Forward declaration — definition follows alongside the other
+ * serve-info helpers; map_build_from_path needs it earlier to derive a
+ * short_name for map_kit_load. */
+static void basename_no_ext(const char *path, char *out, size_t out_cap);
 
 #define TILE_PX 32
 
@@ -601,7 +607,13 @@ void map_build(MapId id, World *world, Arena *arena) {
     snprintf(path, sizeof path, "assets/maps/%s.lvl", def->short_name);
 
     LvlResult r = level_load(world, arena, path);
-    if (r == LVL_OK) return;
+    if (r == LVL_OK) {
+        /* P13 — load per-map parallax + tile atlas. Missing files are
+         * the expected case until P15/P16 ships authored art; the kit
+         * falls back gracefully and the renderer paints M4 flats. */
+        map_kit_load(def->short_name);
+        return;
+    }
 
     /* P08b — fallback handling diverges by registry slot.
      *   - Reserved indices (< MAP_BUILTIN_COUNT) have a code-built
@@ -624,10 +636,15 @@ void map_build(MapId id, World *world, Arena *arena) {
                   def->short_name, level_io_result_str(r));
         }
         build_fallback(id, &world->level, arena);
+        /* Code-built fallbacks still get the matching kit if PNGs exist
+         * — designers can author parallax for `foundry` even before the
+         * `.lvl` file does. */
+        map_kit_load(def->short_name);
     } else {
         LOG_E("map_build(%s): custom map's .lvl unavailable (%s) — falling back to Foundry",
               def->short_name, level_io_result_str(r));
         build_fallback(MAP_FOUNDRY, &world->level, arena);
+        map_kit_load("foundry");
     }
 }
 
@@ -636,11 +653,19 @@ bool map_build_from_path(World *world, Arena *arena, const char *path) {
     LvlResult r = level_load(world, arena, path);
     if (r == LVL_OK) {
         LOG_I("map_build_from_path: loaded %s", path);
+        /* P13 — derive short_name from the .lvl filename stem so an
+         * editor-test-play scratch like /tmp/foo.lvl probes
+         * assets/maps/foo/. Most test-play paths won't have matching
+         * art and the kit logs INFO + falls back. */
+        char short_name[24];
+        basename_no_ext(path, short_name, sizeof short_name);
+        map_kit_load(short_name);
         return true;
     }
     LOG_E("map_build_from_path(%s): level_load failed (%s) — falling back to Foundry",
           path, level_io_result_str(r));
     build_fallback(MAP_FOUNDRY, &world->level, arena);
+    map_kit_load("foundry");
     return false;
 }
 

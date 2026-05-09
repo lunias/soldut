@@ -13,3 +13,8 @@
  * the view. */
 void hud_draw(const World *w, int screen_w, int screen_h, Vec2 cursor_screen,
               Camera2D camera);
+
+/* P13 — drop the HUD atlas (`assets/ui/hud.png`). Lazy-loaded inside
+ * hud_draw on first call; calling unload then drawing again triggers a
+ * reload — that's the hot-reload (Task 9) entry point. Idempotent. */
+void hud_atlas_unload(void);

@@ -12,6 +12,8 @@
 #include "maps.h"
 #include "match.h"
 #include "mech.h"
+#include "hud.h"
+#include "map_kit.h"
 #include "mech_sprites.h"
 #include "net.h"
 #include "weapon_sprites.h"
@@ -1611,6 +1613,10 @@ int shotmode_run(const char *script_path) {
             LOG_E("shotmode: networked bootstrap failed");
             weapons_atlas_unload();
             mech_sprites_unload_all();
+            map_kit_unload();
+            renderer_decorations_unload();
+            hud_atlas_unload();
+            renderer_post_shutdown();
             platform_shutdown();
             game_shutdown(&game); free(s.events); free(s.lerps);
             net_shutdown();
@@ -2005,6 +2011,10 @@ int shotmode_run(const char *script_path) {
         decal_shutdown();
         weapons_atlas_unload();
         mech_sprites_unload_all();
+        map_kit_unload();
+        renderer_decorations_unload();
+        hud_atlas_unload();
+        renderer_post_shutdown();
         platform_shutdown();
         game_shutdown(&game);
         free(s.events);
@@ -2263,6 +2273,10 @@ int shotmode_run(const char *script_path) {
     decal_shutdown();
     weapons_atlas_unload();
     mech_sprites_unload_all();
+    map_kit_unload();
+    renderer_decorations_unload();
+    hud_atlas_unload();
+    renderer_post_shutdown();
     platform_shutdown();
     game_shutdown(&game);
     free(s.events);

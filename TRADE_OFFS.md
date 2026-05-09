@@ -13,7 +13,28 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-09** (post P12 — damage feedback layers shipped.
+Last updated: **2026-05-09** (post-P13 — rendering kit shipped: TTF
+fonts (Atkinson + VG5000 + Steps Mono) wired through `platform_init`
+with graceful default-font fallback; halftone post-process shader +
+backbuffer-sized RT; new `src/map_kit.{c,h}` for per-map parallax +
+tile atlas with no-asset fallbacks; 3-layer parallax draw; tile-sprite
+rendering with 2-tone fallback; free polygon refactor (`draw_polys` +
+`draw_polys_background`); decoration sprites with hash-based sub-rect
+lookup + 4-layer dispatch + ADDITIVE/FLIPPED_X flag handling; HUD
+atlas-aware bars + crosshair + kill-feed icon variants + `DrawTextEx`
+across the HUD; `src/decal.c` chunked into 1024×1024 lazy-allocated
+tiles when level >4096 px; new `src/hotreload.{c,h}` DEV_BUILD-gated
+mtime watcher with reloads for chassis / weapons / decorations / HUD /
+halftone shader. **Resolved**: `Default raylib font (no vendored TTF)`
+deleted. **New entries**: per-map kit textures + decoration sub-rect
+hash + decoration placeholder rectangles + halftone density hard-coded
++ HUD atlas not on disk + decal-layer chunk lazy-alloc soft cap +
+decal dirty-bit reserved + hot-reload registration is a fixed startup
+set. **Updated**: `Mech capsule renderer is the no-asset fallback`
+note unchanged — the capsule path stays the canonical render until
+P15/P16 ships authored chassis atlases.
+
+Previously: 2026-05-09 (post P12 — damage feedback layers shipped.
 New entries: "Whole-mech hit flash, not per-particle" (per-particle
 flash would need a separate hit-flash field per particle in the SoA
 pool; whole-mech is sufficient at v1), "Decal-overlay damage, not
@@ -484,6 +505,188 @@ the ban-by-name simplification.).
 
 ---
 
+## Rendering kit (P13)
+
+### Per-map kit textures aren't on disk yet (post-P13)
+
+- **What we did** — P13 ships the runtime: `src/map_kit.{c,h}` loads
+  `assets/maps/<short>/parallax_far.png` / `parallax_mid.png` /
+  `parallax_near.png` / `tiles.png` on every `map_build`. The
+  `MapKit` slots stay zeroed and the renderer falls back to the M4
+  flat-color paths (2-tone tile checkerboard, no parallax draw)
+  because none of those PNGs exist on disk yet — they ship at
+  P15/P16 with the ComfyUI parallax + per-kit tile-atlas pipelines.
+- **Why** — Same staging as P10/P11/P12: ship the runtime first as a
+  focused review surface, fill the assets later. Splitting means the
+  per-map asset pipeline can iterate against a working renderer
+  without engineering churn between bake passes.
+- **Revisit when** —
+  - P15/P16 ship `assets/maps/<short>/*.png` for at least one map.
+    At that point the kit-loaded paths fire and the M4 fallbacks
+    become dead code in real play. The fallback can stay as a
+    dev-machine convenience for builds without assets, which is a
+    tiny code surface.
+  - A custom map ships parallax PNGs that are taller / shorter than
+    the screen and the "anchor at top, tile horizontally only" v1
+    behavior reads wrong. At that point: add per-map vertical anchor
+    metadata to `LvlMeta` (or scale-to-fit-screen-height heuristic
+    in `draw_parallax_layer`).
+
+### Decoration sub-rect lookup is hash-based until a manifest ships (P13)
+
+- **What we did** — `LvlDeco.sprite_str_idx` records a STRT byte
+  offset like `"decals/pipe_horizontal.png"`. The runtime needs a
+  sub-rect inside the shared `assets/sprites/decorations.png` atlas
+  to draw it. There's no per-asset manifest at v1 — the renderer
+  hashes `sprite_str_idx` into a 16x16 grid of 64x64 cells across
+  the 1024×1024 atlas. Stable across runs (same offset → same
+  sub-rect) but completely ignores what the path actually says.
+- **Why** — Per-deco manifest authoring (a paired `.atlas` file the
+  ComfyUI pipeline emits) is a P15/P16 concern. Until the atlas
+  exists we want SOME visible feedback for `LvlDeco` records the
+  editor places — the hash gives stable placeholder sub-rects that
+  at least let designers verify "this deco is on this tile" during
+  test-play. When the atlas is missing entirely the renderer paints
+  a layer-tinted placeholder rectangle instead.
+- **Revisit when** —
+  - P15/P16 ships `assets/sprites/decorations.png` AND the paired
+    manifest. At that point the hash lookup gets replaced with a
+    real `(sprite_str_idx → Rectangle)` map (probably an `stb_ds`
+    string-keyed hash table loaded at startup), and the placeholder
+    fallback becomes dev-only.
+  - The hashed sub-rects collide visibly across maps (different
+    decos picking the same cell). 256 cells should be enough for
+    M5's deco budget but if a map ships >100 unique decos the
+    collision rate climbs.
+
+### Decoration atlas falls back to placeholder rectangles (P13)
+
+- **What we did** — When `assets/sprites/decorations.png` isn't on
+  disk, `draw_decorations` paints a 16x16-px (× scale) layer-tinted
+  rectangle at each deco position so designers see deco placements
+  in test-play. No "hide entirely" path.
+- **Why** — Designers using the editor's deco tool (P04) can
+  position decos before the atlas exists. Without the placeholder,
+  they'd have to mentally translate `LvlDeco` records to expected
+  positions — annoying. The placeholder is ~30 LOC including the
+  tint table.
+- **Revisit when** —
+  - Atlas ships at P15/P16. Placeholder path becomes dev-only or
+    gets dropped entirely.
+  - Designers report the placeholder rectangles are visually
+    confusing in shot tests (they look like UI bugs). Add a
+    `--no-deco-placeholder` flag or gate behind `--dev`.
+
+### Halftone density is hard-coded at 0.30 (P13)
+
+- **What we did** — `assets/shaders/halftone_post.fs.glsl` reads a
+  `halftone_density` uniform in [0, 1]; render.c sets it to
+  `HALFTONE_DENSITY = 0.30f` per the spec. There's no config knob.
+- **Why** — Per `documents/m5/11-art-direction.md` §"The halftone
+  post-process shader" the ship value is 0.30. Surfacing it as a
+  config slider is M6 polish — the runtime knob is plumbed through
+  `SetShaderValue` so the slider has a place to land.
+- **Revisit when** —
+  - Playtest reveals the density should differ per-map (e.g. the
+    "smelter floor" Foundry feels right at 0.30 but Aurora's open
+    sky reads better at 0.15). At that point: add `halftone_density`
+    to `LvlMeta` (single Q0.16 field) and read per-map.
+  - Accessibility complaint that the screen pattern triggers
+    motion sensitivity. Add a "Halftone: off / low / standard"
+    toggle to the in-game settings.
+
+### HUD atlas not on disk; bars + crosshair use primitive fallback (P13)
+
+- **What we did** — `assets/ui/hud.png` is referenced by the lazy-
+  loader in `hud.c` but doesn't ship at P13. `draw_bar_v2` paints
+  the M5 spec layout (1px outline + dark bg + fg fill + tick marks)
+  via primitives in BOTH the atlas and no-atlas paths since the
+  layout is identical. Crosshair has an atlas-aware sprite path
+  but falls back to the M4 line-cross with the new tint colors
+  when the atlas is missing. Weapon icons + flag pictograms fall
+  back to per-id color swatches + short text labels.
+- **Why** — Same staging as the chassis / weapon / parallax / tile
+  atlases: ship the runtime first, fill the assets at P15/P16 with
+  the ComfyUI HUD-icon pipeline. The fallback shapes (color swatch
+  per weapon, "HS"/"GIB"/"OK"/"RAG"/"SUI" for kill flags) keep the
+  HUD parseable during P13–P14 development.
+- **Revisit when** —
+  - P15/P16 ships `assets/ui/hud.png` with proper sub-rects per the
+    spec. The fallback paths become dev-only.
+  - The color-swatch-per-weapon-id read becomes confusing once we
+    have >14 weapons (planned M6 expansion). At that point: drop
+    the fallback and require the atlas.
+
+### Decal-layer chunks lazy-allocate; soft cap (P13)
+
+- **What we did** — Levels >4096 px in either dim partition the
+  splat layer into 1024×1024 chunks, lazy-allocated on first paint
+  per chunk. A typical match stains 3–8 chunks (the high-traffic
+  zones); peak memory stays around 12–32 MB. Worst case if every
+  chunk gets paint: 28 chunks × 4 MB = 112 MB on a Citadel-sized
+  map, past the 80 MB texture budget.
+- **Why** — Static-allocating every chunk would push budget past 80
+  MB on big maps even if only one chunk ever gets paint. Lazy
+  allocation buys the memory headroom for normal play; the worst
+  case requires every zone to receive blood, which doesn't happen
+  in a 5-minute round.
+- **Revisit when** —
+  - Playtest on a Citadel-equivalent map shows a long-duration
+    match (10+ min) consistently lighting up >20 chunks and
+    actually ships over 80 MB. At that point: add an LRU eviction
+    pass — chunks not painted in the last 60 s get
+    UnloadRenderTexture'd; their decals re-paint from a per-chunk
+    "splat archive" the next time the chunk re-allocates. ~80 LOC.
+  - We support map sizes >8192×8192 px (M6 stretch). At that point
+    the `DECAL_MAX_CHUNKS=64` cap bites and we have to either bump
+    or implement true streaming.
+
+### Decal-layer dirty-tracking reserved but not used (P13)
+
+- **What we did** — `DecalLayer.dirty[DECAL_MAX_CHUNKS]` is set when
+  a flush paints into a chunk, but `decal_draw_layer` walks every
+  allocated chunk every frame and emits one `DrawTextureRec` per
+  chunk regardless of dirtiness.
+- **Why** — Selective redraw of dirty chunks would save ~10
+  textured-quad draws per frame on a Citadel-sized match. Inside
+  budget; no perceived hitch. The dirty bit is plumbed for the M6
+  selective-redraw path.
+- **Revisit when** —
+  - Profiling shows the splat layer's draw-pass costing >0.5 ms.
+    Implement: track a render-side cached frame; only re-emit the
+    DrawTextureRec for chunks whose dirty bit was set this frame.
+  - We add the LRU eviction (above) — same dirty bit drives "this
+    chunk hasn't been painted in N seconds, free it".
+
+### Hot-reload registration is a fixed startup set (P13)
+
+- **What we did** — `src/hotreload.{c,h}` mtime-watches a fixed list
+  of paths registered at startup: chassis × 5 atlases, weapons
+  atlas, decorations atlas, HUD atlas, halftone shader. Per-map
+  kit textures (`assets/maps/<short>/parallax_*.png` + `tiles.png`)
+  reload via `map_kit_load` when the map changes, not via the
+  watcher; level files (`assets/maps/*.lvl`) and audio assets
+  (`assets/sfx/*.wav`, `assets/music/*.ogg`) are NOT registered.
+- **Why** — Per-file registration is simpler than directory-walk +
+  glob. The fixed startup set covers ~80% of "designer iterates on
+  art and wants to see the change live" — the chassis + weapons +
+  HUD atlases are the most-iterated-on assets at the M5 stage.
+  Per-map kit assets + `.lvl` + audio are deferred to M6 polish
+  when the editor + ComfyUI loop is the gating workflow.
+- **Revisit when** —
+  - A designer reports they're stuck recompiling / restarting to
+    see a parallax change. Switch to a directory-walk hotreload
+    mode (`hotreload_register_dir(path, glob_pattern, cb)`) that
+    rescans every poll cycle. ~50 LOC.
+  - Audio module ships at P14 — wire `.wav` / `.ogg` reloads into
+    its own callback (`UnloadSound` + `LoadSound` for each alias).
+  - Level reload mid-round becomes a real workflow (e.g. an editor
+    F5 round-trip without restarting the host process). At that
+    point: add a `LEVEL_RELOAD` host-only debug message that
+    triggers `level_load` + `decal_clear` + clients re-download.
+
+---
+
 ## World / level
 
 ### Hard-coded tutorial map
@@ -924,28 +1127,6 @@ the ban-by-name simplification.).
   the UI helpers consult when in shot mode, or (b) a small
   separate `tools/ui_shots.c` that opens raylib at multiple
   resolutions and renders each screen with hard-coded fake state.
-
-### Default raylib font (no vendored TTF)
-
-- **What we did** — Use `GetFontDefault()` (raylib's 10×10
-  pixel-font baked into the library) for all UI text, with
-  `SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR)` to
-  smooth the upscale and a per-screen UI scale factor (1× at
-  720p, snapping in 0.25 increments up to 3× at 4K). Combined
-  with `FLAG_MSAA_4X_HINT` for line/shape antialiasing.
-- **Why** — A real TTF would be sharper at high DPI but adds an
-  asset to vendor (font files are >100 KB; the public-domain
-  ones we'd want — Inter, Atkinson Hyperlegible, JetBrains
-  Mono — are ~200-400 KB each). The bilinear-filtered default
-  font + UI scale is "good enough" for M4's purpose and keeps
-  the binary at <3 MB. We can swap to a real TTF in M5 alongside
-  the art pass if HUD/lobby text feels mushy.
-- **Revisit when** — User-facing complaints about fuzzy text at
-  4K, OR a localization push needs glyphs the bitmap doesn't
-  cover (any non-Latin script). At that point: vendor a single
-  TTF in `assets/fonts/`, load with `LoadFontEx` at, say, 32 px
-  base size with codepoint set sized for the language, route all
-  `ui_draw_text` calls through it.
 
 ### `tick_hz` config field accepted but ignored
 

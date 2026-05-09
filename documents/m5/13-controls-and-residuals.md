@@ -158,7 +158,7 @@ A keybinds config file (`soldut_controls.cfg`) is M6 polish; M5 ships hard-coded
 
 | Trade-off entry | Resolved by | Notes |
 |---|---|---|
-| Mechs rendered as raw capsules | [08-rendering.md](08-rendering.md), [12-rigging-and-damage.md](12-rigging-and-damage.md) | Sprite atlas runtime lands at P10; capsule fallback intentionally kept until P12 (damage feedback) makes the sprite path canonical. Entry deletes when P12 ships, not at P10. |
+| Mechs rendered as raw capsules | [08-rendering.md](08-rendering.md), [12-rigging-and-damage.md](12-rigging-and-damage.md) | Sprite atlas runtime lands at P10; capsule fallback intentionally kept until P12 (damage feedback) makes the sprite path canonical. **P12 shipped damage feedback in BOTH render paths (hit-flash + decals + spray + emitter + smoke), but no `assets/sprites/<chassis>.png` files exist on disk until P15/P16 — so capsule fallback is what fires in real play through P14 development. Per the post-P12 audit in `TRADE_OFFS.md`, the entry-deletion gate moved from P12 to P15/P16 (asset generation).** |
 | Only a tile grid; no per-tile polygons | [03-collision-polygons.md](03-collision-polygons.md) | Free-poly broadphase + slope physics. |
 | Hard-coded tutorial map | [01-lvl-format.md](01-lvl-format.md), [07-maps.md](07-maps.md) | `.lvl` loader + 8 authored maps. |
 | Grappling Hook is a stub | [05-grapple.md](05-grapple.md) | Full anchor + retract + release. |
@@ -298,7 +298,7 @@ For honesty: M5 lands several deliberate compromises that should go straight int
 - **Decal-overlay damage, not sprite-swap damage states** (per [12-rigging-and-damage.md](12-rigging-and-damage.md)).
 - **Symmetric mech parts to avoid flip-past-180° artifact** (per [12-rigging-and-damage.md](12-rigging-and-damage.md)).
 - **No re-sort by Y mid-tumble** (per [12-rigging-and-damage.md](12-rigging-and-damage.md)).
-- **One-handed weapons leave L_HAND dangling**; only two-handed weapons drive the foregrip pose (per [12-rigging-and-damage.md](12-rigging-and-damage.md)).
+- **L_HAND dangles for both one-handed AND two-handed weapons** (per [12-rigging-and-damage.md](12-rigging-and-damage.md) and `TRADE_OFFS.md` "Left hand has no pose target"). The two-handed foregrip-pose driver was attempted at P11 in three variants (strength-0.6 L_HAND yank, clamped, snap-pose-IK strength-1.0) and reverted post-ship — all three drifted the body in the aim direction during steady-state hold because the L_ARM rest-state decouples from L_SHOULDER during the constraint-solve iterations as PELVIS shifts under R_ARM aim drive. Real fix is a 2-bone IK constraint INSIDE the solver loop; deferred to M6. `WeaponSpriteDef.pivot_foregrip` stays on the table so the future IK consumer can plug in without sprite-def churn.
 
 When M5 ships, the planner walks this list, opens a TRADE_OFFS entry per item still unresolved, and *deletes* every "resolved" entry from §"Resolved by M5".
 

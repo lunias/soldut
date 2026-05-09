@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "platform.h"
 
 #include "../third_party/raylib/src/raylib.h"
 
@@ -31,10 +32,13 @@ void ui_draw_text(const UIContext *u, const char *text, int x, int y,
     if (!text || !*text) return;
     int sz = (int)((float)base_size * u->scale + 0.5f);
     if (sz < 8) sz = 8;
-    /* DrawTextEx with the default font + a non-1.0 spacing gives us
-     * raylib's nice GLSL-shader alpha blend, plus the bilinear filter
-     * we set on the default font texture in platform.c. */
-    DrawTextEx(GetFontDefault(), text, (Vector2){ (float)x, (float)y },
+    /* P13 — Atkinson Hyperlegible body font when present; raylib default
+     * (bilinear-filtered) when not. ui_font_for handles the fallback so
+     * a fresh checkout still draws text. The 1/10 letter spacing is
+     * what we tuned against the default font; the TTF is wider so we
+     * keep the same coefficient — measure_text below stays consistent. */
+    DrawTextEx(ui_font_for(UI_FONT_BODY), text,
+               (Vector2){ (float)x, (float)y },
                (float)sz, (float)sz / 10.0f, col);
 }
 
@@ -42,7 +46,7 @@ int ui_measure(const UIContext *u, const char *text, int base_size) {
     if (!text || !*text) return 0;
     int sz = (int)((float)base_size * u->scale + 0.5f);
     if (sz < 8) sz = 8;
-    Vector2 v = MeasureTextEx(GetFontDefault(), text, (float)sz,
+    Vector2 v = MeasureTextEx(ui_font_for(UI_FONT_BODY), text, (float)sz,
                               (float)sz / 10.0f);
     return (int)(v.x + 0.5f);
 }

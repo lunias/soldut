@@ -5,7 +5,7 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-09** (post-P12 — damage feedback layers: hit-flash white-additive tint on every damage event, persistent damage decals stored in sprite-local i8 coords per visible part, heavy 64-particle blood spray + new FX_STUMP pinned emitter on dismemberment that tracks the parent particle for ~1.5 s, fx_spawn_smoke from limbs at <30% HP with squared-deficit RNG roll. P11 — per-weapon visible art runtime + two-handed foregrip pose; M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver, P02 — polygon collision + slope physics, P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote interp + `is_dummy` bit, P04 — standalone level editor at `tools/editor/` + `--test-play` flag, P05 — pickup runtime + powerups + Engineer deployable + Burst SMG cadence + practice dummy, P06 — grappling hook with `CSTR_FIXED_ANCHOR` + contracting distance constraint + state-bit-gated wire suffix, P07 — CTF mode with flag entities + capture rule + carrier penalties + 26-byte `NET_MSG_FLAG_STATE` event protocol; post-P07 — lobby UX pass, auto-balance ordering fix, editor → game CTF round-trip via F5, snapshot pos quant 8× → 4× to fit Crossfire's 4480 px width; P08 — map sharing across the network: `MapDescriptor` in `INITIAL_STATE`, `NET_MSG_MAP_REQUEST`/`MAP_CHUNK`/`MAP_READY`/`MAP_DESCRIPTOR`, `src/map_cache.{c,h}` + `src/map_download.{c,h}`, content-addressed cache at `<XDG/AppData>/soldut/maps/<crc>.lvl` with 64 MB LRU, lobby UI download progress, host gate on per-peer MAP_READY; P08b — runtime `MapRegistry` with up-to-32 entries; scans `assets/maps/*.lvl` at `game_init` so user-authored maps surface in the host's lobby cycle without overwriting a builtin slot; P09 — `BTN_FIRE_SECONDARY` (RMB) one-shot of inactive slot, host kick/ban modal in the lobby player list, `bans.txt` persistence, three-card map vote picker on the summary screen, title-screen Controls modal listing keybinds; P10 — per-chassis bone-length distinctness pass + per-chassis posture quirks in `build_pose` + new `src/mech_sprites.{c,h}` module + sprite-or-capsule dispatch in `draw_mech` (sprite path renders 17-entry `g_render_parts` z-order; capsule fallback when `assets/sprites/<chassis>.png` is missing) + `extra_chassis` shotmode directive + `tests/shots/m5_chassis_distinctness.shot`).
+Last updated: **2026-05-09** (post-P13 — rendering kit: TTF fonts (Atkinson + VG5000 + Steps Mono) loaded in `platform_init` with graceful `GetFontDefault()` fallback; halftone post-process shader (`assets/shaders/halftone_post.fs.glsl`, Bayer 8x8 + 30% screen) wired through a new backbuffer-sized `RenderTexture2D` post target; new `src/map_kit.{c,h}` module owns per-map parallax/tile atlas bundle (`assets/maps/<short>/parallax_*.png` + `tiles.png`) loaded on `map_build` with no-asset fallbacks; 3-layer parallax draw (far/mid before world, near after); free polygon rendering refactored out of the P02 stopgap into `draw_polys` + `draw_polys_background` with M5 spec colors; decoration sprites via lazy-loaded shared atlas + 4-layer dispatch + ADDITIVE/FLIPPED_X flags; HUD final art with atlas-aware bars (1-px outline + dark bg + tick marks every 10%), weapon-icon kill-feed entries, bink-tinted crosshair; `src/decal.c` chunked into 1024×1024 tiles when level >4096 px with lazy-allocated chunks (Citadel-sized maps stay inside 80 MB texture budget); new `src/hotreload.{c,h}` mtime watcher (DEV_BUILD-gated, 250 ms poll) registers chassis/weapons/decorations/HUD/shader callbacks at startup. P12 — damage feedback layers: hit-flash white-additive tint on every damage event, persistent damage decals stored in sprite-local i8 coords per visible part, heavy 64-particle blood spray + new FX_STUMP pinned emitter on dismemberment that tracks the parent particle for ~1.5 s, fx_spawn_smoke from limbs at <30% HP with squared-deficit RNG roll. P11 — per-weapon visible art runtime + two-handed foregrip pose; M4 lobby & matches in; M5 P01 — `.lvl` format + loader/saver, P02 — polygon collision + slope physics, P03 — render-side accumulator + interp alpha + reconcile smoothing + two-snapshot remote interp + `is_dummy` bit, P04 — standalone level editor at `tools/editor/` + `--test-play` flag, P05 — pickup runtime + powerups + Engineer deployable + Burst SMG cadence + practice dummy, P06 — grappling hook with `CSTR_FIXED_ANCHOR` + contracting distance constraint + state-bit-gated wire suffix, P07 — CTF mode with flag entities + capture rule + carrier penalties + 26-byte `NET_MSG_FLAG_STATE` event protocol; post-P07 — lobby UX pass, auto-balance ordering fix, editor → game CTF round-trip via F5, snapshot pos quant 8× → 4× to fit Crossfire's 4480 px width; P08 — map sharing across the network: `MapDescriptor` in `INITIAL_STATE`, `NET_MSG_MAP_REQUEST`/`MAP_CHUNK`/`MAP_READY`/`MAP_DESCRIPTOR`, `src/map_cache.{c,h}` + `src/map_download.{c,h}`, content-addressed cache at `<XDG/AppData>/soldut/maps/<crc>.lvl` with 64 MB LRU, lobby UI download progress, host gate on per-peer MAP_READY; P08b — runtime `MapRegistry` with up-to-32 entries; scans `assets/maps/*.lvl` at `game_init` so user-authored maps surface in the host's lobby cycle without overwriting a builtin slot; P09 — `BTN_FIRE_SECONDARY` (RMB) one-shot of inactive slot, host kick/ban modal in the lobby player list, `bans.txt` persistence, three-card map vote picker on the summary screen, title-screen Controls modal listing keybinds; P10 — per-chassis bone-length distinctness pass + per-chassis posture quirks in `build_pose` + new `src/mech_sprites.{c,h}` module + sprite-or-capsule dispatch in `draw_mech` (sprite path renders 17-entry `g_render_parts` z-order; capsule fallback when `assets/sprites/<chassis>.png` is missing) + `extra_chassis` shotmode directive + `tests/shots/m5_chassis_distinctness.shot`).
 
 ---
 
@@ -1898,10 +1898,121 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
     `tests/net/run.sh`, `tests/shots/net/run.sh 2p_combat`) pass
     post-P12.
 
+- **P13 — Rendering kit (parallax + tile sprites + free polygons + decoration
+  sprites + HUD final art + TTF fonts + halftone post + decal chunking +
+  hot reload)** (2026-05-09).
+  - **TTF fonts**: three faces vendored under `assets/fonts/` —
+    Atkinson-Hyperlegible-Regular.ttf (~54 KB, OFL), VG5000-Regular.otf
+    (~75 KB, OFL, Velvetyne), Steps-Mono-Thin.otf (~22 KB, OFL,
+    raphaelbastide). Loaded via `LoadFontEx` in `platform_init` after
+    `InitWindow`; bilinear-filtered. New extern globals
+    `g_ui_font_body / _display / _mono` + `UIFontKind` enum + helper
+    `ui_font_for(kind)` in `src/platform.{c,h}` with graceful fallback
+    to `GetFontDefault()` when a face fails to load. `src/ui.c` and
+    `src/hud.c` migrated from `GetFontDefault()` to `ui_font_for`. The
+    M4 `Default raylib font (no vendored TTF)` trade-off is gone.
+  - **Halftone post-process**: new `assets/shaders/halftone_post.fs.glsl`
+    (GLSL 330, ~50 LOC). Bayer 8x8 ordered-dither + 60% darkening for
+    pixels under threshold. Wired into `src/render.c` via a new
+    backbuffer-sized `RenderTexture2D g_post_target` + `Shader
+    g_halftone_post`. World draws to the RT; backbuffer blit applies
+    the shader; HUD draws on top with no shader. Per-frame uniforms
+    `resolution` + `halftone_density` (default 0.30). RT recreated on
+    backbuffer-size change; shader missing → graceful fallback to the
+    M4 direct-to-backbuffer path. `renderer_post_shutdown` wired into
+    every shutdown site (shotmode + main).
+  - **Per-map kit (parallax + tile atlas)**: new `src/map_kit.{c,h}`
+    module with `g_map_kit` global holding 4 textures
+    (`parallax_far/mid/near` + `tiles`) loaded from
+    `assets/maps/<short_name>/`. `map_kit_load(short_name)` is called
+    from `map_build` / `map_build_from_path` after the level loads
+    (basename-stem derivation for absolute paths). Three render-side
+    additions in `src/render.c`: `draw_parallax_far_mid` (screen-
+    space, before BeginMode2D, ratios 0.10/0.40), `draw_parallax_near`
+    (screen-space, after BeginMode2D, ratio 0.95), and `draw_level_tiles`
+    (when atlas is loaded, walks `LvlTile.id` against an 8x8 grid of
+    32x32 sub-rects; falls back to M4 2-tone checkerboard otherwise).
+    Wraparound math uses fmodf modulo `tile_w` so each layer tiles
+    horizontally.
+  - **Free polygons**: extracted from the P02 stopgap into
+    `draw_polys` with M5 spec colors (SOLID 32,38,46 / ICE 180,220,240
+    / DEADLY 80,200,80 / ONE_WAY 80,80,100). New `draw_polys_background`
+    paints BACKGROUND-kind polys after mechs at alpha 0.6 as
+    foreground silhouettes (window grilles, distant railings).
+  - **Decoration sprites**: `LvlDeco` records now render via new
+    `draw_decorations(L, layer)` in `src/render.c`. Lazy-loaded shared
+    atlas at `assets/sprites/decorations.png`; absent file →
+    layer-tinted placeholder rectangles so designers see deco
+    placements during test-play. Sub-rect lookup is `sprite_str_idx`
+    hashed into a 16x16 grid of 64x64 cells (placeholder until P15/P16
+    ships a real manifest). Layer dispatch inside `draw_world_pass`:
+    layers 0+1 before tiles, layer 2 after tiles before mechs, layer 3
+    after mechs/projectiles/fx with BLEND_ALPHA. ADDITIVE flag wraps
+    individual decos in `BeginBlendMode(BLEND_ADDITIVE)`. FLIPPED_X
+    flag inverts the source-rect width.
+  - **HUD final art**: lazy-loaded `g_hud_atlas` from
+    `assets/ui/hud.png` (256x256). New atlas-aware draws:
+    `draw_bar_v2` (1px outline + dark bg + fg fill + 1-px tick marks
+    every 10% — works in both atlas + no-atlas paths since the layout
+    is identical), `hud_draw_weapon_icon` (atlas sub-rect or per-id
+    color swatch fallback), `hud_draw_killflag_icon` (atlas sub-rect
+    or short-text label fallback). Crosshair tints by bink (red >0.5,
+    pale-cyan otherwise). Kill-feed entries replaced text-only weapon
+    name with weapon-icon + name + flag-icon variants. All HUD text
+    migrated to `DrawTextEx` with `ui_font_for(UI_FONT_BODY/_MONO/_DISPLAY)`.
+  - **Decal layer chunking**: `src/decal.c` refactored. Levels ≤4096
+    px in both dims keep the single-RT path (M4 behavior, no overhead
+    change). Levels >4096 px partition into 1024×1024 chunks
+    (DECAL_MAX_CHUNKS=64 cap, covers Citadel 6400×3200 = 7×4 = 28
+    chunks). Chunks are lazy-allocated on first paint via
+    `ensure_chunk_alloc(cx, cy)`; untouched zones cost zero memory.
+    `decal_paint_blood` queues into a pending list (unchanged shape);
+    `decal_flush_pending` walks chunks, finds overlapping pending
+    splats, batches paints inside one BeginTextureMode pair per dirty
+    chunk. `decal_draw_layer` walks allocated chunks and emits one
+    DrawTextureRec each. Soft cap: a typical match stains 3–8 chunks
+    = 12–32 MB peak (inside 80 MB texture budget). New
+    `dirty[DECAL_MAX_CHUNKS]` array reserved for an M6 selective-
+    redraw path.
+  - **Hot reload**: new `src/hotreload.{c,h}` module. mtime watcher
+    polling every 250 ms; per-file callbacks fire on change after the
+    first sighting. DEV_BUILD-gated — release builds compile every
+    public function as a no-op. Makefile DBG_CFLAGS adds `-DDEV_BUILD`.
+    main.c registers callbacks at startup for chassis × 5 atlases,
+    weapons.png, decorations.png, hud.png, and halftone_post.fs.glsl.
+    Per-map kit textures (parallax / tiles) reload on every
+    `map_kit_load`, not via the watcher; the watcher's per-file
+    registration set is fixed at startup. Hot-reload poll runs once
+    per frame at the top of the main loop; release-build cost is one
+    function-call no-op per frame.
+  - **Cleanup**: shutdown sequence in shotmode.c + (implicitly main.c
+    process exit) walks weapons_atlas_unload + mech_sprites_unload_all
+    + map_kit_unload + renderer_decorations_unload + hud_atlas_unload
+    + renderer_post_shutdown + platform_shutdown so GL textures /
+    shaders / RTs are freed while the GL context is still live.
+  - **Shipped fallback behavior** (no assets present): TTF fonts work
+    (the three OFL faces ship in this commit); chassis sprites fall
+    back to capsules (M4 path); weapons fall back to per-weapon-sized
+    lines (P11 fallback); tile atlas falls back to 2-tone
+    checkerboard; parallax + decorations are no-op when missing; HUD
+    bars + crosshair use primitive fallback with the new tick-mark
+    style; halftone shader applies (file is shipped). The asset
+    pipeline at P15/P16 fills in the missing PNGs without further
+    runtime work.
+  - **Verification**: `make` clean. `make test-physics` ok.
+    `make test-level-io` 25/25. `make test-pickups` 43/43.
+    `make test-snapshot` ok. `make test-spawn` ok. `make test-ctf`
+    52/52. `make test-map-chunks` 21/21. `make test-map-registry`
+    ok. `tests/net/run.sh` 13/13. `make editor` clean.
+    `./soldut --shot tests/shots/walk_right.shot` produces 6 PNGs;
+    visual inspection shows: TTF fonts crisp, halftone screen
+    visible in dark areas, new tick-mark HP/armor bars, weapon
+    color-swatch icons in the HUD, no-atlas capsule mech body
+    rendering, all working.
+
 ### Pending
 
-- **P13–P14** — Parallax / HUD final art / TTF font / halftone post /
-  decal chunking, audio module.
+- **P14** — Audio module (`src/audio.{c,h}`).
 - **P15–P18** — ComfyUI asset generation + the 8 maps + bake test.
 
 ## Headless test

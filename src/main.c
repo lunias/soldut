@@ -2,11 +2,14 @@
 #include "ctf.h"
 #include "decal.h"
 #include "game.h"
+#include "hotreload.h"
+#include "hud.h"
 #include "level.h"
 #include "level_io.h"
 #include "lobby.h"
 #include "lobby_ui.h"
 #include "log.h"
+#include "map_kit.h"
 #include "maps.h"
 #include "match.h"
 #include "mech.h"
@@ -982,6 +985,44 @@ static void draw_summary_overlay(void *user, int sw, int sh) {
     summary_screen_run(ctx->ui, ctx->game, sw, sh);
 }
 
+/* ---- M5 P13 — hot-reload callbacks ------------------------------- */
+/* Each callback drops the previous asset and triggers a reload. For
+ * eagerly-loaded atlases we fire load_all() right away; for lazily-
+ * loaded atlases (HUD / decorations / halftone) we just unload and
+ * the next render call re-allocates from disk. DEV_BUILD-only. */
+
+static void reload_chassis_atlases(const char *path) {
+    (void)path;
+    LOG_I("hotreload: reloading chassis atlases");
+    mech_sprites_unload_all();
+    mech_sprites_load_all();
+}
+
+static void reload_weapons_atlas(const char *path) {
+    (void)path;
+    LOG_I("hotreload: reloading weapons atlas");
+    weapons_atlas_unload();
+    weapons_atlas_load();
+}
+
+static void reload_decorations_atlas(const char *path) {
+    (void)path;
+    LOG_I("hotreload: dropping decorations atlas (lazy reload on next draw)");
+    renderer_decorations_unload();
+}
+
+static void reload_hud_atlas(const char *path) {
+    (void)path;
+    LOG_I("hotreload: dropping HUD atlas (lazy reload on next hud_draw)");
+    hud_atlas_unload();
+}
+
+static void reload_halftone_shader(const char *path) {
+    (void)path;
+    LOG_I("hotreload: dropping halftone shader (lazy reload on next frame)");
+    renderer_post_shutdown();
+}
+
 /* ---- Main --------------------------------------------------------- */
 
 int main(int argc, char **argv) {
@@ -1128,6 +1169,22 @@ int main(int argc, char **argv) {
      * per-weapon-sized line in draw_held_weapon. */
     weapons_atlas_load();
 
+    /* M5 P13 — register a small set of assets with the hot-reload
+     * watcher. DEV_BUILD-gated; release builds make every public
+     * hotreload_* a no-op. Per-map kit textures (parallax / tiles)
+     * reload via map_kit_load when the map changes; covering them
+     * dynamically as the kit changes is M6 polish. */
+    hotreload_register("assets/sprites/trooper.png",  reload_chassis_atlases);
+    hotreload_register("assets/sprites/scout.png",    reload_chassis_atlases);
+    hotreload_register("assets/sprites/heavy.png",    reload_chassis_atlases);
+    hotreload_register("assets/sprites/sniper.png",   reload_chassis_atlases);
+    hotreload_register("assets/sprites/engineer.png", reload_chassis_atlases);
+    hotreload_register("assets/sprites/weapons.png",  reload_weapons_atlas);
+    hotreload_register("assets/sprites/decorations.png", reload_decorations_atlas);
+    hotreload_register("assets/ui/hud.png",           reload_hud_atlas);
+    hotreload_register("assets/shaders/halftone_post.fs.glsl",
+                       reload_halftone_shader);
+
     LobbyUIState ui = (LobbyUIState){0};
     lobby_ui_init(&ui);
     if (args.name[0]) snprintf(ui.player_name, sizeof ui.player_name, "%s", args.name);
@@ -1169,6 +1226,11 @@ int main(int argc, char **argv) {
         last = now;
         if (dt > MAX_FRAME_DT) dt = MAX_FRAME_DT;
         accum += dt;
+
+        /* M5 P13 — file-watcher poll. Internally rate-limited to
+         * 250 ms so this is a single timestamp comparison most frames.
+         * No-op outside DEV_BUILD. */
+        hotreload_poll();
 
         platform_begin_frame(&pf);
 

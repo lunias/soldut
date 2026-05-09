@@ -3,6 +3,8 @@
 #include "decal.h"
 #include "hud.h"
 #include "level.h"
+#include "log.h"
+#include "map_kit.h"
 #include "match.h"
 #include "mech.h"
 #include "mech_sprites.h"
@@ -13,6 +15,95 @@
 #include "weapons.h"
 
 #include <math.h>
+
+/* M5 P13 — halftone post-process render target + shader.
+ *
+ * Render flow when both are loaded:
+ *   1. World draw -> RenderTexture2D `g_post_target`
+ *   2. Backbuffer: blit `g_post_target` through `g_halftone_post` shader
+ *   3. HUD on top, no shader
+ *
+ * Both fall back gracefully:
+ *   - Missing shader file → g_halftone_loaded stays false, world draws
+ *     directly to the backbuffer (M4 shape).
+ *   - LoadShader returning the default shader (compile failure) → the
+ *     uniform locations come back -1 and we treat it as "not loaded".
+ *
+ * The RT is recreated on backbuffer-size change (window resize); locations
+ * are looked up once at first use. */
+#define HALFTONE_DENSITY 0.30f
+
+static Shader          g_halftone_post = {0};
+static int             g_halftone_loc_resolution = -1;
+static int             g_halftone_loc_density    = -1;
+static bool            g_halftone_loaded         = false;
+static bool            g_halftone_load_attempted = false;
+
+static RenderTexture2D g_post_target = {0};
+static int             g_post_target_w = 0;
+static int             g_post_target_h = 0;
+
+static void halftone_load_once(void) {
+    if (g_halftone_load_attempted) return;
+    g_halftone_load_attempted = true;
+    const char *path = "assets/shaders/halftone_post.fs.glsl";
+    if (!FileExists(path)) {
+        LOG_I("halftone: shader file missing (%s); post-process disabled", path);
+        return;
+    }
+    Shader s = LoadShader(NULL, path);
+    /* raylib falls back to its default shader on compile-failure, but
+     * that shader doesn't carry our uniforms — GetShaderLocation returns
+     * -1 if a name isn't present. Treat either condition as "not loaded"
+     * so we don't burn cycles drawing through a no-op pass. */
+    int loc_res = GetShaderLocation(s, "resolution");
+    int loc_den = GetShaderLocation(s, "halftone_density");
+    if (loc_res < 0 && loc_den < 0) {
+        LOG_W("halftone: shader at %s loaded but uniforms missing; disabling", path);
+        UnloadShader(s);
+        return;
+    }
+    g_halftone_post           = s;
+    g_halftone_loc_resolution = loc_res;
+    g_halftone_loc_density    = loc_den;
+    g_halftone_loaded         = true;
+    LOG_I("halftone: shader loaded; density=%.2f", (double)HALFTONE_DENSITY);
+}
+
+static bool ensure_post_target(int sw, int sh) {
+    halftone_load_once();
+    if (!g_halftone_loaded) return false;
+    if (sw <= 0 || sh <= 0) return false;
+    if (g_post_target.id != 0 && g_post_target_w == sw && g_post_target_h == sh) {
+        return true;
+    }
+    if (g_post_target.id != 0) UnloadRenderTexture(g_post_target);
+    g_post_target = LoadRenderTexture(sw, sh);
+    if (g_post_target.id == 0) {
+        LOG_E("halftone: LoadRenderTexture(%d,%d) failed; disabling post", sw, sh);
+        g_halftone_loaded = false;
+        return false;
+    }
+    /* Bilinear here would mush the per-pixel halftone screen — keep
+     * point-sample so the dither reads sharp. */
+    SetTextureFilter(g_post_target.texture, TEXTURE_FILTER_POINT);
+    g_post_target_w = sw;
+    g_post_target_h = sh;
+    return true;
+}
+
+void renderer_post_shutdown(void) {
+    if (g_post_target.id != 0) {
+        UnloadRenderTexture(g_post_target);
+        g_post_target = (RenderTexture2D){0};
+    }
+    if (g_halftone_loaded) {
+        UnloadShader(g_halftone_post);
+        g_halftone_post = (Shader){0};
+        g_halftone_loaded = false;
+    }
+    g_halftone_load_attempted = false;
+}
 
 void renderer_init(Renderer *r, int sw, int sh, Vec2 follow) {
     r->camera.offset   = (Vector2){ sw * 0.5f, sh * 0.5f };
@@ -78,8 +169,34 @@ static void update_camera(Renderer *r, World *w, int sw, int sh, float dt) {
 
 /* ---- Drawing helpers ---------------------------------------------- */
 
-static void draw_level(const Level *L) {
+/* P13 — Tile rendering with optional kit atlas. When g_map_kit.tiles is
+ * loaded, each solid tile draws a 32x32 sub-rect from the 8x8-grid atlas
+ * indexed by `LvlTile.id`. When not, falls back to the M4 flat 2-tone
+ * checkerboard so a fresh checkout without per-map art still reads. */
+static void draw_level_tiles(const Level *L) {
     const float ts = (float)L->tile_size;
+    Texture2D atlas = g_map_kit.tiles;
+    bool has_atlas = (atlas.id != 0);
+
+    if (has_atlas) {
+        const float src_tile_px = 32.0f;
+        for (int y = 0; y < L->height; ++y) {
+            for (int x = 0; x < L->width; ++x) {
+                const LvlTile *t = &L->tiles[y * L->width + x];
+                if (!(t->flags & TILE_F_SOLID)) continue;
+                int aid = (int)t->id;
+                int ax  = (aid % 8) * (int)src_tile_px;
+                int ay  = (aid / 8) * (int)src_tile_px;
+                DrawTexturePro(atlas,
+                    (Rectangle){ (float)ax, (float)ay, src_tile_px, src_tile_px },
+                    (Rectangle){ (float)x * ts, (float)y * ts, ts, ts },
+                    (Vector2){0, 0}, 0.0f, WHITE);
+            }
+        }
+        return;
+    }
+
+    /* Fallback: M4 2-tone checkerboard with a 1-px edge. */
     Color floor_a = (Color){ 32,  38,  46, 255 };
     Color floor_b = (Color){ 24,  28,  34, 255 };
     Color edge    = (Color){ 80,  90, 110, 255 };
@@ -93,25 +210,27 @@ static void draw_level(const Level *L) {
                                (int)ts, (int)ts, edge);
         }
     }
+}
 
-    /* P02: temporary polygon renderer. Draws each free polygon as a
-     * filled triangle plus an edge outline so the slope test bed (in
-     * level_build_tutorial) shows up in shot tests. The proper art
-     * pass (sprite atlas + halftone) lands at P13. */
-    Color poly_solid = (Color){ 50, 70, 100, 255 };
+/* P13 — Free polygon rendering, refactored out of the P02 stopgap.
+ * Color-by-kind per `documents/m5/08-rendering.md` §"Free polygons".
+ * BACKGROUND polygons are skipped here; `draw_polys_background` paints
+ * them in a separate pass after the mechs so they sit visually in front
+ * of the playfield (alpha-blended foreground silhouettes). */
+static void draw_polys(const Level *L) {
+    Color poly_solid = (Color){ 32,  38,  46, 255 };
     Color poly_ice   = (Color){180, 220, 240, 255 };
-    Color poly_dead  = (Color){140,  40,  40, 255 };
-    Color poly_one   = (Color){ 90, 110,  60, 255 };
-    Color poly_back  = (Color){ 28,  32,  40, 200 };
+    Color poly_dead  = (Color){ 80, 200,  80, 255 };
+    Color poly_one   = (Color){ 80,  80, 100, 200 };
     Color poly_edge  = (Color){180, 200, 230, 255 };
     for (int i = 0; i < L->poly_count; ++i) {
         const LvlPoly *poly = &L->polys[i];
+        if ((PolyKind)poly->kind == POLY_KIND_BACKGROUND) continue;
         Color fill;
         switch ((PolyKind)poly->kind) {
             case POLY_KIND_ICE:        fill = poly_ice;   break;
             case POLY_KIND_DEADLY:     fill = poly_dead;  break;
             case POLY_KIND_ONE_WAY:    fill = poly_one;   break;
-            case POLY_KIND_BACKGROUND: fill = poly_back;  break;
             case POLY_KIND_SOLID:
             default:                   fill = poly_solid; break;
         }
@@ -119,11 +238,193 @@ static void draw_level(const Level *L) {
         Vector2 v1 = { (float)poly->v_x[1], (float)poly->v_y[1] };
         Vector2 v2 = { (float)poly->v_x[2], (float)poly->v_y[2] };
         /* DrawTriangle is CCW-only; our authoring is screen-CW so flip
-         * the order to keep the fill visible. */
+         * the vertex order to keep the fill visible. */
         DrawTriangle(v0, v2, v1, fill);
         DrawLineEx(v0, v1, 2.0f, poly_edge);
         DrawLineEx(v1, v2, 2.0f, poly_edge);
         DrawLineEx(v2, v0, 2.0f, poly_edge);
+    }
+}
+
+/* BACKGROUND polygons — drawn after mechs at alpha 0.6 so they sit in
+ * front of the playfield as decorative silhouettes. Per the spec, this
+ * is the rendering layer for "things behind but in front of mechs"
+ * (window grilles, distant railings). */
+static void draw_polys_background(const Level *L) {
+    Color poly_back = (Color){ 28, 32, 40, 153 };  /* alpha ~0.6 */
+    for (int i = 0; i < L->poly_count; ++i) {
+        const LvlPoly *poly = &L->polys[i];
+        if ((PolyKind)poly->kind != POLY_KIND_BACKGROUND) continue;
+        Vector2 v0 = { (float)poly->v_x[0], (float)poly->v_y[0] };
+        Vector2 v1 = { (float)poly->v_x[1], (float)poly->v_y[1] };
+        Vector2 v2 = { (float)poly->v_x[2], (float)poly->v_y[2] };
+        DrawTriangle(v0, v2, v1, poly_back);
+    }
+}
+
+/* Compatibility wrapper kept for the existing call site below — fires
+ * tiles + non-background polygons in the M4-equivalent slot. */
+static void draw_level(const Level *L) {
+    draw_level_tiles(L);
+    draw_polys(L);
+}
+
+/* P13 — Parallax tile across the screen with a horizontal scroll factor.
+ * Drawn outside BeginMode2D, in screen space. The vertical axis isn't
+ * scrolled — each layer anchors at the top of the screen at native size.
+ * (When a custom map ships parallax PNGs that are taller/shorter than
+ * the screen, this is the simple fallback; per-map vertical anchoring
+ * is M6 polish.) Idempotent no-op when the texture isn't loaded. */
+static void draw_parallax_layer(Camera2D cam, Texture2D tex,
+                                float ratio, int sw, int sh)
+{
+    if (tex.id == 0) return;
+    int tw = tex.width;
+    int th = tex.height;
+    if (tw <= 0 || th <= 0) return;
+    (void)sh;
+    /* World-space scroll, multiplied by the parallax ratio. ratio < 1
+     * makes the layer drift slower than the world (depth illusion). */
+    float scroll = cam.target.x * ratio;
+    float mod    = fmodf(scroll, (float)tw);
+    if (mod < 0.0f) mod += (float)tw;
+    float x = -mod;
+    while (x < (float)sw) {
+        DrawTexture(tex, (int)x, 0, WHITE);
+        x += (float)tw;
+    }
+}
+
+static void draw_parallax_far_mid(Camera2D cam, int sw, int sh) {
+    /* Far: nearly static (ratio 0.10) — sky / distant skyline. */
+    draw_parallax_layer(cam, g_map_kit.parallax_far, 0.10f, sw, sh);
+    /* Mid: 0.40 — buildings, hills. Drawn over far. */
+    draw_parallax_layer(cam, g_map_kit.parallax_mid, 0.40f, sw, sh);
+}
+
+static void draw_parallax_near(Camera2D cam, int sw, int sh) {
+    /* Near: 0.95 — foreground silhouettes that sit visually in front of
+     * the action. Drawn AFTER the world but inside the post-target so
+     * the halftone screen catches it too. */
+    draw_parallax_layer(cam, g_map_kit.parallax_near, 0.95f, sw, sh);
+}
+
+/* P13 — Decoration atlas. Shared across all maps (not per-kit), loaded
+ * once at startup via `decorations_atlas_load`. Until the atlas ships
+ * (P15/P16), the slot stays at id=0 and the renderer draws small
+ * layer-colored placeholder rectangles so designers can see where their
+ * `LvlDeco` records sit in the world during test-play.
+ *
+ * Sub-rect lookup: there is no per-deco manifest at v1. We hash the
+ * `sprite_str_idx` byte offset into a 16x16 grid of 64x64 cells across
+ * the 1024x1024 atlas, so a stable string at the same offset always
+ * grabs the same sub-rect. P15/P16 ships an `assets/sprites/decorations.atlas`
+ * manifest and this fallback gets replaced with a real lookup. */
+static Texture2D g_decorations_atlas = {0};
+static bool      g_decorations_atlas_attempted = false;
+
+static void decorations_atlas_load_once(void) {
+    if (g_decorations_atlas_attempted) return;
+    g_decorations_atlas_attempted = true;
+    const char *path = "assets/sprites/decorations.png";
+    if (!FileExists(path)) {
+        LOG_I("decorations: %s missing; placeholder rectangles only", path);
+        return;
+    }
+    Texture2D t = LoadTexture(path);
+    if (t.id == 0) {
+        LOG_W("decorations: LoadTexture(%s) failed", path);
+        return;
+    }
+    SetTextureFilter(t, TEXTURE_FILTER_BILINEAR);
+    g_decorations_atlas = t;
+    LOG_I("decorations: atlas loaded (%dx%d)", t.width, t.height);
+}
+
+void renderer_decorations_unload(void) {
+    if (g_decorations_atlas.id != 0) UnloadTexture(g_decorations_atlas);
+    g_decorations_atlas = (Texture2D){0};
+    g_decorations_atlas_attempted = false;
+}
+
+/* Hash a byte offset into a 16x16 cell index. Stable across runs so a
+ * given LvlDeco record always picks the same sub-rect. */
+static Rectangle deco_src_rect_for(uint16_t sprite_str_idx) {
+    uint32_t h = (uint32_t)sprite_str_idx * 2654435761u;
+    int cell  = (int)(h >> 24) & 0xFF;        /* 0..255 — 16x16 grid */
+    int cx    = cell & 0x0F;
+    int cy    = (cell >> 4) & 0x0F;
+    return (Rectangle){ (float)(cx * 64), (float)(cy * 64), 64.0f, 64.0f };
+}
+
+static Color deco_placeholder_color(int layer) {
+    static const Color c[4] = {
+        { 90, 110, 160, 180 },   /* layer 0 — far parallax tone */
+        { 90, 140, 130, 200 },   /* layer 1 — mid */
+        {130, 130,  90, 220 },   /* layer 2 — near foreground */
+        {180,  90,  90, 230 },   /* layer 3 — foreground silhouette */
+    };
+    if (layer < 0 || layer > 3) return (Color){200, 200, 200, 200};
+    return c[layer];
+}
+
+/* P13 — Walk `level->decos`, draw every entry whose `layer` matches.
+ * Atlas-driven when present; small placeholder rectangles when not.
+ * Caller is inside BeginMode2D (decorations live in world space).
+ * The ADDITIVE flag wraps a single deco in BeginBlendMode pair —
+ * cheap state change cost (one per ADDITIVE deco). */
+enum {
+    DECO_FLIPPED_X = 1u << 0,
+    DECO_ADDITIVE  = 1u << 1,
+};
+
+static void draw_decorations(const Level *L, int layer) {
+    if (L->deco_count == 0 || !L->decos) return;
+    decorations_atlas_load_once();
+    bool has_atlas = (g_decorations_atlas.id != 0);
+    Color placeholder = deco_placeholder_color(layer);
+
+    for (int i = 0; i < L->deco_count; ++i) {
+        const LvlDeco *d = &L->decos[i];
+        if ((int)d->layer != layer) continue;
+
+        /* Q1.15 scale → float multiplier. Stored value 32768 = 1.0×.
+         * Defensive clamp so a malformed record can't blow up draw
+         * dimensions (e.g. negative scale via signed underflow). */
+        float scale = (d->scale_q == 0) ? 1.0f
+                                        : (float)d->scale_q / 32768.0f;
+        if (scale <  0.05f) scale = 1.0f;
+        if (scale > 16.0f)  scale = 16.0f;
+
+        /* rot_q is 1/256 turns per the .lvl spec. */
+        float angle = ((float)d->rot_q / 256.0f) * 360.0f;
+
+        bool additive = (d->flags & DECO_ADDITIVE) != 0;
+        if (additive) BeginBlendMode(BLEND_ADDITIVE);
+
+        if (has_atlas) {
+            Rectangle src = deco_src_rect_for(d->sprite_str_idx);
+            float dw = src.width  * scale;
+            float dh = src.height * scale;
+            /* DrawTexturePro flipX: pass a negative source width. */
+            if (d->flags & DECO_FLIPPED_X) src.width = -src.width;
+            DrawTexturePro(g_decorations_atlas, src,
+                (Rectangle){ (float)d->pos_x, (float)d->pos_y, dw, dh },
+                /* origin = centroid so rotation pivots correctly */
+                (Vector2){ dw * 0.5f, dh * 0.5f },
+                angle, WHITE);
+        } else {
+            /* Placeholder: a small filled rectangle at the deco position.
+             * Keeps deco placement visible in test-play through P14. */
+            float w = 16.0f * scale;
+            float h = 16.0f * scale;
+            DrawRectanglePro(
+                (Rectangle){ (float)d->pos_x, (float)d->pos_y, w, h },
+                (Vector2){ w * 0.5f, h * 0.5f },
+                angle, placeholder);
+        }
+
+        if (additive) EndBlendMode();
     }
 }
 
@@ -868,6 +1169,71 @@ static void draw_pickups(const PickupPool *pool, double now_s) {
 
 /* ---- Frame --------------------------------------------------------- */
 
+/* World pass — every world-space draw call lives here so both the
+ * post-process and the no-shader fallback emit the same scene. P13
+ * threads sw/sh so the screen-space parallax + foreground silhouettes
+ * see the current backbuffer size. */
+static void draw_world_pass(Renderer *r, World *w, float alpha,
+                            Vec2 local_visual_offset, int sw, int sh)
+{
+    /* P13 — Parallax FAR + MID first, in screen space, before any world
+     * draw. No BeginMode2D — the parallax draw computes its own scroll
+     * from r->camera.target and the parallax ratio. Each layer no-ops
+     * if its texture isn't loaded. */
+    draw_parallax_far_mid(r->camera, sw, sh);
+
+    BeginMode2D(r->camera);
+        /* P13 — Decoration layers 0 + 1 sit BEHIND the tile sprites
+         * (far + mid parallax-band silhouettes anchored in world space).
+         * No-op when the level has no LvlDeco records. */
+        draw_decorations(&w->level, 0);
+        draw_decorations(&w->level, 1);
+        draw_level_tiles(&w->level);
+        draw_polys(&w->level);
+        /* P13 — Decoration layer 2 sits BETWEEN tiles and mechs (near
+         * silhouettes that read in front of geometry but behind action). */
+        draw_decorations(&w->level, 2);
+        decal_draw_layer();
+        draw_pickups(&w->pickups, GetTime());
+        for (int i = 0; i < w->mech_count; ++i) {
+            /* Reconcile-smoothing offset only applies to the local
+             * mech (the one whose state we predict + replay). For
+             * everyone else pass {0,0} — remote mechs get smoothed
+             * via the snapshot interp buffer instead (snapshot.c). */
+            Vec2 off = (i == w->local_mech_id)
+                     ? local_visual_offset : (Vec2){0, 0};
+            bool is_local = (i == w->local_mech_id);
+            draw_mech(&w->particles, &w->constraints,
+                      &w->mechs[i], &w->level, is_local, alpha, off);
+            /* P11 — held weapon sits on top of the front-arm
+             * silhouette. Drawn after the body so the grip
+             * pivot at R_HAND covers the wrist seam. */
+            draw_held_weapon(w, i, alpha, off);
+            /* P06 — draw the rope after the body+weapon so it
+             * sits on top of the arm and launcher. */
+            draw_grapple_rope(w, i, alpha, off);
+        }
+        projectile_draw(&w->projectiles, alpha);
+        fx_draw(&w->fx, alpha);
+        /* P13 — BACKGROUND polygons sit on top of mechs as alpha-blended
+         * foreground silhouettes (window grilles, distant railings).
+         * Per `documents/m5/08-rendering.md` §"Free polygons". */
+        draw_polys_background(&w->level);
+        /* P13 — Decoration layer 3 sits on top of mechs + projectiles +
+         * fx + bg polys (foreground occluders). BLEND_ALPHA is the
+         * default; ADDITIVE flag flips it per-deco inside draw_decorations. */
+        draw_decorations(&w->level, 3);
+        /* P07 — CTF flags. Drawn after mechs so a carried flag sits
+         * in front of the body silhouette; before HUD so it stays
+         * inside the world camera transform. */
+        draw_flags(w, alpha);
+    EndMode2D();
+
+    /* P13 — Parallax NEAR last (foreground silhouettes), screen-space
+     * over the world. No-op when the texture isn't loaded. */
+    draw_parallax_near(r->camera, sw, sh);
+}
+
 void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
                          float alpha, Vec2 local_visual_offset,
                          Vec2 cursor_screen,
@@ -885,43 +1251,61 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
 
     /* Bake any blood drops the latest tick added before we begin the
      * world draw — raylib disallows nesting BeginTextureMode inside
-     * BeginMode2D. */
+     * BeginMode2D, and `decal_flush_pending` is itself a BeginTextureMode
+     * pair on the splat layer. Run it before any BeginTextureMode /
+     * BeginDrawing pair we open below. */
     decal_flush_pending();
 
-    BeginDrawing();
-        ClearBackground((Color){12, 14, 18, 255});
+    bool use_post = ensure_post_target(sw, sh);
 
-        BeginMode2D(r->camera);
-            draw_level(&w->level);
-            decal_draw_layer();
-            draw_pickups(&w->pickups, GetTime());
-            for (int i = 0; i < w->mech_count; ++i) {
-                /* Reconcile-smoothing offset only applies to the local
-                 * mech (the one whose state we predict + replay). For
-                 * everyone else pass {0,0} — remote mechs get smoothed
-                 * via the snapshot interp buffer instead (snapshot.c). */
-                Vec2 off = (i == w->local_mech_id)
-                         ? local_visual_offset : (Vec2){0, 0};
-                bool is_local = (i == w->local_mech_id);
-                draw_mech(&w->particles, &w->constraints,
-                          &w->mechs[i], &w->level, is_local, alpha, off);
-                /* P11 — held weapon sits on top of the front-arm
-                 * silhouette. Drawn after the body so the grip
-                 * pivot at R_HAND covers the wrist seam. */
-                draw_held_weapon(w, i, alpha, off);
-                /* P06 — draw the rope after the body+weapon so it
-                 * sits on top of the arm and launcher. */
-                draw_grapple_rope(w, i, alpha, off);
-            }
-            projectile_draw(&w->projectiles, alpha);
-            fx_draw(&w->fx, alpha);
-            /* P07 — CTF flags. Drawn after mechs so a carried flag sits
-             * in front of the body silhouette; before HUD so it stays
-             * inside the world camera transform. */
-            draw_flags(w, alpha);
-        EndMode2D();
+    if (use_post) {
+        /* World → off-screen RT. ClearBackground inside BeginTextureMode
+         * targets the RT, not the backbuffer — keeps the post-pass
+         * blend predictable. */
+        BeginTextureMode(g_post_target);
+            ClearBackground((Color){12, 14, 18, 255});
+            draw_world_pass(r, w, alpha, local_visual_offset, sw, sh);
+        EndTextureMode();
 
-        hud_draw(w, sw, sh, cursor_screen, r->camera);
-        if (overlay_cb) overlay_cb(overlay_user, sw, sh);
-    EndDrawing();
+        /* Per-frame uniforms. Resolution may have changed since last
+         * frame (window resize); halftone density is constant in P13
+         * but plumbed through SetShaderValue so the M6 config slider
+         * has a place to land. */
+        Vector2 res = { (float)sw, (float)sh };
+        float   den = HALFTONE_DENSITY;
+        if (g_halftone_loc_resolution >= 0)
+            SetShaderValue(g_halftone_post, g_halftone_loc_resolution,
+                           &res, SHADER_UNIFORM_VEC2);
+        if (g_halftone_loc_density >= 0)
+            SetShaderValue(g_halftone_post, g_halftone_loc_density,
+                           &den, SHADER_UNIFORM_FLOAT);
+
+        BeginDrawing();
+            ClearBackground(BLACK);
+            BeginShaderMode(g_halftone_post);
+                /* raylib's render textures come back Y-flipped — pass
+                 * a negative source-rectangle height to flip on draw.
+                 * (See [06-rendering-audio.md] "Y-flip gotcha.") */
+                Rectangle src = {
+                    0, 0,
+                    (float)g_post_target.texture.width,
+                    -(float)g_post_target.texture.height
+                };
+                Vector2   dst = { 0, 0 };
+                DrawTextureRec(g_post_target.texture, src, dst, WHITE);
+            EndShaderMode();
+            hud_draw(w, sw, sh, cursor_screen, r->camera);
+            if (overlay_cb) overlay_cb(overlay_user, sw, sh);
+        EndDrawing();
+    } else {
+        /* Fallback: M4 shape, no post pass. Fires on a fresh checkout
+         * without `assets/shaders/halftone_post.fs.glsl`, or when
+         * LoadRenderTexture failed (low-VRAM / GL-context issue). */
+        BeginDrawing();
+            ClearBackground((Color){12, 14, 18, 255});
+            draw_world_pass(r, w, alpha, local_visual_offset, sw, sh);
+            hud_draw(w, sw, sh, cursor_screen, r->camera);
+            if (overlay_cb) overlay_cb(overlay_user, sw, sh);
+        EndDrawing();
+    }
 }
