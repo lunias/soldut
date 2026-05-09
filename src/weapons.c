@@ -6,6 +6,7 @@
 #include "particle.h"
 #include "projectile.h"
 #include "snapshot.h"
+#include "weapon_sprites.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -318,8 +319,12 @@ void weapons_fire_hitscan(World *w, int mid) {
 
     Vec2 hand = mech_hand_pos(w, mid);
     Vec2 dir  = apply_self_bink(w, me, mech_aim_dir(w, mid));
-    Vec2 origin = { hand.x + dir.x * wpn->muzzle_offset,
-                    hand.y + dir.y * wpn->muzzle_offset };
+    /* P11 — muzzle from the weapon sprite def so visible muzzle and
+     * physics muzzle coincide. The fallback (`wpn->muzzle_offset`)
+     * preserves the M3 origin if a future weapon ships without a
+     * sprite-def entry. */
+    const WeaponSpriteDef *wsp = weapon_sprite_def(me->weapon_id);
+    Vec2 origin = weapon_muzzle_world(hand, dir, wsp, wpn->muzzle_offset);
     weapons_record_fire(w, mid, me->weapon_id, origin, dir);
     float t_max = wpn->range_px;
 
@@ -423,8 +428,8 @@ void weapons_fire_hitscan_lag_comp(World *w, int mid, uint64_t shot_at_tick) {
 
     Vec2 hand = mech_hand_pos(w, mid);
     Vec2 dir  = apply_self_bink(w, me, mech_aim_dir(w, mid));
-    Vec2 origin = { hand.x + dir.x * wpn->muzzle_offset,
-                    hand.y + dir.y * wpn->muzzle_offset };
+    const WeaponSpriteDef *wsp = weapon_sprite_def(me->weapon_id);
+    Vec2 origin = weapon_muzzle_world(hand, dir, wsp, wpn->muzzle_offset);
     weapons_record_fire(w, mid, me->weapon_id, origin, dir);
     float t_max = wpn->range_px;
 
@@ -509,8 +514,8 @@ void weapons_predict_local_fire(World *w, int mid) {
 
     Vec2 hand = mech_hand_pos(w, mid);
     Vec2 dir  = apply_self_bink(w, me, mech_aim_dir(w, mid));
-    Vec2 origin = { hand.x + dir.x * wpn->muzzle_offset,
-                    hand.y + dir.y * wpn->muzzle_offset };
+    const WeaponSpriteDef *wsp = weapon_sprite_def(me->weapon_id);
+    Vec2 origin = weapon_muzzle_world(hand, dir, wsp, wpn->muzzle_offset);
     if (wpn->fire == WFIRE_HITSCAN) {
         float t_max = wpn->range_px;
         float wall_t;
@@ -572,8 +577,8 @@ void weapons_spawn_projectiles(World *w, int mid, int weapon_id) {
 
     Vec2 hand = mech_hand_pos(w, mid);
     Vec2 dir  = apply_self_bink(w, me, mech_aim_dir(w, mid));
-    Vec2 origin = { hand.x + dir.x * wpn->muzzle_offset,
-                    hand.y + dir.y * wpn->muzzle_offset };
+    const WeaponSpriteDef *wsp = weapon_sprite_def(weapon_id);
+    Vec2 origin = weapon_muzzle_world(hand, dir, wsp, wpn->muzzle_offset);
 
     if (wpn->fire == WFIRE_SPREAD) {
         int n = wpn->spread_pellets > 0 ? wpn->spread_pellets : 1;

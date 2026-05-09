@@ -11,6 +11,7 @@
 #include "match.h"
 #include "mech.h"
 #include "mech_sprites.h"
+#include "weapon_sprites.h"
 #include "net.h"
 #include "pickup.h"
 #include "platform.h"
@@ -1121,6 +1122,11 @@ int main(int argc, char **argv) {
      * checkout without sprite PNGs in `assets/sprites/` still renders
      * cleanly. */
     mech_sprites_load_all();
+
+    /* M5 P11 — load shared weapon atlas. Missing file leaves
+     * `g_weapons_atlas.id == 0` and the renderer falls back to a
+     * per-weapon-sized line in draw_held_weapon. */
+    weapons_atlas_load();
 
     LobbyUIState ui = (LobbyUIState){0};
     lobby_ui_init(&ui);
