@@ -9,6 +9,8 @@
 #include "particle.h"
 #include "pickup.h"
 #include "projectile.h"
+#include "weapon_sprites.h"
+#include "weapons.h"
 
 #include <math.h>
 
@@ -189,24 +191,95 @@ static void draw_bone_clamped(const Level *L, Vec2 a, Vec2 b, float thick, Color
     DrawLineEx((Vector2){a.x, a.y}, (Vector2){end.x, end.y}, thick, c);
 }
 
-/* Held-weapon placeholder line — a small line from R_HAND in aim
- * direction, stopped at the first solid tile so the barrel doesn't
- * draw through walls. Drawn by both the capsule path and the sprite
- * path until P11 lands held-weapon sprite art. */
-static void draw_held_weapon_line(const ParticlePool *p, const Mech *m,
-                                  const Level *L, float alpha,
-                                  Vec2 visual_offset) {
+/* P11 — held-weapon render. Picks the effective weapon (active slot,
+ * or the inactive slot for a brief flicker after BTN_FIRE_SECONDARY),
+ * looks up the sprite-def, and either draws via DrawTexturePro at the
+ * grip pivot OR falls back to a per-weapon-sized barrel line clamped
+ * against solids. Visible muzzle flash for ~3 ticks after fire stacks
+ * additively over either path.
+ *
+ * Plumbed at the top level (renderer_draw_frame) instead of from inside
+ * draw_mech because we need `World *w` for tick + last-fired tracking
+ * + local_mech_id (for invis alpha) + level (for the fallback clamp).
+ *
+ * Spec: documents/m5/12-rigging-and-damage.md §"Per-weapon visible art"
+ * + §"BTN_FIRE_SECONDARY hand flicker". */
+static void draw_held_weapon(const World *w, int mid, float alpha,
+                             Vec2 visual_offset)
+{
+    const Mech *m = &w->mechs[mid];
     if (!m->alive) return;
+
+    /* Effective weapon: usually the active slot, but for a short
+     * window after RMB fire the inactive slot's weapon flickers in so
+     * the player sees the throw/shot they just produced. */
+    int eff_weapon_id = m->weapon_id;
+    if (m->last_fired_slot >= 0 &&
+        m->last_fired_tick != 0 &&
+        (w->tick - m->last_fired_tick) < 3 &&
+        m->last_fired_slot != m->active_slot) {
+        eff_weapon_id = (m->last_fired_slot == 0) ? m->primary_id
+                                                  : m->secondary_id;
+    }
+
+    const WeaponSpriteDef *wp  = weapon_sprite_def(eff_weapon_id);
+    const Weapon          *wpn = weapon_def(eff_weapon_id);
+    if (!wp || !wpn) return;
+
     int b = m->particle_base;
-    Vec2 rh = particle_render_pos(p, b + PART_R_HAND, alpha);
-    Vec2 sh = particle_render_pos(p, b + PART_R_SHOULDER, alpha);
-    rh.x += visual_offset.x; rh.y += visual_offset.y;
-    sh.x += visual_offset.x; sh.y += visual_offset.y;
-    float dx = rh.x - sh.x, dy = rh.y - sh.y;
-    float dl = sqrtf(dx * dx + dy * dy);
-    if (dl > 1.0f) { dx /= dl; dy /= dl; }
-    Vec2 muzzle = { rh.x + dx * 22.0f, rh.y + dy * 22.0f };
-    draw_bone_clamped(L, rh, muzzle, 3.0f, (Color){50, 60, 80, 255});
+    Vec2 rh = particle_render_pos(&w->particles, b + PART_R_HAND, alpha);
+    rh.x += visual_offset.x;
+    rh.y += visual_offset.y;
+    Vec2 aim = mech_aim_dir(w, mid);
+
+    /* Body tint mirrors draw_mech_sprites / draw_mech_capsules so a
+     * dummy's orange wash + invis alpha-mod carry through to the
+     * weapon. Dead mechs already early-exit above. */
+    Color tint = m->is_dummy ? (Color){200, 130,  40, 255}
+                             : (Color){255, 255, 255, 255};
+    if (m->powerup_invis_remaining > 0.0f) {
+        tint.a = (mid == w->local_mech_id) ? (uint8_t)128 : (uint8_t)51;
+    }
+
+    if (g_weapons_atlas.id != 0) {
+        /* Sprite path: rotate around the grip pivot by the aim angle.
+         * Symmetric weapon design avoids the "scope flips at ±π"
+         * artifact noted in 12-rigging-and-damage.md §"Plate flip past
+         * 180°"; asymmetric weapons (with a top-mounted optic) can opt
+         * into per-sprite flipY in a future polish pass. */
+        float angle = atan2f(aim.y, aim.x) * RAD2DEG;
+        DrawTexturePro(g_weapons_atlas, wp->src,
+                       (Rectangle){ rh.x, rh.y, wp->draw_w, wp->draw_h },
+                       wp->pivot_grip, angle, tint);
+    } else {
+        /* Fallback: per-weapon-sized barrel line, clamped to the first
+         * solid tile crossing so the barrel doesn't draw through a
+         * thin wall. Length scales with the sprite's draw_w so a Mass
+         * Driver "reads" visibly longer than a Sidearm even without
+         * the atlas. */
+        Vec2 muzzle = {
+            rh.x + aim.x * wp->draw_w * 0.7f,
+            rh.y + aim.y * wp->draw_w * 0.7f,
+        };
+        Color line_color = (Color){ 50, 60, 80, tint.a };
+        if (m->is_dummy) line_color = (Color){ 120, 80, 30, tint.a };
+        draw_bone_clamped(&w->level, rh, muzzle, 3.0f, line_color);
+    }
+
+    /* Visible muzzle flash for ~3 ticks (50 ms @ 60 Hz) after fire.
+     * Triggered by `last_fired_tick` rather than `fire_cooldown` so
+     * the flash window is independent of weapon fire-rate (a Microgun
+     * with a 25 ms cycle would otherwise never see a flash). */
+    if (m->last_fired_tick != 0 && (w->tick - m->last_fired_tick) < 3) {
+        Vec2 muzzle = weapon_muzzle_world(rh, aim, wp, wpn->muzzle_offset);
+        float t = 1.0f - (float)(w->tick - m->last_fired_tick) / 3.0f;
+        uint8_t flash_a = (uint8_t)(220.0f * t * (tint.a / 255.0f));
+        BeginBlendMode(BLEND_ADDITIVE);
+        DrawCircleV((Vector2){ muzzle.x, muzzle.y },
+                    8.0f * (0.6f + 0.4f * t),
+                    (Color){ 255, 200, 80, flash_a });
+        EndBlendMode();
+    }
 }
 
 /* M4 capsule-line mech body — kept as the no-asset / dev fallback when
@@ -352,8 +425,9 @@ typedef struct MechRenderPart {
 /* Z-order: back-side limbs first (drawn behind the body when facing
  * right; the renderer swaps L↔R when facing left). Centerline pieces
  * in the middle. Front-side limbs last (drawn on top of the body).
- * Held-weapon art (P11) renders after this table; for now we draw a
- * placeholder line via `draw_held_weapon_line`. */
+ * Held-weapon art lives in `draw_held_weapon` (P11) and is plumbed at
+ * the top level (renderer_draw_frame) so it has access to the World
+ * struct for last-fired-slot / muzzle-flash tracking. */
 static const MechRenderPart g_render_parts[] = {
     /* Back leg (L when facing right) */
     { PART_L_HIP,      PART_L_KNEE,     MSP_LEG_UPPER_L },
@@ -482,9 +556,10 @@ static void draw_mech_sprites(const ParticlePool *p, const ConstraintPool *cp,
 }
 
 /* M5 P10 dispatcher. Picks the sprite path when the chassis's atlas
- * is loaded; falls back to the M4 capsule path otherwise. The held-
- * weapon placeholder line is drawn after the body so it sits on top
- * of the front arm; P11 will replace this with per-weapon sprite art. */
+ * is loaded; falls back to the M4 capsule path otherwise. Held-weapon
+ * art is drawn separately from `renderer_draw_frame` (P11) — it needs
+ * world-level state (tick + last-fired-slot for the RMB flicker, plus
+ * the muzzle-flash window) that `draw_mech` doesn't see. */
 static void draw_mech(const ParticlePool *p, const ConstraintPool *cp,
                       const Mech *m, const Level *L, bool is_local,
                       float alpha, Vec2 visual_offset) {
@@ -494,7 +569,7 @@ static void draw_mech(const ParticlePool *p, const ConstraintPool *cp,
     } else {
         draw_mech_capsules(p, cp, m, L, is_local, alpha, visual_offset);
     }
-    draw_held_weapon_line(p, m, L, alpha, visual_offset);
+    (void)L;     /* used inside draw_mech_capsules; silenced when sprite path takes over */
 }
 
 /* P06 — Grapple rope. Single straight line from the firer's right hand
@@ -674,8 +749,12 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
                 bool is_local = (i == w->local_mech_id);
                 draw_mech(&w->particles, &w->constraints,
                           &w->mechs[i], &w->level, is_local, alpha, off);
-                /* P06 — draw the rope after the body so it sits on top
-                 * of the arm. */
+                /* P11 — held weapon sits on top of the front-arm
+                 * silhouette. Drawn after the body so the grip
+                 * pivot at R_HAND covers the wrist seam. */
+                draw_held_weapon(w, i, alpha, off);
+                /* P06 — draw the rope after the body+weapon so it
+                 * sits on top of the arm and launcher. */
                 draw_grapple_rope(w, i, alpha, off);
             }
             projectile_draw(&w->projectiles, alpha);

@@ -267,6 +267,16 @@ typedef struct {
     float     charge_timer;       /* Rail Cannon: charges before fire */
     float     spinup_timer;       /* Microgun: spin-up before sustained fire */
 
+    /* P11 — last-fired slot tracking (purely render-side). When the
+     * inactive slot fires via BTN_FIRE_SECONDARY (RMB), the renderer
+     * draws the OTHER slot's weapon at R_HAND for a short window so
+     * the player sees the throw/shot the secondary just produced.
+     * After the window expires the active slot's weapon is drawn
+     * again. `last_fired_slot = -1` sentinel means "never fired" so
+     * the very first ticks don't flicker on a fresh mech. */
+    int8_t    last_fired_slot;
+    uint64_t  last_fired_tick;
+
     /* Recoil decay (cosmetic — actual recoil is the hand impulse). */
     float     recoil_kick;
 

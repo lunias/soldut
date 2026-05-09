@@ -14,6 +14,7 @@
 #include "mech.h"
 #include "mech_sprites.h"
 #include "net.h"
+#include "weapon_sprites.h"
 #include "pickup.h"
 #include "platform.h"
 #include "physics.h"
@@ -163,9 +164,13 @@ typedef struct {
      * dummy in the legacy (NETMODE_NONE) shot path. Each entry creates
      * a non-aiming dummy at the given world-space coordinates so a
      * single shot can capture multiple chassis side-by-side for
-     * per-chassis distinctness verification. Capped at 6. */
+     * per-chassis distinctness verification. Capped at 6.
+     * P11 — optional primary_id override so per-weapon visible-art
+     * tests can spawn one chassis per weapon variant in a single shot.
+     * primary_id < 0 means "use mech_default_loadout's primary". */
     struct {
         int   chassis_id;
+        int   primary_id;
         float x, y;
     }       extra_chassis[6];
     int     extra_chassis_count;
@@ -374,9 +379,13 @@ static bool parse_script(const char *path, Script *out) {
             }
         } else if (strcmp(tok, "extra_chassis") == 0) {
             char chassis[32];
+            char primary[64] = {0};
             float ex, ey;
-            if (sscanf(rest, "%31s %f %f", chassis, &ex, &ey) != 3) {
-                LOG_E("shotmode: %s:%d 'extra_chassis' needs <name> <x> <y>",
+            int matched = sscanf(rest, "%31s %f %f \"%63[^\"]\"",
+                                 chassis, &ex, &ey, primary);
+            if (matched < 3) {
+                LOG_E("shotmode: %s:%d 'extra_chassis' needs "
+                      "<name> <x> <y> [\"primary weapon\"]",
                       path, lineno);
                 ok = false;
                 continue;
@@ -394,6 +403,13 @@ static bool parse_script(const char *path, Script *out) {
                 (int)chassis_id_from_name(chassis);
             out->extra_chassis[n].x = ex;
             out->extra_chassis[n].y = ey;
+            out->extra_chassis[n].primary_id = -1;
+            if (matched == 4 && primary[0] != '\0') {
+                int wid = find_weapon_id(primary);
+                if (wid >= 0) out->extra_chassis[n].primary_id = wid;
+                else LOG_W("shotmode: %s:%d unknown weapon '%s'",
+                           path, lineno, primary);
+            }
         } else if (strcmp(tok, "aim") == 0) {
             if (sscanf(rest, "%f %f", &out->initial_ax, &out->initial_ay) != 2) {
                 LOG_E("shotmode: %s:%d bad 'aim'", path, lineno); ok = false;
@@ -1413,6 +1429,12 @@ static void seed_world(Game *g, const Script *s) {
             MechLoadout xlo = mech_default_loadout();
             xlo.chassis_id  = s->extra_chassis[i].chassis_id;
             xlo.armor_id    = ARMOR_NONE;
+            /* P11 — optional primary override so a single shot can put
+             * Mass Driver / Sidearm / Pulse Rifle / etc. in the same
+             * frame for visible-size comparison. */
+            if (s->extra_chassis[i].primary_id >= 0) {
+                xlo.primary_id = s->extra_chassis[i].primary_id;
+            }
             Vec2 ex_spawn = { s->extra_chassis[i].x, s->extra_chassis[i].y };
             mech_create_loadout(w, xlo, ex_spawn, /*team*/ 2, /*is_dummy*/ true);
         }
@@ -1573,8 +1595,10 @@ int shotmode_run(const char *script_path) {
         return EXIT_FAILURE;
     }
 
-    /* M5 P10 — chassis sprite atlases (capsule fallback when missing). */
+    /* M5 P10 — chassis sprite atlases (capsule fallback when missing).
+     * M5 P11 — shared weapon atlas (line fallback when missing). */
     mech_sprites_load_all();
+    weapons_atlas_load();
 
     /* Networked path: bootstrap host or client, then run the full
      * mode dispatcher each tick. The legacy match-only path below is
@@ -1585,6 +1609,7 @@ int shotmode_run(const char *script_path) {
             (s.netmode == NETMODE_CONNECT && game.net.role != NET_ROLE_CLIENT))
         {
             LOG_E("shotmode: networked bootstrap failed");
+            weapons_atlas_unload();
             mech_sprites_unload_all();
             platform_shutdown();
             game_shutdown(&game); free(s.events); free(s.lerps);
@@ -1978,6 +2003,7 @@ int shotmode_run(const char *script_path) {
         net_close(&game.net);
         net_shutdown();
         decal_shutdown();
+        weapons_atlas_unload();
         mech_sprites_unload_all();
         platform_shutdown();
         game_shutdown(&game);
@@ -2235,6 +2261,7 @@ int shotmode_run(const char *script_path) {
     }
 
     decal_shutdown();
+    weapons_atlas_unload();
     mech_sprites_unload_all();
     platform_shutdown();
     game_shutdown(&game);

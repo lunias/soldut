@@ -13,9 +13,26 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-05** (post P09 — controls + host-controls panel
+Last updated: **2026-05-09** (post P11 — per-weapon visible art runtime
++ post-ship foregrip-pose revert. Foregrip pose was attempted (three
+variants: strength-0.6 L_HAND yank, clamped L_HAND, snap-pose-IK
+strength-1.0 on L_ELBOW+L_HAND); all three drifted the mech body in
+the aim direction during steady-state hold. Reverted; "Left hand has
+no pose target" trade-off updated to cover both one-handed and
+two-handed weapons until a real 2-bone IK constraint lands inside
+the solver loop. Added "Held-weapon line fallback when weapons
+atlas is missing" entry — P11 ships the runtime + sprite-def table;
+`assets/sprites/weapons.png` arrives at P16. New "Muzzle flash is a
+render-tick disc, not a pooled FX particle" entry (cosmetic stopgap
+until P13). Migrated fire-path muzzle origin from
+`Weapon.muzzle_offset` (single float) to `weapon_muzzle_world(...)`
+so visible muzzle and physics muzzle coincide; the float field stays
+as the fallback. P10 audit (refreshed the capsule trade-off) carried
+over.
+
+Previously: 2026-05-05 (post P09 — controls + host-controls panel
 + `bans.txt` persistence + 3-card vote picker + multi-round match flow.
-Resolves three M4-era entries: "Map vote picker UI is partial",
+Resolved three M4-era entries: "Map vote picker UI is partial",
 "Kick / ban UI not exposed", "`bans.txt` not persisted". New
 post-P09 entries below cover the placeholder map-vote thumbnails and
 the ban-by-name simplification.).
@@ -117,19 +134,42 @@ the ban-by-name simplification.).
 
 ## Animation / pose
 
-### Left hand has no pose target (no IK)
+### Left hand has no pose target (no IK) — incl. two-handed weapons (P11)
 
 - **What we did** — Right hand is driven by the aim vector each tick.
   Left hand has no target — the upper arm and forearm just hang from
-  the shoulder.
-- **Why** — A two-handed rifle pose needs IK: solve for elbow position
-  given hand and shoulder. We don't have a 2-bone IK solver yet, and
-  M1's design doc didn't specify one explicitly.
+  the shoulder. Applies to BOTH one-handed and two-handed weapons.
+  (The `WeaponSpriteDef.pivot_foregrip` field still ships on the
+  sprite-def table; it's just not consumed by the pose driver yet.)
+- **Why** — A two-handed rifle pose needs IK: solve for the elbow
+  position given hand and shoulder. The pose system runs once per
+  tick BEFORE the constraint solver; constraint corrections from
+  the R_ARM aim drive then shift PELVIS each tick (small but real).
+  Posing L_ELBOW + L_HAND on rest-length positions in the pose pass
+  fixes the chain at start-of-tick but DECOUPLES from L_SHOULDER
+  during the constraint-solve iterations: as PELVIS drifts under
+  the R_ARM correction, L_SHOULDER follows via cross-brace; the
+  L_ARM chain de-rests; the solver corrects again, propagating
+  *additional* force back to PELVIS — the body drifts visibly
+  in the aim direction. P11 attempted this fix at strength 0.6
+  (yanked L_HAND past chain reach), then a clamped variant, then a
+  snap-pose-IK at strength 1.0 — all three exhibited the drift.
+  The clean fix is a 2-bone IK constraint that runs INSIDE the
+  constraint solver loop (so the L_ARM tracks L_SHOULDER per
+  iteration instead of once per tick). That's a real addition to
+  the constraint pool — out of scope for P11. Deferred.
 - **Revisit when** —
-  - We add weapons that look obviously wrong without a left-hand grip
-    (most rifles, every two-handed weapon).
-  - Players complain that the mech looks broken.
-  - We add a proper animation system (M3 expansion).
+  - We add weapons or finishing moves that look obviously wrong
+    without a left-hand grip (most rifles, every two-handed weapon).
+  - A 2-bone IK constraint kind (`CSTR_IK_2BONE`) lands in the
+    constraint pool — could be a P12 or M6 polish item. The
+    `WeaponSpriteDef.pivot_foregrip` field is already on the wire
+    so the IK constraint can plug in without sprite-def churn.
+  - Players complain that the mech looks broken (post-P16 art
+    might make the dangle more noticeable than the current capsule
+    fallback).
+  - We add a proper animation system (M3 expansion). A real skeletal
+    animation runtime would subsume this trade-off entirely.
 
 ### Dummies skip arm pose entirely
 
@@ -223,13 +263,85 @@ the ban-by-name simplification.).
     the level format) — at that point the same shader can be reused
     for the grapple.
 
-### Mechs rendered as raw capsules
+### Held-weapon line fallback when weapons atlas is missing (post-P11)
 
-- **What we did** — `render.c` draws each bone as a thick line and
-  particles as small filled circles. No sprite art.
-- **Why** — Art pass is M5. Capsules read well enough for movement and
-  combat testing.
-- **Revisit when** — M5 (maps & content).
+- **What we did** — P11 shipped `src/weapon_sprites.{c,h}`: 14-entry
+  `g_weapon_sprites[]` table (grip / foregrip / muzzle pivots in
+  source-rect-relative px) + `g_weapons_atlas` shared `Texture2D` that
+  loads from `assets/sprites/weapons.png`. When the atlas isn't
+  present (which is true at P11 ship — the file arrives at P16 with
+  the asset-generation pipeline), `draw_held_weapon` in
+  `src/render.c` falls back to a per-weapon-sized line (`draw_w *
+  0.7`, clamped against solids via the existing `draw_bone_clamped`).
+  A Mass Driver still reads visibly longer than a Sidearm, but the
+  line silhouette doesn't carry the visible identity the spec
+  describes.
+- **Why** — Splitting the runtime (P11) from the asset generation
+  (P16) lets each land as a focused review surface; the atlas
+  pipeline is the substantial work in P15/P16. Shipping the sprite-
+  def table + draw path with a graceful fallback means the sprite
+  path is ready the moment the PNG drops in — no further plumbing.
+  Per-weapon line distinctness keeps shot tests informative during
+  development.
+- **Revisit when** —
+  - P16 ships `assets/sprites/weapons.png`. At that point the atlas
+    branch fires and the fallback becomes dead code in real play; the
+    fallback can stay as a dev-machine convenience until any future
+    decision to drop it.
+  - The `draw_w * 0.7` heuristic stops feeling right at the edges
+    (Sidearm's 20-px line is barely visible; Mass Driver's 67-px line
+    can clip the body silhouette). Tune the multiplier or drop the
+    fallback entirely.
+
+### Muzzle flash is a render-tick disc, not a pooled FX particle (P11)
+
+- **What we did** — `draw_held_weapon` checks `m->last_fired_tick`
+  and, when within 3 ticks of the most recent fire, emits a single
+  `DrawCircleV` call at the visible muzzle in `BLEND_ADDITIVE` mode
+  (yellow-orange, alpha-tapered over the window). Bypasses the FX
+  pool entirely.
+- **Why** — At P11 the muzzle flash is a feedback layer, not a
+  reusable visual. Pooling it would require a new `FxKind`
+  (FX_MUZZLE_FLASH) plus `fx_spawn_*` plumbing for ~3 ticks of
+  visibility per shot. The render-side disc costs a single branch +
+  draw call per mech per frame; the pool would cost the same per
+  flash plus the per-tick fx_update walk.
+- **Revisit when** —
+  - P13 ships per-weapon-class muzzle-flash sprites (the spec at
+    `documents/m5/12-rigging-and-damage.md` §"Render path" + the
+    HUD/atlas pass) and the disc gets replaced with a real sprite
+    drawn from a flash atlas.
+  - We need flashes to persist across the firer's death (e.g. a
+    final-frame killcam shot where the muzzle flash should still be
+    visible after the body ragdolls). The render-tick form requires
+    the firer's mech alive to read; pooled FX would survive.
+
+### Mech capsule renderer is the no-asset fallback (post-P10)
+
+- **What we did** — P10 shipped the sprite path: `draw_mech_sprites`
+  walks the 17-entry `g_render_parts[]` z-order table when
+  `g_chassis_sprites[chassis].atlas.id != 0`, otherwise `draw_mech`
+  falls through to `draw_mech_capsules` (preserved from M4 — bone =
+  thick line, particle = small filled circle). At P10 ship none of
+  the five `assets/sprites/<chassis>.png` files exist, so every chassis
+  actually renders as capsules in real play; the sprite path is only
+  exercised by tests that load synthetic atlases.
+- **Why** — P10 deliberately split the runtime + per-chassis bone
+  distinctness + data-table pipeline from the held-weapon-art (P11)
+  and damage-feedback layers (hit-flash tint, decals, stump caps,
+  smoke — P12) so each lands as a focused review surface. Asset
+  generation (P15–P16) fills the atlases later. The capsule fallback
+  is what keeps the build playable through P10–P14 development.
+- **Revisit when** —
+  - P12 (damage feedback) lands. At that point the sprite path is
+    the canonical render — the [m5/13-controls-and-residuals.md]
+    sweep treats this entry as deletable from P12 onward.
+  - Asset generation (P15–P16) fills `assets/sprites/<chassis>.png`
+    and `draw_mech_capsules` becomes dead code in real play.
+  - Earlier than the above only if the capsule fallback masks a
+    real regression (e.g. a sprite-path bug that fires only when
+    atlases load). Symptom would be: shot tests pass with capsules
+    but break under synthetic-atlas sprite tests.
 
 ---
 

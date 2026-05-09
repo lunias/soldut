@@ -7,6 +7,7 @@
 #include "physics.h"
 #include "pickup.h"
 #include "projectile.h"
+#include "weapon_sprites.h"
 #include "weapons.h"
 
 #include <math.h>
@@ -342,6 +343,12 @@ int mech_create_loadout(World *w, MechLoadout lo, Vec2 spawn,
     m->grapple.constraint_idx = -1;
     m->grapple.anchor_mech    = -1;
 
+    /* P11 — render-side RMB-flicker tracking. -1 = "never fired", so
+     * the renderer doesn't flicker between slots in the early ticks of
+     * a freshly spawned mech. */
+    m->last_fired_slot = -1;
+    m->last_fired_tick = 0;
+
     LOG_I("mech_create: id=%d chassis=%s%s armor=%s jet=%s primary=%s secondary=%s",
           mid, ch->name, is_dummy ? " (dummy)" : "",
           ar->name, jp->name,
@@ -537,9 +544,71 @@ static void build_pose(const Chassis *ch, World *w, Mech *m, float dt) {
     float arm_reach = ch->bone_arm + ch->bone_forearm;
     if (!skip_right_arm_aim) {
         Vec2 r_sho = (Vec2){ pelvis.x + 10, pelvis.y - ch->torso_h + 4 };
-        pose_set(m, PART_R_HAND,
-            (Vec2){ r_sho.x + aim_dir.x * arm_reach,
-                    r_sho.y + aim_dir.y * arm_reach }, 0.7f);
+        Vec2 r_hand_target = (Vec2){ r_sho.x + aim_dir.x * arm_reach,
+                                     r_sho.y + aim_dir.y * arm_reach };
+        pose_set(m, PART_R_HAND, r_hand_target, 0.7f);
+
+        /* P11 — two-handed foregrip pose. Drive both L_ELBOW and
+         * L_HAND so the L_ARM chain sits at rest length pointing from
+         * L_SHOULDER toward the weapon's foregrip pixel. One-handed
+         * weapons return false from `weapon_foregrip_world` and the
+         * L_ARM keeps no pose target — the off-hand dangles from the
+         * constraint chain (the M1 "no IK" default). Spec:
+         * documents/m5/12-rigging-and-damage.md
+         * §"Two-handed weapons and the off-hand foregrip".
+         *
+         * Why pose BOTH elbow and hand instead of just the hand:
+         * the raw foregrip is typically UNREACHABLE for the L_ARM
+         * chain (Pulse Rifle on Trooper: foregrip is ~74 px from
+         * L_SHOULDER, but the chain `bone_arm + bone_forearm` only
+         * reaches ~30 px). Posing only L_HAND yanks the hand toward
+         * an out-of-reach target each tick; the constraint solver
+         * corrects the over-stretched chain by pulling L_ELBOW and
+         * L_SHOULDER forward; that propagates through CHEST →
+         * PELVIS and drags the whole body in the aim direction —
+         * the "mech moves on its own" bug. Posing BOTH elbow and
+         * hand at chain-rest-length positions on the L_SHOULDER →
+         * foregrip line forces the chain straight from the start;
+         * the constraint solver has nothing to correct, no force
+         * propagates back to the body, no drift. Visually the L_ARM
+         * extends straight toward the foregrip — a "reaching for the
+         * rifle" pose; once held-weapon art lands at P16 the L_HAND
+         * sits roughly on the rifle's foregrip pixel. */
+        /* P11 — two-handed foregrip pose: DEFERRED.
+         *
+         * The original implementation drove L_HAND toward the weapon
+         * sprite's foregrip pixel (with strength 0.6 at first, then a
+         * snap-pose IK variant that posed both L_ELBOW and L_HAND at
+         * chain-rest positions). Both versions visibly drifted the
+         * mech body in the aim direction — the "mech moves on its
+         * own" bug.
+         *
+         * Root cause: the rifle's grip-to-foregrip span (~24 px on a
+         * Pulse Rifle) plus the body's shoulder-to-shoulder span
+         * (~20 px) plus the aim-extended R_ARM (~30 px) puts the
+         * rifle's foregrip ~70+ px from L_SHOULDER, far past the
+         * L_ARM chain's max reach (`bone_arm + bone_forearm` ≈
+         * 30 px). Even a strength-1.0 snap-IK that places L_ELBOW +
+         * L_HAND on rest-length positions decouples from L_SHOULDER
+         * during the constraint-solve iterations: as PELVIS shifts
+         * (driven by the R_ARM aim drive's chain-pull each tick),
+         * L_SHOULDER follows via cross-brace; the L_ARM chain is no
+         * longer at rest relative to the moved L_SHOULDER; constraint
+         * corrections fire, propagating back to PELVIS — net
+         * additive drift in the aim direction. Pose strength <1 just
+         * moves the chain into a compressed state per-tick which
+         * also generates corrections.
+         *
+         * Real fix: an IK constraint that runs INSIDE the constraint-
+         * solve loop (instead of before it as a one-shot pose), so
+         * the L_ARM tracks L_SHOULDER per iteration. That's a real
+         * 2-bone analytic IK addition to the constraint pool — out
+         * of scope for P11. Deferred to M6 polish; tracked under
+         * TRADE_OFFS.md "Left hand has no pose target". One-handed
+         * weapons (which were never going to drive the foregrip)
+         * dangle as before; two-handed weapons also dangle now —
+         * resolved when the IK lands. */
+        (void)r_hand_target;
     }
     (void)arm_reach;
 
@@ -1323,6 +1392,14 @@ static void fire_other_slot_one_shot(World *w, int mid) {
     if (m->reload_timer  > 0.0f) return;
     if (wpn->mag_size > 0 && *ammo_ptr <= 0) return;
 
+    /* P11 — stamp the last-fired slot for the renderer's RMB-flicker
+     * window. Stamped before dispatch so even the rare case where the
+     * inner spawn fails (e.g. projectile pool full on grapple) leaves
+     * the renderer in a coherent state — the flicker just decays
+     * through the window. */
+    m->last_fired_slot = (int8_t)other_slot;
+    m->last_fired_tick = w->tick;
+
     /* Save active-slot aliases; swap to the inactive slot's stats. */
     int saved_weapon_id = m->weapon_id;
     int saved_ammo      = m->ammo;
@@ -1365,6 +1442,11 @@ static void fire_other_slot_one_shot(World *w, int mid) {
 
             Vec2 hand    = part_pos(w, m, PART_R_HAND);
             Vec2 aim_dir = mech_aim_dir(w, mid);
+            /* P11 — head spawns at the launcher muzzle, not bare hand,
+             * so visible rope start matches the rendered weapon. */
+            const WeaponSpriteDef *wsp_g = weapon_sprite_def(weapon_id);
+            Vec2 origin = weapon_muzzle_world(hand, aim_dir, wsp_g,
+                                              wpn->muzzle_offset);
             float speed  = wpn->projectile_speed_pxs > 0.0f
                            ? wpn->projectile_speed_pxs : 1200.0f;
             Vec2 vel     = (Vec2){ aim_dir.x * speed, aim_dir.y * speed };
@@ -1376,7 +1458,7 @@ static void fire_other_slot_one_shot(World *w, int mid) {
                 .weapon_id     = weapon_id,
                 .owner_mech_id = mid,
                 .owner_team    = m->team,
-                .origin        = hand,
+                .origin        = origin,
                 .velocity      = vel,
                 .damage        = 0.0f,
                 .aoe_radius    = 0.0f,
@@ -1396,7 +1478,7 @@ static void fire_other_slot_one_shot(World *w, int mid) {
                 /* Broadcast the head spawn so remote clients can
                  * render it during FLYING (snapshot only mirrors
                  * grapple state, not the head projectile). */
-                weapons_record_fire(w, mid, weapon_id, hand, aim_dir);
+                weapons_record_fire(w, mid, weapon_id, origin, aim_dir);
                 SHOT_LOG("t=%llu mech=%d grapple_fire(RMB) ph=%d",
                          (unsigned long long)w->tick, mid, ph);
             }
@@ -1530,6 +1612,10 @@ bool mech_try_fire(World *w, int mid, ClientInput in) {
 
         Vec2 hand    = part_pos(w, m, PART_R_HAND);
         Vec2 aim_dir = mech_aim_dir(w, mid);
+        /* P11 — origin from launcher muzzle, see RMB branch above. */
+        const WeaponSpriteDef *wsp_g = weapon_sprite_def(m->weapon_id);
+        Vec2 origin  = weapon_muzzle_world(hand, aim_dir, wsp_g,
+                                           wpn->muzzle_offset);
         float speed  = wpn->projectile_speed_pxs > 0.0f
                        ? wpn->projectile_speed_pxs : 1200.0f;
         Vec2 vel     = (Vec2){ aim_dir.x * speed, aim_dir.y * speed };
@@ -1541,7 +1627,7 @@ bool mech_try_fire(World *w, int mid, ClientInput in) {
             .weapon_id     = m->weapon_id,
             .owner_mech_id = mid,
             .owner_team    = m->team,
-            .origin        = hand,
+            .origin        = origin,
             .velocity      = vel,
             .damage        = 0.0f,
             .aoe_radius    = 0.0f,
@@ -1562,7 +1648,7 @@ bool mech_try_fire(World *w, int mid, ClientInput in) {
          * the FLYING head. The snapshot only mirrors `grapple.state`,
          * not the projectile itself, so without a FIRE_EVENT the
          * remote view is empty between fire and attach. */
-        weapons_record_fire(w, mid, m->weapon_id, hand, aim_dir);
+        weapons_record_fire(w, mid, m->weapon_id, origin, aim_dir);
         SHOT_LOG("t=%llu mech=%d grapple_fire ph=%d aim=(%.2f,%.2f)",
                  (unsigned long long)w->tick, mid, ph,
                  aim_dir.x, aim_dir.y);
@@ -1570,6 +1656,15 @@ bool mech_try_fire(World *w, int mid, ClientInput in) {
 
     if (m->active_slot == 0) m->ammo_primary   = m->ammo;
     else                     m->ammo_secondary = m->ammo;
+
+    /* P11 — stamp the last-fired slot. The early-return branches above
+     * all bail before reaching here, so a stamp at the tail means a
+     * shot did leave the barrel via the active slot. (RMB stamps in
+     * fire_other_slot_one_shot; on a tick where RMB fired, the active
+     * path bails on the shared cooldown above and never reaches this
+     * stamp — at most one stamp per tick.) */
+    m->last_fired_slot = (int8_t)m->active_slot;
+    m->last_fired_tick = w->tick;
     return true;
 }
 

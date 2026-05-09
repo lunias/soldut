@@ -1,0 +1,15 @@
+# Minimal drift-isolation shot. One Trooper player, no extras, no
+# input. Hold for 200 ticks. Pelvis should converge to a steady
+# position with v ≈ 0 and stay there.
+
+window 1280 720
+seed   11 11
+out    build/shots/m5_drift_isolate
+
+loadout Trooper "Pulse Rifle" Sidearm Light Standard
+spawn_at 640 984
+mouse    1000 360
+
+at 60 shot t60
+at 120 shot t120
+at 200 end

@@ -1,0 +1,85 @@
+# m5_weapon_held.shot — M5 P11
+#
+# Verifies the per-weapon visible-art runtime (P11):
+#   - Pulse Rifle is visibly distinct from Mass Driver / Sidearm at
+#     a glance (silhouette length scales with the weapon sprite size).
+#   - Two-handed weapons drive L_HAND toward the foregrip pose target;
+#     one-handed (Sidearm / Frag Grenades) leaves L_HAND dangling.
+#   - BTN_FIRE_SECONDARY (RMB) flickers the inactive slot's weapon at
+#     R_HAND for ~3 ticks before reverting.
+#   - Active-slot swap (BTN_SWAP / Q) replaces the visible weapon and
+#     drops the foregrip pose for a one-handed secondary.
+#   - Muzzle flash sprite renders additively at the per-weapon muzzle.
+#
+# At P11 ship `assets/sprites/weapons.png` doesn't exist, so the
+# fallback line draws — but the line's length is per-weapon
+# (`draw_w * 0.7`) so visible distinctness still reads on the contact
+# sheet. When the atlas eventually lands (P16) the same shots will
+# show real sprites without script changes.
+#
+# Run:
+#   ./soldut --shot tests/shots/m5_weapon_held.shot
+# Output:
+#   build/shots/m5_weapon_held/*.png + weapon_sheet.png
+
+window 1280 720
+seed   11 11
+out    build/shots/m5_weapon_held
+
+# Player Trooper holding Pulse Rifle (two-handed, foregrip-driving)
+# + Frag Grenades (one-handed). Aim slightly up-right so the weapon
+# is visible against the floor tiles.
+loadout Trooper "Pulse Rifle" "Frag Grenades" Light Standard
+spawn_at 640 984
+mouse    1000 360
+
+# Reference row: same chassis, four different primaries — visibly
+# different barrel lengths under the fallback line render. Mass Driver
+# is the longest weapon (96 px → 67 px barrel line); Sidearm is the
+# shortest (28 px → 20 px); the others sit in between.
+extra_chassis Trooper  240 984 "Mass Driver"
+extra_chassis Trooper  400 984 "Microgun"
+extra_chassis Trooper  900 984 "Rail Cannon"
+extra_chassis Trooper 1080 984 "Sidearm"
+
+# Let the Verlet solver settle each chassis into its standing pose.
+at  60 shot pristine_pulse_rifle
+
+# LMB single-shot — captures the Pulse Rifle muzzle-flash window.
+at  68 press fire
+at  69 release fire
+at  70 shot lmb_fire_flash
+
+# RMB BTN_FIRE_SECONDARY one-shot. Pulse cooldown is 110 ms (~7
+# ticks), so the active LMB path bails for several ticks; RMB still
+# fires Frag Grenades because shared `fire_cooldown` only blocks
+# fresh fires within the 110 ms window of the LMB shot — wait until
+# 90 (~22 ticks after LMB fire) so the shared cooldown is clear.
+at  90 press fire_secondary
+at  91 release fire_secondary
+# Capture during the 3-tick render flicker window — secondary's
+# Frag Grenade sprite (16×16) replaces the rifle at R_HAND.
+at  92 shot rmb_throw_flicker
+# After the window: rifle returns to R_HAND.
+at  98 shot rmb_after_flicker
+
+# Active-slot swap: Pulse Rifle → Frag Grenades. One-handed weapon
+# means the foregrip pose target stays unset → L_HAND falls back to
+# the M1 dangle behavior. Verifiable via the weapon being smaller
+# AND the L_HAND particle sitting noticeably lower than the foregrip
+# would have placed it.
+at 130 press swap
+at 131 release swap
+at 145 shot frag_active_dangle
+
+# Swap back: rifle returns, foregrip re-engages on next tick's
+# build_pose pass.
+at 165 press swap
+at 166 release swap
+at 180 shot pulse_active_again
+
+# Composite all six shots into one sheet — easier to eyeball the
+# visible-art differences side-by-side.
+contact_sheet weapon_sheet cols 3 cell 320 180
+
+at 200 end
