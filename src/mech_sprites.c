@@ -109,3 +109,58 @@ void mech_sprites_unload_all(void) {
         }
     }
 }
+
+/* P12 — Damage-decal helpers. The mapping below is the inverse of
+ * `g_render_parts` in render.c: hits at a bone's distal particle
+ * accumulate on the bone's sprite. Hits at the joints (shoulder, hip,
+ * neck) accumulate on the plate sprite that covers that joint, so a
+ * shoulder hit reads on the shoulder plate, not the upper-arm. Hits at
+ * hand/foot particles accumulate on the lower-arm/leg sprite (the
+ * hand/foot sprites are too small for visible decals). */
+MechSpriteId mech_part_to_sprite_id(int part) {
+    switch (part) {
+        case PART_HEAD:       return MSP_HEAD;
+        case PART_NECK:       return MSP_HEAD;
+        case PART_CHEST:      return MSP_TORSO;
+        case PART_PELVIS:     return MSP_HIP_PLATE;
+        case PART_L_SHOULDER: return MSP_SHOULDER_L;
+        case PART_R_SHOULDER: return MSP_SHOULDER_R;
+        case PART_L_ELBOW:    return MSP_ARM_UPPER_L;
+        case PART_R_ELBOW:    return MSP_ARM_UPPER_R;
+        case PART_L_HAND:     return MSP_ARM_LOWER_L;
+        case PART_R_HAND:     return MSP_ARM_LOWER_R;
+        case PART_L_HIP:      return MSP_HIP_PLATE;
+        case PART_R_HIP:      return MSP_HIP_PLATE;
+        case PART_L_KNEE:     return MSP_LEG_UPPER_L;
+        case PART_R_KNEE:     return MSP_LEG_UPPER_R;
+        case PART_L_FOOT:     return MSP_LEG_LOWER_L;
+        case PART_R_FOOT:     return MSP_LEG_LOWER_R;
+        default:              return MSP_TORSO;
+    }
+}
+
+void mech_sprite_part_endpoints(MechSpriteId sp, int *out_a, int *out_b) {
+    int a = -1, b = PART_PELVIS;
+    switch (sp) {
+        case MSP_TORSO:        a = PART_CHEST;      b = PART_PELVIS;     break;
+        case MSP_HEAD:         a = PART_NECK;       b = PART_HEAD;       break;
+        case MSP_HIP_PLATE:    a = -1;              b = PART_PELVIS;     break;
+        case MSP_SHOULDER_L:   a = -1;              b = PART_L_SHOULDER; break;
+        case MSP_SHOULDER_R:   a = -1;              b = PART_R_SHOULDER; break;
+        case MSP_ARM_UPPER_L:  a = PART_L_SHOULDER; b = PART_L_ELBOW;    break;
+        case MSP_ARM_UPPER_R:  a = PART_R_SHOULDER; b = PART_R_ELBOW;    break;
+        case MSP_ARM_LOWER_L:  a = PART_L_ELBOW;    b = PART_L_HAND;     break;
+        case MSP_ARM_LOWER_R:  a = PART_R_ELBOW;    b = PART_R_HAND;     break;
+        case MSP_HAND_L:       a = -1;              b = PART_L_HAND;     break;
+        case MSP_HAND_R:       a = -1;              b = PART_R_HAND;     break;
+        case MSP_LEG_UPPER_L:  a = PART_L_HIP;      b = PART_L_KNEE;     break;
+        case MSP_LEG_UPPER_R:  a = PART_R_HIP;      b = PART_R_KNEE;     break;
+        case MSP_LEG_LOWER_L:  a = PART_L_KNEE;     b = PART_L_FOOT;     break;
+        case MSP_LEG_LOWER_R:  a = PART_R_KNEE;     b = PART_R_FOOT;     break;
+        case MSP_FOOT_L:       a = -1;              b = PART_L_FOOT;     break;
+        case MSP_FOOT_R:       a = -1;              b = PART_R_FOOT;     break;
+        default:               a = -1;              b = PART_PELVIS;     break;
+    }
+    if (out_a) *out_a = a;
+    if (out_b) *out_b = b;
+}

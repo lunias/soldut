@@ -1,5 +1,6 @@
 #include "simulate.h"
 
+#include "hash.h"
 #include "log.h"
 #include "mech.h"
 #include "particle.h"
@@ -8,6 +9,8 @@
 #include "projectile.h"
 #include "snapshot.h"
 #include "weapons.h"
+
+#include <math.h>
 
 static const char *anim_name(int a) {
     switch (a) {
@@ -154,6 +157,22 @@ void simulate_step(World *w, float dt) {
         mech_step_drive(w, i, drive_in, dt);
     }
 
+    /* P12 — Hit-flash decay. Runs unconditionally (auth + non-auth) so
+     * the local client's flash decays in lockstep with the server's
+     * authoritative side. The kick is set by `mech_apply_damage`
+     * (server) or by the snapshot apply path on remote-mech damage
+     * (deferred until P14 if hit-flash desyncs become noticeable —
+     * for now, the local client's hit-flash on a remote mech only
+     * fires once the next snapshot delivers HP delta, which is
+     * one snapshot late. Acceptable.). */
+    for (int i = 0; i < w->mech_count; ++i) {
+        Mech *m = &w->mechs[i];
+        if (m->hit_flash_timer > 0.0f) {
+            m->hit_flash_timer -= dt;
+            if (m->hit_flash_timer < 0.0f) m->hit_flash_timer = 0.0f;
+        }
+    }
+
     /* Try-fire. Authoritative server fires for *every* mech driven by
      * a remote peer (their latched input may have BTN_FIRE set). The
      * local-only path also fires for the local mech. Pure clients
@@ -224,6 +243,46 @@ void simulate_step(World *w, float dt) {
 
     /* FX particles (blood, sparks, tracers). */
     fx_update(w, dt);
+
+    /* P12 — Smoke from heavily damaged limbs. Tick-gated to every 8th
+     * tick (~7.5 Hz cap), with a square-of-deficit RNG roll so light
+     * damage is essentially silent and near-death is a continuous
+     * plume. The five tracked limbs map back to their joint particles
+     * (PART_*_ELBOW / _KNEE / HEAD) so the puff originates at the
+     * visibly-damaged region of the limb sprite. Server-only —
+     * clients see HP via snapshots and run the same threshold rule
+     * locally so smoke renders identically without an extra wire
+     * message. */
+    if ((w->tick % 8u) == 0u) {
+        for (int mi = 0; mi < w->mech_count; ++mi) {
+            Mech *m = &w->mechs[mi];
+            if (!m->alive) continue;
+            const struct { float hp; float max; int part; } limbs[5] = {
+                { m->hp_arm_l, 80.0f, PART_L_ELBOW },
+                { m->hp_arm_r, 80.0f, PART_R_ELBOW },
+                { m->hp_leg_l, 80.0f, PART_L_KNEE  },
+                { m->hp_leg_r, 80.0f, PART_R_KNEE  },
+                { m->hp_head,  50.0f, PART_HEAD    },
+            };
+            for (int k = 0; k < 5; ++k) {
+                float frac = limbs[k].hp / limbs[k].max;
+                if (frac >= 0.30f) continue;
+                float intensity = (0.30f - frac) / 0.30f;
+                intensity *= intensity;
+                if (pcg32_float01(w->rng) > intensity) continue;
+                int idx = (int)m->particle_base + limbs[k].part;
+                Vec2 src = (Vec2){
+                    w->particles.pos_x[idx],
+                    w->particles.pos_y[idx],
+                };
+                Vec2 vel = {
+                    (pcg32_float01(w->rng) - 0.5f) * 30.0f,
+                    -20.0f - pcg32_float01(w->rng) * 30.0f,
+                };
+                fx_spawn_smoke(&w->fx, src, vel, w->rng);
+            }
+        }
+    }
 
     /* Age the kill feed; HUD reads .age to fade entries out. */
     for (int i = 0; i < KILLFEED_CAPACITY; ++i) {

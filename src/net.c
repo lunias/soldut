@@ -1646,7 +1646,39 @@ static void client_handle_hit_event(NetState *ns, const uint8_t *body, int blen,
     if (n_sparks > 8) n_sparks = 8;
     for (int k = 0; k < n_blood; ++k) fx_spawn_blood(&g->world.fx, hp, dir, g->world.rng);
     for (int k = 0; k < n_sparks; ++k) fx_spawn_spark(&g->world.fx, hp, dir, g->world.rng);
-    (void)victim; (void)part;   /* reserved for future per-limb visual variation */
+
+    /* P12 — Replicate the server's per-event damage feedback so the
+     * client matches host visuals beat-for-beat:
+     *   - hit_flash_timer kicks the white-additive flash on the body
+     *   - mech_record_damage_decal appends to the same per-limb ring
+     *   - limb HP decrement so the per-limb smoke-threshold check in
+     *     simulate_step fires identically on host + client (the
+     *     dismember bit itself rides the next snapshot). The damage
+     *     byte is the server's final post-armor / post-multiplier
+     *     amount; rounding to u8 introduces ≤0.5 dmg of drift per
+     *     hit, well below the 24 HP smoke threshold. */
+    if ((int)victim < g->world.mech_count) {
+        Mech *vm = &g->world.mechs[(int)victim];
+        vm->hit_flash_timer = 0.10f;
+        mech_record_damage_decal(&g->world, (int)victim, (int)part, hp, (float)dmg);
+
+        float *limb_hp = NULL;
+        switch (part) {
+            case PART_HEAD:                                   limb_hp = &vm->hp_head;  break;
+            case PART_L_SHOULDER: case PART_L_ELBOW:
+            case PART_L_HAND:                                 limb_hp = &vm->hp_arm_l; break;
+            case PART_R_SHOULDER: case PART_R_ELBOW:
+            case PART_R_HAND:                                 limb_hp = &vm->hp_arm_r; break;
+            case PART_L_HIP: case PART_L_KNEE: case PART_L_FOOT: limb_hp = &vm->hp_leg_l; break;
+            case PART_R_HIP: case PART_R_KNEE: case PART_R_FOOT: limb_hp = &vm->hp_leg_r; break;
+            default: break;
+        }
+        if (limb_hp) {
+            *limb_hp -= (float)dmg;
+            if (*limb_hp < 0.0f) *limb_hp = 0.0f;
+        }
+    }
+    (void)dir;
 }
 
 static void client_handle_reject(NetState *ns, const uint8_t *body, int blen) {

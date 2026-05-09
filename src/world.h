@@ -154,6 +154,41 @@ typedef struct {
 #define MAX_MECHS         32
 #define MAX_BLOOD         3000
 
+/* P12 — Persistent damage decals composited over each visible mech
+ * part. Decals are stored in sprite-local space (i8 px relative to the
+ * bone-segment midpoint, unrotated) so they migrate naturally with the
+ * limb sprite each frame. The kind picks the placeholder color until
+ * P13 ships authored decal sub-rects in the HUD atlas.
+ *
+ * MECH_LIMB_DECAL_COUNT must match `MSP_COUNT` in mech_sprites.h
+ * (asserted there at compile time). World.h can't include
+ * mech_sprites.h without an include cycle, so the constant is mirrored
+ * here.
+ *
+ * Sprite-local i8 coords cap at ±127 px, comfortably inside our largest
+ * sprite (96 px tall leg upper) — see TRADE_OFFS.md "Decal records use
+ * sprite-local int8 coords" for the revisit trigger. */
+#define MECH_LIMB_DECAL_COUNT   22
+#define DAMAGE_DECALS_PER_LIMB  16
+
+typedef enum {
+    DAMAGE_DECAL_DENT   = 0,    /* light damage (< 30 dmg) */
+    DAMAGE_DECAL_SCORCH = 1,    /* moderate / explosion damage */
+    DAMAGE_DECAL_GOUGE  = 2,    /* heavy damage (>= 80 dmg) */
+} DamageDecalKind;
+
+typedef struct {
+    int8_t   local_x, local_y;  /* sprite-local px, midpoint-relative, unrotated */
+    uint8_t  kind;              /* DamageDecalKind */
+    uint8_t  reserved;
+} MechDamageDecal;
+
+typedef struct {
+    MechDamageDecal items[DAMAGE_DECALS_PER_LIMB];
+    uint8_t         count;      /* >= DAMAGE_DECALS_PER_LIMB → ring overwrite via modulo */
+    uint8_t         pad[3];
+} MechLimbDecals;
+
 /* Lag-compensation history: per mech, ring buffer of bone particle
  * positions for the last LAG_HIST_TICKS ticks. At 60 Hz this covers
  * 200 ms — the cap on how far back we'll rewind a hitscan to a target's
@@ -323,6 +358,21 @@ typedef struct {
     float     last_damage_taken;
     int       last_killshot_weapon;
 
+    /* P12 — Hit-flash timer. Set to ~0.10 s at every successful damage
+     * application; decayed each tick in simulate. The renderer reads
+     * `hit_flash_timer / 0.10f` as a 0..1 white-additive blend over the
+     * body tint. Whole-mech granularity (per the M5 spec); per-limb is
+     * a polish item. Distinct from `last_damage_taken` — that field
+     * stays as the killing-blow amount for `KILLFLAG_OVERKILL`. */
+    float     hit_flash_timer;
+
+    /* P12 — Persistent damage decals, one ring per visible mech part
+     * (indexed by `MechSpriteId`). The first MECH_RENDER_PART_COUNT
+     * slots are the "real" parts; stump-cap slots are unused but kept
+     * so the index space matches `MSP_COUNT`. Cleared by
+     * `mech_clear_damage_decals` on respawn. */
+    MechLimbDecals damage_decals[MECH_LIMB_DECAL_COUNT];
+
     /* Server-side: the most recent input we processed for this mech.
      * Echoed back in snapshots so the client can drop already-acked
      * inputs from its replay buffer. */
@@ -465,6 +515,7 @@ typedef enum {
     FX_SPARK,
     FX_TRACER,
     FX_SMOKE,
+    FX_STUMP,            /* P12: pinned dismemberment emitter — pin_mech_id / pin_limb track the parent particle each tick */
     FX_KIND_COUNT
 } FxKind;
 
@@ -479,6 +530,14 @@ typedef struct {
     uint32_t color;      /* RGBA8 */
     uint8_t  kind;       /* FxKind */
     uint8_t  alive;
+    /* P12 — FX_STUMP only: pinned-emitter parent. The emitter has no
+     * own integrate path; each tick it spawns 1–2 blood particles at
+     * the parent particle position so the trail tracks the still-moving
+     * torso (not the tumbling severed limb). Self-deactivates when
+     * pin_mech_id is invalid or the body's particle base disappears. */
+    int16_t  pin_mech_id;
+    uint8_t  pin_limb;   /* LIMB_* bit (HEAD/L_ARM/R_ARM/L_LEG/R_LEG) */
+    uint8_t  pin_pad;
 } FxParticle;
 
 typedef struct {

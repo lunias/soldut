@@ -124,9 +124,11 @@ In addition to the docs and CLAUDE.md, Claude should be aware of these key code 
 - `src/main.c` — top-level loop
 - `src/world.h` — all the data definitions
 - `src/mech.{c,h}` — chassis + animation + damage
+- `src/mech_sprites.{c,h}` — per-chassis sprite atlas + render parts (P10)
 - `src/physics.c` — Verlet + constraints + collision
-- `src/render.c` — current capsule renderer
+- `src/render.c` — sprite-or-capsule mech dispatch + held-weapon draw
 - `src/weapons.{c,h}` — weapon table + fire dispatch
+- `src/weapon_sprites.{c,h}` — per-weapon sprite defs + grip/foregrip/muzzle pivots (P11)
 - `src/projectile.{c,h}` — projectile pool
 - `src/level.{c,h}` — current tile-grid loader
 - `src/maps.{c,h}` — current code-built maps

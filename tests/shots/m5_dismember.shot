@@ -1,0 +1,75 @@
+# m5_dismember.shot — P12 damage feedback layers.
+#
+# Verifies the four runtime layers landed at P12:
+#   1. hit-flash white-additive tint (~80–120 ms after damage)
+#   2. persistent decal placeholder dots — one per damage event, 16-deep
+#      ring per visible part — accumulating on the limbs that took fire
+#   3. heavy initial blood spray + pinned FX_STUMP emitter on dismember
+#   4. fx_spawn_smoke from limbs at < 30% HP (visible BEFORE the dummy
+#      dies, since leg dismemberment isn't lethal — only head detach is)
+#
+# Stump-cap SPRITES require a chassis atlas, which doesn't ship at P12
+# (asset gen lands at P15/P16). The spec calls out "capsule fallback:
+# stump caps don't render"; the heavy initial blood spray + pinned
+# emitter sell the dismemberment without it.
+#
+# Strategy: aim at the dummy's left knee. Each Pulse Rifle hit deals
+# 12.6 dmg (knee multiplier 0.7) so:
+#   5 hits  → limb HP 80 → 17 → smoke threshold engaged (frac 0.21)
+#   7 hits  → limb HP   ≤  -8  → DISMEMBER L_LEG (non-lethal, dummy alive)
+# Dummy chassis HP starts at 150; 7 shots × 18 base = 126 dmg → 24 HP
+# alive at end of fire window. Window for "alive with missing leg +
+# smoke trail" is ticks ~50-120.
+#
+# Run:
+#   ./soldut --shot tests/shots/m5_dismember.shot
+# Output:
+#   build/shots/m5_dismember/{t010_pristine,t022_first_flash,...}.png
+#   build/shots/m5_dismember/sheet.png
+
+window 1280 720
+seed   12 12
+out    build/shots/m5_dismember
+loadout - "Pulse Rifle" Sidearm Light Standard
+contact_sheet sheet cols 4 cell 480 270
+
+# Both player and dummy stand on the right-side platform (cols 70–79
+# in level_build_tutorial, x range 2240–2560, top y=1024). Player at
+# x=2280 sits 120 px left of the dummy at x=2400 on the same row 32
+# surface. World-space `aim` (not `mouse`) so the rifle target stays
+# locked on the dummy's left knee regardless of camera follow.
+spawn_at 2280 984
+aim      2400 1005
+
+# Pristine reference — dummy untouched.
+at  10 shot t010_pristine
+
+# Fire the Pulse Rifle for ~50 ticks: ≈7 shots at 110 ms cycle. Each
+# 12.6-dmg knee hit accumulates on L_LEG limb HP and on the leg-upper /
+# leg-lower decal rings. Hit-flash kicks at every shot to f=1.0 and
+# decays over 6 ticks.
+at  20 press fire
+at  70 release fire
+
+# Capture mid-flash on the first shot (flash f ≈ 0.7 at t=22).
+at  22 shot t022_first_flash
+
+# Mid-fight: decals visible on the leg sprite area, multiple flashes
+# stacked through the cycle.
+at  40 shot t040_decals
+
+# Smoke begins firing once a limb is below 30% HP (~5 hits in).
+at  60 shot t060_smoke_begins
+
+# Dismember moment (~tick 60-65 if all 7 hits land on the leg). Heavy
+# initial spray + FX_STUMP emitter pinned to the parent particle.
+at  78 shot t078_spray
+
+# Pinned emitter still dripping for ~1.5 s after dismember; smoke
+# trailing the gibbed limb (it's still in the particle pool, frac=0).
+at 130 shot t130_emitter
+
+# Settled state — body has stopped, blood pooled, smoke continuing.
+at 220 shot t220_settled
+
+at 280 end
