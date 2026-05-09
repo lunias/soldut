@@ -3,6 +3,8 @@
 #include "input.h"
 #include "math.h"
 
+#include "../third_party/raylib/src/raylib.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -13,6 +15,27 @@
  * and the audio engine because any 2D project that doesn't is reinventing
  * the parts of raylib that work.
  */
+
+/* M5 P13 — TTF fonts. Three faces ship under assets/fonts/:
+ *   BODY    — Atkinson Hyperlegible Regular (high-contrast accessible body)
+ *   DISPLAY — VG5000 Regular (Velvetyne; map titles, kill-feed flag chips)
+ *   MONO    — Steps Mono Thin (Velvetyne; HUD numerics)
+ * `ui_font_for` returns the matching Font when loaded, or raylib's default
+ * font as graceful fallback so a fresh checkout without `assets/fonts/`
+ * still renders text (just bilinear-blurry like M4). */
+typedef enum {
+    UI_FONT_BODY    = 0,
+    UI_FONT_DISPLAY = 1,
+    UI_FONT_MONO    = 2,
+    UI_FONT_COUNT
+} UIFontKind;
+
+extern Font g_ui_font_body;
+extern Font g_ui_font_display;
+extern Font g_ui_font_mono;
+extern bool g_ui_fonts_loaded;
+
+Font ui_font_for(UIFontKind kind);
 
 typedef struct {
     int   window_w, window_h;

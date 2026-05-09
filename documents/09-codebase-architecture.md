@@ -6,7 +6,7 @@ This document specifies the **layout** of the source: folders, modules, what eac
 
 ```
 soldut/
-├── src/                    # game source — 72 .c/.h files (39 modules) post-M5 P11
+├── src/                    # game source — 72 .c/.h files (39 modules) post-M5 P12
 ├── tools/                  # support utilities (level cooker, replay extractor)
 ├── assets/                 # ships with the binary
 ├── third_party/
@@ -80,7 +80,7 @@ Modules that the design canon expects but that haven't shipped yet:
 - `audio.{c,h}` — lands at M5 P14 (per `documents/m5/09-audio.md`).
 - `hotreload.{c,h}` — never built; data hot-reload is deferred indefinitely.
 
-Shipped at M5: `level_io.{c,h}` (P01), `pickup.{c,h}` (P05), `ctf.{c,h}` (P07), `map_cache.{c,h}` + `map_download.{c,h}` (P08), `mech_sprites.{c,h}` (P10), `weapon_sprites.{c,h}` (P11).
+Shipped at M5: `level_io.{c,h}` (P01), `pickup.{c,h}` (P05), `ctf.{c,h}` (P07), `map_cache.{c,h}` + `map_download.{c,h}` (P08), `mech_sprites.{c,h}` (P10), `weapon_sprites.{c,h}` (P11). P12 grew existing modules (no new module): `render.c` (+~155 LOC for `apply_hit_flash` / `draw_damage_decals` / `draw_stump_caps` / `part_local_to_world`), `mech.c` (+~85 LOC for `hit_flash_timer` decay + per-limb decal-ring writes + smoke-threshold check), `mech_sprites.c` (+~55 LOC for `mech_part_to_sprite_id` + `mech_sprite_part_endpoints` helpers), and added `FX_STUMP` to the particle path.
 
 `server_browser.{c,h}` was originally planned as its own module; LAN discovery folded into `net.{c,h}` and the browser screen lives in `lobby_ui.{c,h}`.
 
@@ -354,23 +354,23 @@ We do **not** integrate Tracy or Optick at v1. If we need deep traces, we add th
 
 ## File size targets
 
-| Module | Current LOC (post-M4 + M5 P01–P11) | Notes |
+| Module | Current LOC (post-M4 + M5 P01–P12) | Notes |
 |---|---|---|
 | main.c | 1600 | top-level loop + accumulator + CLI + P03 event broadcast loops + P04 `--test-play` + P05 `broadcast_new_pickups` + P07 CTF mode-mask validation + `broadcast_flag_state_if_dirty` + `ctf_step` hookup + TDM/CTF team auto-balance + P08 host map-ready gate / serve-info refresh + P09 `host_start_map_vote` + summary-screen vote routing + P10 `mech_sprites_load_all` after `platform_init` + P11 `g_weapons_atlas` load |
 | platform.c | 100 | thin raylib wrapper (P09: RMB → `BTN_FIRE_SECONDARY`) |
 | game.c | 143 | Game lifecycle (P08b `map_registry_init` call) |
-| simulate.c | 251 | the pure step (P03 render_prev snapshot, P05 pickup_step hook) |
+| simulate.c | 310 | the pure step (P03 render_prev snapshot, P05 pickup_step hook, P12 per-mech `hit_flash_timer` decay + per-limb smoke-threshold check on every 8th tick) |
 | physics.c | 753 | Verlet + constraints + tile/poly collision (M5 P02 grew this; P06 added `solve_fixed_anchor`) |
-| mech.c | 1999 | chassis + animation drive — past split threshold (P05 powerups + Engineer deployable + Burst SMG cadence; P06 grapple lifecycle + ATTACHED retract block; P07 carrier penalties + `ctf_drop_on_death` hook in `mech_kill`; P09 `fire_other_slot_one_shot` RMB one-shot dispatch; P10 per-chassis bone-length distinctness in `g_chassis[]` + per-chassis posture quirks in `build_pose`; P11 `last_fired_slot` / `last_fired_tick` fields + grapple-branch migration to `weapon_muzzle_world(...)` — foregrip pose driver attempted in `build_pose` and reverted post-ship) |
+| mech.c | 2084 | chassis + animation drive — past split threshold (P05 powerups + Engineer deployable + Burst SMG cadence; P06 grapple lifecycle + ATTACHED retract block; P07 carrier penalties + `ctf_drop_on_death` hook in `mech_kill`; P09 `fire_other_slot_one_shot` RMB one-shot dispatch; P10 per-chassis bone-length distinctness in `g_chassis[]` + per-chassis posture quirks in `build_pose`; P11 `last_fired_slot` / `last_fired_tick` fields + grapple-branch migration to `weapon_muzzle_world(...)` — foregrip pose driver attempted in `build_pose` and reverted post-ship; P12 `hit_flash_timer` decay + per-limb `damage_decals` ring writes from `mech_apply_damage` + `mech_dismember` 64-particle radial spray + `fx_spawn_stump_emitter` arm + per-limb smoke-threshold check) |
 | weapons.c | 681 | weapon table + fire logic + P03 fire-event recording + P06 WFIRE_GRAPPLE branch + P11 four fire paths migrated to `weapon_muzzle_world(...)` |
 | projectile.c | 590 | bullets/grenades + P06 `PROJ_GRAPPLE_HEAD` lifecycle |
-| particle.c | 190 | pool + draw |
+| particle.c | 282 | pool + draw (P12 added `FX_STUMP` pinned emitter + `fx_spawn_stump_emitter` + tick-time parent-particle lookup + `fx_spawn_smoke` for damaged-limb cue) |
 | decal.c | 80 | splat layer |
 | level.c | 260 | tile-grid helpers + ray queries + poly broadphase (M5 P02) |
 | level_io.c | 833 | `.lvl` loader/saver + CRC32 + poly broadphase build (M5 P01–P02) + P08 `level_compute_buffer_crc` for download verify |
 | maps.c | 837 | code-built map fallbacks + `map_build` + `map_build_from_path` + P05 default pickups + P07 `MAP_CROSSFIRE` (CTF arena) + per-map `meta.mode_mask` + P08 `map_build_for_descriptor` + `maps_refresh_serve_info` + P08b `MapRegistry` + `map_registry_init`/`_from` + cheap META scan + custom-map fallback in `map_build` |
 | match.c | 301 | match phases, scoring, mode rules |
-| render.c | 771 | orchestration (P02 polygon stopgap, P03 alpha-lerp threading, P05 invis alpha-mod + pickup placeholder, P06 `draw_grapple_rope`, P07 `draw_flags`, P10 sprite-or-capsule dispatch + 17-entry `g_render_parts` z-order table + L↔R swap helpers + `draw_held_weapon_line` extracted; P11 `draw_held_weapon` sprite-or-line dispatch + per-weapon-sized barrel fallback + RMB hand-flicker + 3-tick muzzle-flash disc) |
+| render.c | 927 | orchestration (P02 polygon stopgap, P03 alpha-lerp threading, P05 invis alpha-mod + pickup placeholder, P06 `draw_grapple_rope`, P07 `draw_flags`, P10 sprite-or-capsule dispatch + 17-entry `g_render_parts` z-order table + L↔R swap helpers + `draw_held_weapon_line` extracted; P11 `draw_held_weapon` sprite-or-line dispatch + per-weapon-sized barrel fallback + RMB hand-flicker + 3-tick muzzle-flash disc; P12 `apply_hit_flash` blend in both render paths + `draw_damage_decals` placeholder dots over the limb sprite + `draw_stump_caps` for sprite-path dismemberment + `part_local_to_world` re-rotates decals with the current bone angle) |
 | hud.c | 283 | HP / jet / ammo / kill feed + P05 active-powerup pill + P07 CTF flag pips + off-screen compass arrows |
 | ui.c | 306 | immediate-mode UI helpers |
 | lobby.c | 598 | lobby state, slots, chat, ready-up + P09 `lobby_load_bans` / `lobby_save_bans` (`bans.txt` round-trip) |
@@ -382,7 +382,7 @@ We do **not** integrate Tracy or Optick at v1. If we need deep traces, we add th
 | ctf.c | 285 | new at P07 — flag entities + capture rule + auto-return + carrier helpers |
 | map_cache.c | 324 | new at P08 — content-addressed `<XDG_DATA_HOME>/soldut/maps/<crc>.lvl` cache + 64 MB LRU + atomic write |
 | map_download.c | 125 | new at P08 — per-process MapDownload (2 MB buffer + chunk bitmap + 30 s stall watchdog) |
-| mech_sprites.c | 111 | new at P10 — `g_chassis_sprites[CHASSIS_COUNT]` + 22-entry placeholder sub-rect/pivot table + `assets/sprites/<chassis>.png` loader |
+| mech_sprites.c | 166 | new at P10 — `g_chassis_sprites[CHASSIS_COUNT]` + 22-entry placeholder sub-rect/pivot table + `assets/sprites/<chassis>.png` loader; P12 added `mech_part_to_sprite_id` + `mech_sprite_part_endpoints` helpers (PART_* ↔ MechSpriteId mapping + bone endpoints) so decal record-time and render-time agree on the world↔local transform |
 | weapon_sprites.c | 211 | new at P11 — `g_weapon_sprites[WEAPON_COUNT]` (14 entries: sub-rect + grip / foregrip / muzzle pivots + draw_w/h) + `g_weapons_atlas` loader + `weapon_muzzle_world(...)` / `weapon_foregrip_world(...)` helpers |
 | config.c | 178 | `soldut.cfg` parser |
 | arena.c | 51 | |
@@ -391,7 +391,7 @@ We do **not** integrate Tracy or Optick at v1. If we need deep traces, we add th
 | hash.c | 49 | |
 | ds.c | 20 | one #define |
 | shotmode.c | 2272 | scriptable test runner + P05 `give_invis` debug directive + P07 `mode`/`map`/`flag_carry` directives + config_load + ctf_init_round/ctf_step hookup + post-P07 `arm_carry`/`kill_peer`/`team_change` directives + P09 `fire_secondary` button + P10 `extra_chassis` directive + dummy spawn loop + `mech_sprites_unload_all` before each `platform_shutdown` + P11 `extra_chassis` 4-token primary-weapon override — well past split threshold |
-| **Total .c** | **~19,830 LOC** | + ~4,150 LOC of headers |
+| **Total .c** | **~20,220 LOC** | + ~4,180 LOC of headers |
 
 `net.c`, `mech.c`, `lobby_ui.c`, and `shotmode.c` are all well past the
 ~1500 line split guideline. P08 added ~415 LOC to `net.c` (lobby-channel
@@ -404,11 +404,17 @@ path + render-parts table) and `shotmode.c` (+53 LOC for the
 +79 .h) and grew `render.c` (+79 LOC for `draw_held_weapon` + muzzle
 flash) and `mech.c` (+95 LOC for `last_fired_*` fields, the reverted
 foregrip-pose driver, and `weapon_muzzle_world(...)` migration in the
-grapple branches). The extraction (e.g., `net_lobby.c` /
-`net_map_share.c`; `lobby_ui_match.c` / `lobby_ui_summary.c`) is worth
-scheduling before the audio module (M5 P14) adds its own surface to
-`net.c`. `audio.{c,h}` is not yet built — it lands at M5 P14 and will
-add to this table.
+grapple branches). P12 grew `render.c` (+~155 LOC for `apply_hit_flash`
++ `draw_damage_decals` + `draw_stump_caps` + `part_local_to_world`),
+`mech.c` (+~85 LOC for hit-flash decay + per-limb decal-ring writes +
+`mech_dismember` heavy-spray + `fx_spawn_stump_emitter` arm + smoke
+threshold), `mech_sprites.c` (+~55 LOC for the PART_* ↔ sprite-id
+helpers), `particle.c` (+~92 LOC for `FX_STUMP` + `fx_spawn_smoke`),
+and `simulate.c` (+~60 LOC for hit-flash decay + smoke-threshold tick).
+The extraction (e.g., `net_lobby.c` / `net_map_share.c`;
+`lobby_ui_match.c` / `lobby_ui_summary.c`) is worth scheduling before
+the audio module (M5 P14) adds its own surface to `net.c`. `audio.{c,h}`
+is not yet built — it lands at M5 P14 and will add to this table.
 
 If a module substantially exceeds the rule of thumb, it's doing too much — we
 look for an extraction.

@@ -51,3 +51,16 @@ void renderer_draw_frame(Renderer *r, World *w,
                          Vec2 cursor_screen,
                          RendererOverlayFn overlay_cb,
                          void *overlay_user);
+
+/* M5 P13 — drop the halftone shader + post-process render target. Called
+ * from main.c right before platform_shutdown so GL resources are freed
+ * while the GL context is still live. Safe to call when nothing was ever
+ * loaded (idempotent). */
+void renderer_post_shutdown(void);
+
+/* M5 P13 — drop the global `assets/sprites/decorations.png` atlas.
+ * Called from the same shutdown sites; idempotent. The atlas is lazy-
+ * loaded on the first `draw_decorations` invocation, so calling
+ * `renderer_decorations_unload` and then drawing again triggers a
+ * reload — that's the hot-reload path P13 Task 9 plugs into. */
+void renderer_decorations_unload(void);

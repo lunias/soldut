@@ -58,7 +58,8 @@ all: $(BIN)
 # gdb can walk every local variable. Output binary is `soldut-dbg` —
 # distinct from the release binary so you can keep both around.
 DBG_CFLAGS = -std=c11 -O0 -g3 -ggdb -Wall -Wextra -Wpedantic -Werror \
-             -fno-omit-frame-pointer -fsanitize=address -fsanitize=undefined
+             -fno-omit-frame-pointer -fsanitize=address -fsanitize=undefined \
+             -DDEV_BUILD
 DBG_LDFLAGS = -fsanitize=address -fsanitize=undefined
 DBG_OBJ := $(SRC:src/%.c=$(BUILD_DIR)/dbg/%.o)
 DBG_DEP := $(DBG_OBJ:.o=.d)
