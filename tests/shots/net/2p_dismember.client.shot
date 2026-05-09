@@ -1,0 +1,32 @@
+# 2p_dismember.client — passive target for the host's fire. The
+# client stands still, doesn't fire, and captures screenshots at the
+# same ticks as the host so a reviewer can diff host-view vs
+# client-view of the SAME moment for every damage feedback layer.
+#
+# Pairs with 2p_dismember.host.shot. See that file for the full
+# verification rationale.
+
+window 1280 720
+seed   12 12
+out    build/shots/net/dismember_client
+network connect 127.0.0.1:24091
+name ClientTarget
+
+# Match host's peer_spawn so the local mech starts where the host
+# expects it.
+spawn_at 2500 1112
+
+# Aim into empty space far to the left so the client never
+# accidentally fires (no fire input issued either, but pose-driven
+# aim keeps the right arm posed correctly for visual consistency).
+aim 1900 1080
+
+# Same screenshot ticks as host. Each tick should show the same
+# damage feedback layers from the client's perspective.
+at  100 shot t100_pristine
+at  140 shot t140_first_flash
+at  180 shot t180_decals
+at  240 shot t240_dismember
+at  340 shot t340_settled
+
+at  450 end

@@ -1,0 +1,57 @@
+# 2p_dismember.host — host fires Pulse Rifle at the client to verify
+# the four P12 damage feedback layers replicate from server to client.
+#
+# Pairs with 2p_dismember.client.shot. Both spawn adjacent on the
+# Foundry ground floor (200 px apart). The host fires; the client
+# stays passive. At the same tick, both screenshots should show:
+#   - identical hit-flash on the victim (white-additive blend)
+#   - identical decal placeholder dots on the same limb sprite area
+#   - identical heavy spray + pinned emitter at dismember moment
+#   - identical smoke from limbs at <30% HP
+#
+# Aim biased at the client's lower body so hits accumulate on a leg
+# limb (knee hits = 12.6 dmg with the 0.7 location multiplier; ~7
+# concentrated hits dismember L_LEG without killing the chassis —
+# leg dismember is non-lethal, only HEAD detach is lethal).
+#
+# Run:
+#   tests/shots/net/run.sh 2p_dismember
+# Output:
+#   build/shots/net/{dismember_host,dismember_client}/*.png
+#   build/shots/net/sheet.png  (side-by-side host vs client per tick)
+
+window 1280 720
+seed   12 12
+out    build/shots/net/dismember_host
+network host 24091
+name HostShoot
+
+# Place host (slot 0) on the Foundry ground at the same coords
+# 2p_combat uses, so the test runs against a known-good geometry.
+spawn_at 2300 1112
+# Place client (slot 1) 200 px right.
+peer_spawn 1 2500 1112
+
+# Aim at the client's lower body — pelvis y=1112, knee y≈1130, foot
+# y≈1148. Aiming at 1130 lands the rifle line at the upper-leg /
+# knee region after gravity drop. Bink scatter biases hits onto a
+# single leg limb.
+aim 2500 1130
+
+# Settle, then full-auto into the client. Pulse Rifle 110 ms cycle =
+# ~6.6 ticks/shot; 100 ticks of fire ≈ 15 shots, biased toward the
+# client's L_LEG / R_LEG. We want the FIRST few hits captured
+# clearly (flash + decals on living mech), then the dismember beat,
+# then a settled post-dismember state.
+at  120 press fire
+at  220 release fire
+
+# Screenshots — same ticks as the client side so the contact-sheet
+# comparison shows host-view vs client-view at identical moments.
+at  100 shot t100_pristine
+at  140 shot t140_first_flash      # ~3 hits in; flash on victim
+at  180 shot t180_decals           # ~9 hits in; decal accumulation
+at  240 shot t240_dismember        # post-fire; expect dismember + spray
+at  340 shot t340_settled          # body settled; emitter trail; smoke
+
+at  450 end

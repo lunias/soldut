@@ -165,6 +165,17 @@ void mech_kill(World *w, int mech_id, int killshot_part, Vec2 dir,
  * invocation does any work. `limb` is a LIMB_* bit from world.h. */
 void mech_dismember(World *w, int mech_id, int limb);
 
+/* Record a persistent damage decal on the hit limb's sprite. Computes
+ * the hit's sprite-local i8 coords (midpoint-relative, unrotated) so
+ * the decal stays glued to the limb sprite as the body moves; kind
+ * picks DENT/SCORCH/GOUGE based on damage amount. Both the
+ * authoritative damage path (mech_apply_damage) AND the client-side
+ * NET_MSG_HIT_EVENT handler call this so host and client decal rings
+ * stay in lockstep. Safe to call on a dead mech (no-op if part is
+ * out of range; otherwise records normally). */
+void mech_record_damage_decal(World *w, int mech_id, int part,
+                              Vec2 hit_world, float damage);
+
 /* The pose/anim driver — called every simulation tick *before* the
  * physics step. Reads input, sets pose targets and strengths, kicks off
  * anim transitions. Local control happens here too: run force, jet

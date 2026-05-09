@@ -78,6 +78,54 @@ int fx_spawn_spark(FxPool *pool, Vec2 pos, Vec2 vel, pcg32_t *rng) {
     return idx;
 }
 
+int fx_spawn_smoke(FxPool *pool, Vec2 pos, Vec2 vel, pcg32_t *rng) {
+    int idx = fx_alloc(pool);
+    if (idx < 0) return -1;
+    FxParticle *fp = &pool->items[idx];
+    /* Velocity already chosen by caller — small upward drift with
+     * lateral jitter. Add a small extra random angle so successive
+     * puffs from the same source spread visibly. */
+    float ang = atan2f(vel.y, vel.x) + (pcg32_float01(rng) - 0.5f) * 0.6f;
+    float speed = sqrtf(vel.x * vel.x + vel.y * vel.y);
+    fp->pos       = pos;
+    fp->render_prev_pos = pos;
+    fp->vel       = (Vec2){ cosf(ang) * speed, sinf(ang) * speed };
+    fp->life      = 0.9f + pcg32_float01(rng) * 0.6f;
+    fp->life_max  = fp->life;
+    fp->size      = 3.0f + pcg32_float01(rng) * 2.0f;
+    /* fx_draw's FX_SMOKE branch hardcodes the render color to dark grey;
+     * we just need the LSB (alpha-byte) to be 0xFF so the life-ratio
+     * fade reaches full visibility at spawn. */
+    fp->color     = 0x000000FFu;
+    fp->kind      = FX_SMOKE;
+    fp->alive     = 1;
+    fp->pin_mech_id = -1;
+    fp->pin_limb    = 0;
+    fp->pin_pad     = 0;
+    return idx;
+}
+
+int fx_spawn_stump_emitter(FxPool *pool, int mech_id, int limb,
+                           float duration_s)
+{
+    int idx = fx_alloc(pool);
+    if (idx < 0) return -1;
+    FxParticle *fp = &pool->items[idx];
+    fp->pos       = (Vec2){ 0.0f, 0.0f };   /* updated each tick to parent particle */
+    fp->render_prev_pos = fp->pos;
+    fp->vel       = (Vec2){ 0.0f, 0.0f };
+    fp->life      = duration_s;
+    fp->life_max  = duration_s;
+    fp->size      = 0.0f;
+    fp->color     = 0x00000000u;     /* invisible — emitter doesn't render */
+    fp->kind      = FX_STUMP;
+    fp->alive     = 1;
+    fp->pin_mech_id = (int16_t)mech_id;
+    fp->pin_limb    = (uint8_t)limb;
+    fp->pin_pad     = 0;
+    return idx;
+}
+
 int fx_spawn_tracer(FxPool *pool, Vec2 a, Vec2 b) {
     int idx = fx_alloc(pool);
     if (idx < 0) return -1;
@@ -95,7 +143,10 @@ int fx_spawn_tracer(FxPool *pool, Vec2 a, Vec2 b) {
 }
 
 /* Per-tick update: blood and sparks fall under gravity, age out,
- * and deposit decals when they expire. */
+ * and deposit decals when they expire. P12 — FX_STUMP emitters pin to
+ * a parent particle (looked up via pin_mech_id + pin_limb each tick)
+ * and spawn 1–2 blood drops per tick at that world position; they don't
+ * integrate or wall-collide themselves. */
 void fx_update(World *w, float dt) {
     FxPool *pool = &w->fx;
     Vec2 g = w->level.gravity;
@@ -117,6 +168,43 @@ void fx_update(World *w, float dt) {
             }
             fp->alive = 0;
             continue;
+        }
+
+        if (fp->kind == FX_STUMP) {
+            /* Look up the parent particle on the pinned mech each tick
+             * so the emitter tracks the still-moving torso wherever it
+             * tumbles. parent_part = the joint particle the dismembered
+             * limb USED to attach to. */
+            int mid = fp->pin_mech_id;
+            int parent_part = -1;
+            switch (fp->pin_limb) {
+                case LIMB_HEAD:  parent_part = PART_NECK;       break;
+                case LIMB_L_ARM: parent_part = PART_L_SHOULDER; break;
+                case LIMB_R_ARM: parent_part = PART_R_SHOULDER; break;
+                case LIMB_L_LEG: parent_part = PART_L_HIP;      break;
+                case LIMB_R_LEG: parent_part = PART_R_HIP;      break;
+                default:         parent_part = -1;              break;
+            }
+            if (mid < 0 || mid >= w->mech_count || parent_part < 0) {
+                fp->alive = 0;
+                continue;
+            }
+            const Mech *m = &w->mechs[mid];
+            int idx = (int)m->particle_base + parent_part;
+            Vec2 pos = particle_pos(&w->particles, idx);
+            fp->pos = pos;
+            /* 1–2 blood drops per tick, downward-biased so the trail
+             * hangs below the joint regardless of the body's pose. */
+            int n = 1 + (int)(pcg32_next(w->rng) & 1u);
+            for (int k = 0; k < n; ++k) {
+                Vec2 vd = {
+                    (pcg32_float01(w->rng) - 0.5f) * 200.0f,
+                    100.0f + pcg32_float01(w->rng) * 200.0f,
+                };
+                fx_spawn_blood(pool, pos, vd, w->rng);
+            }
+            if (i > last_alive) last_alive = i;
+            continue;     /* skip integrate + wall-collide */
         }
 
         if (fp->kind != FX_TRACER) {
@@ -183,6 +271,10 @@ void fx_draw(const FxPool *pool, float alpha) {
                  * version lands with the M5 art pass. */
                 DrawCircleV(pos, fp->size * 1.4f,
                     (Color){ 60, 60, 60, (unsigned char)(a / 2) });
+                break;
+            case FX_STUMP:
+                /* Pinned dismemberment emitter — invisible itself; the
+                 * blood drops it spawns each tick are what's visible. */
                 break;
             case FX_KIND_COUNT: break;
         }

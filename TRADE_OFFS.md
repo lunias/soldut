@@ -13,7 +13,25 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-09** (post P11 — per-weapon visible art runtime
+Last updated: **2026-05-09** (post P12 — damage feedback layers shipped.
+New entries: "Whole-mech hit flash, not per-particle" (per-particle
+flash would need a separate hit-flash field per particle in the SoA
+pool; whole-mech is sufficient at v1), "Decal-overlay damage, not
+sprite-swap damage states" (the canonical compromise from
+`documents/m5/12-rigging-and-damage.md` — 3× asset reduction, 5
+shared decal sub-rects total), "Decal records use sprite-local int8
+coords" (±127 px range fits all current sprites; widen to int16 if a
+chassis goes bigger), "Symmetric mech parts to avoid flip-past-180°
+artifact" (no `flipY` in the sprite path; asymmetric parts get
+per-part flipY in M6 polish), "No re-sort by Y mid-tumble" (dead-
+body limb cross-overs read briefly weird; tolerated). Updated the
+"Mech capsule renderer is the no-asset fallback" entry's note —
+sprite path is now canonical (P12 ships the damage feedback in both
+paths) but `assets/sprites/<chassis>.png` doesn't ship until
+P15/P16, so capsule fallback is what fires in real play through
+P14 development.
+
+Previously: 2026-05-09 post-P11 — per-weapon visible art runtime
 + post-ship foregrip-pose revert. Foregrip pose was attempted (three
 variants: strength-0.6 L_HAND yank, clamped L_HAND, snap-pose-IK
 strength-1.0 on L_ELBOW+L_HAND); all three drifted the mech body in
@@ -316,32 +334,153 @@ the ban-by-name simplification.).
     visible after the body ragdolls). The render-tick form requires
     the firer's mech alive to read; pooled FX would survive.
 
-### Mech capsule renderer is the no-asset fallback (post-P10)
+### Mech capsule renderer is the no-asset fallback (post-P12)
 
 - **What we did** — P10 shipped the sprite path: `draw_mech_sprites`
   walks the 17-entry `g_render_parts[]` z-order table when
   `g_chassis_sprites[chassis].atlas.id != 0`, otherwise `draw_mech`
   falls through to `draw_mech_capsules` (preserved from M4 — bone =
-  thick line, particle = small filled circle). At P10 ship none of
-  the five `assets/sprites/<chassis>.png` files exist, so every chassis
-  actually renders as capsules in real play; the sprite path is only
-  exercised by tests that load synthetic atlases.
+  thick line, particle = small filled circle). P12 added the four
+  damage-feedback layers in BOTH render paths so a no-atlas build
+  still gets hit-flash + decals + spray + emitter + smoke; only the
+  stump-cap sub-rects skip in capsule mode (the spec explicitly
+  calls this out). At P12 ship none of the five
+  `assets/sprites/<chassis>.png` files exist, so every chassis
+  actually renders as capsules in real play; the sprite path is
+  exercised only by tests that load synthetic atlases.
 - **Why** — P10 deliberately split the runtime + per-chassis bone
   distinctness + data-table pipeline from the held-weapon-art (P11)
-  and damage-feedback layers (hit-flash tint, decals, stump caps,
-  smoke — P12) so each lands as a focused review surface. Asset
-  generation (P15–P16) fills the atlases later. The capsule fallback
-  is what keeps the build playable through P10–P14 development.
+  and damage-feedback layers (P12) so each lands as a focused review
+  surface. Asset generation (P15–P16) fills the atlases later. The
+  capsule fallback is what keeps the build playable through P12–P14
+  development. P12 was originally the "delete this trade-off" gate
+  per `documents/m5/13-controls-and-residuals.md` §"Resolved by M5",
+  but with no atlases on disk the entry stays open as the hard
+  fallback — the gate moves to P15/P16 (asset generation).
 - **Revisit when** —
-  - P12 (damage feedback) lands. At that point the sprite path is
-    the canonical render — the [m5/13-controls-and-residuals.md]
-    sweep treats this entry as deletable from P12 onward.
-  - Asset generation (P15–P16) fills `assets/sprites/<chassis>.png`
-    and `draw_mech_capsules` becomes dead code in real play.
+  - P15/P16 ship `assets/sprites/<chassis>.png` for at least one
+    chassis. At that point the sprite path becomes the canonical
+    render in real play; the capsule fallback can be retired (or
+    kept as a dev-machine convenience for builds without assets,
+    which is a tiny code surface).
   - Earlier than the above only if the capsule fallback masks a
     real regression (e.g. a sprite-path bug that fires only when
     atlases load). Symptom would be: shot tests pass with capsules
     but break under synthetic-atlas sprite tests.
+
+### Whole-mech hit flash, not per-particle (P12)
+
+- **What we did** — `Mech.hit_flash_timer` is set to 0.10 s on every
+  successful damage application in `mech_apply_damage`. The renderer
+  reads `timer / 0.10f` as a 0..1 white-additive blend over the body
+  tint — applied once per Mech, modulating every limb sprite (or
+  capsule color) uniformly. No per-particle / per-limb granularity.
+- **Why** — Per-particle flash would need a separate hit-flash field
+  per particle in the SoA pool (~12 KB across all mechs at peak).
+  Whole-mech flash is the right granularity for v1: the player gets
+  a clear "hit landed" cue without needing to identify which arm took
+  the bullet (the kill feed already attributes the damage). The cost
+  is one float per Mech and one branch per render call.
+- **Revisit when** —
+  - Playtest reveals players genuinely can't tell which limb got hit
+    when watching a hit-flash ("which arm did I just shoot?"). At
+    that point per-particle flash on the SoA pool is the natural
+    extension — the parallel array exists already.
+  - We add a vulnerable-spot mechanic where hitting a specific part
+    matters tactically (e.g. a "core" particle that takes 2× damage).
+    Per-particle flash communicates that.
+
+### Decal-overlay damage, not sprite-swap damage states (P12)
+
+- **What we did** — Damage events drop a decal record onto the hit
+  limb's `MechLimbDecals` ring (`(local_x, local_y, kind)` per entry,
+  16-deep, oldest-overwrite). The renderer composites those decals
+  on top of the limb sprite each frame using the bone segment's
+  current angle. We do NOT ship `pristine.png` / `damaged.png` /
+  `heavy.png` per-part variants.
+- **Why** — Three asset variants per limb × 17 visible parts × 5
+  chassis = 255 sprites just for damage states. The decal-overlay
+  approach uses 5 shared sub-rects total (3 dent variants + 2 scorch
+  per spec; 3 placeholder colored circles at P12 ship until P13's
+  HUD atlas drops them in). 50× asset reduction with comparable
+  visual feedback. Decal records are i8 sprite-local px so they
+  migrate with the bone naturally; the same sprite continues to
+  render with a decal "stuck" to it as the body moves.
+- **Revisit when** —
+  - The decal-overlay reads visually wrong against authored chassis
+    art (e.g., a decal sized for one chassis's plate looks weird on
+    a Heavy's larger pauldron). At that point either: (a) author
+    per-chassis decal variants in the HUD atlas, or (b) scale decal
+    sub-rects by the part's `draw_w / draw_h` at composite time.
+  - We want truly distinct damage stages (e.g. "exposed wiring at
+    50% HP", "shattered armor at 25%") rather than just accumulated
+    pock-marks. A per-limb damage-stage swap would be a real visual
+    upgrade — but it doubles or triples the asset count and we'd
+    only do it once we know the base art is shipping.
+
+### Decal records use sprite-local int8 coords (P12)
+
+- **What we did** — `MechDamageDecal.local_x` and `local_y` are
+  `int8_t` (-127..127). The decal-record path in `mech_apply_damage`
+  clamps both axes to that range before storing.
+- **Why** — Sprite-midpoint-relative coords for our largest sprite
+  (Trooper leg-upper at 36×96 px) span ±48 px, comfortably inside i8
+  range. i8 cuts decal storage to 4 bytes per entry (vs 8 for two
+  i16 / two float). 16 entries × 22 visible parts × 32 mechs = ~45 KB
+  total, vs ~90 KB at i16.
+- **Revisit when** —
+  - A future chassis goes wider than 254 px on either axis (none of
+    the five M5 chassis come close). Widen to int16 — the
+    pixel-coords-not-fraction discipline survives the change.
+  - We add stretchable / scaling sprites where a decal could land
+    far from the midpoint. Same fix.
+
+### Symmetric mech parts to avoid flip-past-180° artifact (P12-relevant)
+
+- **What we did** — `draw_mech_sprites` rotates each limb sprite by
+  `atan2(b - a) * RAD2DEG - 90.0f`. When a bone rotates past straight
+  up, raylib's rotation crosses the ±π boundary cleanly but the
+  sprite's "up" axis flips relative to the body. We don't apply
+  per-frame `flipY` correction; instead, we ship the chassis art
+  with parts drawn as top-to-bottom symmetric (so a flipped V
+  coordinate is invisible).
+- **Why** — Soldat's `Render.pas` applies a per-part flipY when the
+  bone's parent-relative angle crosses ±π/2 — ~15 LOC of bookkeeping.
+  Symmetric authoring is cheaper at our atlas size (5 chassis × 22
+  parts) and keeps the renderer flat. The asymmetric parts in our
+  spec (Sniper helmet visor, Engineer shoulder-mounted welder) are
+  small enough to author with a "rotates correctly within the
+  expected pose range" check.
+- **Revisit when** —
+  - A new asymmetric part causes visible weirdness during ragdoll
+    tumbles (the head's visor rotates upside-down when the body
+    cartwheels). At that point: add per-part flipY to the few
+    asymmetric sprites, not blanket. ~15 LOC in `draw_mech_sprites`
+    + a `flip_y_at_high_angle` flag on `MechSpritePart`.
+
+### No re-sort by Y mid-tumble (P12-relevant)
+
+- **What we did** — `g_render_parts[]` z-order is fixed: back-side
+  limbs first, centerline body, front-side limbs last (with L↔R
+  swap when `facing_left`). When a mech dies and tumbles, technically
+  the back arm should briefly draw IN FRONT of the body when the
+  body rotates past horizontal. We don't re-sort.
+- **Why** — Per-mech re-sort by Y costs 17 entries to walk + a sort
+  per draw call per dead mech. Spine-based games do it; Soldat
+  doesn't. The visible artifact (a back-arm sprite briefly behind
+  the chest when it should be in front) lasts a fraction of a second
+  during the tumble and then settles correctly once the body stops.
+  Tolerable for v1; v2 polish if dead-body presentation becomes a
+  visible ship-blocker.
+- **Revisit when** —
+  - Dead-body rendering reads as visibly broken in playtest (e.g. a
+    streamer's footage highlights "the corpse looks weird"). At
+    that point: add a per-frame Y-sort over the 17 render parts
+    when `m->alive == false`. Cost: a 17-element sort per dead mech
+    per draw call. Inside budget at 32 mechs.
+  - We add re-sort for any other reason (e.g. carried-flag z-order
+    at chest-vs-pelvis tilt). Reuse the same sort path for dead
+    bodies.
 
 ---
 

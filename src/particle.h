@@ -21,6 +21,16 @@ void fx_clear(FxPool *pool);
 int fx_spawn_blood(FxPool *pool, Vec2 pos, Vec2 vel, pcg32_t *rng);
 int fx_spawn_spark(FxPool *pool, Vec2 pos, Vec2 vel, pcg32_t *rng);
 int fx_spawn_tracer(FxPool *pool, Vec2 a, Vec2 b);
+/* P12 — Smoke puff. Mirrors fx_spawn_blood with darker color, longer
+ * life, additive-darker render. Spawned by the per-limb damage threshold
+ * check in simulate_step when a limb's HP frac drops below 0.30. */
+int fx_spawn_smoke(FxPool *pool, Vec2 pos, Vec2 vel, pcg32_t *rng);
+/* P12 — Pinned dismemberment emitter. Lives in the FX pool as an FX_STUMP
+ * particle that doesn't itself draw or integrate; each tick of fx_update
+ * looks up the parent particle (`mech_id` + parent of `limb`) and spawns
+ * 1–2 blood drops at that world position. Self-deactivates on duration
+ * expiry or invalid pin. */
+int fx_spawn_stump_emitter(FxPool *pool, int mech_id, int limb, float duration_s);
 
 /* Step all FX particles. Calls into decal.c for blood that should
  * leave a permanent splat. */

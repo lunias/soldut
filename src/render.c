@@ -139,6 +139,22 @@ static inline Vec2 particle_render_pos(const ParticlePool *p, int i, float alpha
     };
 }
 
+/* P12 — Apply the hit-flash white-additive blend to a body tint.
+ * `timer` is the per-mech `hit_flash_timer` (0..0.10 s); the blend is
+ * linear from 0% (timer=0) to 100% white (timer=0.10). Alpha is
+ * preserved so invisibility-powerup alpha-mod survives the flash. */
+static inline Color apply_hit_flash(Color c, float timer) {
+    if (timer <= 0.0f) return c;
+    float f = timer / 0.10f;
+    if (f > 1.0f) f = 1.0f;
+    return (Color){
+        (uint8_t)(c.r + ((float)(255 - c.r)) * f),
+        (uint8_t)(c.g + ((float)(255 - c.g)) * f),
+        (uint8_t)(c.b + ((float)(255 - c.b)) * f),
+        c.a,
+    };
+}
+
 static void draw_bone(const ParticlePool *p, int a, int b, float thick, Color c,
                       float alpha, Vec2 off) {
     Vec2 va = particle_render_pos(p, a, alpha);
@@ -282,6 +298,80 @@ static void draw_held_weapon(const World *w, int mid, float alpha,
     }
 }
 
+/* P12 — Inverse of the decal-record transform in mech.c::mech_apply_damage.
+ * Given a sprite (MSP) and i8 sprite-local coords (midpoint-relative,
+ * unrotated), compute the world position the renderer should draw the
+ * decal at. Reads particle_render_pos so decals lerp with the rest of
+ * the body during sub-tick interp. */
+static Vec2 part_local_to_world(const ParticlePool *p, const Mech *m,
+                                MechSpriteId sp, int8_t lx, int8_t ly,
+                                float alpha)
+{
+    int b = m->particle_base;
+    int p_a = -1, p_b = -1;
+    mech_sprite_part_endpoints(sp, &p_a, &p_b);
+    Vec2 vb = particle_render_pos(p, b + p_b, alpha);
+    Vec2 mid;
+    float angle;
+    if (p_a >= 0) {
+        Vec2 va = particle_render_pos(p, b + p_a, alpha);
+        mid = (Vec2){ (va.x + vb.x) * 0.5f, (va.y + vb.y) * 0.5f };
+        angle = atan2f(vb.y - va.y, vb.x - va.x) - 1.5707963267948966f;
+    } else {
+        mid = vb;
+        angle = 0.0f;
+    }
+    float c = cosf(angle), s = sinf(angle);
+    return (Vec2){
+        (float)lx * c - (float)ly * s + mid.x,
+        (float)lx * s + (float)ly * c + mid.y,
+    };
+}
+
+/* P12 — Composite damage decals over the just-drawn limbs. Until P13
+ * ships authored decal sub-rects in the HUD atlas, render a small
+ * filled circle per decal as a placeholder. The colors track the three
+ * decal kinds defined in world.h. Both render paths (sprites + capsule
+ * fallback) call this after their respective body draws so a hit
+ * leaves a persistent visible mark either way. */
+static void draw_damage_decals(const ParticlePool *p, const Mech *m,
+                               float alpha, Vec2 visual_offset,
+                               uint8_t base_alpha)
+{
+    /* Placeholder colors — replaced by HUD-atlas sub-rects at P13.
+     * Brace-enclosed inner initializers (no compound-literal cast) keep
+     * the array initializer constant under -Wpedantic. */
+    static const Color s_decal_colors[3] = {
+        [DAMAGE_DECAL_DENT]   = { 32,  36,  44, 200 },
+        [DAMAGE_DECAL_SCORCH] = {  8,   8,  12, 230 },
+        [DAMAGE_DECAL_GOUGE]  = { 80,  10,   8, 240 },
+    };
+    static const float s_decal_radius[3] = {
+        [DAMAGE_DECAL_DENT]   = 2.5f,
+        [DAMAGE_DECAL_SCORCH] = 3.5f,
+        [DAMAGE_DECAL_GOUGE]  = 4.0f,
+    };
+    for (int sp = 0; sp < MECH_LIMB_DECAL_COUNT; ++sp) {
+        const MechLimbDecals *ring = &m->damage_decals[sp];
+        if (ring->count == 0) continue;
+        int n = (ring->count < DAMAGE_DECALS_PER_LIMB)
+              ? (int)ring->count : DAMAGE_DECALS_PER_LIMB;
+        for (int k = 0; k < n; ++k) {
+            const MechDamageDecal *d = &ring->items[k];
+            uint8_t kind = d->kind;
+            if (kind > DAMAGE_DECAL_GOUGE) kind = DAMAGE_DECAL_DENT;
+            Color col = s_decal_colors[kind];
+            col.a = (uint8_t)(((int)col.a * (int)base_alpha) / 255);
+            Vec2 wp = part_local_to_world(p, m, (MechSpriteId)sp,
+                                          d->local_x, d->local_y, alpha);
+            wp.x += visual_offset.x;
+            wp.y += visual_offset.y;
+            DrawCircleV((Vector2){ wp.x, wp.y },
+                        s_decal_radius[kind], col);
+        }
+    }
+}
+
 /* M4 capsule-line mech body — kept as the no-asset / dev fallback when
  * the chassis's sprite atlas hasn't loaded. The new sprite path
  * (`draw_mech_sprites`) is the M5 P10 default; the dispatcher in
@@ -323,6 +413,12 @@ static void draw_mech_capsules(const ParticlePool *p, const ConstraintPool *cp,
         body.a = a;
         edge.a = a;
     }
+
+    /* P12 — hit-flash white-additive blend over the body tint. Capsule
+     * fallback applies it the same way the sprite path does so a fresh
+     * checkout (no chassis atlases) still gets visible feedback on
+     * every hit. */
+    body = apply_hit_flash(body, m->hit_flash_timer);
 
     /* Back leg first, then front, head last — see [06-rendering-audio.md]. */
     Color leg_back  = (Color){ body.r - 20, body.g - 20, body.b - 20, 255 };
@@ -394,6 +490,9 @@ static void draw_mech_capsules(const ParticlePool *p, const ConstraintPool *cp,
         c.x += visual_offset.x; c.y += visual_offset.y;
         draw_bone_clamped(L, a, c, 5.0f, arm_front);
     }
+
+    /* P12 — damage decal placeholder dots, even in the capsule fallback. */
+    draw_damage_decals(p, m, alpha, visual_offset, body.a);
 }
 
 /* M5 P10 — sprite-driven mech rendering. Each chassis's atlas is
@@ -495,6 +594,49 @@ static int swap_sprite_lr(int s) {
     }
 }
 
+/* P12 — Stump caps over the parent particle of each dismembered limb.
+ * Skips silently when the chassis atlas isn't loaded (capsule-fallback
+ * path doesn't carry stump-cap art per the spec — the heavy initial
+ * blood spray + pinned emitter sell the dismemberment without it).
+ * The cap orientation reads off the body's torso (CHEST→PELVIS) so the
+ * stump rotates with the body's tilt rather than the absent limb. */
+static void draw_stump_caps(const ParticlePool *p, const Mech *m,
+                            const MechSpriteSet *set,
+                            float alpha, Vec2 visual_offset, Color tint)
+{
+    if (set->atlas.id == 0) return;
+    if (!m->dismember_mask) return;
+    int b = m->particle_base;
+    Vec2 chest  = particle_render_pos(p, b + PART_CHEST,  alpha);
+    Vec2 pelvis = particle_render_pos(p, b + PART_PELVIS, alpha);
+    float body_angle =
+        atan2f(pelvis.y - chest.y, pelvis.x - chest.x) * RAD2DEG - 90.0f;
+
+    static const struct { uint8_t bit; int part; int sprite_id; } caps[] = {
+        { LIMB_HEAD,  PART_NECK,       MSP_STUMP_NECK       },
+        { LIMB_L_ARM, PART_L_SHOULDER, MSP_STUMP_SHOULDER_L },
+        { LIMB_R_ARM, PART_R_SHOULDER, MSP_STUMP_SHOULDER_R },
+        { LIMB_L_LEG, PART_L_HIP,      MSP_STUMP_HIP_L      },
+        { LIMB_R_LEG, PART_R_HIP,      MSP_STUMP_HIP_R      },
+    };
+    for (size_t i = 0; i < sizeof caps / sizeof caps[0]; ++i) {
+        if (!(m->dismember_mask & caps[i].bit)) continue;
+        int sprite_id = caps[i].sprite_id;
+        int part      = caps[i].part;
+        if (m->facing_left) {
+            sprite_id = swap_sprite_lr(sprite_id);
+            part      = swap_part_lr(part);
+        }
+        const MechSpritePart *cap = &set->parts[sprite_id];
+        Vec2 pos = particle_render_pos(p, b + part, alpha);
+        pos.x += visual_offset.x;
+        pos.y += visual_offset.y;
+        DrawTexturePro(set->atlas, cap->src,
+                       (Rectangle){ pos.x, pos.y, cap->draw_w, cap->draw_h },
+                       cap->pivot, body_angle, tint);
+    }
+}
+
 static void draw_mech_sprites(const ParticlePool *p, const ConstraintPool *cp,
                               const Mech *m, bool is_local,
                               float alpha, Vec2 visual_offset) {
@@ -510,6 +652,10 @@ static void draw_mech_sprites(const ParticlePool *p, const ConstraintPool *cp,
     if (m->alive && m->powerup_invis_remaining > 0.0f) {
         tint.a = is_local ? (uint8_t)128 : (uint8_t)51;
     }
+    /* P12 — hit-flash white-additive blend. Same blend in both render
+     * paths so the visible feedback is consistent across atlases vs
+     * capsules. */
+    tint = apply_hit_flash(tint, m->hit_flash_timer);
 
     for (int i = 0; i < MECH_RENDER_PART_COUNT; ++i) {
         const MechRenderPart *rp = &g_render_parts[i];
@@ -553,6 +699,16 @@ static void draw_mech_sprites(const ParticlePool *p, const ConstraintPool *cp,
                        (Rectangle){ draw_x, draw_y, sp->draw_w, sp->draw_h },
                        sp->pivot, angle, tint);
     }
+
+    /* P12 — Stump caps go on top of the limb sprites so they cover the
+     * exposed-end pixels at the joint. Skipped when no atlas. */
+    draw_stump_caps(p, m, set, alpha, visual_offset, tint);
+
+    /* P12 — Damage decals composited on top of every limb. The decal's
+     * sprite-local coords were captured at hit time relative to the
+     * sprite midpoint; `part_local_to_world` re-rotates them with the
+     * current bone angle so they migrate naturally with the body. */
+    draw_damage_decals(p, m, alpha, visual_offset, tint.a);
 }
 
 /* M5 P10 dispatcher. Picks the sprite path when the chassis's atlas

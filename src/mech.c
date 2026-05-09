@@ -3,6 +3,7 @@
 #include "ctf.h"
 #include "level.h"
 #include "log.h"
+#include "mech_sprites.h"
 #include "particle.h"
 #include "physics.h"
 #include "pickup.h"
@@ -1685,6 +1686,51 @@ static float hit_location_mult(int part) {
     }
 }
 
+void mech_record_damage_decal(World *w, int mid, int part, Vec2 hit_world,
+                              float damage)
+{
+    if (mid < 0 || mid >= w->mech_count) return;
+    Mech *m = &w->mechs[mid];
+    MechSpriteId sp = mech_part_to_sprite_id(part);
+    int p_a = -1, p_b = -1;
+    mech_sprite_part_endpoints(sp, &p_a, &p_b);
+    Vec2 mid_w; float decal_angle;
+    if (p_a >= 0) {
+        Vec2 va = part_pos(w, m, p_a);
+        Vec2 vb = part_pos(w, m, p_b);
+        mid_w.x = (va.x + vb.x) * 0.5f;
+        mid_w.y = (va.y + vb.y) * 0.5f;
+        /* Sprite art is authored vertically (parent end at top); the
+         * renderer subtracts 90° from atan2. Match that here so the
+         * decal's local-y axis aligns with the sprite's vertical. */
+        decal_angle = atan2f(vb.y - va.y, vb.x - va.x) - 1.5707963267948966f;
+    } else {
+        mid_w = part_pos(w, m, p_b);
+        decal_angle = 0.0f;
+    }
+    float dx = hit_world.x - mid_w.x;
+    float dy = hit_world.y - mid_w.y;
+    float c = cosf(-decal_angle), s = sinf(-decal_angle);
+    float lx = dx * c - dy * s;
+    float ly = dx * s + dy * c;
+    if (lx < -127.0f) lx = -127.0f;
+    if (lx >  127.0f) lx =  127.0f;
+    if (ly < -127.0f) ly = -127.0f;
+    if (ly >  127.0f) ly =  127.0f;
+    uint8_t decal_kind = DAMAGE_DECAL_DENT;
+    if (damage >= 80.0f)      decal_kind = DAMAGE_DECAL_GOUGE;
+    else if (damage >= 30.0f) decal_kind = DAMAGE_DECAL_SCORCH;
+    MechLimbDecals *ring = &m->damage_decals[sp];
+    int slot = (int)((unsigned)ring->count % DAMAGE_DECALS_PER_LIMB);
+    ring->items[slot] = (MechDamageDecal){
+        .local_x  = (int8_t)lx,
+        .local_y  = (int8_t)ly,
+        .kind     = decal_kind,
+        .reserved = 0,
+    };
+    if (ring->count < 255) ring->count++;
+}
+
 /* Map a body part to its parent limb (LIMB_*), or 0 for torso parts
  * that don't dismember. */
 static int part_to_limb(int part) {
@@ -1728,11 +1774,6 @@ static void cut_constraints_between(World *w, Mech *m,
             c->active = 0;
         }
     }
-}
-
-/* Spawn an exuberant blood spew at the joint to sell the dismemberment. */
-static void blood_spew_at(World *w, Vec2 at, Vec2 base_dir) {
-    for (int k = 0; k < 32; ++k) fx_spawn_blood(&w->fx, at, base_dir, w->rng);
 }
 
 void mech_dismember(World *w, int mid, int limb) {
@@ -1797,9 +1838,40 @@ void mech_dismember(World *w, int mid, int limb) {
     cut_constraints_between(w, m, limb_parts, n_limb, kept_parts, n_kept);
     m->dismember_mask |= (uint8_t)limb;
 
+    /* P12 — Drive the matching limb HP to 0 so post-dismember smoke
+     * fires at full intensity on BOTH server and client. On the
+     * server limb HP is already ≤0 when mech_dismember triggers (it's
+     * the trigger condition); on the client mech_dismember is called
+     * from snapshot.c when a new dismember bit arrives, where the
+     * client's limb HP may still read full because hit events are
+     * unreliable. Zeroing here keeps the per-limb smoke check in
+     * simulate_step consistent across both sides. */
+    switch (limb) {
+        case LIMB_HEAD:  m->hp_head  = 0.0f; break;
+        case LIMB_L_ARM: m->hp_arm_l = 0.0f; break;
+        case LIMB_R_ARM: m->hp_arm_r = 0.0f; break;
+        case LIMB_L_LEG: m->hp_leg_l = 0.0f; break;
+        case LIMB_R_LEG: m->hp_leg_r = 0.0f; break;
+        default: break;
+    }
+
     Vec2 sp = (Vec2){ w->particles.pos_x[base + joint_part],
                       w->particles.pos_y[base + joint_part] };
-    blood_spew_at(w, sp, (Vec2){ -120.0f, -60.0f });
+    /* P12 — Heavy initial spray: 64-particle radial fan from the joint.
+     * `fx_spawn_blood` randomizes the angle within ±0.7 rad of the
+     * passed direction; sweeping the full circle here gives even
+     * coverage. Replaces the M3 `blood_spew_at` (32 particles, single
+     * direction). */
+    for (int i = 0; i < 64; ++i) {
+        float angle = pcg32_float01(w->rng) * 6.283185307179586f;
+        Vec2 vd = { cosf(angle) * 220.0f, sinf(angle) * 280.0f };
+        fx_spawn_blood(&w->fx, sp, vd, w->rng);
+    }
+    /* P12 — Pinned dripping emitter for ~1.5 s. Tracks the parent
+     * particle each tick so the trail follows the still-moving torso
+     * even as the body ragdolls (or keeps fighting after a single
+     * limb-loss). */
+    fx_spawn_stump_emitter(&w->fx, mid, limb, 1.5f);
 
     LOG_I("mech %d dismember limb=0x%02x at (%.1f,%.1f)",
           mid, limb, sp.x, sp.y);
@@ -1931,9 +2003,22 @@ bool mech_apply_damage(World *w, int mid, int part, float dmg, Vec2 dir,
 
     m->health -= final_dmg;
     m->last_damage_taken = final_dmg;
+    /* P12 — Hit-flash tint: kicks every damage event to ~6 ticks of
+     * white-additive flash on the body. Decayed each tick in
+     * simulate_step. Distinct from `last_damage_taken` (above), which
+     * stays pegged at the killing-blow amount for OVERKILL detection
+     * in mech_kill. */
+    m->hit_flash_timer = 0.10f;
     SHOT_LOG("t=%llu mech=%d damage part=%d dmg=%.1f hp=%.1f/%.1f mask=0x%02x",
              (unsigned long long)w->tick, mid, part, final_dmg,
              m->health, m->health_max, m->dismember_mask);
+
+    /* P12 — Persistent damage decal. Records the hit's position in the
+     * sprite-local space of whichever MSP covers the hit part, so the
+     * decal stays glued to the limb sprite as the body moves. Shared
+     * with the client-side hit-event handler in net.c so host/client
+     * decal rings stay in lockstep. */
+    mech_record_damage_decal(w, mid, part, part_pos(w, m, part), final_dmg);
 
     /* Per-limb HP tracking. The limb takes the same damage that hit
      * the chassis. When it drops to zero it dismembers. (See

@@ -548,9 +548,31 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
         }
 
         /* Apply dismemberment by deactivating constraints in the new
-         * masks that weren't already inactive locally. M1 only ships
-         * left-arm dismemberment; the same predicate works. */
-        m->dismember_mask = (uint8_t)e->limb_bits;
+         * masks that weren't already inactive locally. P12: route
+         * through mech_dismember for any newly-set bits so the client
+         * runs the same constraint-deactivation + 64-particle blood
+         * spray + FX_STUMP pinned emitter + limb-HP-zero side effects
+         * the host fires inside `mech_apply_damage`. mech_dismember
+         * has an internal "already gone" guard so re-asserting an
+         * already-set bit is a no-op. The trailing assignment is
+         * defensive — covers any future bit added to the mask but
+         * not iterated here (e.g. a 6th limb). */
+        uint8_t new_mask = (uint8_t)e->limb_bits;
+        uint8_t added    = (uint8_t)(new_mask & ~m->dismember_mask);
+        if (added) {
+            static const uint8_t s_limb_bits[] = {
+                LIMB_HEAD, LIMB_L_ARM, LIMB_R_ARM, LIMB_L_LEG, LIMB_R_LEG,
+            };
+            for (int k = 0;
+                 k < (int)(sizeof s_limb_bits / sizeof s_limb_bits[0]);
+                 ++k)
+            {
+                if (added & s_limb_bits[k]) {
+                    mech_dismember(w, mid, (int)s_limb_bits[k]);
+                }
+            }
+        }
+        m->dismember_mask = new_mask;
     }
 
     /* Kill anything not in this snapshot. */

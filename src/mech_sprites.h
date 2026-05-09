@@ -75,3 +75,25 @@ bool mech_sprites_load_all(void);
  * an early-error exit path). Safe to call when no atlases have been
  * loaded. */
 void mech_sprites_unload_all(void);
+
+/* P12 — Damage-decal accounting helpers.
+ *
+ * mech_part_to_sprite_id maps a hit on a particle (PART_*) to the
+ * `MechSpriteId` whose decal ring should record the hit. Hits on a
+ * limb's distal particle (e.g. PART_L_HAND) accumulate on the larger
+ * parent sprite (e.g. MSP_ARM_LOWER_L) so the dot is visible.
+ *
+ * mech_sprite_part_endpoints returns the bone-segment endpoints that
+ * anchor a sprite. `*out_a == -1` means single-particle anchor (the
+ * sprite draws at `*out_b`). Used by the damage-decal world↔local
+ * transform so the decal stays glued to its sprite as the body moves. */
+MechSpriteId mech_part_to_sprite_id(int part);
+void         mech_sprite_part_endpoints(MechSpriteId sp,
+                                        int *out_a, int *out_b);
+
+/* P12 — World decal-count slot count must equal MSP_COUNT so the
+ * `damage_decals[MECH_LIMB_DECAL_COUNT]` array on Mech can be indexed
+ * by `MechSpriteId` directly. world.h can't include this header
+ * (cycle), so the constant is mirrored there and asserted here. */
+_Static_assert(MSP_COUNT == MECH_LIMB_DECAL_COUNT,
+               "MSP_COUNT must match MECH_LIMB_DECAL_COUNT in world.h");
