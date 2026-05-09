@@ -1,0 +1,49 @@
+# m5_chassis_distinctness.shot — M5 P10
+#
+# Spawns one of each chassis side-by-side. Verifies the per-chassis
+# bone-length distinctness pass: Heavy is visibly the tallest + widest
+# (torso 38 vs Trooper's 30, +27%), Scout is shortest and thinnest
+# (-16% all over), Sniper has the long forearms + shins (tall lean
+# stance), Engineer is the compact stocky build.
+#
+# Run:
+#   ./soldut --shot tests/shots/m5_chassis_distinctness.shot
+# Output:
+#   build/shots/m5_chassis_distinctness/all_chassis.png
+#
+# Verification — eyeball the PNG and confirm:
+#   - Heavy is visibly taller than Scout (~30% in stand height)
+#   - Sniper's chest leans forward (head pose offset toward facing)
+#   - Engineer's right arm doesn't aim at the cursor (tool pose)
+
+window 1280 720
+seed   7 7
+out    build/shots/m5_chassis_distinctness
+
+# Player chassis is Trooper (the reference silhouette). Loadout slot 1
+# is the secondary, which the engineer-quirk gate uses to skip the
+# right-arm aim drive — the player here is Trooper so that gate
+# doesn't fire (active_slot == 0 by default).
+loadout Trooper "Pulse Rifle" Sidearm Light Standard
+
+# Player Trooper at the centerline of the row; camera smooth-follows
+# to here. The clear floor patch is between the jet platform (tiles
+# 12..22 in row 30 ≈ x=384..704) and the slope test bed (3 polys at
+# x=1500..1987). 160 px spacing fits 5 chassis cleanly inside that
+# window.
+spawn_at 1060 984
+mouse    640 360
+
+# Y = 32*32 - 36 (feet_below_pelvis) - 4 (foot_clearance) = 984. The
+# tutorial map's solid floor sits at row 32, so this puts every chassis
+# pelvis above the same shared floor — gravity settles each one onto
+# its own feet over the first few ticks.
+extra_chassis Scout     740 984
+extra_chassis Heavy     900 984
+extra_chassis Sniper   1220 984
+extra_chassis Engineer 1380 984
+
+# Let the Verlet solver settle each chassis into its standing pose
+# (post-physics anchor + slope check both run), then capture once.
+at  90 shot all_chassis
+at 120 end

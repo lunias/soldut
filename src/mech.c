@@ -24,6 +24,11 @@
  * Numbers track documents/02-game-design.md §Mechs.
  */
 
+/* Per-chassis bone lengths drive both the constraint rest lengths
+ * (set in mech_create_loadout via add_distance) and the sprite atlas
+ * sub-rect sizes (mech_sprites.c). Heavy is visibly bigger, Scout
+ * smaller, Sniper has long forearms + tall stance. Numbers per
+ * documents/m5/12-rigging-and-damage.md §"Per-chassis bone structures". */
 static const Chassis g_chassis[CHASSIS_COUNT] = {
     [CHASSIS_TROOPER] = {
         .name = "Trooper",
@@ -41,9 +46,9 @@ static const Chassis g_chassis[CHASSIS_COUNT] = {
         .run_mult = 1.20f, .jump_mult = 1.10f, .jet_mult = 1.30f,
         .fuel_max = 1.20f, .fuel_regen = 0.25f, .mass_scale = 0.80f,
         .health_max = 100.0f,
-        .bone_arm = 12.0f, .bone_forearm = 14.0f,
-        .bone_thigh = 16.0f, .bone_shin = 16.0f,
-        .torso_h = 26.0f, .neck_h = 12.0f,
+        .bone_arm = 11.0f, .bone_forearm = 13.0f,
+        .bone_thigh = 14.0f, .bone_shin = 14.0f,
+        .torso_h = 24.0f, .neck_h = 12.0f,
         .hitbox_scale = 0.85f,
         .passive = PASSIVE_SCOUT_DASH,
     },
@@ -52,9 +57,9 @@ static const Chassis g_chassis[CHASSIS_COUNT] = {
         .run_mult = 0.85f, .jump_mult = 0.85f, .jet_mult = 0.80f,
         .fuel_max = 0.85f, .fuel_regen = 0.15f, .mass_scale = 1.40f,
         .health_max = 220.0f,
-        .bone_arm = 16.0f, .bone_forearm = 18.0f,
+        .bone_arm = 17.0f, .bone_forearm = 18.0f,
         .bone_thigh = 20.0f, .bone_shin = 20.0f,
-        .torso_h = 34.0f, .neck_h = 14.0f,
+        .torso_h = 38.0f, .neck_h = 16.0f,
         .hitbox_scale = 1.20f,
         .passive = PASSIVE_HEAVY_AOE_RESIST,
     },
@@ -63,9 +68,9 @@ static const Chassis g_chassis[CHASSIS_COUNT] = {
         .run_mult = 0.95f, .jump_mult = 1.00f, .jet_mult = 1.00f,
         .fuel_max = 1.10f, .fuel_regen = 0.20f, .mass_scale = 0.95f,
         .health_max = 130.0f,
-        .bone_arm = 14.0f, .bone_forearm = 17.0f,
-        .bone_thigh = 18.0f, .bone_shin = 18.0f,
-        .torso_h = 30.0f, .neck_h = 14.0f,
+        .bone_arm = 13.0f, .bone_forearm = 19.0f,
+        .bone_thigh = 17.0f, .bone_shin = 21.0f,
+        .torso_h = 30.0f, .neck_h = 16.0f,
         .hitbox_scale = 1.00f,
         .passive = PASSIVE_SNIPER_STEADY,
     },
@@ -74,10 +79,10 @@ static const Chassis g_chassis[CHASSIS_COUNT] = {
         .run_mult = 1.00f, .jump_mult = 1.00f, .jet_mult = 1.10f,
         .fuel_max = 1.00f, .fuel_regen = 0.25f, .mass_scale = 1.00f,
         .health_max = 140.0f,
-        .bone_arm = 14.0f, .bone_forearm = 16.0f,
-        .bone_thigh = 18.0f, .bone_shin = 18.0f,
-        .torso_h = 30.0f, .neck_h = 14.0f,
-        .hitbox_scale = 1.00f,
+        .bone_arm = 14.0f, .bone_forearm = 14.0f,
+        .bone_thigh = 16.0f, .bone_shin = 18.0f,
+        .torso_h = 32.0f, .neck_h = 13.0f,
+        .hitbox_scale = 0.95f,
         .passive = PASSIVE_ENGINEER_REPAIR,
     },
 };
@@ -486,12 +491,40 @@ static void build_pose(const Chassis *ch, World *w, Mech *m, float dt) {
     }
     Vec2 pelvis = { pelvis_x, pelvis_y };
 
-    pose_set(m, PART_CHEST,
-        (Vec2){ pelvis.x, pelvis.y - ch->torso_h }, 0.7f);
+    /* Chassis-specific posture quirks (P10) — small per-chassis biases
+     * applied to chest/head/r-hand pose targets. Spec:
+     * documents/m5/12-rigging-and-damage.md §"Posture differences per
+     * chassis". Scout leans forward, Heavy locks chest upright (higher
+     * pose strength), Sniper hunches the head, Engineer skips the
+     * right-arm aim drive when holding the secondary slot (tool, not
+     * rifle). */
+    float chest_strength    = 0.7f;
+    bool  skip_right_arm_aim = m->is_dummy;
+    float face_dir          = m->facing_left ? -1.0f : 1.0f;
+    Vec2  chest_target = { pelvis.x, pelvis.y - ch->torso_h };
+    Vec2  head_target  = { pelvis.x, pelvis.y - ch->torso_h - ch->neck_h - 8.0f };
+    switch ((ChassisId)m->chassis_id) {
+        case CHASSIS_SCOUT:
+            chest_target.x += face_dir * 2.0f;
+            break;
+        case CHASSIS_HEAVY:
+            chest_strength = 0.85f;
+            break;
+        case CHASSIS_SNIPER:
+            head_target.x += face_dir * 2.0f;
+            head_target.y += 3.0f;
+            break;
+        case CHASSIS_ENGINEER:
+            if (m->active_slot == 1) skip_right_arm_aim = true;
+            break;
+        case CHASSIS_TROOPER:
+        default: break;
+    }
+
+    pose_set(m, PART_CHEST, chest_target, chest_strength);
     pose_set(m, PART_NECK,
         (Vec2){ pelvis.x, pelvis.y - ch->torso_h - ch->neck_h * 0.5f }, 0.7f);
-    pose_set(m, PART_HEAD,
-        (Vec2){ pelvis.x, pelvis.y - ch->torso_h - ch->neck_h - 8.0f }, 0.7f);
+    pose_set(m, PART_HEAD, head_target, 0.7f);
 
     pose_set(m, PART_L_HIP, (Vec2){ pelvis.x - 7, pelvis.y }, 0.7f);
     pose_set(m, PART_R_HIP, (Vec2){ pelvis.x + 7, pelvis.y }, 0.7f);
@@ -502,7 +535,7 @@ static void build_pose(const Chassis *ch, World *w, Mech *m, float dt) {
         (Vec2){ pelvis.x + 10, pelvis.y - ch->torso_h + 4 }, 0.7f);
 
     float arm_reach = ch->bone_arm + ch->bone_forearm;
-    if (!m->is_dummy) {
+    if (!skip_right_arm_aim) {
         Vec2 r_sho = (Vec2){ pelvis.x + 10, pelvis.y - ch->torso_h + 4 };
         pose_set(m, PART_R_HAND,
             (Vec2){ r_sho.x + aim_dir.x * arm_reach,

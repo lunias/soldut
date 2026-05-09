@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot shot \
         debug gdb gdb-host gdb-client valgrind editor
 
 all: $(BIN)
@@ -125,6 +125,17 @@ $(BUILD_DIR)/pickup_test: tests/pickup_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(EN
 
 test-pickups: $(BUILD_DIR)/pickup_test
 	./$(BUILD_DIR)/pickup_test
+
+# M5 P10-followup — EntitySnapshot wire codec, specifically the
+# `primary_id` field. Round-trips a snapshot where the host's mech
+# has its secondary slot active (weapon_id != primary_id) and asserts
+# the decoded primary_id matches. Pre-fix this would silently lose
+# primary_id on the wire.
+$(BUILD_DIR)/snapshot_test: tests/snapshot_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/snapshot_test.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+test-snapshot: $(BUILD_DIR)/snapshot_test
+	./$(BUILD_DIR)/snapshot_test
 
 # M5 P07 — CTF runtime: ctf_init_round + ctf_step + ctf_drop_on_death.
 # Builds a synthetic level with a Red/Blue flag pair, exercises pickup /

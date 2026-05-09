@@ -12,6 +12,7 @@
 #include "maps.h"
 #include "match.h"
 #include "mech.h"
+#include "mech_sprites.h"
 #include "net.h"
 #include "pickup.h"
 #include "platform.h"
@@ -157,6 +158,17 @@ typedef struct {
         float x, y;
     }       peer_spawns[8];
     int     peer_spawn_count;
+
+    /* M5 P10 — extra dummy mechs spawned alongside the player + main
+     * dummy in the legacy (NETMODE_NONE) shot path. Each entry creates
+     * a non-aiming dummy at the given world-space coordinates so a
+     * single shot can capture multiple chassis side-by-side for
+     * per-chassis distinctness verification. Capped at 6. */
+    struct {
+        int   chassis_id;
+        float x, y;
+    }       extra_chassis[6];
+    int     extra_chassis_count;
 } Script;
 
 static const struct { const char *name; uint16_t bit; } BUTTON_TABLE[] = {
@@ -360,6 +372,28 @@ static bool parse_script(const char *path, Script *out) {
             } else {
                 out->have_spawn_at = true;
             }
+        } else if (strcmp(tok, "extra_chassis") == 0) {
+            char chassis[32];
+            float ex, ey;
+            if (sscanf(rest, "%31s %f %f", chassis, &ex, &ey) != 3) {
+                LOG_E("shotmode: %s:%d 'extra_chassis' needs <name> <x> <y>",
+                      path, lineno);
+                ok = false;
+                continue;
+            }
+            int max_extras =
+                (int)(sizeof out->extra_chassis / sizeof out->extra_chassis[0]);
+            if (out->extra_chassis_count >= max_extras) {
+                LOG_E("shotmode: %s:%d too many extra_chassis (max %d)",
+                      path, lineno, max_extras);
+                ok = false;
+                continue;
+            }
+            int n = out->extra_chassis_count++;
+            out->extra_chassis[n].chassis_id =
+                (int)chassis_id_from_name(chassis);
+            out->extra_chassis[n].x = ex;
+            out->extra_chassis[n].y = ey;
         } else if (strcmp(tok, "aim") == 0) {
             if (sscanf(rest, "%f %f", &out->initial_ax, &out->initial_ay) != 2) {
                 LOG_E("shotmode: %s:%d bad 'aim'", path, lineno); ok = false;
@@ -1371,6 +1405,19 @@ static void seed_world(Game *g, const Script *s) {
     w->dummy_mech_id = mech_create_loadout(w, dlo, dummy_spawn,
                                            /*team*/ 2, /*is_dummy*/ true);
 
+    /* M5 P10 — extra chassis dummies for side-by-side comparison shots
+     * (e.g. tests/shots/m5_chassis_distinctness.shot). Spawned as
+     * `is_dummy=true` so they stand still without aiming. */
+    if (s) {
+        for (int i = 0; i < s->extra_chassis_count; ++i) {
+            MechLoadout xlo = mech_default_loadout();
+            xlo.chassis_id  = s->extra_chassis[i].chassis_id;
+            xlo.armor_id    = ARMOR_NONE;
+            Vec2 ex_spawn = { s->extra_chassis[i].x, s->extra_chassis[i].y };
+            mech_create_loadout(w, xlo, ex_spawn, /*team*/ 2, /*is_dummy*/ true);
+        }
+    }
+
     /* P07 — populate flags[] when in CTF mode. ctf_init_round bails
      * silently if the level lacks a Red+Blue flag pair. */
     ctf_init_round(w, g->match.mode);
@@ -1526,6 +1573,9 @@ int shotmode_run(const char *script_path) {
         return EXIT_FAILURE;
     }
 
+    /* M5 P10 — chassis sprite atlases (capsule fallback when missing). */
+    mech_sprites_load_all();
+
     /* Networked path: bootstrap host or client, then run the full
      * mode dispatcher each tick. The legacy match-only path below is
      * kept for the existing M1/M3 shot tests. */
@@ -1535,6 +1585,7 @@ int shotmode_run(const char *script_path) {
             (s.netmode == NETMODE_CONNECT && game.net.role != NET_ROLE_CLIENT))
         {
             LOG_E("shotmode: networked bootstrap failed");
+            mech_sprites_unload_all();
             platform_shutdown();
             game_shutdown(&game); free(s.events); free(s.lerps);
             net_shutdown();
@@ -1927,6 +1978,7 @@ int shotmode_run(const char *script_path) {
         net_close(&game.net);
         net_shutdown();
         decal_shutdown();
+        mech_sprites_unload_all();
         platform_shutdown();
         game_shutdown(&game);
         free(s.events);
@@ -2183,6 +2235,7 @@ int shotmode_run(const char *script_path) {
     }
 
     decal_shutdown();
+    mech_sprites_unload_all();
     platform_shutdown();
     game_shutdown(&game);
     free(s.events);

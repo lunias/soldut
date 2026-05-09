@@ -92,6 +92,12 @@ typedef struct {
     uint8_t  chassis_id;
     uint8_t  armor_id;
     uint8_t  jetpack_id;
+    uint8_t  primary_id;        /* primary slot's weapon — distinct from `weapon_id`
+                                 * (which is the active slot's). Pre-S0LH this was
+                                 * inferred client-side from the first snapshot's
+                                 * weapon_id, which broke on mid-round join when
+                                 * the host had its secondary equipped at connect
+                                 * time, AND on mid-round PICKUP_WEAPON swaps. */
     uint8_t  secondary_id;
     uint8_t  ammo_secondary;
     /* P06 — Grapple suffix (only present on the wire when state_bits
@@ -109,8 +115,10 @@ typedef struct {
  *   M3 = 22 (M2 size) + 5 = 27 bytes.
  *   P03 widens state_bits u8 → u16 = 28 bytes.
  *   P06 adds an OPTIONAL 8-byte grapple suffix gated by
- *     SNAP_STATE_GRAPPLING; the fixed-width minimum stays 28. */
-#define ENTITY_SNAPSHOT_WIRE_BYTES         28
+ *     SNAP_STATE_GRAPPLING; the fixed-width minimum stays 28.
+ *   P10-followup adds primary_id u8 = 29 bytes; protocol id bumps
+ *     S0LG → S0LH (see version.h). */
+#define ENTITY_SNAPSHOT_WIRE_BYTES         29
 #define ENTITY_SNAPSHOT_GRAPPLE_BYTES       8
 
 enum {

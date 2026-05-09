@@ -5,6 +5,7 @@
 #include "level.h"
 #include "match.h"
 #include "mech.h"
+#include "mech_sprites.h"
 #include "particle.h"
 #include "pickup.h"
 #include "projectile.h"
@@ -188,11 +189,33 @@ static void draw_bone_clamped(const Level *L, Vec2 a, Vec2 b, float thick, Color
     DrawLineEx((Vector2){a.x, a.y}, (Vector2){end.x, end.y}, thick, c);
 }
 
-/* Polygonal mech rendering — flat-shaded plates per
- * [06-rendering-audio.md]. M1 uses thick capsule lines as plates;
- * baked sprites land at M5 (asset pass). The Level pointer is only
- * used to clamp arm/rifle bones that would otherwise visibly cross a
- * thin solid (e.g., aiming through the col-55 wall). The
+/* Held-weapon placeholder line — a small line from R_HAND in aim
+ * direction, stopped at the first solid tile so the barrel doesn't
+ * draw through walls. Drawn by both the capsule path and the sprite
+ * path until P11 lands held-weapon sprite art. */
+static void draw_held_weapon_line(const ParticlePool *p, const Mech *m,
+                                  const Level *L, float alpha,
+                                  Vec2 visual_offset) {
+    if (!m->alive) return;
+    int b = m->particle_base;
+    Vec2 rh = particle_render_pos(p, b + PART_R_HAND, alpha);
+    Vec2 sh = particle_render_pos(p, b + PART_R_SHOULDER, alpha);
+    rh.x += visual_offset.x; rh.y += visual_offset.y;
+    sh.x += visual_offset.x; sh.y += visual_offset.y;
+    float dx = rh.x - sh.x, dy = rh.y - sh.y;
+    float dl = sqrtf(dx * dx + dy * dy);
+    if (dl > 1.0f) { dx /= dl; dy /= dl; }
+    Vec2 muzzle = { rh.x + dx * 22.0f, rh.y + dy * 22.0f };
+    draw_bone_clamped(L, rh, muzzle, 3.0f, (Color){50, 60, 80, 255});
+}
+
+/* M4 capsule-line mech body — kept as the no-asset / dev fallback when
+ * the chassis's sprite atlas hasn't loaded. The new sprite path
+ * (`draw_mech_sprites`) is the M5 P10 default; the dispatcher in
+ * `draw_mech` picks based on `g_chassis_sprites[m->chassis_id].atlas.id`.
+ *
+ * The Level pointer clamps arm/rifle bones that would otherwise visibly
+ * cross a thin solid (e.g., aiming through the col-55 wall). The
  * ConstraintPool lets us skip drawing bones whose distance constraint
  * has been deactivated by dismemberment so the corpse doesn't trail a
  * stretched bone across the level.
@@ -202,9 +225,9 @@ static void draw_bone_clamped(const Level *L, Vec2 a, Vec2 b, float thick, Color
  * latest result. `visual_offset` is added to every drawn particle —
  * used by the local mech to smooth out reconciliation snaps over
  * ~6 frames. Pass {0,0} for non-local mechs. */
-static void draw_mech(const ParticlePool *p, const ConstraintPool *cp,
-                      const Mech *m, const Level *L, bool is_local,
-                      float alpha, Vec2 visual_offset) {
+static void draw_mech_capsules(const ParticlePool *p, const ConstraintPool *cp,
+                               const Mech *m, const Level *L, bool is_local,
+                               float alpha, Vec2 visual_offset) {
     int b = m->particle_base;
     int idx_head    = b + PART_HEAD;
     int idx_neck    = b + PART_NECK;
@@ -298,20 +321,180 @@ static void draw_mech(const ParticlePool *p, const ConstraintPool *cp,
         c.x += visual_offset.x; c.y += visual_offset.y;
         draw_bone_clamped(L, a, c, 5.0f, arm_front);
     }
+}
 
-    /* Rifle: a small line from R_HAND in aim direction, stopped at
-     * the first solid tile so the barrel doesn't draw through walls. */
-    if (m->alive) {
-        Vec2 rh = particle_render_pos(p, b + PART_R_HAND, alpha);
-        Vec2 sh = particle_render_pos(p, b + PART_R_SHOULDER, alpha);
-        rh.x += visual_offset.x; rh.y += visual_offset.y;
-        sh.x += visual_offset.x; sh.y += visual_offset.y;
-        float dx = rh.x - sh.x, dy = rh.y - sh.y;
-        float dl = sqrtf(dx * dx + dy * dy);
-        if (dl > 1.0f) { dx /= dl; dy /= dl; }
-        Vec2 muzzle = { rh.x + dx * 22.0f, rh.y + dy * 22.0f };
-        draw_bone_clamped(L, rh, muzzle, 3.0f, (Color){50, 60, 80, 255});
+/* M5 P10 — sprite-driven mech rendering. Each chassis's atlas is
+ * indexed by `MechSpriteId`; the renderer walks the canonical
+ * `g_render_parts` z-order table and emits one `DrawTexturePro` per
+ * entry. When facing left we swap L↔R on each entry so the back-side
+ * limbs (rendered first, behind the body) become the right side and
+ * the front-side limbs (rendered after the body, on top) become the
+ * left side. The art is authored vertically — top of source = parent
+ * end, bottom = child end, which is why we subtract 90° from the bone
+ * angle below.
+ *
+ * Single-particle anchors (entries with `part_a == -1`) draw at the
+ * `part_b` particle with `angle = 0` — used for plates and hands/feet
+ * that aren't bone segments. The constraint check is skipped for them
+ * because the relevant dismemberment-driven inactive constraints are
+ * the limb-to-body links, not links involving the plate alone.
+ *
+ * Body tint matches the capsule-path colors (alive, dummy-orange,
+ * dead-red wash, invis alpha-mod for the local vs remote view) so a
+ * mid-development build that runs Trooper as sprites and other chassis
+ * as capsules reads visually consistent. */
+typedef struct MechRenderPart {
+    int8_t   part_a;        /* PART_* parent end, or -1 for single-particle anchor */
+    int8_t   part_b;        /* PART_* child  end (the anchor when part_a == -1) */
+    uint8_t  sprite_idx;    /* MechSpriteId */
+} MechRenderPart;
+
+/* Z-order: back-side limbs first (drawn behind the body when facing
+ * right; the renderer swaps L↔R when facing left). Centerline pieces
+ * in the middle. Front-side limbs last (drawn on top of the body).
+ * Held-weapon art (P11) renders after this table; for now we draw a
+ * placeholder line via `draw_held_weapon_line`. */
+static const MechRenderPart g_render_parts[] = {
+    /* Back leg (L when facing right) */
+    { PART_L_HIP,      PART_L_KNEE,     MSP_LEG_UPPER_L },
+    { PART_L_KNEE,     PART_L_FOOT,     MSP_LEG_LOWER_L },
+    { -1,              PART_L_FOOT,     MSP_FOOT_L      },
+    /* Back arm (L when facing right) */
+    { PART_L_SHOULDER, PART_L_ELBOW,    MSP_ARM_UPPER_L },
+    { PART_L_ELBOW,    PART_L_HAND,     MSP_ARM_LOWER_L },
+    { -1,              PART_L_HAND,     MSP_HAND_L      },
+    /* Centerline body */
+    { PART_CHEST,      PART_PELVIS,     MSP_TORSO       },
+    { -1,              PART_PELVIS,     MSP_HIP_PLATE   },
+    { -1,              PART_L_SHOULDER, MSP_SHOULDER_L  },
+    { -1,              PART_R_SHOULDER, MSP_SHOULDER_R  },
+    { PART_NECK,       PART_HEAD,       MSP_HEAD        },
+    /* Front leg (R when facing right) */
+    { PART_R_HIP,      PART_R_KNEE,     MSP_LEG_UPPER_R },
+    { PART_R_KNEE,     PART_R_FOOT,     MSP_LEG_LOWER_R },
+    { -1,              PART_R_FOOT,     MSP_FOOT_R      },
+    /* Front arm (R when facing right) */
+    { PART_R_SHOULDER, PART_R_ELBOW,    MSP_ARM_UPPER_R },
+    { PART_R_ELBOW,    PART_R_HAND,     MSP_ARM_LOWER_R },
+    { -1,              PART_R_HAND,     MSP_HAND_R      },
+};
+#define MECH_RENDER_PART_COUNT 17
+_Static_assert((sizeof g_render_parts / sizeof g_render_parts[0]) ==
+                   MECH_RENDER_PART_COUNT,
+               "g_render_parts must have MECH_RENDER_PART_COUNT entries");
+
+/* L↔R part-index swap for the facing-left case. PART_L_SHOULDER..
+ * PART_L_HAND and PART_R_SHOULDER..PART_R_HAND are 3 apart in the
+ * enum, same for PART_L_HIP..PART_L_FOOT vs PART_R_HIP..PART_R_FOOT. */
+static int swap_part_lr(int part) {
+    if (part >= PART_L_SHOULDER && part <= PART_L_HAND) return part + 3;
+    if (part >= PART_R_SHOULDER && part <= PART_R_HAND) return part - 3;
+    if (part >= PART_L_HIP      && part <= PART_L_FOOT) return part + 3;
+    if (part >= PART_R_HIP      && part <= PART_R_FOOT) return part - 3;
+    return part;
+}
+
+/* MSP_*_L ↔ MSP_*_R swap. The L/R pair indices aren't a simple
+ * arithmetic offset (the enum starts at MSP_TORSO=0 and the L/R pairs
+ * begin at MSP_SHOULDER_L=3), so an explicit switch is the clearest. */
+static int swap_sprite_lr(int s) {
+    switch (s) {
+        case MSP_SHOULDER_L:       return MSP_SHOULDER_R;
+        case MSP_SHOULDER_R:       return MSP_SHOULDER_L;
+        case MSP_ARM_UPPER_L:      return MSP_ARM_UPPER_R;
+        case MSP_ARM_UPPER_R:      return MSP_ARM_UPPER_L;
+        case MSP_ARM_LOWER_L:      return MSP_ARM_LOWER_R;
+        case MSP_ARM_LOWER_R:      return MSP_ARM_LOWER_L;
+        case MSP_HAND_L:           return MSP_HAND_R;
+        case MSP_HAND_R:           return MSP_HAND_L;
+        case MSP_LEG_UPPER_L:      return MSP_LEG_UPPER_R;
+        case MSP_LEG_UPPER_R:      return MSP_LEG_UPPER_L;
+        case MSP_LEG_LOWER_L:      return MSP_LEG_LOWER_R;
+        case MSP_LEG_LOWER_R:      return MSP_LEG_LOWER_L;
+        case MSP_FOOT_L:           return MSP_FOOT_R;
+        case MSP_FOOT_R:           return MSP_FOOT_L;
+        case MSP_STUMP_SHOULDER_L: return MSP_STUMP_SHOULDER_R;
+        case MSP_STUMP_SHOULDER_R: return MSP_STUMP_SHOULDER_L;
+        case MSP_STUMP_HIP_L:      return MSP_STUMP_HIP_R;
+        case MSP_STUMP_HIP_R:      return MSP_STUMP_HIP_L;
+        default: return s;
     }
+}
+
+static void draw_mech_sprites(const ParticlePool *p, const ConstraintPool *cp,
+                              const Mech *m, bool is_local,
+                              float alpha, Vec2 visual_offset) {
+    const MechSpriteSet *set = &g_chassis_sprites[m->chassis_id];
+    int b = m->particle_base;
+
+    /* Tint mirrors the capsule path so a mid-development build that
+     * mixes sprite + capsule chassis reads consistent. */
+    Color tint;
+    if (m->is_dummy)         tint = (Color){200, 130,  40, 255};
+    else if (!m->alive)      tint = (Color){200,  90,  90, 255};
+    else                     tint = (Color){255, 255, 255, 255};
+    if (m->alive && m->powerup_invis_remaining > 0.0f) {
+        tint.a = is_local ? (uint8_t)128 : (uint8_t)51;
+    }
+
+    for (int i = 0; i < MECH_RENDER_PART_COUNT; ++i) {
+        const MechRenderPart *rp = &g_render_parts[i];
+        int part_a     = rp->part_a;
+        int part_b     = rp->part_b;
+        int sprite_idx = rp->sprite_idx;
+        if (m->facing_left) {
+            if (part_a >= 0) part_a = swap_part_lr(part_a);
+            part_b     = swap_part_lr(part_b);
+            sprite_idx = swap_sprite_lr(sprite_idx);
+        }
+
+        /* Skip dismembered limbs at the bone-segment entries; single-
+         * particle anchors (plates, hands, feet drawn at one particle)
+         * always draw — the dismemberment constraint is between the
+         * limb and the body, not anchored at the plate alone. */
+        if (part_a >= 0 &&
+            !bone_constraint_active(cp, b + part_a, b + part_b)) continue;
+
+        Vec2 pos_b = particle_render_pos(p, b + part_b, alpha);
+        float draw_x, draw_y, angle;
+        if (part_a >= 0) {
+            Vec2 pos_a = particle_render_pos(p, b + part_a, alpha);
+            draw_x = (pos_a.x + pos_b.x) * 0.5f + visual_offset.x;
+            draw_y = (pos_a.y + pos_b.y) * 0.5f + visual_offset.y;
+            /* Sprites are authored vertically (parent end at top of
+             * source). atan2 gives the bone angle CCW from +x; raylib
+             * rotates CW in screen-space (+y down). Subtract 90° so
+             * angle=0 corresponds to a vertical bone (parent above
+             * child) which is the source authoring orientation. */
+            angle = atan2f(pos_b.y - pos_a.y, pos_b.x - pos_a.x) * RAD2DEG
+                  - 90.0f;
+        } else {
+            draw_x = pos_b.x + visual_offset.x;
+            draw_y = pos_b.y + visual_offset.y;
+            angle = 0.0f;
+        }
+
+        const MechSpritePart *sp = &set->parts[sprite_idx];
+        DrawTexturePro(set->atlas, sp->src,
+                       (Rectangle){ draw_x, draw_y, sp->draw_w, sp->draw_h },
+                       sp->pivot, angle, tint);
+    }
+}
+
+/* M5 P10 dispatcher. Picks the sprite path when the chassis's atlas
+ * is loaded; falls back to the M4 capsule path otherwise. The held-
+ * weapon placeholder line is drawn after the body so it sits on top
+ * of the front arm; P11 will replace this with per-weapon sprite art. */
+static void draw_mech(const ParticlePool *p, const ConstraintPool *cp,
+                      const Mech *m, const Level *L, bool is_local,
+                      float alpha, Vec2 visual_offset) {
+    const MechSpriteSet *set = &g_chassis_sprites[m->chassis_id];
+    if (set->atlas.id != 0) {
+        draw_mech_sprites(p, cp, m, is_local, alpha, visual_offset);
+    } else {
+        draw_mech_capsules(p, cp, m, L, is_local, alpha, visual_offset);
+    }
+    draw_held_weapon_line(p, m, L, alpha, visual_offset);
 }
 
 /* P06 — Grapple rope. Single straight line from the firer's right hand
