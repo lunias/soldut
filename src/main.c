@@ -1,3 +1,4 @@
+#include "audio.h"
 #include "config.h"
 #include "ctf.h"
 #include "decal.h"
@@ -305,6 +306,46 @@ static void apply_new_kills(Game *g) {
     if (any) g->lobby.dirty = true;
 }
 
+/* P14 — resolve a string-table offset to a usable asset path. Idx 0 is
+ * reserved as "no string"; the table is a packed blob of NUL-terminated
+ * UTF-8 owned by the level arena. Paths in `.lvl` files are conventionally
+ * relative to the `assets/` directory; the resolver prefixes that for
+ * non-rooted entries (so a META string of "music/foundry.ogg" lands at
+ * "assets/music/foundry.ogg" on disk). Returns NULL when no string is
+ * present so the caller can skip the load. */
+static const char *resolve_meta_path(const Level *L, uint16_t idx,
+                                     char *buf, size_t cap)
+{
+    if (idx == 0) return NULL;
+    if (!L->string_table) return NULL;
+    if ((int)idx >= L->string_table_size) return NULL;
+    const char *s = L->string_table + idx;
+    if (!*s) return NULL;
+    if (s[0] == '/' || strncmp(s, "assets/", 7) == 0) return s;
+    snprintf(buf, cap, "assets/%s", s);
+    return buf;
+}
+
+/* P14 — apply per-map audio (music + ambient). Hard-cut between map
+ * tracks; the audio module's own dedup keeps a same-map round-loop
+ * from re-loading the streaming buffer. Called from start_round once
+ * the level is built. */
+static void apply_audio_for_map(Game *g) {
+    char music_buf[256];
+    char ambient_buf[256];
+    const Level *L = &g->world.level;
+    const char *music_path = resolve_meta_path(L, L->meta.music_str_idx,
+                                               music_buf, sizeof music_buf);
+    audio_set_music_for_map(music_path);
+    if (music_path) audio_music_play();
+
+    const char *ambient_path = resolve_meta_path(L,
+                                                  L->meta.ambient_loop_str_idx,
+                                                  ambient_buf,
+                                                  sizeof ambient_buf);
+    audio_set_ambient_loop(ambient_path);
+}
+
 static void start_round(Game *g) {
     /* For the FIRST round, derive map+mode from the rotation table
      * (match_init left them at defaults). Subsequent rounds get
@@ -501,6 +542,12 @@ static void start_round(Game *g) {
     g->world.match_mode_cached = (int)g->match.mode;
     ctf_init_round(&g->world, g->match.mode);
     g->world.flag_state_dirty = false;
+
+    /* P14 — per-map audio. Hard-cut to the round's music + ambient
+     * track; missing-asset paths log INFO and silence. Currently no
+     * shipped maps populate music_str_idx — P17/P18 authored maps
+     * + the ComfyUI music pipeline fill those in. */
+    apply_audio_for_map(g);
 
     match_begin_round(&g->match);
     g->mode = MODE_MATCH;
@@ -1169,6 +1216,15 @@ int main(int argc, char **argv) {
      * per-weapon-sized line in draw_held_weapon. */
     weapons_atlas_load();
 
+    /* M5 P14 — initialize the audio module. Walks the SFX manifest
+     * (load source + aliases for each id), populates default bus
+     * gains, and stashes the Game pointer for listener-position
+     * lookup. Missing files log INFO and leave their alias_count at
+     * 0; audio_play_at no-ops silently for those ids so a fresh
+     * checkout (no `assets/sfx/`) plays without errors. Music +
+     * ambient stay empty until start_round picks them per map. */
+    audio_init(&game);
+
     /* M5 P13 — register a small set of assets with the hot-reload
      * watcher. DEV_BUILD-gated; release builds make every public
      * hotreload_* a no-op. Per-map kit textures (parallax / tiles)
@@ -1184,6 +1240,9 @@ int main(int argc, char **argv) {
     hotreload_register("assets/ui/hud.png",           reload_hud_atlas);
     hotreload_register("assets/shaders/halftone_post.fs.glsl",
                        reload_halftone_shader);
+    /* M5 P14 — audio manifest + servo path. Music / ambient stay
+     * outside the watcher (per-map stop+reload covers them). */
+    audio_register_hotreload();
 
     LobbyUIState ui = (LobbyUIState){0};
     lobby_ui_init(&ui);
@@ -1233,6 +1292,14 @@ int main(int argc, char **argv) {
         hotreload_poll();
 
         platform_begin_frame(&pf);
+
+        /* M5 P14 — advance the audio mixer state: decay duck
+         * envelopes, feed UpdateMusicStream (must be every frame to
+         * avoid streaming-buffer underrun), retrigger ambient loop,
+         * modulate servo loop volume from local-mech velocity. Runs
+         * regardless of mode so music continues across mode
+         * transitions. */
+        audio_step(&game.world, (float)dt);
 
         /* Pump network FIRST so inbound inputs / snapshots / lobby
          * messages are visible before this frame's sim ticks. */
@@ -1656,6 +1723,12 @@ int main(int argc, char **argv) {
         net_close(&game.net);
         net_shutdown();
     }
+
+    /* M5 P14 — release loaded SFX / music / ambient before _exit so
+     * raylib's audio resources aren't leaked through the syscall.
+     * audio_shutdown does NOT call CloseAudioDevice (platform_shutdown
+     * owns the device lifetime); _exit then drops the OS handles. */
+    audio_shutdown();
 
     log_shutdown();
     _exit(EXIT_SUCCESS);

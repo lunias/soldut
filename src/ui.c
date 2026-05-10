@@ -1,4 +1,6 @@
 #include "ui.h"
+
+#include "audio.h"
 #include "platform.h"
 
 #include "../third_party/raylib/src/raylib.h"
@@ -144,7 +146,9 @@ bool ui_button(UIContext *u, Rectangle r, const char *label, bool enabled) {
         int ty = (int)(r.y + (r.height - (float)fp) * 0.5f);
         ui_draw_text(u, label, tx, ty, u->font_size, text);
     }
-    return enabled && hover && u->mouse_pressed;
+    bool clicked = enabled && hover && u->mouse_pressed;
+    if (clicked) audio_play_global(SFX_UI_CLICK);
+    return clicked;
 }
 
 /* ---- Toggle -------------------------------------------------------- */
@@ -174,6 +178,7 @@ bool ui_toggle(UIContext *u, Rectangle r, const char *label, bool *on) {
 
     if (hover && u->mouse_pressed) {
         *on = !*on;
+        audio_play_global(SFX_UI_TOGGLE);
         return true;
     }
     return false;

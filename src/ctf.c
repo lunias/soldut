@@ -1,5 +1,6 @@
 #include "ctf.h"
 
+#include "audio.h"
 #include "game.h"
 #include "level.h"
 #include "lobby.h"
@@ -118,6 +119,7 @@ static void mark_dirty(World *w) {
 
 static void ctf_pickup(struct Game *g, int f, int mi) {
     Flag *flag = &g->world.flags[f];
+    Vec2 sound_pos = ctf_flag_position(&g->world, f);
     flag->status         = FLAG_CARRIED;
     flag->carrier_mech   = (int8_t)mi;
     flag->return_at_tick = 0;
@@ -131,6 +133,7 @@ static void ctf_pickup(struct Game *g, int f, int mi) {
                  (flag->team == MATCH_TEAM_RED) ? "Red" : "Blue");
         lobby_chat_system(&g->lobby, msg);
     }
+    audio_play_at(SFX_FLAG_PICKUP, sound_pos);
     mark_dirty(&g->world);
 }
 
@@ -167,6 +170,9 @@ static void ctf_capture(struct Game *g, int mi) {
                  g->match.team_score[MATCH_TEAM_BLUE]);
         lobby_chat_system(&g->lobby, msg);
     }
+    /* Capture is loud and team-shaping — every viewer hears it
+     * regardless of distance. */
+    audio_play_global(SFX_FLAG_CAPTURE);
     mark_dirty(&g->world);
     /* Lobby slot scores changed; reship the table on the next net_poll. */
     g->lobby.dirty = true;
@@ -174,9 +180,11 @@ static void ctf_capture(struct Game *g, int mi) {
 
 static void ctf_return_flag(struct Game *g, int f, int by_mech) {
     Flag *flag = &g->world.flags[f];
+    Vec2 sound_pos = flag->home_pos;
     flag->status         = FLAG_HOME;
     flag->carrier_mech   = -1;
     flag->return_at_tick = 0;
+    audio_play_at(SFX_FLAG_RETURN, sound_pos);
 
     if (by_mech >= 0) {
         int slot = lobby_find_slot_by_mech(&g->lobby, by_mech);
@@ -278,6 +286,7 @@ void ctf_drop_on_death(World *w, MatchModeId mode, int mech_id, Vec2 death_pos) 
         flag->carrier_mech   = -1;
         flag->dropped_pos    = death_pos;
         flag->return_at_tick = w->tick + FLAG_AUTO_RETURN_TICKS;
+        audio_play_at(SFX_FLAG_DROP, death_pos);
         LOG_I("ctf: drop flag=%d carrier mech=%d at (%.0f,%.0f)",
               f, mech_id, (double)death_pos.x, (double)death_pos.y);
         mark_dirty(w);

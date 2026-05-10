@@ -1,5 +1,6 @@
 #include "projectile.h"
 
+#include "audio.h"
 #include "level.h"
 #include "log.h"
 #include "mech.h"
@@ -277,6 +278,10 @@ void projectile_step(World *w, float dt) {
                         (Vec2){ -p->vel_x[i] * 0.05f,
                                 -p->vel_y[i] * 0.05f }, w->rng);
                 }
+                /* Audio runs on both host + client (alive=0 path is
+                 * unconditional per the P09 sync fix), so the firer
+                 * hears the anchor land regardless of role. */
+                audio_play_at(SFX_GRAPPLE_HIT, hp);
                 p->alive[i] = 0;
                 continue;
             }
@@ -461,6 +466,20 @@ void explosion_spawn(World *w, Vec2 pos, float radius, float damage,
              (unsigned long long)w->tick, pos.x, pos.y,
              radius, damage, impulse, owner_mech_id, weapon_id);
     w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.4f);
+
+    /* P14 — explosion SFX. Size buckets per spec: large = Mass Driver
+     * + ≥150 dmg AOE; medium = Frag Grenade / Plasma Cannon mid-tier
+     * (≥50 dmg); small = Micro-rockets / sub-50 splashes. The duck
+     * fires on big detonations (≥100 dmg AOE) so a Mass Driver
+     * audibly drops the music + ambient bus for ~300 ms. Both branches
+     * run on host + client so explosion audio is universal (the
+     * authoritative gate below is for damage/impulse, not visuals). */
+    SfxId esfx;
+    if      (damage >= 150.0f) esfx = SFX_EXPLOSION_LARGE;
+    else if (damage >=  50.0f) esfx = SFX_EXPLOSION_MEDIUM;
+    else                       esfx = SFX_EXPLOSION_SMALL;
+    audio_play_at(esfx, pos);
+    if (damage >= 100.0f) audio_request_duck(0.5f, 0.30f);
 
     if (!w->authoritative) return;   /* damage is server-authoritative */
 

@@ -287,6 +287,19 @@ typedef struct {
     Vec2      pose_target  [PART_COUNT];
     float     pose_strength[PART_COUNT];
 
+    /* P14 — gait phase tracking for footstep audio. Updated by
+     * build_pose's ANIM_RUN case each tick; the wrap from >0.5 → <0.5
+     * is the swing→stance transition that fires SFX_FOOTSTEP_*. Both
+     * fields stay at 0 outside ANIM_RUN, which suppresses spurious
+     * footsteps on stand→run transitions (the comparison reads the
+     * post-RUN value vs the new RUN value continuously). */
+    float     gait_phase_l;
+    float     gait_phase_r;
+    /* P14 — rate-limit the jet pulse SFX. apply_jet_force fires a
+     * pulse every JET_PULSE_INTERVAL_TICKS so a held-jet doesn't
+     * machine-gun the cue. Compared against world.tick. */
+    uint64_t  last_jet_pulse_tick;
+
     /* Weapon state. Each mech carries a primary + secondary; only the
      * active slot consumes BTN_FIRE. BTN_SWAP toggles between them. */
     int       primary_id;

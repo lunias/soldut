@@ -1,5 +1,6 @@
 #include "mech.h"
 
+#include "audio.h"
 #include "ctf.h"
 #include "level.h"
 #include "log.h"
@@ -441,6 +442,11 @@ void mech_grapple_release(World *w, int mid) {
     m->grapple.constraint_idx = -1;
     m->grapple.state          = GRAPPLE_IDLE;
     m->grapple.anchor_mech    = -1;
+    Vec2 pelv = (Vec2){
+        w->particles.pos_x[m->particle_base + PART_PELVIS],
+        w->particles.pos_y[m->particle_base + PART_PELVIS],
+    };
+    audio_play_at(SFX_GRAPPLE_RELEASE, pelv);
     SHOT_LOG("t=%llu mech=%d grapple_release",
              (unsigned long long)w->tick, mid);
 }
@@ -635,6 +641,29 @@ static void build_pose(const Chassis *ch, World *w, Mech *m, float dt) {
             float p_r = p_l + 0.5f;
             if (p_r >= 1.0f) p_r -= 1.0f;
 
+            /* P14 — footstep SFX on swing→stance transitions. The
+             * gait phase wraps from >0.5 (swing) back to <0.5 (stance
+             * start) at the moment the foot plants. We compare the
+             * current phase against the previous tick's stored value;
+             * the wrap test is robust to the cycle_freq jitter that
+             * comes from per-chassis run_mult. The SFX fires only
+             * when grounded so a mid-air ANIM_RUN (rare; typically
+             * the build switches to ANIM_FALL) doesn't ping. */
+            if (m->grounded) {
+                if (m->gait_phase_l > 0.5f && p_l < 0.5f) {
+                    float plant_x = lhip.x + front;
+                    audio_play_at(SFX_FOOTSTEP_CONCRETE,
+                                  (Vec2){ plant_x, foot_y_ground });
+                }
+                if (m->gait_phase_r > 0.5f && p_r < 0.5f) {
+                    float plant_x = rhip.x + front;
+                    audio_play_at(SFX_FOOTSTEP_CONCRETE,
+                                  (Vec2){ plant_x, foot_y_ground });
+                }
+            }
+            m->gait_phase_l = p_l;
+            m->gait_phase_r = p_r;
+
             float l_fx, l_fy, r_fx, r_fy;
             if (p_l < 0.5f) {
                 float u = p_l * 2.0f;
@@ -809,6 +838,20 @@ static void apply_jet_force(World *w, const Mech *m, float thrust_pxs2, float dt
     }
     if (scale <= 0.0f) return;
     float fy = -thrust_pxs2 * scale * dt * dt;     /* base impulse, straight up */
+
+    /* P14 — jet pulse SFX, rate-limited every 4 ticks (~67 ms at
+     * 60 Hz). Holding W must not machine-gun the cue. last_jet_pulse_
+     * tick lives on the mutable world.mechs entry; the const Mech *
+     * arg gives us read-only physics access but we re-derive the
+     * non-const pointer for the field write. */
+    if (w->tick - w->mechs[m->id].last_jet_pulse_tick >= 4) {
+        Vec2 pelv = (Vec2){
+            p->pos_x[b + PART_PELVIS],
+            p->pos_y[b + PART_PELVIS],
+        };
+        audio_play_at(SFX_JET_PULSE, pelv);
+        w->mechs[m->id].last_jet_pulse_tick = w->tick;
+    }
 
     /* Run-input sign for ceiling-tangent direction selection. The
      * latched_input tells us which way the player is leaning; when
@@ -1480,6 +1523,7 @@ static void fire_other_slot_one_shot(World *w, int mid) {
                  * render it during FLYING (snapshot only mirrors
                  * grapple state, not the head projectile). */
                 weapons_record_fire(w, mid, weapon_id, origin, aim_dir);
+                audio_play_at(SFX_GRAPPLE_FIRE, origin);
                 SHOT_LOG("t=%llu mech=%d grapple_fire(RMB) ph=%d",
                          (unsigned long long)w->tick, mid, ph);
             }
@@ -1650,6 +1694,7 @@ bool mech_try_fire(World *w, int mid, ClientInput in) {
          * not the projectile itself, so without a FIRE_EVENT the
          * remote view is empty between fire and attach. */
         weapons_record_fire(w, mid, m->weapon_id, origin, aim_dir);
+        audio_play_at(SFX_GRAPPLE_FIRE, origin);
         SHOT_LOG("t=%llu mech=%d grapple_fire ph=%d aim=(%.2f,%.2f)",
                  (unsigned long long)w->tick, mid, ph,
                  aim_dir.x, aim_dir.y);
@@ -1935,6 +1980,27 @@ void mech_kill(World *w, int mid, int killshot_part, Vec2 dir,
     w->last_event_time = 0.0f;
     w->hit_pause_ticks = 5;
     w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.6f);
+
+    /* P14 — death audio. Kill fanfare plays globally (no spatial pan)
+     * for the local killer; death grunt plays at the victim's pelvis
+     * for everyone (spectators, etc.). The local-mech checks fire on
+     * whichever side runs mech_kill — server / offline solo runs the
+     * full path; pure clients mirror death via snapshots and don't
+     * call mech_kill, so client-side death audio is a v1 gap (TODO:
+     * fold into client_handle_hit_event when victim hp goes to 0). */
+    if (killer_mech_id >= 0 && killer_mech_id == w->local_mech_id &&
+        killer_mech_id != mid)
+    {
+        audio_play_global(SFX_KILL_FANFARE);
+    }
+    {
+        Vec2 vp = (Vec2){
+            w->particles.pos_x[m->particle_base + PART_PELVIS],
+            w->particles.pos_y[m->particle_base + PART_PELVIS],
+        };
+        audio_play_at(SFX_DEATH_GRUNT, vp);
+    }
+
     LOG_I("mech_kill: id=%d (part=%d, impulse=%.1f, mask=0x%02x, weapon=%d, by=%d)",
           mid, killshot_part, impulse, m->dismember_mask, weapon_id, killer_mech_id);
     SHOT_LOG("t=%llu mech=%d kill killshot_part=%d dir=(%.2f,%.2f) impulse=%.1f mask=0x%02x weapon=%d by=%d flags=0x%x",

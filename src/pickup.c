@@ -1,5 +1,6 @@
 #include "pickup.h"
 
+#include "audio.h"
 #include "log.h"
 #include "mech.h"
 #include "particle.h"
@@ -7,6 +8,38 @@
 
 #include <math.h>
 #include <string.h>
+
+/* SFX cue per pickup kind — picked at grab time (and used for the
+ * high-tier respawn cue). REPAIR_PACK plays the health cue (it heals);
+ * PRACTICE_DUMMY never grabs so SFX_NONE silences correctly. */
+static SfxId sfx_for_pickup_kind(uint8_t kind) {
+    switch (kind) {
+        case PICKUP_HEALTH:         return SFX_PICKUP_HEALTH;
+        case PICKUP_AMMO_PRIMARY:
+        case PICKUP_AMMO_SECONDARY: return SFX_PICKUP_AMMO;
+        case PICKUP_ARMOR:          return SFX_PICKUP_ARMOR;
+        case PICKUP_WEAPON:         return SFX_PICKUP_WEAPON;
+        case PICKUP_POWERUP:        return SFX_PICKUP_POWERUP;
+        case PICKUP_JET_FUEL:       return SFX_PICKUP_JET_FUEL;
+        case PICKUP_REPAIR_PACK:    return SFX_PICKUP_HEALTH;
+        case PICKUP_PRACTICE_DUMMY:
+        default:                    return SFX_NONE;
+    }
+}
+
+/* High-tier kinds get an audible respawn cue (POWERUP, WEAPON, ARMOR
+ * — the spawners players hover around). Health / ammo / jet-fuel
+ * respawn quietly so the soundscape doesn't ping every 20 s. */
+static bool pickup_respawn_audible(uint8_t kind) {
+    switch (kind) {
+        case PICKUP_POWERUP:
+        case PICKUP_WEAPON:
+        case PICKUP_ARMOR:
+            return true;
+        default:
+            return false;
+    }
+}
 
 /* Server-side: queue a state-change event onto World.pickupfeed for
  * main.c to drain and broadcast via NET_MSG_PICKUP_STATE. Mirrors the
@@ -287,6 +320,9 @@ void pickup_step(World *w, float dt) {
         if (w->tick >= s->available_at_tick) {
             s->state = PICKUP_STATE_AVAILABLE;
             enqueue_pickup_event(w, i);
+            if (pickup_respawn_audible(s->kind)) {
+                audio_play_at(SFX_PICKUP_RESPAWN, s->pos);
+            }
             SHOT_LOG("t=%llu pickup %d respawn (kind=%d)",
                      (unsigned long long)w->tick, i, (int)s->kind);
         }
@@ -335,6 +371,7 @@ void pickup_step(World *w, float dt) {
                 fx_spawn_spark(&w->fx, s->pos,
                                (Vec2){0.0f, -40.0f}, w->rng);
             }
+            audio_play_at(sfx_for_pickup_kind(s->kind), s->pos);
             SHOT_LOG("t=%llu pickup %d grabbed by mech=%d (kind=%d)",
                      (unsigned long long)w->tick, i, mi, (int)s->kind);
             break;     /* one grab per spawner per tick */

@@ -21,6 +21,7 @@
 
 #include "net.h"
 
+#include "audio.h"
 #include "ctf.h"
 #include "decal.h"
 #include "game.h"
@@ -551,9 +552,57 @@ static void client_handle_flag_state(NetState *ns, const uint8_t *body,
                                      int blen, Game *g)
 {
     (void)ns;
+    /* P14 — snapshot pre-decode status + positions per flag so we can
+     * play the right SFX on transitions. ctf.c plays the same cues on
+     * the host's authoritative side; this mirror lets pure clients
+     * hear flag pickup / drop / return / capture. The wire is sparse
+     * (event-driven), so each FLAG_STATE message is by definition a
+     * transition for at least one flag. */
+    Flag prev_flags[2];
+    int  prev_count = g->world.flag_count;
+    if (prev_count < 0) prev_count = 0;
+    if (prev_count > 2) prev_count = 2;
+    for (int i = 0; i < prev_count; ++i) prev_flags[i] = g->world.flags[i];
+
     int n = decode_flag_state(body, blen, &g->world);
     if (n <= 0) {
         LOG_W("client: malformed FLAG_STATE (%d bytes)", blen);
+        return;
+    }
+
+    int new_count = g->world.flag_count;
+    if (new_count > 2) new_count = 2;
+    int common = (prev_count < new_count) ? prev_count : new_count;
+    for (int f = 0; f < common; ++f) {
+        const Flag *was = &prev_flags[f];
+        const Flag *is_ = &g->world.flags[f];
+        if (was->status == is_->status) continue;     /* no transition */
+
+        /* Capture: CARRIED → HOME. Globally heard regardless of
+         * distance to the scoring base. */
+        if (was->status == FLAG_CARRIED && is_->status == FLAG_HOME) {
+            audio_play_global(SFX_FLAG_CAPTURE);
+            continue;
+        }
+        /* Auto-return / friendly return: DROPPED → HOME. Cue at the
+         * home position so it spatializes correctly. */
+        if (was->status == FLAG_DROPPED && is_->status == FLAG_HOME) {
+            audio_play_at(SFX_FLAG_RETURN, is_->home_pos);
+            continue;
+        }
+        /* Drop: CARRIED → DROPPED. Cue at the new dropped position. */
+        if (was->status == FLAG_CARRIED && is_->status == FLAG_DROPPED) {
+            audio_play_at(SFX_FLAG_DROP, is_->dropped_pos);
+            continue;
+        }
+        /* Pickup: HOME / DROPPED → CARRIED. Cue at the previous
+         * position (where the flag was when it got grabbed). */
+        if (is_->status == FLAG_CARRIED) {
+            Vec2 grab_pos = (was->status == FLAG_DROPPED) ? was->dropped_pos
+                                                          : was->home_pos;
+            audio_play_at(SFX_FLAG_PICKUP, grab_pos);
+            continue;
+        }
     }
 }
 
@@ -1464,6 +1513,13 @@ static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen
             fx_spawn_spark(&g->world.fx, origin,
                 (Vec2){ dir.x * 350.0f, dir.y * 350.0f }, g->world.rng);
         }
+        /* P14 — fire SFX. The predict path plays its own cue for self
+         * LMB-active hitscan; for everything else (remote shooters,
+         * self RMB-on-inactive, self projectile / melee / grapple)
+         * we play here. Same gate as the muzzle sparks above. */
+        SfxId fsfx = audio_sfx_for_weapon((int)weapon);
+        if (wpn->fire == WFIRE_GRAPPLE) fsfx = SFX_GRAPPLE_FIRE;
+        audio_play_at(fsfx, origin);
     }
 
     if (wpn->fire == WFIRE_HITSCAN) {
@@ -1646,6 +1702,10 @@ static void client_handle_hit_event(NetState *ns, const uint8_t *body, int blen,
     if (n_sparks > 8) n_sparks = 8;
     for (int k = 0; k < n_blood; ++k) fx_spawn_blood(&g->world.fx, hp, dir, g->world.rng);
     for (int k = 0; k < n_sparks; ++k) fx_spawn_spark(&g->world.fx, hp, dir, g->world.rng);
+    /* P14 — flesh-impact SFX on the client side. Server-authoritative
+     * fire paths (weapons_fire_hitscan etc.) play this on the host;
+     * client mirrors it via the wire. */
+    audio_play_at(SFX_HIT_FLESH, hp);
 
     /* P12 — Replicate the server's per-event damage feedback so the
      * client matches host visuals beat-for-beat:

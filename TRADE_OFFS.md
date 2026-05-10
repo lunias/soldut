@@ -13,7 +13,32 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-09** (post-P13 — rendering kit shipped: TTF
+Last updated: **2026-05-09** (post-P14 — audio module shipped:
+`src/audio.{c,h}` with 47-entry SFX manifest + alias pool +
+listener-relative pan/volume; 5 software buses with default mix
+1.00/1.00/0.30/0.45/0.70 for MASTER/SFX/MUSIC/AMBIENT/UI; ducking on
+big detonations (`audio_request_duck(0.5, 0.30)` from
+`explosion_spawn` for AOE damage ≥100); per-map music streaming via
+`audio_set_music_for_map`; ambient loops via `audio_set_ambient_loop`;
+servo loop modulated by local-mech velocity; ~30 call sites wired
+across `weapons.c` (fire SFX + hit SFX), `projectile.c` (explosion
+buckets + grapple hit), `mech.c` (footsteps via gait wrap, jet pulse
+rate-limited, grapple fire/release, kill fanfare + death grunt),
+`pickup.c` (per-kind grab + high-tier respawn), `ctf.c` (flag SFX
+on host) + `client_handle_flag_state` (mirrored on client),
+`ui.c` (click + toggle), `client_handle_fire_event` (mirrored fire
+SFX gated on `!predict_drew`), `client_handle_hit_event` (HIT_FLESH).
+Hot-reload registers all 47 SFX paths + servo path via
+`audio_register_hotreload` (DEV_BUILD-gated, mtime watcher). Per-map
+music switch resolved through `apply_audio_for_map` reading
+`level.meta.music_str_idx` + `ambient_loop_str_idx` from the level's
+STRT lump. **New entries**: SFX manifest assets aren't on disk yet
+(P15+); No crossfade between map tracks; No 3D HRTF / binaural pan;
+Servo loop only for the local mech; Footstep SFX is concrete-surface
+only at v1; Held-jet pulse rate-limit picked by integer tick count;
+Client-side mech_kill audio is server-only; UI hover sound not wired.
+
+Previously: 2026-05-09 (post-P13 — rendering kit shipped: TTF
 fonts (Atkinson + VG5000 + Steps Mono) wired through `platform_init`
 with graceful default-font fallback; halftone post-process shader +
 backbuffer-sized RT; new `src/map_kit.{c,h}` for per-map parallax +
@@ -717,20 +742,6 @@ the ban-by-name simplification.).
   - We replace the post-physics anchor with PBD/XPBD (the proper
     solver doesn't fight the slope-tangent run code as hard).
 
-### Renderer draws polygons as flat triangles (P02 stopgap)
-
-- **What we did** — `render.c::draw_level` draws each polygon as a
-  filled triangle (color by kind) plus a thin edge outline so shot
-  tests see the slope test bed. No texture, no halftone, no parallax
-  layering.
-- **Why** — P02 needs *some* polygon rendering for visual verification.
-  The proper polygon visual lives in P13 (parallax + HUD final art +
-  TTF + halftone post + decal chunking) and would be wasted work to
-  build twice.
-- **Revisit when** — P13 (rendering kit). At that point the stopgap is
-  replaced by the sprite-atlas + halftone path; the temporary
-  triangle-fill code is deleted.
-
 ### Slope test bed is hardcoded in `level_build_tutorial`
 
 - **What we did** — `level.c::level_build_tutorial` allocates 3 SOLID
@@ -1191,6 +1202,195 @@ the ban-by-name simplification.).
 
 ---
 
+## Audio (P14)
+
+### SFX manifest assets aren't on disk yet (post-P14)
+
+- **What we did** — P14 ships the audio runtime: 47-entry SFX manifest
+  in `src/audio.c` + servo loop path, each loaded by `audio_init` via
+  `LoadSound` + `LoadSoundAlias`. None of the underlying `.wav`
+  files exist at P14 ship — every entry hits the missing-file path,
+  logs INFO ("audio: assets/sfx/X.wav missing — playback for this id
+  will no-op"), and leaves `alias_count = 0`. `audio_play_at` /
+  `_global` early-return for those ids, so the build runs without
+  audio while the asset-generation pipeline catches up. raylib also
+  emits its own `WARNING: FILEIO: [...] Failed to open file` per
+  missing file at startup; tolerated as one-time noise.
+- **Why** — Same staging as P10 / P11 / P12 / P13: ship the runtime
+  first as a focused review surface, fill the assets at P15-P18.
+  Splitting means the SFX pipeline can iterate against a working
+  module without engineering churn between renders. Audio assets are
+  CC0-sourced (freesound.org / opengameart.org) plus Soldut-original
+  recordings per `documents/m5/09-audio.md` §"Where to source samples".
+- **Revisit when** —
+  - P15-P18 ships `assets/sfx/*.wav` for at least one cue. The audio
+    module's `audio_register_hotreload` already plumbs the manifest
+    into the P13 mtime watcher, so designers iterating on samples get
+    the per-file reload without further wiring.
+  - The startup INFO + raylib WARNING noise becomes a real concern
+    (e.g., users seeing 50 lines per launch in `soldut.log`). Bump
+    raylib's `SetTraceLogLevel` to `LOG_ERROR` around `audio_init` to
+    suppress just the loop's warnings, and condense our INFOs to a
+    single summary "audio_init: 0/47 samples loaded".
+
+### No crossfade between map tracks (P14)
+
+- **What we did** — `audio_set_music_for_map(path)` does a hard
+  stop + unload + reload + play sequence on the same `Music` slot.
+  Round transitions cut the previous track and start the new one
+  with a brief silence in between (during the OGG header parse +
+  buffer fill).
+- **Why** — Crossfading wants two simultaneous decoders + a mix
+  envelope on each — doubles the streaming buffer (1 MB each, vs the
+  one we have) and adds non-trivial state (per-track gain ramp,
+  envelope arithmetic). The hard cut reads "round-end" cleanly to
+  players ("the music stopped, the next one started"). Spec
+  pre-disclosed this as a deliberate compromise.
+- **Revisit when** —
+  - Playtest reports the round-transition silence reads as broken
+    (e.g., "the music drops out, did the game freeze?"). Add a 200 ms
+    fadeout on the outgoing track + 200 ms fadein on the incoming
+    via the existing `audio_set_bus_volume` infrastructure (or by
+    modulating MUSIC bus duck_target through the transition).
+  - We add a "lobby music" track that should crossfade into match
+    music — at that point the dual-decoder cost might be worth it.
+    M6 polish.
+
+### No 3D HRTF / binaural pan (P14)
+
+- **What we did** — `audio_play_at` computes a single linear pan
+  from `dx / 800` (clamped to [-1, +1]) and a linear distance
+  attenuation from `1 - clamp((dist - 200)/1300, 0, 1)`. raylib's
+  `SetSoundPan` distributes the resulting signal between L/R speakers.
+  No HRTF filter, no head-shadow simulation, no Doppler shift.
+- **Why** — We're a 2D side-scrolling game on a fixed-camera plane.
+  HRTF would simulate height + distance + occlusion that doesn't
+  exist in the play model. Linear pan + distance attenuation is what
+  the spec calls for and matches every comparable 2D shooter.
+- **Revisit when** —
+  - VR / 3D spatial-audio modes ever come into scope. Out of v1.
+  - Players report "I can't tell where the sound came from"
+    consistently. Distance attenuation + pan on stereo speakers is
+    well-understood; if it fails, the cure is louder cues, not HRTF.
+
+### Servo loop only for the local mech (P14)
+
+- **What we did** — `audio_step` reads the local mech's pelvis
+  velocity each frame and calls `audio_servo_update(vel)`; remote
+  mechs get no servo loop. Local-only servo means a quiet stationary
+  player + audible running, but two players running side-by-side on
+  the client only hear one servo (the local mech's).
+- **Why** — Three reasons per `documents/m5/09-audio.md`:
+  (a) 32 simultaneously-modulated servo loops would be a CPU + audio
+  graph nightmare for a per-mech-feel cue that doesn't carry tactical
+  information; (b) a single intimate loop attached to the listener
+  reads more authentically than a chorus of distant servo hums;
+  (c) spatializing 32 loops via `audio_play_at` doesn't fit the
+  one-source-per-Sound model — we'd need 32 dedicated `Sound`
+  instances. Pre-disclosed by the spec.
+- **Revisit when** —
+  - We add a stealth mechanic where hearing nearby mechs' servos is
+    tactical signal (e.g., "I can hear them coming"). At that point
+    the cleanest path is a per-Mech `Sound` instance with distance
+    attenuation, capped at the nearest 4 mechs.
+  - We ship variable-pitch chassis-specific servo loops (Heavy
+    deeper, Scout higher) — at that point per-listener servo audio
+    might want per-chassis variants for own-mech too.
+
+### Footstep SFX is concrete-surface only at v1 (P14)
+
+- **What we did** — `build_pose`'s ANIM_RUN gait wrap fires
+  `audio_play_at(SFX_FOOTSTEP_CONCRETE, ...)` for every plant. Metal
+  + ice surfaces have manifest entries (and the sound files will
+  drop in at P15+) but no surface-detection logic queries the foot's
+  contact tile to pick the right SfxId.
+- **Why** — Surface detection wants a `level_tile_at(foot_pos)`
+  query + an SfxId map keyed off `LvlTile.kind` and (later) tile-id
+  ranges in the atlas. Cheap to write but adds a layer of conditional
+  logic that's only meaningful once the actual sound files exist
+  (otherwise all three play silence). Defer to playtest after P15+
+  ships at least one footstep variant.
+- **Revisit when** —
+  - P15-P18 ship `assets/sfx/footstep_concrete.wav` AND any other
+    surface variant. At that point: in `build_pose`, query
+    `level_tile_at` at the plant position, branch on `LvlTile.kind`
+    (TILE_ICE → SFX_FOOTSTEP_ICE; TILE_SOLID with metal-id range →
+    SFX_FOOTSTEP_METAL; else → SFX_FOOTSTEP_CONCRETE). ~15 LOC.
+  - We add per-chassis footstep variants (Heavy thuds, Scout pads).
+    Same dispatch site; just more SfxIds.
+
+### Held-jet pulse rate-limit picked by integer tick count (P14)
+
+- **What we did** — `apply_jet_force` fires `SFX_JET_PULSE` once
+  every 4 ticks (`if (w->tick - last_jet_pulse_tick >= 4)`) using a
+  per-Mech `last_jet_pulse_tick` field. At 60 Hz that's ~15 pulses/sec
+  per held jet. The cue plays on whichever tick the inequality first
+  fires after a press.
+- **Why** — The jet "puff" sound design is a continuous-textured
+  cue (per-tick is way too dense; sub-3-tick reads as a stuttering
+  burst); 4 ticks = 67 ms is roughly the resolution of human pulse
+  perception for layered SFX. Picking the rate as a fixed tick
+  delta — instead of a `Sound` loop — keeps the fire site simple
+  + lets the rate change per-chassis later (Burst-jet wants faster).
+- **Revisit when** —
+  - We add per-chassis jetpacks with distinct exhaust character
+    (Burst chassis already has a separate SFX_JET_BOOST for the
+    BTN_DASH dump). Per-chassis pulse rate just becomes a chassis
+    field; lookup at the rate-limit check.
+  - Audio designers want a continuous looping jet pulse (more
+    "afterburner" than "puff puff puff"). At that point: replace
+    the per-tick fire with a held `Sound` similar to the servo loop,
+    modulated by the held-jet state.
+
+### Client-side mech_kill audio is server-only (P14)
+
+- **What we did** — `mech_kill` fires `audio_play_global(SFX_KILL_FANFARE)`
+  for the local killer and `audio_play_at(SFX_DEATH_GRUNT, victim_pos)`
+  for the victim's pelvis. `mech_kill` runs only on the authoritative
+  side (server / offline-solo); pure clients see death via snapshots
+  flipping `alive = false`, never call `mech_kill` locally, so they
+  miss both audio cues for their own deaths and any kills they
+  scored. Hits arrive via `client_handle_hit_event` which already
+  plays `SFX_HIT_FLESH`, but the killing-blow fanfare/grunt is silent.
+- **Why** — The server-authoritative side is the right place for
+  the kill bookkeeping (kill feed, score, dismember mask, drop-flag
+  on death). Replicating death audio onto the client wants either
+  (a) a `NET_MSG_KILL_EVENT` that the client handles, or (b)
+  detecting the snapshot transition `alive: true → false` per mech
+  and firing audio. (b) is cheaper but spec'd separately from the
+  HIT_EVENT path — defer to a focused fix when the gap shows up
+  in real WAN play.
+- **Revisit when** —
+  - WAN playtest: clients consistently report "I can't tell when I
+    got the kill" — at that point either gate the existing fire
+    audio's `predict_drew` machinery into a "this fire connected"
+    bit, or add the snapshot-edge detector in `snapshot_apply`.
+  - We add a kill-streak HUD or announcer cue — needs the same
+    death-detection event regardless of network role.
+
+### UI hover sound not wired (P14)
+
+- **What we did** — `ui_button` plays `SFX_UI_CLICK` on press; no
+  hover-enter sound. The manifest declares `SFX_UI_HOVER` (and the
+  asset path is reserved), but the runtime doesn't fire it.
+- **Why** — Hover detection wants per-button state tracking ("was
+  this rect hovered last frame too?"). The current `UIContext` is
+  intentionally stateless across frames apart from focus + caret.
+  Adding `last_hovered_id` (hash of rect + label) on UIContext +
+  comparing per call is ~10 LOC, but the audio benefit is small
+  relative to click — players notice clicks more than hovers, and
+  a busy UI plays hovers constantly which becomes its own noise
+  problem.
+- **Revisit when** —
+  - The HUD final art pass calls for hover audio as part of menu
+    polish (likely M6). At that point: add a `last_hover_hash`
+    field on UIContext, hash `(rect.x, rect.y, label[0])` per
+    button to identify it, fire SFX_UI_HOVER on hash transition.
+  - We add a settings menu where hover navigation is the primary
+    interaction model. Same fix.
+
+---
+
 ## Architecture / process
 
 ### Snapshot-style debugging via `headless_sim` is the only test
@@ -1214,27 +1414,6 @@ the ban-by-name simplification.).
   regression. Wiring it into CI without that is just running it for
   show.
 - **Revisit when** — `headless_sim` gets assertions.
-
-### No data hot-reload (no `src/hotreload.c`)
-
-- **What we did** — Data files (`.lvl`, `soldut.cfg`, future weapon /
-  mech tunables) are read at process start or at level load. There is
-  no file watcher; in-flight changes need a restart or a level reload.
-- **Why** — `documents/01-philosophy.md` Rule 8 calls for a tiny
-  mtime-polling watcher (`src/hotreload.c`) so iterating on game-feel
-  is fast. We haven't needed it yet — tunables live as `#define`s in C,
-  weapon stats live in the `g_weapons[]` table in C, and maps reload
-  via the lobby flow's map rotation. The cost of NOT having it is paid
-  in iteration time, not in correctness.
-- **Revisit when** —
-  - The level editor (M5 P04) ships F5 test-play. F5-from-editor wants
-    the game to re-read the `.lvl` without a full restart. Either the
-    editor talks to a sibling game process (Plan B in
-    `documents/m5/02-level-editor.md`) or we add the file watcher.
-  - We move weapon / mech tunables out of C into a data file and start
-    tuning game-feel from disk.
-  - A non-engineer designer starts authoring content and the
-    recompile-to-see-change loop becomes the bottleneck.
 
 ---
 
