@@ -117,11 +117,14 @@ That's ~21 constraints per mech, ~672 across 32 mechs. Plus dismembered limb int
 
 The simulation runs at **120 Hz** (every 8.33 ms) inside a fixed-step accumulator. Render runs at whatever frame rate the player has, interpolating between the last two simulated states.
 
-> **M1 note:** the build currently runs **one sim tick per render
-> frame** (effectively 60 Hz on a vsynced display). No fixed-step
-> accumulator, no render-side interpolation alpha. This leaks: jet
-> arcs feel different in fullscreen vs small windows. See
-> [TRADE_OFFS.md](../TRADE_OFFS.md#60-hz-simulation-not-120-hz).
+> **Build note (post-M5 P03):** the fixed-step accumulator and the
+> render-side interpolation alpha are in (`main.c`'s 60 Hz loop +
+> per-particle `render_prev_*` snapshot lerped at `accum/TICK_DT`).
+> The **rate** still ships at **60 Hz**, not 120 Hz, because slope-
+> physics tuning happened against it; flipping to 120 Hz is a
+> `#define SIM_HZ` change plus a re-tune pass. Deferred until
+> playtest after authored maps land. See
+> [TRADE_OFFS.md](../TRADE_OFFS.md#sim-runs-at-60-hz-not-120-hz).
 
 The Verlet step for one particle:
 

@@ -1,0 +1,111 @@
+{
+  "_meta": {
+    "title": "Soldut \u2014 Lightning smoke (4-step SDXL with Lightning LoRA)",
+    "description": "Fast smoke test using ByteDance SDXL Lightning 4-step LoRA. Same SDXL base + VAE; LoRA at strength 1.0; KSampler with steps=4, cfg=1.5 (Lightning needs low cfg), sampler=euler, scheduler=sgm_uniform. Should produce a 768x768 image in 20-40s on RTX 2080 vs 5+ min for full sampling.",
+    "format": "ComfyUI API format.",
+    "version": 1
+  },
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "Illustrious-XL-v0.1.safetensors"
+    }
+  },
+  "2": {
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "LoRA \u2014 SDXL Lightning 4-step"
+    },
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "clip": [
+        "1",
+        1
+      ],
+      "lora_name": "sdxl_lightning_4step_lora.safetensors",
+      "strength_model": 1.0,
+      "strength_clip": 1.0
+    }
+  },
+  "30": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "2",
+        1
+      ],
+      "text": "battletech technical readout illustration, single weight ink line art, mecha line drawing, mechanical, panel lines, hydraulic pistons, factory built, exposed machinery, full body battlemech, t-pose, no shading, halftone, monochrome, 1985 illustration, white background, no text, no watermark, no character"
+    }
+  },
+  "31": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "2",
+        1
+      ],
+      "text": "photo, 3d, render, smooth, gradient, glow, anime face, character, person, color, saturated, neon, blurry, watermark, text, multiple objects"
+    }
+  },
+  "40": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 768,
+      "height": 768,
+      "batch_size": 1
+    }
+  },
+  "50": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ],
+      "positive": [
+        "30",
+        0
+      ],
+      "negative": [
+        "31",
+        0
+      ],
+      "latent_image": [
+        "40",
+        0
+      ],
+      "seed": 1000001,
+      "steps": 4,
+      "cfg": 1.5,
+      "sampler_name": "euler",
+      "scheduler": "sgm_uniform",
+      "denoise": 1.0
+    }
+  },
+  "60": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "50",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    }
+  },
+  "70": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "60",
+        0
+      ],
+      "filename_prefix": "soldut/smoke_lightning"
+    }
+  }
+}

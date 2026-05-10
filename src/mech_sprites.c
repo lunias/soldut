@@ -41,8 +41,13 @@ static const MechSpritePart s_default_parts[MSP_COUNT] = {
     [MSP_LEG_UPPER_R]      = { .src = { 40,  80,  36,  96 }, .pivot = { 18, 48 }, .draw_w =  36, .draw_h =  96 },
     [MSP_LEG_LOWER_L]      = { .src = { 80,  80,  32,  88 }, .pivot = { 16, 44 }, .draw_w =  32, .draw_h =  88 },
     [MSP_LEG_LOWER_R]      = { .src = {116,  80,  32,  88 }, .pivot = { 16, 44 }, .draw_w =  32, .draw_h =  88 },
-    [MSP_FOOT_L]           = { .src = {152,  80,  32,  24 }, .pivot = { 16, 12 }, .draw_w =  32, .draw_h =  24 },
-    [MSP_FOOT_R]           = { .src = {188,  80,  32,  24 }, .pivot = { 16, 12 }, .draw_w =  32, .draw_h =  24 },
+    /* Foot pivot at (16, 24) — bottom edge of the 32x24 sprite — so
+     * the entire boot draws ABOVE the FOOT particle. The FOOT particle
+     * IS the ground-contact point in physics; anything below it is in
+     * the floor. With center-pivot (default) the boot drew 12px past
+     * the contact point, visibly clipping the platform. */
+    [MSP_FOOT_L]           = { .src = {152,  80,  32,  24 }, .pivot = { 16, 24 }, .draw_w =  32, .draw_h =  24 },
+    [MSP_FOOT_R]           = { .src = {188,  80,  32,  24 }, .pivot = { 16, 24 }, .draw_w =  32, .draw_h =  24 },
 
     [MSP_ARM_UPPER_L]      = { .src = {  0, 180,  32,  80 }, .pivot = { 16, 40 }, .draw_w =  32, .draw_h =  80 },
     [MSP_ARM_UPPER_R]      = { .src = { 36, 180,  32,  80 }, .pivot = { 16, 40 }, .draw_w =  32, .draw_h =  80 },

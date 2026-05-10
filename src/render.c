@@ -978,6 +978,7 @@ static void draw_mech_sprites(const ParticlePool *p, const ConstraintPool *cp,
 
         Vec2 pos_b = particle_render_pos(p, b + part_b, alpha);
         float draw_x, draw_y, angle;
+        float bone_len = 0.0f;
         if (part_a >= 0) {
             Vec2 pos_a = particle_render_pos(p, b + part_a, alpha);
             draw_x = (pos_a.x + pos_b.x) * 0.5f + visual_offset.x;
@@ -987,8 +988,10 @@ static void draw_mech_sprites(const ParticlePool *p, const ConstraintPool *cp,
              * rotates CW in screen-space (+y down). Subtract 90° so
              * angle=0 corresponds to a vertical bone (parent above
              * child) which is the source authoring orientation. */
-            angle = atan2f(pos_b.y - pos_a.y, pos_b.x - pos_a.x) * RAD2DEG
-                  - 90.0f;
+            float dx = pos_b.x - pos_a.x;
+            float dy = pos_b.y - pos_a.y;
+            angle = atan2f(dy, dx) * RAD2DEG - 90.0f;
+            bone_len = sqrtf(dx * dx + dy * dy);
         } else {
             draw_x = pos_b.x + visual_offset.x;
             draw_y = pos_b.y + visual_offset.y;
@@ -996,9 +999,37 @@ static void draw_mech_sprites(const ParticlePool *p, const ConstraintPool *cp,
         }
 
         const MechSpritePart *sp = &set->parts[sprite_idx];
+        /* For 2-particle bones, scale the sprite's height to match the
+         * actual bone span (plus a small overlap allowance for the
+         * parent-side wraparound). The s_default_parts draw_h values
+         * were authored 2-5x larger than the per-chassis bone lengths
+         * (e.g. leg_lower draw_h=88 vs trooper bone_shin=18); rendering
+         * those raw extends the sprite past the bone endpoints, so a
+         * dense AI-filled tile shows the limb clipping through the
+         * floor. The overlap factor (1.20) keeps the parent-side
+         * exposed-end zone visible behind the parent plate's z-order
+         * while the bottom edge stays at the child particle.
+         * Single-particle sprites (plates, hands, feet, stumps) keep
+         * their authored draw_h since they anchor at one point. */
+        float dst_w = sp->draw_w;
+        float dst_h = sp->draw_h;
+        Vector2 pivot = sp->pivot;
+        if (part_a >= 0 && bone_len > 0.0f) {
+            /* Scale the sprite so its rendered height equals the actual
+             * bone span. This makes the sprite endpoints align with the
+             * particle endpoints — no overhang past the parent or child
+             * particle. The previous 1.20x overlap factor produced
+             * visible foot-into-floor bleed when the AI atlas filled
+             * the bottom of the leg_lower tile with content. */
+            float scale = bone_len / sp->draw_h;
+            dst_w = sp->draw_w * scale;
+            dst_h = sp->draw_h * scale;
+            pivot.x *= scale;
+            pivot.y *= scale;
+        }
         DrawTexturePro(set->atlas, sp->src,
-                       (Rectangle){ draw_x, draw_y, sp->draw_w, sp->draw_h },
-                       sp->pivot, angle, tint);
+                       (Rectangle){ draw_x, draw_y, dst_w, dst_h },
+                       pivot, angle, tint);
     }
 
     /* P12 — Stump caps go on top of the limb sprites so they cover the

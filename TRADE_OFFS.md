@@ -13,7 +13,25 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-09** (post-P14 — audio module shipped:
+Last updated: **2026-05-10** (post-P15 — first chassis atlas on disk
++ sprite anchor fixes. Trooper canonical generated end-to-end on
+RTX 2080 8GB / WSL2; the spec'd ControlNet-Union promax + IP-Adapter
+PLUS chain at 1024×1024 doesn't fit (multiple OOMs / hangs this
+session). Working subset uses T2I-Adapter Lineart SDXL (~150MB) in
+place of ControlNet-Union (2.5GB), drops IP-Adapter, runs CPU VAE to
+avoid the GPU-VAE OOM at 1024×1024. **New entry**:
+"ControlNet-Union promax + IP-Adapter chain doesn't fit in 8GB VRAM".
+Two render-side sprite-anchor fixes (no trade-off entries — these
+are plain bug fixes): `draw_mech_sprites` now scales sprite dst_h
+to match the actual bone span (was authored 2.4–5.7× bigger, dense
+AI tiles overhung past particles); foot pivot moved to bottom edge
+so the boot draws above the FOOT particle (was clipping into the
+platform with center pivot). The "Mech capsule renderer is the
+no-asset fallback" entry's deletion gate is partially met (Trooper
+atlas shipped) but stays open until the remaining four chassis +
+stump caps land in P16.
+
+Previously: 2026-05-09 (post-P14 — audio module shipped:
 `src/audio.{c,h}` with 47-entry SFX manifest + alias pool +
 listener-relative pan/volume; 5 software buses with default mix
 1.00/1.00/0.30/0.45/0.70 for MASTER/SFX/MUSIC/AMBIENT/UI; ducking on
@@ -380,7 +398,7 @@ the ban-by-name simplification.).
     visible after the body ragdolls). The render-tick form requires
     the firer's mech alive to read; pooled FX would survive.
 
-### Mech capsule renderer is the no-asset fallback (post-P12)
+### Mech capsule renderer is the no-asset fallback (post-P15 partial)
 
 - **What we did** — P10 shipped the sprite path: `draw_mech_sprites`
   walks the 17-entry `g_render_parts[]` z-order table when
@@ -390,29 +408,81 @@ the ban-by-name simplification.).
   damage-feedback layers in BOTH render paths so a no-atlas build
   still gets hit-flash + decals + spray + emitter + smoke; only the
   stump-cap sub-rects skip in capsule mode (the spec explicitly
-  calls this out). At P12 ship none of the five
-  `assets/sprites/<chassis>.png` files exist, so every chassis
-  actually renders as capsules in real play; the sprite path is
-  exercised only by tests that load synthetic atlases.
+  calls this out). **P15 partially addresses this**: Trooper now has
+  an authored atlas (`assets/sprites/trooper.png`) generated through
+  the ComfyUI Pipeline 1 (8GB-tuned subset). The remaining four
+  chassis (Scout / Heavy / Sniper / Engineer) still render as
+  capsules until P16.
 - **Why** — P10 deliberately split the runtime + per-chassis bone
   distinctness + data-table pipeline from the held-weapon-art (P11)
   and damage-feedback layers (P12) so each lands as a focused review
-  surface. Asset generation (P15–P16) fills the atlases later. The
-  capsule fallback is what keeps the build playable through P12–P14
-  development. P12 was originally the "delete this trade-off" gate
-  per `documents/m5/13-controls-and-residuals.md` §"Resolved by M5",
-  but with no atlases on disk the entry stays open as the hard
-  fallback — the gate moves to P15/P16 (asset generation).
+  surface. Asset generation runs in P15–P16; per-chassis iteration
+  is gated on the user driving ComfyUI through the pipeline.
 - **Revisit when** —
-  - P15/P16 ship `assets/sprites/<chassis>.png` for at least one
-    chassis. At that point the sprite path becomes the canonical
-    render in real play; the capsule fallback can be retired (or
-    kept as a dev-machine convenience for builds without assets,
-    which is a tiny code surface).
-  - Earlier than the above only if the capsule fallback masks a
-    real regression (e.g. a sprite-path bug that fires only when
-    atlases load). Symptom would be: shot tests pass with capsules
-    but break under synthetic-atlas sprite tests.
+  - P16 ships the four remaining chassis atlases + stump caps. At
+    that point this entry deletes — the capsule path stays in source
+    as a dev-machine convenience for builds without asset packs,
+    which is a tiny code surface.
+  - The capsule fallback masks a real regression (e.g. a sprite-path
+    bug that fires only when atlases load). Symptom: shot tests pass
+    with capsules but break under synthetic-atlas sprite tests.
+
+### ControlNet-Union promax + IP-Adapter chain doesn't fit in 8GB VRAM (P15)
+
+- **What we did** — `documents/m5/11-art-direction.md` §"Pipeline 1"
+  specs SDXL + ControlNet-Union promax (2.5 GB) + IP-Adapter PLUS
+  (CLIP-Vision-H 1.2 GB + IPA 0.8 GB) at 1024×1024. On RTX 2080 / 8GB
+  VRAM under WSL2, multiple iterations this session OOMed during VAE
+  decode or hung indefinitely on the IP-Adapter→VAE swap (comfy at
+  0% GPU util, queue stuck at 1). The spec'd `mech_chassis_canonical_v1.json`
+  workflow stays as the reference for 12GB+ GPUs but is not the
+  shipping path on 8GB.
+  We ship a **drop-in 8GB substitute** —
+  `tools/comfy/workflows/soldut/mech_chassis_canonical_8gb_v1.json` —
+  with three differences from the spec:
+  1. ControlNet-Union promax (2.5 GB) replaced by **T2I-Adapter
+     Lineart SDXL** (TencentARC/t2i-adapter-lineart-sdxl-1.0 fp16,
+     ~150 MB). T2I-Adapter does the same job (skeleton-geometry
+     conditioning) at <10% the VRAM cost. Loaded through the same
+     `ControlNetLoader`/`ControlNetApplyAdvanced` nodes in modern
+     comfy.
+  2. IP-Adapter PLUS chain (CLIP-Vision-H + IPA, ~2.5 GB) **dropped
+     entirely**. Style consistency comes from prompt + Pipeline 7
+     post (palette remap + halftone screen) instead of conditioning
+     on the anchor image.
+  3. VAE decode at 1024×1024 runs on **CPU** (`--cpu-vae` server
+     flag). GPU VAE OOMs at this resolution after the model+adapter
+     swap; tiled GPU VAE OOMs too. CPU VAE is slower (~25 sec at
+     1024×1024) but reliable; total wall time still ~45 sec.
+  The Trooper atlas generated through this path (`assets/sprites/trooper.png`)
+  is rough first-pass quality — recognizable mech silhouette but
+  noisy interior — because we lose IP-Adapter's style anchoring and
+  the prompt+ControlNet alone don't enforce TRO-register surface
+  detail as strongly.
+- **Why** — The 8GB ceiling is hardware. Without a bigger GPU we
+  can't run the full chain; without the full chain the output drifts
+  from the spec'd register. Three options weighed:
+  (a) drop one piece and accept lower quality (chosen for P15
+  Trooper),
+  (b) iterate prompt + skeleton + multi-pass refinement to compensate
+  (the iteration lever; happens in P16+ candidate review),
+  (c) borrow / upgrade hardware (deferred — the user has friends with
+  bigger GPUs but doesn't want to chase that for the first pass).
+- **Revisit when** —
+  - Any 12GB+ GPU is available: switch to `mech_chassis_canonical_v1.json`
+    (the spec workflow). Quality should jump because IP-Adapter +
+    full ControlNet-Union are back in the chain. The 8GB workflow
+    stays in source as the lower-tier fallback.
+  - A quantized variant of ControlNet-Union (4-bit?) ships small
+    enough to fit alongside SDXL + IP-Adapter on 8 GB. Worth checking
+    HuggingFace periodically; SDXL ecosystem moves fast.
+  - The output quality from the 8GB path is acceptable for ship after
+    candidate iteration. Plausible — the Pipeline 7 post-process is
+    designed to unify rough output, and for indie-game-scale 32×32
+    sprite slots a lot of detail is lost in the downsample anyway.
+  - We discover the IP-Adapter-VAE swap hang has a config fix (e.g.
+    explicit unload before VAE node, or a different IP-Adapter wrapper).
+    None found this session after ~6 iterations.
 
 ### Whole-mech hit flash, not per-particle (P12)
 

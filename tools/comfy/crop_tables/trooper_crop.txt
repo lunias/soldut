@@ -1,0 +1,48 @@
+# Soldut — Trooper crop table (2x scaled — full-frame skeleton)
+#
+# Maps anatomical positions in the canonical 1024x1024 ComfyUI output to
+# per-part rectangles, then to an atlas at assets/sprites/trooper.png.
+# Coordinates match the SCALED-UP skeleton at
+# tools/comfy/skeletons/trooper_tpose_skeleton.png — mech fills y=132..904.
+#
+# Format (whitespace-separated):
+#   part_id   src_x src_y src_w src_h   dst_x dst_y   pivot_x pivot_y   draw_w draw_h
+#
+# The src_* columns are the bbox in the AI canonical (1024x1024).
+# The dst_* columns are the position in the packed atlas — mirroring
+# src/mech_sprites.c::s_default_parts so no transcribe pass is needed
+# unless you tune part dimensions away from defaults.
+
+# part_id          src_x src_y src_w src_h   dst_x dst_y   pivot_x pivot_y   draw_w draw_h
+torso              456    232   112   144      0     0      28       36       56     72
+head               476    132    72    72     60     0      20       20       40     40
+hip_plate          448    408   128    72    104     0      32       18       64     36
+shoulder_l         368    256   112    80    172     0      28       20       56     40
+shoulder_r         544    256   112    80    232     0      28       20       56     40
+
+leg_upper_l        448    492    72   192      0    80      18       48       36     96
+leg_upper_r        512    492    72   192     40    80      18       48       36     96
+leg_lower_l        454    684    64   176     80    80      16       44       32     88
+leg_lower_r        518    684    64   176    116    80      16       44       32     88
+foot_l             448    852    64    48    152    80      16       12       32     24
+foot_r             512    852    64    48    188    80      16       12       32     24
+
+arm_upper_l        396    296    64   144      0   180      16       40       32     80
+arm_upper_r        544    296    64   144     36   180      16       40       32     80
+arm_lower_l        400    444    56   144     72   180      14       36       28     72
+arm_lower_r        548    444    56   144    104   180      14       36       28     72
+hand_l             408    572    32    32    136   180       8        8       16     16
+hand_r             556    572    32    32    156   180       8        8       16     16
+
+# Stump caps — by convention these are hand-drawn (not AI; see
+# documents/m5/11-art-direction.md §"Pipeline 5 — Hand-drawn stump caps").
+# Drop hand-drawn 32x32 PNGs into tools/comfy/stumps/<chassis>/ and
+# crop_canonical.py will composite them in at the dst slots below.
+# (When AI-generating stumps via the stump_cap_v1.json workflow, those
+# are saved to tools/comfy/stumps/<chassis>/ first; cropper picks them
+# up automatically.)
+stump_shoulder_l    16     16    32    32      0   264      16       16       32     32
+stump_shoulder_r    60     16    32    32     36   264      16       16       32     32
+stump_hip_l        104     16    32    32     72   264      16       16       32     32
+stump_hip_r        148     16    32    32    108   264      16       16       32     32
+stump_neck         192     16    32    32    144   264      16       16       32     32
