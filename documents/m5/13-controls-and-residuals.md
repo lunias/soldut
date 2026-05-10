@@ -124,11 +124,11 @@ Default keybinds shipped at M5:
 | Jump | Space | |
 | Jet | W or Right Mouse Hold | (LMB-RMB-down combo can scoop both fire + jet — accepted) |
 | Crouch | Ctrl | Drops through ONE_WAY platforms |
-| Prone | Z | |
+| Prone | X | |
 | **Primary fire** | **Left Mouse** | Fires active slot |
 | **Secondary fire** | **Right Mouse** | Fires inactive slot one-shot — **NEW at M5** |
 | Reload | R | |
-| Melee | V | |
+| Melee | F | |
 | Use / interact | E | Engineer ability, grapple release, flag interact |
 | Swap weapon | Q | Toggle active slot |
 | Dash | Shift | Scout dash, Burst-jet boost |

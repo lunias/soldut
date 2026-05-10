@@ -6,7 +6,7 @@ This document specifies the **layout** of the source: folders, modules, what eac
 
 ```
 soldut/
-├── src/                    # game source — 72 .c/.h files (39 modules) post-M5 P12
+├── src/                    # game source — 78 .c/.h files (42 modules) post-M5 P14
 ├── tools/                  # support utilities (level cooker, replay extractor)
 ├── assets/                 # ships with the binary
 ├── third_party/
@@ -44,11 +44,13 @@ src/
 ├── projectile.{c,h}        # bullets, grenades, rockets
 ├── particle.{c,h}          # blood, sparks, smoke
 ├── decal.{c,h}             # splat layer
+├── audio.{c,h}             # SFX manifest + alias pool + ducking + music/ambient (M5 P14)
 ├── pickup.{c,h}            # pickup spawners + state machine + per-kind apply (M5 P05)
 ├── ctf.{c,h}               # CTF flag entities + capture / pickup / return rules (M5 P07)
 ├── level.{c,h}             # tile grid + ray helpers
 ├── level_io.{c,h}          # `.lvl` binary format loader/saver + CRC32 (M5 P01)
 ├── maps.{c,h}              # code-built map fallbacks + `map_build` dispatcher
+├── map_kit.{c,h}           # per-map parallax + tile atlas textures (M5 P13)
 ├── match.{c,h}             # match phases, scoring, mode rules
 ├── render.{c,h}            # high-level draw orchestration
 ├── hud.{c,h}               # screen-space UI (HP/jet/ammo/kill feed)
@@ -68,6 +70,7 @@ src/
 ├── math.h                  # math helpers beyond raymath (header-only, mostly inline)
 ├── hash.{c,h}              # PCG, FNV, simple hash table
 ├── ds.c                    # one .c that #defines STB_DS_IMPLEMENTATION
+├── hotreload.{c,h}         # dev-build mtime watcher (DEV_BUILD-gated; M5 P13)
 ├── shotmode.{c,h}          # scriptable scene runner that drives the real
 │                           #   sim + renderer and writes PNG + log pairs
 │                           #   for visual debugging — see CLAUDE.md
@@ -76,11 +79,9 @@ src/
 
 That is the entire public structure. Anything we want to add asks: which existing module owns this? If none, it gets a new `name.{c,h}` pair, never a folder.
 
-Modules that the design canon expects but that haven't shipped yet:
-- `audio.{c,h}` — lands at M5 P14 (per `documents/m5/09-audio.md`).
-- `hotreload.{c,h}` — never built; data hot-reload is deferred indefinitely.
+All modules expected by the design canon now ship — `audio.{c,h}` landed at M5 P14.
 
-Shipped at M5: `level_io.{c,h}` (P01), `pickup.{c,h}` (P05), `ctf.{c,h}` (P07), `map_cache.{c,h}` + `map_download.{c,h}` (P08), `mech_sprites.{c,h}` (P10), `weapon_sprites.{c,h}` (P11). P12 grew existing modules (no new module): `render.c` (+~155 LOC for `apply_hit_flash` / `draw_damage_decals` / `draw_stump_caps` / `part_local_to_world`), `mech.c` (+~85 LOC for `hit_flash_timer` decay + per-limb decal-ring writes + smoke-threshold check), `mech_sprites.c` (+~55 LOC for `mech_part_to_sprite_id` + `mech_sprite_part_endpoints` helpers), and added `FX_STUMP` to the particle path.
+Shipped at M5: `level_io.{c,h}` (P01), `pickup.{c,h}` (P05), `ctf.{c,h}` (P07), `map_cache.{c,h}` + `map_download.{c,h}` (P08), `mech_sprites.{c,h}` (P10), `weapon_sprites.{c,h}` (P11), `map_kit.{c,h}` + `hotreload.{c,h}` (P13), `audio.{c,h}` (P14). P12 grew existing modules (no new module): `render.c` (+~155 LOC for `apply_hit_flash` / `draw_damage_decals` / `draw_stump_caps` / `part_local_to_world`), `mech.c` (+~85 LOC for `hit_flash_timer` decay + per-limb decal-ring writes + smoke-threshold check), `mech_sprites.c` (+~55 LOC for `mech_part_to_sprite_id` + `mech_sprite_part_endpoints` helpers), and added `FX_STUMP` to the particle path. P13 also grew `render.c` (parallax + halftone post + decoration draw + tile sprites + free-poly extraction), `decal.c` (chunked layer for >4096 px maps), `hud.c` (atlas-aware bars + crosshair + kill-feed icons + `DrawTextEx` migration), and `platform.c` (TTF font globals + `LoadFontEx`).
 
 `server_browser.{c,h}` was originally planned as its own module; LAN discovery folded into `net.{c,h}` and the browser screen lives in `lobby_ui.{c,h}`.
 
@@ -198,6 +199,7 @@ Each module's `.h` declares what it depends on. The dependency graph is a DAG; w
               level
               level_io
               maps
+              map_kit                (P13; consumed by render)
               match
               render
                 ↑
@@ -209,6 +211,8 @@ Each module's `.h` declares what it depends on. The dependency graph is a DAG; w
               input
 
               arena, pool, log, math, hash, ds, config   (leaf utilities)
+              hotreload                                   (P13; DEV_BUILD-gated; main.c registers callbacks)
+              audio                                       (P14; consumed by mech/weapons/projectile/pickup/ctf/ui/net for SFX cues)
               shotmode                                    (test harness; see CLAUDE.md)
 ```
 
@@ -354,7 +358,7 @@ We do **not** integrate Tracy or Optick at v1. If we need deep traces, we add th
 
 ## File size targets
 
-| Module | Current LOC (post-M4 + M5 P01–P12) | Notes |
+| Module | Current LOC (post-M4 + M5 P01–P13) | Notes |
 |---|---|---|
 | main.c | 1600 | top-level loop + accumulator + CLI + P03 event broadcast loops + P04 `--test-play` + P05 `broadcast_new_pickups` + P07 CTF mode-mask validation + `broadcast_flag_state_if_dirty` + `ctf_step` hookup + TDM/CTF team auto-balance + P08 host map-ready gate / serve-info refresh + P09 `host_start_map_vote` + summary-screen vote routing + P10 `mech_sprites_load_all` after `platform_init` + P11 `g_weapons_atlas` load |
 | platform.c | 100 | thin raylib wrapper (P09: RMB → `BTN_FIRE_SECONDARY`) |
@@ -384,12 +388,15 @@ We do **not** integrate Tracy or Optick at v1. If we need deep traces, we add th
 | map_download.c | 125 | new at P08 — per-process MapDownload (2 MB buffer + chunk bitmap + 30 s stall watchdog) |
 | mech_sprites.c | 166 | new at P10 — `g_chassis_sprites[CHASSIS_COUNT]` + 22-entry placeholder sub-rect/pivot table + `assets/sprites/<chassis>.png` loader; P12 added `mech_part_to_sprite_id` + `mech_sprite_part_endpoints` helpers (PART_* ↔ MechSpriteId mapping + bone endpoints) so decal record-time and render-time agree on the world↔local transform |
 | weapon_sprites.c | 211 | new at P11 — `g_weapon_sprites[WEAPON_COUNT]` (14 entries: sub-rect + grip / foregrip / muzzle pivots + draw_w/h) + `g_weapons_atlas` loader + `weapon_muzzle_world(...)` / `weapon_foregrip_world(...)` helpers |
+| map_kit.c | 77 | new at P13 — `g_map_kit` per-map texture bundle (`parallax_far/mid/near` + `tiles`); `map_kit_load(short_name)` probes `assets/maps/<short>/*.png` with graceful no-asset fallbacks |
+| audio.c | 637 | new at P14 — 47-entry SFX manifest + alias pool, 5 software buses (master/sfx/music/ambient/ui) with default 1.00/1.00/0.30/0.45/0.70, listener-relative `audio_play_at` (200..1500 px attenuation, ±800 px pan), `audio_play_global` for UI/capture/fanfare, `audio_request_duck` stacks via min on music+ambient, servo loop modulated by local-mech velocity, `LoadMusicStream` per-map looping, ambient `Sound` retrigger, `audio_reload_path` + `audio_register_hotreload` |
 | config.c | 178 | `soldut.cfg` parser |
 | arena.c | 51 | |
 | pool.c | 65 | |
 | log.c | 91 | |
 | hash.c | 49 | |
 | ds.c | 20 | one #define |
+| hotreload.c | 94 | new at P13 — DEV_BUILD-gated mtime watcher, 250 ms poll, fixed registration set; `hotreload_register(path, cb)` + `hotreload_poll()`; release builds compile every public function as a no-op |
 | shotmode.c | 2272 | scriptable test runner + P05 `give_invis` debug directive + P07 `mode`/`map`/`flag_carry` directives + config_load + ctf_init_round/ctf_step hookup + post-P07 `arm_carry`/`kill_peer`/`team_change` directives + P09 `fire_secondary` button + P10 `extra_chassis` directive + dummy spawn loop + `mech_sprites_unload_all` before each `platform_shutdown` + P11 `extra_chassis` 4-token primary-weapon override — well past split threshold |
 | **Total .c** | **~20,220 LOC** | + ~4,180 LOC of headers |
 

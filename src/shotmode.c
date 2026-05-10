@@ -1,5 +1,6 @@
 #include "shotmode.h"
 
+#include "audio.h"
 #include "config.h"
 #include "ctf.h"
 #include "decal.h"
@@ -1598,9 +1599,11 @@ int shotmode_run(const char *script_path) {
     }
 
     /* M5 P10 — chassis sprite atlases (capsule fallback when missing).
-     * M5 P11 — shared weapon atlas (line fallback when missing). */
+     * M5 P11 — shared weapon atlas (line fallback when missing).
+     * M5 P14 — audio module init (no-op silently for missing assets). */
     mech_sprites_load_all();
     weapons_atlas_load();
+    audio_init(&game);
 
     /* Networked path: bootstrap host or client, then run the full
      * mode dispatcher each tick. The legacy match-only path below is
@@ -1611,6 +1614,7 @@ int shotmode_run(const char *script_path) {
             (s.netmode == NETMODE_CONNECT && game.net.role != NET_ROLE_CLIENT))
         {
             LOG_E("shotmode: networked bootstrap failed");
+            audio_shutdown();
             weapons_atlas_unload();
             mech_sprites_unload_all();
             map_kit_unload();
@@ -2009,6 +2013,7 @@ int shotmode_run(const char *script_path) {
         net_close(&game.net);
         net_shutdown();
         decal_shutdown();
+        audio_shutdown();
         weapons_atlas_unload();
         mech_sprites_unload_all();
         map_kit_unload();
@@ -2271,6 +2276,7 @@ int shotmode_run(const char *script_path) {
     }
 
     decal_shutdown();
+    audio_shutdown();
     weapons_atlas_unload();
     mech_sprites_unload_all();
     map_kit_unload();

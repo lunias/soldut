@@ -1,5 +1,6 @@
 #include "weapons.h"
 
+#include "audio.h"
 #include "level.h"
 #include "log.h"
 #include "mech.h"
@@ -326,6 +327,7 @@ void weapons_fire_hitscan(World *w, int mid) {
     const WeaponSpriteDef *wsp = weapon_sprite_def(me->weapon_id);
     Vec2 origin = weapon_muzzle_world(hand, dir, wsp, wpn->muzzle_offset);
     weapons_record_fire(w, mid, me->weapon_id, origin, dir);
+    audio_play_at(audio_sfx_for_weapon(me->weapon_id), origin);
     float t_max = wpn->range_px;
 
     float wall_t;
@@ -371,6 +373,7 @@ void weapons_fire_hitscan(World *w, int mid) {
             w->mechs[hit_mech].last_killshot_weapon = me->weapon_id;
             mech_apply_damage(w, hit_mech, hit_part, wpn->damage, dir, mid);
         }
+        audio_play_at(SFX_HIT_FLESH, final_end);
     } else {
         final_end = (Vec2){ origin.x + dir.x * t_max, origin.y + dir.y * t_max };
         SHOT_LOG("t=%llu fire mech=%d wpn=%d miss end=(%.1f,%.1f) wall=%d",
@@ -382,6 +385,7 @@ void weapons_fire_hitscan(World *w, int mid) {
                 fx_spawn_spark(&w->fx, final_end,
                     (Vec2){ -dir.x * 200.0f, -dir.y * 200.0f }, w->rng);
             }
+            audio_play_at(SFX_HIT_CONCRETE, final_end);
         }
     }
 
@@ -431,6 +435,7 @@ void weapons_fire_hitscan_lag_comp(World *w, int mid, uint64_t shot_at_tick) {
     const WeaponSpriteDef *wsp = weapon_sprite_def(me->weapon_id);
     Vec2 origin = weapon_muzzle_world(hand, dir, wsp, wpn->muzzle_offset);
     weapons_record_fire(w, mid, me->weapon_id, origin, dir);
+    audio_play_at(audio_sfx_for_weapon(me->weapon_id), origin);
     float t_max = wpn->range_px;
 
     float wall_t;
@@ -478,6 +483,7 @@ void weapons_fire_hitscan_lag_comp(World *w, int mid, uint64_t shot_at_tick) {
             w->mechs[hit_mech].last_killshot_weapon = me->weapon_id;
             mech_apply_damage(w, hit_mech, hit_part, wpn->damage, dir, mid);
         }
+        audio_play_at(SFX_HIT_FLESH, final_end);
     } else {
         final_end = (Vec2){ origin.x + dir.x * t_max, origin.y + dir.y * t_max };
         if (t_max < wpn->range_px) {
@@ -485,6 +491,7 @@ void weapons_fire_hitscan_lag_comp(World *w, int mid, uint64_t shot_at_tick) {
                 fx_spawn_spark(&w->fx, final_end,
                     (Vec2){ -dir.x * 200.0f, -dir.y * 200.0f }, w->rng);
             }
+            audio_play_at(SFX_HIT_CONCRETE, final_end);
         }
     }
     fx_spawn_tracer(&w->fx, origin, final_end);
@@ -528,6 +535,10 @@ void weapons_predict_local_fire(World *w, int mid) {
         }
         Vec2 end = { origin.x + dir.x * t_max, origin.y + dir.y * t_max };
         fx_spawn_tracer(&w->fx, origin, end);
+        /* Predict-side fire SFX. The matching FIRE_EVENT will arrive
+         * ~RTT later; client_handle_fire_event suppresses its own play
+         * via the predict_drew gate so we don't double-trigger. */
+        audio_play_at(audio_sfx_for_weapon(me->weapon_id), origin);
     }
 
     int hand_idx = me->particle_base + PART_R_HAND;
@@ -599,6 +610,7 @@ void weapons_spawn_projectiles(World *w, int mid, int weapon_id) {
     Vec2 spark_end = { origin.x + dir.x * 80.0f,
                        origin.y + dir.y * 80.0f };
     fx_spawn_tracer(&w->fx, origin, spark_end);
+    audio_play_at(audio_sfx_for_weapon(weapon_id), origin);
 
     /* Bink — projectile bink is applied as the projectile passes near
      * targets, but a small fire-time bink to anyone in the aim cone is
@@ -670,6 +682,16 @@ void weapons_fire_melee(World *w, int mid, int weapon_id) {
         if (dir.x * vd.x + dir.y * vd.y > 0.5f) dmg *= 2.5f;
         t->last_killshot_weapon = weapon_id;
         mech_apply_damage(w, hit_mech, hit_part, dmg, dir, mid);
+    }
+    /* Audio: melee swing + flesh impact when the swing connects.
+     * Played server-side and offline-solo; clients hear via
+     * client_handle_fire_event for the swing and client_handle_hit_event
+     * for the flesh hit. */
+    audio_play_at(audio_sfx_for_weapon(weapon_id), chest);
+    if (hit_mech >= 0) {
+        Vec2 contact = { chest.x + dir.x * (hit_t * wpn->range_px),
+                         chest.y + dir.y * (hit_t * wpn->range_px) };
+        audio_play_at(SFX_HIT_FLESH, contact);
     }
     /* Visual swing — short tracer + sparks. */
     fx_spawn_tracer(&w->fx, chest, end);
