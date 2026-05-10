@@ -1,9 +1,16 @@
 {
   "_meta": {
-    "title": "Soldut \u2014 Mech chassis canonical T-pose v1",
-    "description": "Pipeline 1 from documents/m5/11-art-direction.md, adapted for RTX 2080 8GB (VRAM constraint dropped IP-Adapter Plus chain). ControlNet-Union locks geometry from the AI-generated skeleton; SDXL Lightning 4-step LoRA at strength 1.0 keeps sampling under 5 seconds; KSampler 4 steps cfg 1.5 euler/sgm_uniform. Style consistency comes from prompt + per-asset palette remap + halftone post (Pipeline 7) rather than IP-Adapter \u2014 adequate for ship-quality at this scale.",
-    "format": "ComfyUI API format. Load via the UI's Load button or POST to /prompt via tools/comfy/run_workflow.py / asset.py.",
-    "version": 1,
+    "title": "Soldut — Mech chassis canonical T-pose (full Pipeline 1)",
+    "description": "Pipeline 1 from documents/m5/11-art-direction.md, in its full form for a capable GPU (≥12 GB VRAM; authored + verified on an RTX 5090 / 32 GB). Illustrious-XL v0.1 base + ControlNet-Union SDXL 1.0 promax (geometry locked from the hand-drawn/programmatic T-pose skeleton via LineartStandardPreprocessor) + IP-Adapter PLUS SDXL ViT-H (style anchored to tools/comfy/style_anchor/<chassis>_anchor_*.png) + 30-step dpmpp_2m_sde / karras at cfg 7.5 + sdxl-vae-fp16-fix. The LoRA stack the spec lists (battletech_battlemechs / super_robot_diffusion_xl / lineart_sdxl_v3) is Civitai-gated and is NOT wired here — to add it, insert a LoraLoader chain between node 1 (CheckpointLoaderSimple) and node 23 (IPAdapterAdvanced) on the MODEL line and re-point node 30/31 CLIPTextEncode at the last LoraLoader's CLIP. Style consistency is carried by the IP-Adapter anchor + the Pipeline 7 post (palette remap + halftone) in tools/comfy/crop_canonical.py. For an 8 GB-VRAM machine use mech_chassis_canonical_8gb_v1.json instead (Lightning 4-step, no IP-Adapter, T2I-Adapter Lineart in place of ControlNet-Union, CPU VAE).",
+    "format": "ComfyUI API format. Load via the UI's Load button (recent ComfyUI auto-converts) or POST to /prompt via tools/comfy/run_workflow.py / asset.py. run_workflow.py rebinds node 10 (LoadImage 'Skeleton') and node 20 (LoadImage 'Style anchor') to the uploaded PNGs, and can override KSampler seed/steps/cfg and the EmptyLatentImage batch_size.",
+    "version": 5,
+    "models": {
+      "checkpoint": "Illustrious-XL-v0.1.safetensors  (OnomaAIResearch/Illustrious-xl-early-release-v0 on HF; license:other — SDXL-derived, commercial output OK per documents/m5/11-art-direction.md §License hygiene)",
+      "controlnet": "controlnet-union-sdxl-1.0_promax.safetensors  (xinsir/controlnet-union-sdxl-1.0 'diffusion_pytorch_model_promax.safetensors' on HF, flattened to a top-level filename so the path has no platform-specific separator; apache-2.0)",
+      "ipadapter": "ip-adapter-plus_sdxl_vit-h.safetensors  (h94/IP-Adapter on HF; apache-2.0)",
+      "clip_vision": "clip_vision_h.safetensors  (OpenCLIP ViT-H/14 laion2B — the image encoder IP-Adapter PLUS SDXL requires)",
+      "vae": "sdxl-vae-fp16-fix.safetensors  (madebyollin/sdxl-vae-fp16-fix on HF; mit)"
+    },
     "chassis_seed": {
       "trooper": 1000001,
       "scout": 2000002,
@@ -14,136 +21,134 @@
   },
   "1": {
     "class_type": "CheckpointLoaderSimple",
-    "_meta": {
-      "title": "Checkpoint \u2014 Illustrious-XL v0.1"
-    },
+    "_meta": { "title": "Checkpoint — Illustrious-XL v0.1" },
     "inputs": {
       "ckpt_name": "Illustrious-XL-v0.1.safetensors"
     }
   },
-  "3": {
-    "class_type": "LoraLoader",
-    "_meta": {
-      "title": "LoRA \u2014 SDXL Lightning 4-step (load-bearing for speed)"
-    },
-    "inputs": {
-      "model": [
-        "1",
-        0
-      ],
-      "clip": [
-        "1",
-        1
-      ],
-      "lora_name": "sdxl_lightning_4step_lora.safetensors",
-      "strength_model": 1.0,
-      "strength_clip": 1.0
-    }
-  },
   "5": {
     "class_type": "VAELoader",
-    "_meta": {
-      "title": "VAE \u2014 sdxl-vae-fp16-fix"
-    },
+    "_meta": { "title": "VAE — sdxl-vae-fp16-fix" },
     "inputs": {
       "vae_name": "sdxl-vae-fp16-fix.safetensors"
     }
   },
+  "2": {
+    "class_type": "LoraLoader",
+    "_meta": { "title": "LoRA — lineart_sdxl_v3 (Civitai 539031 v3 SDXL)" },
+    "inputs": {
+      "model": ["1", 0],
+      "clip": ["1", 1],
+      "lora_name": "lineart_sdxl_v3.safetensors",
+      "strength_model": 1.0,
+      "strength_clip": 1.0
+    }
+  },
+  "3": {
+    "class_type": "LoraLoader",
+    "_meta": { "title": "LoRA — super_robot_diffusion_xl (Civitai 124747 v2.7.7 Illustrious)" },
+    "inputs": {
+      "model": ["2", 0],
+      "clip": ["2", 1],
+      "lora_name": "super_robot_diffusion_xl.safetensors",
+      "strength_model": 0.35,
+      "strength_clip": 0.35
+    }
+  },
   "10": {
     "class_type": "LoadImage",
-    "_meta": {
-      "title": "Skeleton \u2014 hand-drawn T-pose"
-    },
+    "_meta": { "title": "Skeleton — T-pose (rebound by run_workflow.py)" },
     "inputs": {
-      "image": "trooper_tpose_skeleton.png"
+      "image": "trooper_tpose_skeleton_v2.png"
     }
   },
   "11": {
-    "class_type": "LineartStandardPreprocessor",
-    "_meta": {
-      "title": "Preprocess skeleton \u2192 lineart"
-    },
+    "class_type": "CannyEdgePreprocessor",
+    "_meta": { "title": "Preprocess skeleton → canny edges (crisp, preserves input detail)" },
     "inputs": {
-      "image": [
-        "10",
-        0
-      ],
-      "guassian_sigma": 6.0,
-      "intensity_threshold": 8,
+      "image": ["10", 0],
+      "low_threshold": 40,
+      "high_threshold": 180,
       "resolution": 1024
     }
   },
   "12": {
     "class_type": "ControlNetLoader",
-    "_meta": {
-      "title": "ControlNet \u2014 Union SDXL 1.0"
-    },
+    "_meta": { "title": "ControlNet — Union SDXL 1.0 promax" },
     "inputs": {
-      "control_net_name": "controlnet-union-sdxl-1.0/diffusion_pytorch_model_promax.safetensors"
+      "control_net_name": "controlnet-union-sdxl-1.0_promax.safetensors"
     }
   },
   "30": {
     "class_type": "CLIPTextEncode",
-    "_meta": {
-      "title": "Prompt \u2014 positive"
-    },
+    "_meta": { "title": "Prompt — positive" },
     "inputs": {
-      "clip": [
-        "3",
-        1
-      ],
-      "text": "masterpiece, technical illustration, mechanical_parts, no_humans, industrial_design, line_art, flat_color, monochrome_with_red_accent, battlemech, full_body, t_pose, hydraulic_pistons, panel_lines, exposed_machinery, factory_built, hand_drawn_ink, halftone_screentone, white_background, no_text, no_watermark"
+      "clip": ["3", 1],
+      "text": "lineartlora, monochrome lineart, FASA battletech technical readout illustration, pen and ink draftsman elevation, single weight black ink outline, flat_color, no shading, masterpiece, best quality, technical illustration, mechanical_parts, no_humans, mecha, battlemech, full_body, standing, front_view, industrial_design, line_art, lineart, ink_drawing, armored helmet with horizontal visor slit, chunky angular pauldrons, corrugated forearm bellows, riveted armor plating, intricate detailed mechanical design, dense panel lines, rivets, hydraulic_pistons, exposed_machinery, factory_built, blueprint style, technical_drawing, plain white background, simple background, isolated on white, no_text, no_watermark"
     }
   },
   "31": {
     "class_type": "CLIPTextEncode",
-    "_meta": {
-      "title": "Prompt \u2014 negative"
-    },
+    "_meta": { "title": "Prompt — negative" },
     "inputs": {
-      "clip": [
-        "3",
-        1
-      ],
-      "text": "photo, photorealistic, 3d render, smooth shading, gradient, soft lighting, ambient_occlusion, painterly, blurry, jpeg_artifacts, text, watermark, signature, anime_face, character, multiple objects, busy background, antialiased_lines, glow, bloom, depth_of_field, character_eyes, human_face"
+      "clip": ["3", 1],
+      "text": "screentone, halftone, dither, textured background, paper texture, fabric, knit, woven, crosshatching everywhere, hatching background, scanlines, repeating pattern, busy background, detailed background, color, colorful, saturated, vibrant, multicolored, green tint, yellow tint, rainbow, photo, photorealistic, 3d render, smooth shading, gradient, soft lighting, ambient_occlusion, painterly, blurry, jpeg_artifacts, text, watermark, signature, anime_face, character, multiple objects, antialiased_lines, glow, bloom, depth_of_field, character_eyes, human_face, sketch, sketchy lines, doodle, smooth plastic, glossy white plastic, soft cinematic shading, octane render, oversimplified, sparse detail, low detail, toy robot, featureless"
     }
   },
-  "13": {
+  "14": {
     "class_type": "ControlNetApplyAdvanced",
-    "_meta": {
-      "title": "Apply ControlNet \u2014 strength 0.92"
-    },
+    "_meta": { "title": "Apply ControlNet — strength 0.92" },
     "inputs": {
-      "positive": [
-        "30",
-        0
-      ],
-      "negative": [
-        "31",
-        0
-      ],
-      "control_net": [
-        "12",
-        0
-      ],
-      "image": [
-        "11",
-        0
-      ],
-      "vae": [
-        "5",
-        0
-      ],
-      "strength": 0.92,
+      "positive": ["30", 0],
+      "negative": ["31", 0],
+      "control_net": ["12", 0],
+      "image": ["11", 0],
+      "vae": ["5", 0],
+      "strength": 0.98,
       "start_percent": 0.0,
-      "end_percent": 0.95
+      "end_percent": 1.0
+    }
+  },
+  "20": {
+    "class_type": "LoadImage",
+    "_meta": { "title": "Style anchor (rebound by run_workflow.py)" },
+    "inputs": {
+      "image": "trooper_style_v2.png"
+    }
+  },
+  "21": {
+    "class_type": "IPAdapterModelLoader",
+    "_meta": { "title": "IP-Adapter model — plus_sdxl_vit-h" },
+    "inputs": {
+      "ipadapter_file": "ip-adapter-plus_sdxl_vit-h.safetensors"
+    }
+  },
+  "22": {
+    "class_type": "CLIPVisionLoader",
+    "_meta": { "title": "CLIP-Vision — ViT-H (for IP-Adapter PLUS)" },
+    "inputs": {
+      "clip_name": "clip_vision_h.safetensors"
+    }
+  },
+  "23": {
+    "class_type": "IPAdapterAdvanced",
+    "_meta": { "title": "IP-Adapter Advanced — anchor weight 0.85, end 1.0" },
+    "inputs": {
+      "model": ["3", 0],
+      "ipadapter": ["21", 0],
+      "image": ["20", 0],
+      "clip_vision": ["22", 0],
+      "weight": 0.85,
+      "weight_type": "style transfer",
+      "combine_embeds": "concat",
+      "start_at": 0.0,
+      "end_at": 1.0,
+      "embeds_scaling": "V only"
     }
   },
   "40": {
     "class_type": "EmptyLatentImage",
-    "_meta": {
-      "title": "Empty latent \u2014 1024x1024 \u00d71 (fast iter; bump via --batch)"
-    },
+    "_meta": { "title": "Empty latent — 1024x1024 ×1 (bump batch via run_workflow.py --batch)" },
     "inputs": {
       "width": 1024,
       "height": 1024,
@@ -152,60 +157,33 @@
   },
   "50": {
     "class_type": "KSampler",
-    "_meta": {
-      "title": "KSampler \u2014 Lightning 4-step / cfg 1.5 / euler / sgm_uniform"
-    },
+    "_meta": { "title": "KSampler — 30 steps / cfg 7.5 / dpmpp_2m_sde / karras" },
     "inputs": {
-      "model": [
-        "3",
-        0
-      ],
-      "positive": [
-        "13",
-        0
-      ],
-      "negative": [
-        "13",
-        1
-      ],
-      "latent_image": [
-        "40",
-        0
-      ],
+      "model": ["23", 0],
+      "positive": ["14", 0],
+      "negative": ["14", 1],
+      "latent_image": ["40", 0],
       "seed": 1000001,
-      "steps": 4,
-      "cfg": 1.5,
-      "sampler_name": "euler",
-      "scheduler": "sgm_uniform",
+      "steps": 30,
+      "cfg": 7.5,
+      "sampler_name": "dpmpp_2m_sde",
+      "scheduler": "karras",
       "denoise": 1.0
     }
   },
   "60": {
     "class_type": "VAEDecode",
-    "_meta": {
-      "title": "VAE Decode"
-    },
+    "_meta": { "title": "VAE Decode" },
     "inputs": {
-      "samples": [
-        "50",
-        0
-      ],
-      "vae": [
-        "5",
-        0
-      ]
+      "samples": ["50", 0],
+      "vae": ["5", 0]
     }
   },
   "70": {
     "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save \u2014 trooper_candidates"
-    },
+    "_meta": { "title": "Save — trooper_candidates" },
     "inputs": {
-      "images": [
-        "60",
-        0
-      ],
+      "images": ["60", 0],
       "filename_prefix": "soldut/trooper_candidates"
     }
   }
