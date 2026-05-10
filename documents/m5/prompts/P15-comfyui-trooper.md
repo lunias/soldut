@@ -1,5 +1,11 @@
 # P15 — ComfyUI setup + first chassis (Trooper) generation
 
+## ComfyUI install location
+
+~/ComfyUI
+
+Please reuse this install, but you can add to it.
+
 ## What this prompt does
 
 This is mostly a **you-driven** prompt — the model can't run ComfyUI's GUI. Claude's job here is to:

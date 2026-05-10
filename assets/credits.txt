@@ -1,0 +1,169 @@
+# Soldut — credits
+
+This file lists every shipped asset under `assets/` along with its
+source, license, and (where AI-assisted) reproducibility metadata.
+
+Steam disclosure (Jan 17 2026 update) requires a generic AI disclosure
+on the store page; this file is the canonical source for the disclosure
+language.
+
+A build-time script (`tools/credits/check.sh` — TODO) walks `assets/`
+and fails CI if any shipped file lacks a row here.
+
+----------------------------------------------------------------------
+DISCLOSURE
+----------------------------------------------------------------------
+
+Some 2D background and concept assets in this game were generated with
+the assistance of Stable Diffusion XL (Illustrious-XL fine-tune,
+OpenRAIL-M license) via ComfyUI, with substantial post-generation
+editing, palette mapping, compositing, and integration by the
+developer.
+
+Each AI-assisted asset is listed below with its workflow file, LoRA
+stack, IP-Adapter anchor, seed, and modification chain. The same
+metadata is mirrored in `documents/art_log.md` per the project's
+mandatory iteration-log policy
+(see documents/m5/11-art-direction.md §"License hygiene").
+
+Hand-drawn, traced, and CC0-sourced assets are listed alongside; their
+source paths and modifications are recorded the same way.
+
+----------------------------------------------------------------------
+FONTS
+----------------------------------------------------------------------
+
+assets/fonts/Atkinson-Hyperlegible-Regular.ttf
+  source:   Braille Institute of America, Inc. — https://www.brailleinstitute.org/freefont/
+  license:  SIL Open Font License v1.1 (assets/fonts/atkinson-license.txt)
+  role:     UI body text — primary text face
+
+assets/fonts/VG5000-Regular.otf
+  source:   Velvetyne Type Foundry — Justin Bihan — https://velvetyne.fr/fonts/vg5000/
+  license:  SIL Open Font License v1.1 (assets/fonts/VG5000-OFL.txt)
+  role:     UI display — map titles, kill-feed flags, factory stencils
+
+assets/fonts/Steps-Mono-Thin.otf
+  source:   Velvetyne Type Foundry — raphaelbastide — https://velvetyne.fr/fonts/steps-mono/
+  license:  SIL Open Font License v1.1 (assets/fonts/steps-license.txt)
+  role:     HUD numerics — ammo, timer, score
+
+----------------------------------------------------------------------
+SHADERS
+----------------------------------------------------------------------
+
+assets/shaders/halftone_post.fs.glsl
+  source:   Soldut original
+  license:  same as the project (TBD; intent: MIT or 0BSD)
+  role:     Bayer-8 + halftone-screen post-process. Implementation
+            references: Surma's Ditherpunk (https://surma.dev/things/ditherpunk/)
+            and Daniel Ilett's Obra Dinn dithering walkthrough.
+
+----------------------------------------------------------------------
+SPRITES — chassis (AI-assisted via Pipeline 1)
+----------------------------------------------------------------------
+
+(Populated as each chassis atlas lands. P15 ships the Trooper; P16 the
+remaining four. Format below is the canonical entry shape.)
+
+# Example row — fill in the seed, workflow_hash, and modification
+# columns when the first real Trooper atlas is approved:
+#
+# assets/sprites/trooper.png
+#   source:           ComfyUI workflow tools/comfy/workflows/soldut/mech_chassis_canonical_v1.json
+#   base_model:       Illustrious-XL v2.0 (OpenRAIL-M, commercial OK)
+#   loras:            battletech_battlemechs.safetensors @ 0.6
+#                     super_robot_diffusion_xl.safetensors @ 0.4
+#                     lineart_sdxl_v3.safetensors @ 0.5
+#   ip_adapter:       tools/comfy/style_anchor/trooper_anchor_v2.png
+#   skeleton:         tools/comfy/skeletons/trooper_tpose_skeleton.png (hand-drawn)
+#   seed:             1000001
+#   workflow_hash:    sha256:<git rev-parse HEAD:tools/comfy/workflows/soldut/mech_chassis_canonical_v1.json>
+#   modification:     hand-drawn skeleton (ControlNet-Union strength 0.92);
+#                     IP-Adapter PLUS at weight 0.75; downsampled with
+#                     nearest-point; 2-color palette remap (foundry); halftone
+#                     post; cropped via tools/comfy/crop_canonical.py with
+#                     trooper_crop.txt; transcribed pivots into
+#                     src/mech_sprites.c
+#   human_direction:  hand-drawn skeleton, palette authored, 8+ candidates
+#                     reviewed and rejected before approval; pivot positions
+#                     authored; post-process pipeline authored; final atlas
+#                     packing authored.
+
+----------------------------------------------------------------------
+SPRITES — stump caps (hand-drawn)
+----------------------------------------------------------------------
+
+(Populated when the 25 stump caps land — 5 per chassis × 5 chassis.
+Per documents/m5/11-art-direction.md §"Pipeline 5 — Hand-drawn stump
+caps". Per chassis: stump_shoulder_l, stump_shoulder_r, stump_hip_l,
+stump_hip_r, stump_neck — each 32×32 in the chassis atlas.)
+
+# Example row:
+#
+# tools/comfy/stumps/trooper/stump_shoulder_l.png
+#   source:           hand-drawn in Krita with Ink-2 Fineliner brush
+#   license:          original Soldut, CC0 release
+#   reference:        HAER cross-section drawings of pipe + valve assemblies
+#                     (e.g. HAER PA-103-12, Bethlehem Steel Plant, US PD)
+#   modification:     none beyond original draw
+
+----------------------------------------------------------------------
+ASSETS REGISTRY (populated as assets land)
+----------------------------------------------------------------------
+
+# Add new rows above this line in the matching subsection. Keep the
+# format consistent so tools/credits/check.sh can validate it
+# mechanically.
+
+assets/sprites/trooper.png  (P15, first approved atlas)
+  source:           ComfyUI workflow
+                    tools/comfy/workflows/soldut/mech_chassis_canonical_8gb_v1.json
+                    (8GB-tuned variant of Pipeline 1; the spec'd
+                    mech_chassis_canonical_v1.json doesn't fit in 8GB VRAM)
+  base_model:       Illustrious-XL v0.1 (OpenRAIL-M, commercial OK)
+                    via OnomaAIResearch/Illustrious-xl-early-release-v0 on HF
+  controlnet:       T2I-Adapter Lineart SDXL fp16 (~150 MB) at strength 0.95
+                    via TencentARC/t2i-adapter-lineart-sdxl-1.0 on HF
+                    (substitute for the spec'd ControlNet-Union promax 2.5 GB,
+                    which doesn't fit alongside SDXL on 8 GB VRAM)
+  ip_adapter:       not used (8GB VRAM constraint — see TRADE_OFFS.md
+                    "ControlNet-Union promax + IP-Adapter chain doesn't fit
+                    in 8GB VRAM")
+  skeleton:         tools/comfy/skeletons/trooper_tpose_skeleton.png
+                    (1024×1024, programmatic full-frame mech anatomy via
+                    tools/comfy/skeletons/make_trooper_skeleton.py — helmet
+                    with visor, panel-lined torso with power core, hip plate,
+                    shoulder pads, gauntlets, boots; magenta pivot dots at
+                    every joint)
+  style_anchor:     tools/comfy/style_anchor/trooper_anchor_v2.png
+                    (AI-generated, best-of-4 from the prompt-only
+                    style_anchor_v1.json workflow at seed 7700001;
+                    Battletech-TRO ink-on-paper register; not consumed by the
+                    8GB workflow but kept on disk for the spec'd workflow on
+                    bigger GPUs)
+  vae:              SDXL VAE fp16-fix on CPU (madebyollin/sdxl-vae-fp16-fix on HF)
+                    — GPU VAE OOMs at 1024×1024 after the model+adapter swap
+                    on 8GB; CPU VAE adds ~25 sec but completes reliably
+  sampler:          KSampler dpmpp_2m_sde / karras, 28 steps, cfg 7.0
+  seed:             1000001
+  modification:     Pipeline 7 post applied via tools/comfy/crop_canonical.py:
+                    alpha-key white background → transparent, Bayer-8 halftone
+                    screen, 2-color palette remap to Foundry (dark #1A1612 +
+                    accent #D8731A), nearest-neighbor half-size round-trip
+                    downsample. Each tile resized to runtime sprite size
+                    (draw_w × draw_h) before paste. 22 sub-rects per
+                    tools/comfy/crop_tables/trooper_crop.txt.
+  human_direction:  workflow JSON authored, prompt authored, anchor reviewed
+                    (best of 4 candidates approved as v2), skeleton geometry
+                    authored, palette authored, crop table authored,
+                    post-process pipeline authored, atlas layout authored
+  caveats:          rough first-pass quality. Recognizable mech silhouette
+                    + correct anatomical positioning, but interior detail is
+                    sparse because IP-Adapter was dropped to fit 8GB VRAM.
+                    Style consistency comes from prompt + post-process rather
+                    than IP-Adapter conditioning. Suitable for runtime path
+                    validation + visible distinctness in playtest; ship-quality
+                    refinement comes through prompt + skeleton + anchor
+                    iteration in P16 (or moving to ≥12GB hardware where the
+                    spec'd workflow runs).

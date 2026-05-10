@@ -156,6 +156,13 @@ A keybinds config file (`soldut_controls.cfg`) is M6 polish; M5 ships hard-coded
 
 ### Resolved by M5 — these entries get deleted on land
 
+> **One exception**: the "Mechs rendered as raw capsules" entry's
+> deletion gate slipped from P12 → P15/P16 because no
+> `assets/sprites/<chassis>.png` files ship until asset generation
+> lands. The runtime work is done (P10 + P12); the entry stays in
+> `TRADE_OFFS.md` until the first chassis atlas drops in. Every other
+> row in the table below has been deleted as of P14.
+
 | Trade-off entry | Resolved by | Notes |
 |---|---|---|
 | Mechs rendered as raw capsules | [08-rendering.md](08-rendering.md), [12-rigging-and-damage.md](12-rigging-and-damage.md) | Sprite atlas runtime lands at P10; capsule fallback intentionally kept until P12 (damage feedback) makes the sprite path canonical. **P12 shipped damage feedback in BOTH render paths (hit-flash + decals + spray + emitter + smoke), but no `assets/sprites/<chassis>.png` files exist on disk until P15/P16 — so capsule fallback is what fires in real play through P14 development. Per the post-P12 audit in `TRADE_OFFS.md`, the entry-deletion gate moved from P12 to P15/P16 (asset generation).** |

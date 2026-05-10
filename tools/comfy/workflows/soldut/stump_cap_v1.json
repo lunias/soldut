@@ -1,0 +1,68 @@
+{
+  "_meta": {
+    "title": "Soldut — Stump cap (single 256x256 torn-metal cross-section)",
+    "description": "AI-generated replacement for documents/m5/11-art-direction.md §'Pipeline 5 — Hand-drawn stump caps'. The doc warns AI is weak here; we focus the prompt and downsample 8x to 32x32 to hide tells. Run 5x with different seeds for stump_shoulder_l/_r/_hip_l/_hip_r/_neck.",
+    "format": "ComfyUI API format.",
+    "version": 1
+  },
+
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {"ckpt_name": "Illustrious-XL-v0.1.safetensors"}
+  },
+
+  "5": {
+    "class_type": "VAELoader",
+    "inputs": {"vae_name": "sdxl-vae-fp16-fix.safetensors"}
+  },
+
+  "30": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["1", 1],
+      "text": "torn metal cross section, severed mech limb interior, exposed hydraulic pipes, severed cables, jagged metal edge, factory part diagram, single weight ink line, monochrome, technical illustration, no character, no person, white background, focused on a single small object, centered, 1985 line art register"
+    }
+  },
+
+  "31": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["1", 1],
+      "text": "photo, 3d, smooth, gradient, glow, anime, character, person, color, saturated, gore, blood splatter, watermark, text, signature"
+    }
+  },
+
+  "40": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {"width": 256, "height": 256, "batch_size": 1}
+  },
+
+  "50": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model":         ["1", 0],
+      "positive":      ["30", 0],
+      "negative":      ["31", 0],
+      "latent_image":  ["40", 0],
+      "seed":          7800001,
+      "steps":         20,
+      "cfg":           7.5,
+      "sampler_name":  "dpmpp_2m_sde",
+      "scheduler":     "karras",
+      "denoise":       1.0
+    }
+  },
+
+  "60": {
+    "class_type": "VAEDecode",
+    "inputs": {"samples": ["50", 0], "vae": ["5", 0]}
+  },
+
+  "70": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images":         ["60", 0],
+      "filename_prefix": "soldut/stump_cap"
+    }
+  }
+}

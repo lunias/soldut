@@ -27,16 +27,16 @@ This is the orientation pass. Do NOT write any code yet. Your job in this sessio
 2. Skim the file paths under src/ via `ls src/` and read CLAUDE.md's "Architecture in a paragraph" carefully.
 
 3. Report back:
-   - What state the build is currently in (M4 — describe what works).
+   - What state the build is currently in (M5 — describe what works).
    - The top 3 risks for M5 per the overview doc.
    - Which trade-off entries M5 is supposed to resolve (delete on land) versus which it explicitly keeps.
    - Any inconsistencies, ambiguities, or contradictions between the docs and the code that you noticed during the read pass.
 
-4. Do NOT open any subdoc beyond what's listed above. P12 onward will tell you exactly which subdoc to read for each implementation pass.
+4. Do NOT open any subdoc beyond what's listed above. P15 onward will tell you exactly which subdoc to read for each implementation pass.
 
 5. Do NOT write code. Do NOT run the build. Do NOT modify any file. This is read-only orientation.
 
-When you've reported your findings, the session ends. I'll start P12 in a new session.
+When you've reported your findings, the session ends. I'll start P15 in a new session.
 ```
 
 ## What good looks like at the end of this session

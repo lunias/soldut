@@ -1,0 +1,72 @@
+{
+  "_meta": {
+    "title": "Soldut — Style anchor (no ControlNet, no IP-Adapter)",
+    "description": "Generates a single-image style reference used as the IP-Adapter input by the canonical workflow. Strips ControlNet and IP-Adapter (chicken/egg — anchor IS the IP-Adapter input). Leans on prompt-only to produce one 'Battletech-TRO ink-on-paper' image at 768x768. Run a few times with different seeds; pick the cleanest as <chassis>_anchor_v1.png.",
+    "format": "ComfyUI API format.",
+    "version": 1
+  },
+
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "Illustrious-XL-v0.1.safetensors"
+    }
+  },
+
+  "5": {
+    "class_type": "VAELoader",
+    "inputs": {"vae_name": "sdxl-vae-fp16-fix.safetensors"}
+  },
+
+  "30": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Anchor — positive prompt"},
+    "inputs": {
+      "clip": ["1", 1],
+      "text": "battletech technical readout illustration, single-weight black ink line on aged paper, mecha line art, stencil, factory production drawing, panel lines, hydraulic seams, exposed pistons, full-body battlemech, t-pose, no shading, no gradient, no glow, halftone, monochrome, paper texture, 1985 illustration, factory production catalog page"
+    }
+  },
+
+  "31": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Anchor — negative prompt"},
+    "inputs": {
+      "clip": ["1", 1],
+      "text": "photo, 3d, render, smooth shading, gradient, glow, bloom, soft, painterly, anime face, character, person, color, saturated, neon, cyberpunk, ambient occlusion, depth of field, blur, antialiased line, watermark, signature, text, multiple objects"
+    }
+  },
+
+  "40": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {"width": 768, "height": 768, "batch_size": 4}
+  },
+
+  "50": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model":         ["1", 0],
+      "positive":      ["30", 0],
+      "negative":      ["31", 0],
+      "latent_image":  ["40", 0],
+      "seed":          7700001,
+      "steps":         24,
+      "cfg":           7.5,
+      "sampler_name":  "dpmpp_2m_sde",
+      "scheduler":     "karras",
+      "denoise":       1.0
+    }
+  },
+
+  "60": {
+    "class_type": "VAEDecode",
+    "inputs": {"samples": ["50", 0], "vae": ["5", 0]}
+  },
+
+  "70": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images":         ["60", 0],
+      "filename_prefix": "soldut/anchor_candidates"
+    }
+  }
+}

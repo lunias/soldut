@@ -1,0 +1,109 @@
+{
+  "_meta": {
+    "title": "Soldut — Mech chassis canonical T-pose (8GB-tuned)",
+    "description": "Hardware-tuned variant of mech_chassis_canonical_v1.json for RTX 2080 / 8GB VRAM (WSL2). The full spec'd config (SDXL + ControlNet-Union promax + IP-Adapter PLUS at 1024x1024) doesn't fit in 8GB — multiple iterations in this session OOMed during VAE decode or hung on the IP-Adapter-VAE swap. The working subset: SDXL + T2I-Adapter Lineart SDXL (150MB instead of ControlNet-Union's 2.5GB) + GPU VAE at 1024x1024. Style consistency from prompt + post-process palette remap rather than IP-Adapter. Run with --cpu-vae (server flag) to avoid the 1024x1024 GPU-VAE OOM on this hardware. Wall time: ~45s end-to-end. Use mech_chassis_canonical_v1.json instead on 12GB+ GPUs where the full spec fits.",
+    "format": "ComfyUI API format.",
+    "version": 1,
+    "chassis_seed": {"trooper": 1000001, "scout": 2000002, "heavy": 3000003, "sniper": 4000004, "engineer": 5000005}
+  },
+
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {"title": "Checkpoint — Illustrious-XL v0.1"},
+    "inputs": { "ckpt_name": "Illustrious-XL-v0.1.safetensors" }
+  },
+
+  "10": {
+    "class_type": "LoadImage",
+    "_meta": {"title": "Skeleton — programmatic mech anatomy"},
+    "inputs": { "image": "trooper_tpose_skeleton.png" }
+  },
+  "11": {
+    "class_type": "LineartStandardPreprocessor",
+    "_meta": {"title": "Preprocess skeleton → lineart"},
+    "inputs": {
+      "image":      ["10", 0],
+      "guassian_sigma":  6.0,
+      "intensity_threshold": 8,
+      "resolution": 1024
+    }
+  },
+  "12": {
+    "class_type": "ControlNetLoader",
+    "_meta": {"title": "T2I-Adapter Lineart SDXL"},
+    "inputs": { "control_net_name": "t2i-adapter-lineart-sdxl/diffusion_pytorch_model.fp16.safetensors" }
+  },
+
+  "30": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Prompt — positive"},
+    "inputs": {
+      "clip": ["1", 1],
+      "text": "monochrome black ink line drawing of a single full-body battlemech in T-pose, centered, fills the frame, isolated figure on white background, technical readout illustration, single weight black ink lines, panel lines, rivets, hydraulic pistons, exposed servos, halftone screentone shading, 1985 battletech factory production diagram, MIL-STD catalog page register, sharp clean linework, large central subject, no environment, mechanical, militaristic"
+    }
+  },
+  "31": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Prompt — negative"},
+    "inputs": {
+      "clip": ["1", 1],
+      "text": "color, saturated, neon, green, blue, red, yellow, photo, photorealistic, 3d, render, smooth shading, gradient, soft lighting, ambient occlusion, painterly, blurry, jpeg artifacts, deformed, watermark, signature, text, multiple objects, scene, environment, background, walls, floor, perspective, vanishing point, anime face, character, person, holding, glow, bloom, depth of field, eyes, face, small subject, tiny figure, distant, far away"
+    }
+  },
+
+  "13": {
+    "class_type": "ControlNetApplyAdvanced",
+    "_meta": {"title": "Apply T2I-Adapter — strength 0.95"},
+    "inputs": {
+      "positive":      ["30", 0],
+      "negative":      ["31", 0],
+      "control_net":   ["12", 0],
+      "image":         ["11", 0],
+      "vae":           ["1", 2],
+      "strength":      0.95,
+      "start_percent": 0.0,
+      "end_percent":   0.95
+    }
+  },
+
+  "40": {
+    "class_type": "EmptyLatentImage",
+    "_meta": {"title": "Empty latent — 1024×1024"},
+    "inputs": { "width": 1024, "height": 1024, "batch_size": 1 }
+  },
+
+  "50": {
+    "class_type": "KSampler",
+    "_meta": {"title": "KSampler — 28 steps cfg 7.0 dpmpp_2m_sde / karras"},
+    "inputs": {
+      "model":         ["1", 0],
+      "positive":      ["13", 0],
+      "negative":      ["13", 1],
+      "latent_image":  ["40", 0],
+      "seed":          1000001,
+      "steps":         28,
+      "cfg":           7.0,
+      "sampler_name":  "dpmpp_2m_sde",
+      "scheduler":     "karras",
+      "denoise":       1.0
+    }
+  },
+
+  "60": {
+    "class_type": "VAEDecode",
+    "_meta": {"title": "VAE Decode (full GPU)"},
+    "inputs": {
+      "samples": ["50", 0],
+      "vae":     ["1", 2]
+    }
+  },
+
+  "70": {
+    "class_type": "SaveImage",
+    "_meta": {"title": "Save — trooper_canonical_q7"},
+    "inputs": {
+      "images":         ["60", 0],
+      "filename_prefix": "soldut/trooper_canonical_q7"
+    }
+  }
+}
