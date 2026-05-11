@@ -86,6 +86,18 @@ typedef struct LobbyUIState {
 
     /* P09 — title-screen keybinds modal. Toggle via the About button. */
     bool       show_keybinds;
+
+    /* wan-fixes-9 — async "Starting server..." overlay shown while
+     * main.c spawns the dedicated child + polls connect (the previous
+     * bootstrap ran synchronously and froze the window for up to 500
+     * ms with no visual feedback). Set by main.c on click, cleared on
+     * connect-success / connect-fail. host_starting_t0 (GetTime
+     * seconds) drives the indeterminate-bar animation + the 5 s
+     * deadline. host_starting_status is the user-visible sub-status,
+     * cycled by main.c as the polled bootstrap progresses. */
+    bool       host_starting;
+    double     host_starting_t0;
+    char       host_starting_status[64];
 } LobbyUIState;
 
 void lobby_ui_init(LobbyUIState *L);
@@ -111,6 +123,17 @@ void lobby_ui_save_prefs(const LobbyUIState *L);
  * Begin/EndDrawing wrapping. */
 void title_screen_run     (LobbyUIState *L, struct Game *g, int sw, int sh);
 void host_setup_screen_run(LobbyUIState *L, struct Game *g, int sw, int sh);
+
+/* wan-fixes-9 — translucent greyout + centered "Starting server..."
+ * panel with an indeterminate progress bar. Called by main.c *after*
+ * host_setup_screen_run when L->host_starting is set, before
+ * EndDrawing, so the same frame renders the locked-in setup screen
+ * under the overlay. The host-setup widgets behind the overlay still
+ * tick (they share the frame), but the overlay swallows the visual
+ * "you can still click things" affordance — main.c gates input
+ * routing by ignoring request_start_host etc. while host_starting is
+ * true. */
+void host_setup_screen_draw_overlay(LobbyUIState *L, int sw, int sh);
 void browser_screen_run   (LobbyUIState *L, struct Game *g, int sw, int sh);
 void connect_screen_run   (LobbyUIState *L, struct Game *g, int sw, int sh);
 void lobby_screen_run     (LobbyUIState *L, struct Game *g, int sw, int sh);

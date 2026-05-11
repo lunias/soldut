@@ -1273,17 +1273,55 @@ static void stop_dedicated_child_if_any(Game *g) {
     g->dedicated_proc = PROC_HANDLE_NULL;
 }
 
-/* Spawn a child `--dedicated PORT` server, then connect to it as a
- * regular client. Caller (the host UI flow) owns the returned process
- * handle on `Game.dedicated_proc` and is responsible for cleanup on
- * exit (handled in main()'s shutdown path).
+/* wan-fixes-9 — staged async bootstrap. The original
+ * bootstrap_host_via_dedicated did spawn + sleep-polled connect in
+ * one synchronous call, which froze the window for up to 500 ms (~5 s
+ * in the worst case) right after "Start Hosting". MODE_HOST_SETUP now
+ * drives this in two phases so the main loop keeps drawing the
+ * progress overlay each frame:
  *
- * argv0_self is the current process's argv[0] (passed through from
- * main) — used so the spawned child reuses the same binary. */
-static bool bootstrap_host_via_dedicated(Game *g, const LaunchArgs *args,
-                                         const char *argv0_self) {
+ *   host_start_begin:  build child argv + spawn child + stash
+ *                      client_args. Returns true on a healthy spawn.
+ *                      Host_start_*_active fields drive the polled
+ *                      retry from main loop.
+ *   host_start_poll:   one connect attempt + liveness check. Returns
+ *                      1 = connected (Game.dedicated_proc owns the
+ *                          child handle, client side is hot)
+ *                      0 = keep polling
+ *                     -1 = failed (child died or timed out; the
+ *                          handle has already been cleaned up).
+ *   host_start_abort:  terminate + close the child handle. Idempotent.
+ *
+ * For CLI fast-paths (--host on the command line) there's no UI yet so
+ * bootstrap_host_via_dedicated stays as a synchronous convenience
+ * wrapper that loops poll for ~5 s. */
+
+static struct {
+    bool       active;
+    ProcHandle child;
+    LaunchArgs client_args;
+    double     deadline_at;        /* monotonic seconds (GetTime); 0 if N/A */
+    int        attempts;
+} s_host_start;
+
+static void host_start_reset(void) {
+    s_host_start.active        = false;
+    s_host_start.child         = PROC_HANDLE_NULL;
+    s_host_start.client_args   = (LaunchArgs){0};
+    s_host_start.deadline_at   = 0.0;
+    s_host_start.attempts      = 0;
+}
+
+static bool host_start_begin(Game *g, const LaunchArgs *args,
+                             const char *argv0_self,
+                             double deadline_seconds) {
     if (!argv0_self) {
-        LOG_E("bootstrap_host: argv0 missing — cannot spawn dedicated child");
+        LOG_E("host_start_begin: argv0 missing — cannot spawn dedicated child");
+        return false;
+    }
+    if (s_host_start.active) {
+        LOG_W("host_start_begin: already starting (pid=%d) — ignoring",
+              s_host_start.child.pid);
         return false;
     }
 
@@ -1328,53 +1366,97 @@ static bool bootstrap_host_via_dedicated(Game *g, const LaunchArgs *args,
     }
     child_argv[n] = NULL;
 
-    LOG_I("bootstrap_host: spawn args mode=%s map=%s score=%d time=%d ff=%d port=%u",
+    LOG_I("host_start: spawn args mode=%s map=%s score=%d time=%d ff=%d port=%u",
           mode_name, map_name_str, g->config.score_limit,
           (int)g->config.time_limit, (int)g->config.friendly_fire,
           (unsigned)port);
 
     ProcHandle child = proc_spawn_self(argv0_self, child_argv);
     if (!proc_handle_valid(child)) {
-        LOG_E("bootstrap_host: proc_spawn_self failed");
+        LOG_E("host_start: proc_spawn_self failed");
         return false;
     }
-    LOG_I("bootstrap_host: launched dedicated child pid=%d on port %u",
+    LOG_I("host_start: launched dedicated child pid=%d on port %u",
           child.pid, (unsigned)port);
 
-    /* Poll connect to localhost. The child needs ~20-200 ms to init
-     * raylib-less, bind the socket, and reach the ACCEPT-ready state.
-     * Retry every 50 ms for up to 5 s. */
-    LaunchArgs client_args = *args;
-    snprintf(client_args.host, sizeof client_args.host, "%s", "127.0.0.1");
-    client_args.port = port;
+    s_host_start.active      = true;
+    s_host_start.child       = child;
+    s_host_start.client_args = *args;
+    snprintf(s_host_start.client_args.host,
+             sizeof s_host_start.client_args.host, "%s", "127.0.0.1");
+    s_host_start.client_args.port = port;
+    s_host_start.attempts    = 0;
+    s_host_start.deadline_at = (deadline_seconds > 0.0)
+                                   ? (GetTime() + deadline_seconds)
+                                   : 0.0;
+    return true;
+}
 
-    bool connected = false;
-    for (int attempt = 0; attempt < 100; ++attempt) {
-        if (!proc_alive(child)) {
-            LOG_E("bootstrap_host: dedicated child exited before client could "
-                  "connect");
-            break;
-        }
-        if (bootstrap_client(g, &client_args)) {
-            connected = true;
-            break;
-        }
-        sleep_ms_portable(50);
+/* One step of the spawn-then-connect state machine. Returns:
+ *   1  = connected (g->dedicated_proc owns the child)
+ *   0  = keep polling
+ *  -1  = failed (child died or polled past deadline; handle closed) */
+static int host_start_poll(Game *g) {
+    if (!s_host_start.active) return -1;
+
+    if (!proc_alive(s_host_start.child)) {
+        LOG_E("host_start: dedicated child exited before client could connect");
+        proc_close(s_host_start.child);
+        host_start_reset();
+        return -1;
     }
 
-    if (!connected) {
-        LOG_E("bootstrap_host: client connect to local dedicated server timed out");
-        proc_terminate(child);
-        proc_wait(child, 500);
-        proc_kill(child);
-        proc_close(child);
+    if (s_host_start.deadline_at > 0.0 &&
+        GetTime() >= s_host_start.deadline_at) {
+        LOG_E("host_start: client connect to local dedicated server timed out");
+        proc_terminate(s_host_start.child);
+        proc_wait(s_host_start.child, 500);
+        proc_kill(s_host_start.child);
+        proc_close(s_host_start.child);
+        host_start_reset();
+        return -1;
+    }
+
+    s_host_start.attempts++;
+    if (bootstrap_client(g, &s_host_start.client_args)) {
+        g->dedicated_proc = s_host_start.child;
+        LOG_I("host_start: connected to local dedicated server (pid=%d, attempts=%d)",
+              s_host_start.child.pid, s_host_start.attempts);
+        /* Don't proc_close — Game.dedicated_proc owns it now. */
+        s_host_start.active = false;
+        s_host_start.child  = PROC_HANDLE_NULL;
+        return 1;
+    }
+    return 0;
+}
+
+static void host_start_abort(void) {
+    if (!s_host_start.active) return;
+    if (proc_handle_valid(s_host_start.child)) {
+        proc_terminate(s_host_start.child);
+        proc_wait(s_host_start.child, 500);
+        proc_kill(s_host_start.child);
+        proc_close(s_host_start.child);
+    }
+    host_start_reset();
+}
+
+/* Synchronous convenience wrapper used by the CLI fast-paths (which
+ * run before the main loop opens and so have no overlay to drive).
+ * Equivalent to the original bootstrap_host_via_dedicated: spawn +
+ * polled connect with 5 s budget, all on the calling thread. */
+static bool bootstrap_host_via_dedicated(Game *g, const LaunchArgs *args,
+                                         const char *argv0_self) {
+    if (!host_start_begin(g, args, argv0_self, /*deadline_s*/5.0)) {
         return false;
     }
-
-    g->dedicated_proc = child;
-    LOG_I("bootstrap_host: connected to local dedicated server (pid=%d)",
-          child.pid);
-    return true;
+    while (s_host_start.active) {
+        int rc = host_start_poll(g);
+        if (rc == 1) return true;
+        if (rc == -1) return false;
+        sleep_ms_portable(50);
+    }
+    return false;
 }
 
 /* ---- Diag overlay ------------------------------------------------- */
@@ -1845,8 +1927,20 @@ int main(int argc, char **argv) {
         case MODE_HOST_SETUP: {
             BeginDrawing();
             host_setup_screen_run(&ui, &game, pf.render_w, pf.render_h);
+            /* wan-fixes-9 — while the polled bootstrap is in flight,
+             * render a "Starting server..." overlay on top of the
+             * (frozen, last-tick-rendered) setup widgets. The widgets
+             * still receive input — but the only one that fires here,
+             * Start Hosting, is gated below by the !host_starting
+             * guard, and Back can't escape an in-flight spawn cleanly
+             * (we'd leak the child). The scrim communicates "locked
+             * in" without disabling per-widget input plumbing. */
+            if (ui.host_starting) {
+                host_setup_screen_draw_overlay(&ui, pf.render_w, pf.render_h);
+            }
             EndDrawing();
-            if (ui.request_start_host) {
+
+            if (ui.request_start_host && !ui.host_starting) {
                 ui.request_start_host = false;
                 /* Apply the user's choices to the live config so
                  * config_pick_mode/_map and start_round all see them.
@@ -1880,14 +1974,57 @@ int main(int argc, char **argv) {
                  * wan-fixes-8 — also persist player_name + the
                  * chosen mode/map (those flow through g->config
                  * already; the UI saves loadout/team separately on
-                 * cycle clicks). */
+                 * cycle clicks). wan-fixes-9 — spawn in the
+                 * background (host_start_begin) and poll once per
+                 * frame so the overlay can animate. */
                 lobby_ui_save_prefs(&ui);
-                if (bootstrap_host_via_dedicated(&game, &args, argv[0])) {
-                    game.mode = MODE_LOBBY;
+                if (host_start_begin(&game, &args, argv[0], /*deadline_s*/5.0)) {
+                    ui.host_starting    = true;
+                    ui.host_starting_t0 = GetTime();
+                    snprintf(ui.host_starting_status,
+                             sizeof ui.host_starting_status,
+                             "Spawning dedicated server...");
                 } else {
+                    /* Spawn itself failed (proc_spawn_self returned a
+                     * null handle) — no async to drive, fall back to
+                     * the title screen. */
                     game.mode = MODE_TITLE;
+                    ui.setup_initialized = false;
                 }
-                ui.setup_initialized = false;
+            }
+            else if (ui.host_starting) {
+                /* Tick the polled bootstrap one step. The overlay
+                 * already rendered for this frame; the result feeds
+                 * the next frame's behavior. */
+                int rc = host_start_poll(&game);
+                if (rc == 1) {
+                    ui.host_starting = false;
+                    ui.host_starting_status[0] = '\0';
+                    ui.setup_initialized = false;
+                    game.mode = MODE_LOBBY;
+                } else if (rc == -1) {
+                    ui.host_starting = false;
+                    ui.host_starting_status[0] = '\0';
+                    ui.setup_initialized = false;
+                    game.mode = MODE_TITLE;
+                } else {
+                    /* Still polling — update the visible status as
+                     * elapsed time crosses friendly thresholds. The
+                     * child usually accepts connections within 50–200
+                     * ms; if we're past 300 ms we've moved from
+                     * "spawning" to "connecting" territory. */
+                    double elapsed = GetTime() - ui.host_starting_t0;
+                    const char *next = (elapsed < 0.3)
+                        ? "Spawning dedicated server..."
+                        : (elapsed < 1.5)
+                            ? "Connecting to server..."
+                            : "Waiting for server to accept...";
+                    if (strncmp(ui.host_starting_status, next,
+                                sizeof ui.host_starting_status) != 0) {
+                        snprintf(ui.host_starting_status,
+                                 sizeof ui.host_starting_status, "%s", next);
+                    }
+                }
             }
             break;
         }
@@ -2210,6 +2347,11 @@ int main(int argc, char **argv) {
     LOG_I("soldut shutting down (ran %llu sim ticks)",
           (unsigned long long)game.world.tick);
 
+    /* wan-fixes-9 — if the user closed the window while a dedicated
+     * spawn was still polling for its first connect, abort that child
+     * before the regular dedicated_proc teardown (which only sees
+     * confirmed-connected handles). */
+    host_start_abort();
     stop_dedicated_child_if_any(&game);
     if (game.net.role != NET_ROLE_OFFLINE) {
         net_close(&game.net);

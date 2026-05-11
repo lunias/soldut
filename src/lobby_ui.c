@@ -119,6 +119,9 @@ void lobby_ui_reset_session(LobbyUIState *L) {
      * to carry into the next session. */
     L->kick_target_slot      = -1;
     L->ban_target_slot       = -1;
+    L->host_starting         = false;
+    L->host_starting_t0      = 0.0;
+    L->host_starting_status[0] = '\0';
 }
 
 /* ---- Title screen ------------------------------------------------- */
@@ -466,26 +469,36 @@ void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     y += row_h + gap;
 
     /* ---- Confirm / Cancel buttons ---- */
+    /* wan-fixes-9 — while the dedicated-child spawn is in flight,
+     * both buttons are non-interactive (the overlay grays the screen
+     * and the host_starting guard in main.c ignores request_start_host
+     * anyway). Back is gated too because flipping g->mode to
+     * MODE_TITLE mid-spawn would orphan the child handle in
+     * s_host_start. The visual "lock" comes from the overlay + the
+     * button-bg dim below. */
+    bool locked = L->host_starting;
     int bw = S(220), bh = S(48);
     int by = y + S(8);
     int bx_left  = panel_x;
     int bx_right = panel_x + panel_w - bw;
-    if (ui_button(&L->ui, (Rectangle){bx_left, by, bw, bh}, "Back", true)) {
+    if (ui_button(&L->ui, (Rectangle){bx_left, by, bw, bh}, "Back", !locked)) {
         L->setup_initialized = false;     /* re-seed next time */
         g->mode = MODE_TITLE;
     }
     /* The accent-color button on the right communicates "primary action". */
     Rectangle start_r = (Rectangle){bx_right, by, bw, bh};
-    bool start_hover = ui_point_in_rect(L->ui.mouse, start_r);
-    Color start_bg = start_hover ? (Color){80, 200, 120, 255}
-                                 : (Color){60, 160, 90, 255};
+    bool start_hover = !locked && ui_point_in_rect(L->ui.mouse, start_r);
+    Color start_bg = locked       ? (Color){40, 90, 60, 255}
+                   : start_hover  ? (Color){80, 200, 120, 255}
+                                  : (Color){60, 160, 90, 255};
     DrawRectangleRec(start_r, start_bg);
     DrawRectangleLinesEx(start_r, L->ui.scale, L->ui.panel_edge);
     int sl_w = ui_measure(&L->ui, "Start Hosting", 20);
     ui_draw_text(&L->ui, "Start Hosting",
                  (int)(start_r.x + (start_r.width - sl_w) * 0.5f),
                  (int)(start_r.y + (start_r.height - 20*L->ui.scale) * 0.5f),
-                 20, (Color){12, 22, 14, 255});
+                 20, locked ? (Color){12, 22, 14, 160}
+                            : (Color){12, 22, 14, 255});
     if (start_hover && L->ui.mouse_pressed) {
         L->request_start_host = true;
     }
@@ -497,6 +510,98 @@ void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                  S(32), sh - S(28), 14, (Color){90, 100, 120, 255});
 
     ui_end(&L->ui);
+}
+
+/* wan-fixes-9 — overlay rendered on top of host_setup_screen_run when
+ * the dedicated-child spawn + connect-poll is in flight. Two layers:
+ *   1. Full-screen translucent dark rect that drops the underlying
+ *      widgets to ~30% perceived brightness (the "locked-in" cue).
+ *   2. Centered panel with the rotating status message + an
+ *      indeterminate progress bar (a fixed-width segment that sweeps
+ *      left-to-right and wraps; same affordance as Windows
+ *      "marquee"-style progress controls). */
+void host_setup_screen_draw_overlay(LobbyUIState *L, int sw, int sh) {
+    if (!L) return;
+
+    /* Layer 1 — full-screen scrim. 60% alpha black gets us a clear
+     * "modal blocked" feel without making the underlying widgets
+     * unreadable (designers sometimes want to read the chosen mode /
+     * map while the bar is spinning so they know what's being
+     * started). */
+    DrawRectangle(0, 0, sw, sh, (Color){0, 0, 0, 153});
+
+    /* Layer 2 — panel. Sized so the indeterminate bar reads at any
+     * window scale without crowding the status text. */
+    int panel_w = S(520);
+    int panel_h = S(140);
+    int panel_x = (sw - panel_w) / 2;
+    int panel_y = (sh - panel_h) / 2;
+    Rectangle panel = (Rectangle){panel_x, panel_y, panel_w, panel_h};
+    DrawRectangleRec(panel, (Color){16, 22, 32, 240});
+    DrawRectangleLinesEx(panel, L->ui.scale * 2.0f,
+                         (Color){80, 120, 180, 255});
+
+    /* Headline. */
+    int title_size = 22;
+    const char *title = "Starting server...";
+    int tw = ui_measure(&L->ui, title, title_size);
+    ui_draw_text(&L->ui, title,
+                 panel_x + (panel_w - tw) / 2,
+                 panel_y + S(16),
+                 title_size, (Color){220, 230, 240, 255});
+
+    /* Status sub-line — host_starting_status is set by main.c to
+     * "Spawning dedicated server...", then "Waiting for server...",
+     * then "Connecting...". An empty buffer falls back to a generic
+     * line. */
+    int sub_size = 16;
+    const char *sub = (L->host_starting_status[0] != 0)
+                         ? L->host_starting_status
+                         : "Working...";
+    int sw_  = ui_measure(&L->ui, sub, sub_size);
+    ui_draw_text(&L->ui, sub,
+                 panel_x + (panel_w - sw_) / 2,
+                 panel_y + S(50),
+                 sub_size, (Color){160, 180, 200, 255});
+
+    /* Indeterminate progress bar. Track is full-width inside the
+     * panel; the moving "thumb" is 30% of the track width and sweeps
+     * left → right → left. Period 1.6 s — slow enough to look
+     * intentional, fast enough that the user knows the process isn't
+     * frozen. */
+    int track_h     = S(10);
+    int track_inset = S(24);
+    int track_x     = panel_x + track_inset;
+    int track_y     = panel_y + panel_h - S(34);
+    int track_w     = panel_w - 2 * track_inset;
+    Rectangle track = (Rectangle){track_x, track_y, track_w, track_h};
+    DrawRectangleRec(track, (Color){32, 40, 52, 255});
+    DrawRectangleLinesEx(track, 1.0f, (Color){60, 80, 110, 255});
+
+    double now = GetTime();
+    double elapsed = now - L->host_starting_t0;
+    if (elapsed < 0) elapsed = 0;
+    double period = 1.6;
+    double t_norm = (elapsed - period * (int)(elapsed / period)) / period;
+    /* Triangle wave 0→1→0 so the thumb bounces rather than wraps —
+     * looks less like a CSS loader, more like a heartbeat. */
+    double tri = (t_norm < 0.5) ? (t_norm * 2.0) : (2.0 - t_norm * 2.0);
+    int thumb_w = (int)(track_w * 0.30f);
+    int thumb_x = track_x + (int)((track_w - thumb_w) * tri);
+    DrawRectangle(thumb_x, track_y, thumb_w, track_h,
+                  (Color){80, 200, 120, 255});
+
+    /* Elapsed-time label so the user can tell roughly how long they've
+     * been waiting (and whether it's getting close to the 5 s
+     * timeout). */
+    char et[32];
+    snprintf(et, sizeof et, "%.1fs", elapsed);
+    int et_size = 12;
+    int etw = ui_measure(&L->ui, et, et_size);
+    ui_draw_text(&L->ui, et,
+                 panel_x + panel_w - etw - S(12),
+                 panel_y + panel_h - S(16),
+                 et_size, (Color){120, 140, 160, 200});
 }
 
 /* ---- Browser screen ----------------------------------------------- */
