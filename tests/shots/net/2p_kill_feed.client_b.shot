@@ -1,0 +1,13 @@
+# 2p_kill_feed — client B is the target. Stands still and dies.
+
+window 1920 1080
+out build/shots/net/dedi/2p_kill_feed.client_b
+network connect 127.0.0.1:{{PORT}}
+name ClientB
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+
+aim 96 980
+
+at 250 shot t250_being_shot
+at 500 shot t500_dead
+at 700 end

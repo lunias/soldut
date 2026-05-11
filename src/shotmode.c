@@ -1021,13 +1021,20 @@ static void shot_apply_new_kills(Game *g) {
     for (int n = begin; n < cur; ++n) {
         int idx = n % KILLFEED_CAPACITY;
         if (idx < 0) idx += KILLFEED_CAPACITY;
-        const KillFeedEntry *k = &g->world.killfeed[idx];
+        KillFeedEntry *k = &g->world.killfeed[idx];
         int killer_slot = (k->killer_mech_id >= 0)
             ? lobby_find_slot_by_mech(&g->lobby, k->killer_mech_id) : -1;
         int victim_slot = lobby_find_slot_by_mech(&g->lobby, k->victim_mech_id);
+        /* wan-fixes-13 — see apply_new_kills in main.c for rationale. */
+        const char *kn = (killer_slot >= 0) ? g->lobby.slots[killer_slot].name : "world";
+        const char *vn = (victim_slot >= 0) ? g->lobby.slots[victim_slot].name : "?";
+        snprintf(k->killer_name, sizeof k->killer_name, "%s", kn);
+        snprintf(k->victim_name, sizeof k->victim_name, "%s", vn);
         match_apply_kill(&g->match, &g->lobby, killer_slot, victim_slot, k->flags);
         net_server_broadcast_kill(&g->net, k->killer_mech_id,
-                                   k->victim_mech_id, k->weapon_id);
+                                  k->victim_mech_id, k->weapon_id,
+                                  k->flags,
+                                  k->killer_name, k->victim_name);
         any = true;
     }
     g_shot_kill_processed = cur;

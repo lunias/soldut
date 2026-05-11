@@ -1686,18 +1686,54 @@ static void client_handle_snapshot(NetState *ns, const uint8_t *body,
 
 static void client_handle_kill_event(NetState *ns, const uint8_t *body, int blen, Game *g) {
     (void)ns;
-    if (blen < 6) return;
+    /* Minimum legal payload is the wan-fixes-13 layout (39 bytes after
+     * the type tag — see net_server_broadcast_kill comment). Pre-fix
+     * the client only consumed 6 of those bytes and never populated
+     * the killfeed ring; the HUD's kill rail stayed empty for the
+     * joiner the whole match. */
+    if (blen < 6 + 1 + KILLFEED_NAME_BYTES * 2) return;
     const uint8_t *r = body;
     uint16_t killer = r_u16(&r);
     uint16_t victim = r_u16(&r);
     uint16_t weapon = r_u16(&r);
-    (void)weapon;
-    /* We mirror the kill into our local world's last_event so the HUD
-     * shows the kill feed. The actual mech "dies" via the snapshot
-     * apply; this is just the ribbon. */
+    uint8_t  flags  = r_u8 (&r);
+    char killer_name[KILLFEED_NAME_BYTES];
+    char victim_name[KILLFEED_NAME_BYTES];
+    memcpy(killer_name, r, KILLFEED_NAME_BYTES);
+    killer_name[KILLFEED_NAME_BYTES - 1] = '\0';
+    r += KILLFEED_NAME_BYTES;
+    memcpy(victim_name, r, KILLFEED_NAME_BYTES);
+    victim_name[KILLFEED_NAME_BYTES - 1] = '\0';
+    r += KILLFEED_NAME_BYTES;
+
+    /* Append to the client's local killfeed ring exactly like the
+     * server does in mech_kill, so draw_kill_feed picks it up. */
+    int slot = g->world.killfeed_count % KILLFEED_CAPACITY;
+    g->world.killfeed[slot] = (KillFeedEntry){
+        .killer_mech_id = (killer == 0xFFFFu) ? -1 : (int)killer,
+        .victim_mech_id = (int)victim,
+        .weapon_id      = (int)weapon,
+        .flags          = flags,
+        .age            = 0.0f,
+    };
+    snprintf(g->world.killfeed[slot].killer_name,
+             sizeof g->world.killfeed[slot].killer_name, "%s", killer_name);
+    snprintf(g->world.killfeed[slot].victim_name,
+             sizeof g->world.killfeed[slot].victim_name, "%s", victim_name);
+    g->world.killfeed_count++;
+
+    /* Keep the old single-line ribbon working too (it's read by the
+     * legacy "last_event" overlay). */
     snprintf(g->world.last_event, sizeof g->world.last_event,
-             "[KILL] mech #%u → mech #%u", (unsigned)killer, (unsigned)victim);
+             "[KILL] %s -> %s", killer_name[0] ? killer_name : "world",
+             victim_name[0] ? victim_name : "?");
     g->world.last_event_time = 0.0f;
+
+    SHOT_LOG("t=%llu client_handle_kill_event killer=%d ('%s') victim=%d ('%s') weapon=%d flags=0x%02x",
+             (unsigned long long)g->world.tick,
+             (int)(int16_t)killer, killer_name,
+             (int)victim, victim_name,
+             (int)weapon, (unsigned)flags);
 }
 
 static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen, Game *g) {
@@ -2596,15 +2632,41 @@ void net_client_send_input(NetState *ns, ClientInput in) {
     ns->packets_sent++;
 }
 
+/* wan-fixes-13 — KILL_EVENT wire layout (40 bytes):
+ *   u8  type = NET_MSG_KILL_EVENT
+ *   u16 killer_mech_id   (0xFFFF for environmental / world kill)
+ *   u16 victim_mech_id
+ *   u16 weapon_id
+ *   u8  flags            (KILLFLAG_* bits — headshot/gib/overkill/etc.)
+ *   16  killer_name      (NUL-padded; empty for environmental kill)
+ *   16  victim_name      (NUL-padded)
+ *
+ * Pre-fix the wire only carried killer/victim/weapon (7 bytes), the
+ * flags were dropped, and `client_handle_kill_event` only set
+ * `world.last_event` — `world.killfeed[]` was never populated on
+ * clients so the HUD's kill-feed rail stayed empty for the joiner.
+ * Names are fixed-width to keep parsing trivial; KILLFEED_NAME_BYTES
+ * (16) holds enough to show "ClientA" / "EthansFriend" etc. without
+ * truncating realistic 24-byte player_names too aggressively. */
 void net_server_broadcast_kill(NetState *ns, int killer_mech_id,
-                               int victim_mech_id, int weapon_id)
+                               int victim_mech_id, int weapon_id,
+                               uint32_t flags,
+                               const char *killer_name,
+                               const char *victim_name)
 {
     if (ns->role != NET_ROLE_SERVER) return;
-    uint8_t buf[16]; uint8_t *p = buf;
+    uint8_t buf[64]; uint8_t *p = buf;
     w_u8 (&p, NET_MSG_KILL_EVENT);
     w_u16(&p, (uint16_t)killer_mech_id);
     w_u16(&p, (uint16_t)victim_mech_id);
     w_u16(&p, (uint16_t)weapon_id);
+    w_u8 (&p, (uint8_t)(flags & 0xffu));
+    char nk[KILLFEED_NAME_BYTES] = {0};
+    char nv[KILLFEED_NAME_BYTES] = {0};
+    if (killer_name) snprintf(nk, sizeof nk, "%s", killer_name);
+    if (victim_name) snprintf(nv, sizeof nv, "%s", victim_name);
+    memcpy(p, nk, KILLFEED_NAME_BYTES); p += KILLFEED_NAME_BYTES;
+    memcpy(p, nv, KILLFEED_NAME_BYTES); p += KILLFEED_NAME_BYTES;
     ENetPacket *pkt = enet_packet_create(buf, (size_t)(p - buf),
                                           ENET_PACKET_FLAG_RELIABLE);
     enet_host_broadcast((ENetHost *)ns->enet_host, NET_CH_EVENT, pkt);

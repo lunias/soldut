@@ -376,13 +376,24 @@ static void apply_new_kills(Game *g) {
     for (int n = begin; n < cur; ++n) {
         int idx = n % KILLFEED_CAPACITY;
         if (idx < 0) idx += KILLFEED_CAPACITY;
-        const KillFeedEntry *k = &g->world.killfeed[idx];
+        KillFeedEntry *k = &g->world.killfeed[idx];
         int killer_slot = (k->killer_mech_id >= 0)
             ? lobby_find_slot_by_mech(&g->lobby, k->killer_mech_id) : -1;
         int victim_slot = lobby_find_slot_by_mech(&g->lobby, k->victim_mech_id);
+        /* wan-fixes-13 — backfill names on the killfeed entry so both
+         * the host's HUD (reads `killfeed[]` directly) and the wire
+         * (clients decode into their own `killfeed[]`) carry display
+         * strings instead of "mech#N". `mech_kill` lives in mech.c
+         * which can't see Lobby; we materialize the names here. */
+        const char *kn = (killer_slot >= 0) ? g->lobby.slots[killer_slot].name : "world";
+        const char *vn = (victim_slot >= 0) ? g->lobby.slots[victim_slot].name : "?";
+        snprintf(k->killer_name, sizeof k->killer_name, "%s", kn);
+        snprintf(k->victim_name, sizeof k->victim_name, "%s", vn);
         match_apply_kill(&g->match, &g->lobby, killer_slot, victim_slot, k->flags);
         net_server_broadcast_kill(&g->net, k->killer_mech_id,
-                                   k->victim_mech_id, k->weapon_id);
+                                  k->victim_mech_id, k->weapon_id,
+                                  k->flags,
+                                  k->killer_name, k->victim_name);
         any = true;
     }
     g_killfeed_processed = cur;
@@ -1727,8 +1738,15 @@ int main(int argc, char **argv) {
     game.lobby.auto_start_default = game.config.auto_start_seconds;
     game.world.friendly_fire = game.config.friendly_fire;
 
+    /* wan-fixes-13 — default to 1920x1080 so HUD elements render at a
+     * legible size on modern monitors out of the box. UI is DPI-aware
+     * (see ui_compute_scale + the kill-feed scaling below) so 4K
+     * users still get a readable HUD when they resize, but the
+     * baseline pixel density is now Full HD instead of 720p. Shot-
+     * mode tests still launch their own platform_init at 1280×720
+     * (src/shotmode.c parses `window` from the script). */
     PlatformConfig pcfg = {
-        .window_w = 1280, .window_h = 720,
+        .window_w = 1920, .window_h = 1080,
         .vsync = true, .fullscreen = false,
         .title = (args.mode == LAUNCH_HOST)   ? "Soldut " SOLDUT_VERSION_STRING " — host"
                : (args.mode == LAUNCH_CLIENT) ? "Soldut " SOLDUT_VERSION_STRING " — client"

@@ -395,9 +395,15 @@ void net_server_broadcast_snapshot(NetState *ns, struct World *w);
 void net_client_send_input(NetState *ns, ClientInput in);
 
 /* A kill event — fires reliably so missed packets don't desync the
- * kill feed. Server-only. */
+ * kill feed. wan-fixes-13 — carries flags (headshot/gib/overkill/
+ * ragdoll/suicide) + killer + victim names so the client's
+ * `world.killfeed[]` matches the host's without threading Lobby
+ * through hud_draw. Server-only. */
 void net_server_broadcast_kill(NetState *ns, int killer_mech_id,
-                               int victim_mech_id, int weapon_id);
+                               int victim_mech_id, int weapon_id,
+                               uint32_t flags,
+                               const char *killer_name,
+                               const char *victim_name);
 
 /* A hit event — broadcast on every damage application so clients can
  * spawn blood / sparks at the actual hit position with the actual

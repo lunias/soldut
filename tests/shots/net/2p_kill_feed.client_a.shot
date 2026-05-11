@@ -1,0 +1,20 @@
+# 2p_kill_feed — client A holds down LMB and unloads pulse rifle
+# into B's chest at point-blank range. With 150 HP / 12 dmg per
+# hit / ~6 shots/s, B dies within ~3 s of holding fire.
+
+window 1920 1080
+out build/shots/net/dedi/2p_kill_feed.client_a
+network connect 127.0.0.1:{{PORT}}
+name ClientA
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+
+aim 480 980
+
+# Hold fire from t=200 onwards. mode auto-fires hitscan as long as
+# BTN_FIRE is held.
+at 200 press fire
+at 600 release fire
+
+at 250 shot t250_firing
+at 500 shot t500_post_kill
+at 700 end
