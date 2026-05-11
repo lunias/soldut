@@ -331,31 +331,6 @@ the ban-by-name simplification.).
   projectile sniping. Add a per-projectile-tick proximity check to the
   3 nearest mechs.
 
-### Grapple anchor uses server-current position (no lag comp) (P06)
-
-- **What we did** — When a `PROJ_GRAPPLE_HEAD` lands and
-  `projectile_step` decides "tile hit at X" or "bone of mech B at part
-  P", it uses the SERVER'S current view of the world. No rewind to the
-  shooter's render time. Hitscan weapons go through
-  `weapons_fire_hitscan_lag_comp` which rewinds bone history; the
-  grapple does not.
-- **Why** — Per `documents/m5/05-grapple.md` §"Lag compensation":
-  the firer is pulling themselves; the rubber-band correction on a
-  missed grapple is sub-100 ms and the visible feedback (rope head
-  visibly hitting/missing) is local to the firer. Lag-compensating
-  grapple anchors would require a parallel `swept_seg_vs_bone_history`
-  + a redo of the constraint allocation against historical positions,
-  for a feel improvement that's hard to perceive at LAN latency.
-- **Revisit when** —
-  - WAN play (50–150 ms RTT) reveals players regularly missing grapples
-    they expected to hit on their screen — at which point the bone
-    rewind from `weapons_fire_hitscan_lag_comp` becomes the obvious
-    next step (refactor to a shared "swept-seg vs. bone at tick T" path).
-  - A future patch introduces a "grapple kill" mode (currently
-    explicitly zero-damage) where anchor decisions affect combat outcomes;
-    the moment grapples can damage, lag-comp matters the way it does
-    for hitscan.
-
 ### Grapple rope renders as a straight line (P06)
 
 - **What we did** — `render.c::draw_grapple_rope` draws a single

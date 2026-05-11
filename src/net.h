@@ -154,6 +154,15 @@ typedef enum {
 
 #define NET_MAX_PEERS  32
 
+/* Phase 3 — number of inputs packed into each NET_MSG_INPUT datagram.
+ * The client ships [last 4 inputs] every tick (60/s upstream). Server
+ * deduplicates by seq, so the only effect is making a single dropped
+ * UDP packet recoverable without a reconcile jump (next datagram
+ * contains the dropped seq among its 4 redundant copies). Bandwidth
+ * cost: 4 * 12 = 48 input bytes + 2 byte header = 50 B/packet vs the
+ * old 13 B; 60 Hz × 50 = 3 KB/s upstream — trivial. */
+#define NET_INPUT_REDUNDANCY 4
+
 typedef struct NetPeer {
     void        *enet_peer;       /* ENetPeer*; opaque to keep enet out of public API */
     NetPeerState state;
@@ -235,6 +244,22 @@ typedef struct NetState {
     double   snapshot_accum;
     double   snapshot_interval;   /* 1.0 / snapshot_hz */
 
+    /* Effective snapshot rate (Hz), shipped from server to client in
+     * ACCEPT so the client can derive its render interp delay. Server
+     * sets at start from cfg.snapshot_hz; client reads from ACCEPT
+     * (defaults to 30 — the M2 wire-default — when the host doesn't
+     * include the field). */
+    uint16_t snapshot_hz;
+
+    /* Effective render interp delay in ms. Derived as
+     *   `3 * 1000 / snapshot_hz` clamped to [40, 150]
+     * because three snapshot intervals of buffer covers ENet's typical
+     * jitter without over-buffering. 60 Hz → 50 ms; 30 Hz → 100 ms.
+     * Server uses this to compute `Mech.input_view_tick` lag-comp
+     * offset; client uses it to time-shift remote-mech rendering.
+     * Replaces the old compile-time `NET_INTERP_DELAY_MS = 100`. */
+    uint32_t interp_delay_ms;
+
     /* Cached server-side snapshots indexed [0..NET_MAX_PEERS) for
      * delta encoding: for each peer, the most recent snapshot the
      * client has acked. */
@@ -250,12 +275,39 @@ typedef struct NetState {
     double   client_render_time_ms;
     uint32_t client_latest_server_time_ms;
     bool     client_render_clock_armed;
+
+    /* Phase 3 — client redundancy ring. `net_client_send_input` pushes
+     * every tick into `recent_inputs[head]`, then ships up to
+     * NET_INPUT_REDUNDANCY of them (newest first) in each datagram.
+     * Server dedupes by seq via the existing latest_input_seq filter,
+     * so this is invisible to the rest of the codebase — just makes
+     * input loss tolerance go up by 4×. */
+    ClientInput recent_inputs[NET_INPUT_REDUNDANCY];
+    int         recent_input_count;   /* 0..NET_INPUT_REDUNDANCY */
+    int         recent_input_head;    /* next slot to overwrite */
 } NetState;
 
-/* Render-time delay for remote-mech interpolation. 100 ms covers a
- * 30 Hz snapshot stream comfortably (3 snapshot intervals of buffer)
- * and matches the design canon ([documents/05-networking.md] §4). */
+/* Default render-time delay for remote-mech interpolation. 100 ms is the
+ * 30 Hz default (3 snapshot intervals × 33 ms). With Phase 2's 60 Hz
+ * default, the runtime `NetState.interp_delay_ms` overrides this to
+ * 50 ms (3 × 17 ms). The macro is the back-compat baseline used when
+ * the server doesn't ship snapshot_hz in ACCEPT. */
 #define NET_INTERP_DELAY_MS 100u
+
+/* Helper: derive an interp delay (ms) from a snapshot Hz. Three intervals
+ * of buffer covers ENet jitter; the clamp keeps it sane at extreme rates.
+ *
+ *   30 Hz → 100 ms (M2 default)
+ *   60 Hz →  50 ms (Phase 2 default)
+ *   20 Hz → 150 ms (clamped)
+ *  120 Hz →  40 ms (clamped — sim only runs at 60 Hz so this is moot) */
+static inline uint32_t net_interp_delay_for(uint32_t snapshot_hz) {
+    if (snapshot_hz == 0) snapshot_hz = 30;
+    uint32_t d = (3u * 1000u + snapshot_hz / 2u) / snapshot_hz;
+    if (d < 40u)  d = 40u;
+    if (d > 150u) d = 150u;
+    return d;
+}
 
 /* ---- Lifecycle (process global) ----------------------------------- */
 
@@ -265,6 +317,12 @@ void net_shutdown(void);
 /* ---- Per-NetState lifecycle --------------------------------------- */
 
 bool net_server_start(NetState *ns, uint16_t port, struct Game *g);
+
+/* Phase 2 — host runtime knob. Called by bootstrap_host after
+ * net_server_start so the cfg-loaded snapshot rate takes effect before
+ * any peer connects. Clamped to [10, 60]. The interp delay is rederived
+ * from the new rate and shipped to clients in ACCEPT. */
+void net_server_set_snapshot_hz(NetState *ns, int hz);
 
 /* Connect to host:port. Returns true on connect ACK; populates
  * ns->local_mech_id_assigned with the server's choice (>=0). On

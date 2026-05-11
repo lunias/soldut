@@ -391,6 +391,18 @@ typedef struct {
      * inputs from its replay buffer. */
     uint16_t  last_processed_input_seq;
 
+    /* Server-side, set by net.c::server_handle_input on every remote
+     * peer input: the world tick the firing client was *seeing* when
+     * the input was generated, computed as
+     *   `w->tick - rtt_half_ticks - INTERP_DELAY_TICKS`.
+     * mech_try_fire reads this on HITSCAN to route through
+     * `weapons_fire_hitscan_lag_comp` instead of the current-time path,
+     * so client shots at moving remote targets test against the bones
+     * the shooter saw. Cleared (0) after each try_fire; stays 0 for the
+     * host's own mech (local input never flows through server_handle_input)
+     * and for AI / dummy mechs. See [05-networking.md] §5 — Lag comp. */
+    uint64_t  input_view_tick;
+
     /* Bone-position history for lag compensation. Filled at the end of
      * each server tick by mech_record_lag_hist; only meaningful on the
      * authoritative side (server). Indexed modulo LAG_HIST_TICKS. */

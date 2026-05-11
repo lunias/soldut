@@ -1,0 +1,22 @@
+# 2p_grapple_bone — host. Stands as a stationary bone target so the
+# client's grapple-hook attach lands on a mech bone (not a tile).
+# Pairs with 2p_grapple_bone.client.shot. Both should see the rope
+# anchor on the host's body; the server-side log MUST show
+#   grapple_attach ... lag_comp=N
+# where N > 0 when the client (mech=1) is the firer — proving Phase 4
+# rewound bone history during the swept-segment test.
+
+window 1280 720
+out build/shots/net/grapple_bone_host
+network host 24191
+name HostA
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+
+# Stand on the dummy platform; do nothing.
+spawn_at 2300 1112
+peer_spawn 1 2100 1080
+aim 2100 1080
+
+at 200 shot t200_pre
+at 350 shot t350_attached
+at 700 end

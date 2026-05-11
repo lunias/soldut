@@ -914,6 +914,12 @@ static bool bootstrap_host(Game *g, const LaunchArgs *args, bool offline) {
             LOG_E("host: failed to bind UDP %u", (unsigned)g->config.port);
             return false;
         }
+        /* Phase 2 — apply cfg.snapshot_hz before any peer ACCEPTs (the
+         * rate is shipped in ACCEPT). Falls back to net_server_start's
+         * 60 Hz default if cfg is unset / 0. */
+        if (g->config.snapshot_hz > 0) {
+            net_server_set_snapshot_hz(&g->net, g->config.snapshot_hz);
+        }
         net_discovery_open(&g->net);
         LOG_I("host: ready on port %u", (unsigned)g->config.port);
     } else {

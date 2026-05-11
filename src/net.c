@@ -199,7 +199,11 @@ bool net_server_start(NetState *ns, uint16_t port, Game *g) {
     ns->role = NET_ROLE_SERVER;
     ns->bind_port = port ? port : SOLDUT_DEFAULT_PORT;
     ns->discovery_socket = -1;
-    ns->snapshot_interval = 1.0 / 30.0;     /* 30 Hz */
+    /* Phase 2 — bumped from 30 to 60 Hz default. bootstrap_host will
+     * override from cfg.snapshot_hz before any peer connects. */
+    ns->snapshot_hz       = 60;
+    ns->snapshot_interval = 1.0 / (double)ns->snapshot_hz;
+    ns->interp_delay_ms   = net_interp_delay_for(ns->snapshot_hz);
 
     ENetAddress addr;
     addr.host = ENET_HOST_ANY;
@@ -214,12 +218,30 @@ bool net_server_start(NetState *ns, uint16_t port, Game *g) {
     }
     ns->enet_host = h;
 
+    /* Phase 2 — ENet's built-in range coder. Free 30–50% bandwidth
+     * reduction on snapshot streams (lots of zero / repeated bytes in
+     * the SoA EntitySnapshot layout). Safe with no peer caps: the
+     * coder is fully symmetric on both ends. */
+    enet_host_compress_with_range_coder(h);
+
     mint_secret(ns->secret);
     g->world.authoritative = true;
 
-    LOG_I("net_server_start: listening on port %u (max %d peers)",
-          (unsigned)ns->bind_port, NET_MAX_PEERS);
+    LOG_I("net_server_start: listening on port %u (max %d peers, snapshot=%u Hz, "
+          "interp=%u ms, range_coder=on)",
+          (unsigned)ns->bind_port, NET_MAX_PEERS,
+          (unsigned)ns->snapshot_hz, (unsigned)ns->interp_delay_ms);
     return true;
+}
+
+void net_server_set_snapshot_hz(NetState *ns, int hz) {
+    if (!ns || ns->role != NET_ROLE_SERVER) return;
+    if (hz < 10) hz = 10;
+    if (hz > 60) hz = 60;
+    ns->snapshot_hz       = (uint16_t)hz;
+    ns->snapshot_interval = 1.0 / (double)hz;
+    ns->interp_delay_ms   = net_interp_delay_for((uint32_t)hz);
+    LOG_I("net: snapshot_hz=%d interp=%u ms", hz, (unsigned)ns->interp_delay_ms);
 }
 
 bool net_client_connect(NetState *ns, const char *host, uint16_t port,
@@ -228,7 +250,13 @@ bool net_client_connect(NetState *ns, const char *host, uint16_t port,
     memset(ns, 0, sizeof *ns);
     ns->role = NET_ROLE_CLIENT;
     ns->discovery_socket = -1;
+    /* Defaults; the server's ACCEPT will overwrite snapshot_hz +
+     * interp_delay_ms based on the host's actual configured rate. We
+     * start at 30 Hz / 100 ms because that's the M2 wire-default and
+     * what a pre-Phase-2 host (no ACCEPT field) implies. */
+    ns->snapshot_hz       = 30;
     ns->snapshot_interval = 1.0 / 30.0;
+    ns->interp_delay_ms   = NET_INTERP_DELAY_MS;
     ns->local_mech_id_assigned = -1;
 
     /* Outgoing-only ENet host: 1 peer, NET_CH_COUNT channels. */
@@ -239,6 +267,10 @@ bool net_client_connect(NetState *ns, const char *host, uint16_t port,
         return false;
     }
     ns->enet_host = eh;
+    /* Phase 2 — symmetric with the server; ENet drops the compression
+     * silently if the peer doesn't have a matching coder, but our
+     * server enables the same one in net_server_start. */
+    enet_host_compress_with_range_coder(eh);
 
     ENetAddress addr;
     addr.port = port ? port : SOLDUT_DEFAULT_PORT;
@@ -260,6 +292,7 @@ bool net_client_connect(NetState *ns, const char *host, uint16_t port,
         memset(ns, 0, sizeof *ns);
         return false;
     }
+
     ns->server.enet_peer = peer;
     ns->server.state     = NET_PEER_CONNECTING;
     ns->server.remote_addr_host = addr.host;
@@ -287,6 +320,18 @@ bool net_client_connect(NetState *ns, const char *host, uint16_t port,
         memset(ns, 0, sizeof *ns);
         return false;
     }
+
+    /* Phase 3 — apply throttle + timeout AFTER the ENet connect ack
+     * lands. Configuring on a pending CONNECTING peer queues commands
+     * before the protocol handshake completes, which (in 1.3.18) can
+     * blunt the initial round-trip and silently kill the connect. */
+    enet_peer_throttle_configure(peer,
+        /*interval_ms*/ 1000u,
+        /*accel*/       ENET_PEER_PACKET_THROTTLE_ACCELERATION,
+        /*decel*/       ENET_PEER_PACKET_THROTTLE_DECELERATION);
+    enet_peer_timeout(peer, /*limit*/32u,
+                      /*timeout_min_ms*/5000u,
+                      /*timeout_max_ms*/15000u);
     LOG_I("net_client_connect: enet handshake complete; sending CONNECT_REQUEST");
 
     /* Send CONNECT_REQUEST(version, name) on LOBBY reliable. */
@@ -426,14 +471,21 @@ static void send_challenge(void *peer, uint32_t nonce, uint32_t token) {
 }
 
 static void send_accept(void *peer, uint32_t client_id, int mech_id,
-                        uint32_t server_time_ms, uint64_t server_tick)
+                        uint32_t server_time_ms, uint64_t server_tick,
+                        uint16_t snapshot_hz)
 {
+    /* Phase 2: appended snapshot_hz (u16) so the client can derive its
+     * interp delay from the actual host rate. Back-compat: an old
+     * client reads the first 19 bytes and ignores trailing — keeps its
+     * own default rate. A new client connecting to an old host gets
+     * blen=19 and falls back to default snapshot_hz=30. */
     uint8_t buf[24]; uint8_t *p = buf;
     w_u8 (&p, NET_MSG_ACCEPT);
     w_u32(&p, client_id);
     w_u16(&p, (uint16_t)mech_id);
     w_u32(&p, server_time_ms);
     w_u64(&p, server_tick);
+    w_u16(&p, snapshot_hz);
     enet_send_to(peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
                  buf, (int)(p - buf));
 }
@@ -860,7 +912,8 @@ static void server_handle_challenge_response(NetState *ns, NetPeer *p,
     lobby_chat_system(&g->lobby, welcome);
 
     uint32_t srv_ms = (uint32_t)(ns->server_time * 1000.0);
-    send_accept(p->enet_peer, p->client_id, slot, srv_ms, g->world.tick);
+    send_accept(p->enet_peer, p->client_id, slot, srv_ms, g->world.tick,
+                ns->snapshot_hz);
     send_initial_state(p->enet_peer, g);
 
     /* The next net_poll iteration will run the dirty-broadcast pass
@@ -1137,28 +1190,67 @@ static void server_handle_input(NetState *ns, NetPeer *p,
         }
     }
     if (p->mech_id < 0) return;
-    if (blen < 12) return;
+
+    /* Phase 3 wire: tag has already been consumed. Body starts with
+     * a u8 count followed by `count` 12-byte input records (oldest
+     * first). The client always packs the most recent N=NET_INPUT_REDUNDANCY
+     * inputs from its ring; the server applies any whose seq is
+     * strictly newer than its `latest_input_seq` (cheap u16-wrap-safe
+     * compare), dropping the rest as redundant resends. */
+    if (blen < 1) return;
     const uint8_t *r = body;
-    uint16_t seq     = r_u16(&r);
-    uint16_t buttons = r_u16(&r);
-    float    aim_x   = r_f32(&r);
-    float    aim_y   = r_f32(&r);
+    uint8_t count = r_u8(&r);
+    if (count == 0 || count > NET_INPUT_REDUNDANCY) return;
+    if (blen < 1 + (int)count * 12) return;
 
-    /* Drop out-of-order inputs (uint16 seq with wrap). */
-    int16_t delta = (int16_t)(seq - p->latest_input_seq);
-    if (p->latest_input_seq != 0 && delta <= 0) return;
+    int applied = 0;
+    bool advanced = false;
+    for (int i = 0; i < (int)count; ++i) {
+        uint16_t seq     = r_u16(&r);
+        uint16_t buttons = r_u16(&r);
+        float    aim_x   = r_f32(&r);
+        float    aim_y   = r_f32(&r);
 
-    p->latest_input.buttons = buttons;
-    p->latest_input.seq     = seq;
-    p->latest_input.aim_x   = aim_x;
-    p->latest_input.aim_y   = aim_y;
-    p->latest_input.dt      = 0.0f;     /* server uses its own dt */
-    p->latest_input_seq     = seq;
+        int16_t delta = (int16_t)(seq - p->latest_input_seq);
+        if (p->latest_input_seq != 0 && delta <= 0) continue; /* dup / stale */
 
-    /* Latch onto the mech for the next sim tick. */
+        p->latest_input.buttons = buttons;
+        p->latest_input.seq     = seq;
+        p->latest_input.aim_x   = aim_x;
+        p->latest_input.aim_y   = aim_y;
+        p->latest_input.dt      = 0.0f;     /* server uses its own dt */
+        p->latest_input_seq     = seq;
+        advanced = true;
+        applied++;
+    }
+    if (!advanced) return;
+    SHOT_LOG("net: input batch peer=%u count=%d applied=%d latest_seq=%u",
+             (unsigned)p->client_id, (int)count, applied,
+             (unsigned)p->latest_input_seq);
+
+    /* Latch the most recent (whatever stayed in p->latest_input after
+     * the loop) onto the mech for the next sim tick. */
     Mech *m = &g->world.mechs[p->mech_id];
     m->latched_input = p->latest_input;
-    m->last_processed_input_seq = seq;
+    m->last_processed_input_seq = p->latest_input_seq;
+
+    /* Lag-compensation view tick: the world tick the shooter was *seeing*
+     * when they generated this input. The client renders remote players at
+     *   client_render_time = latest_server_time - INTERP_DELAY_MS
+     * and the input had to travel one-way to reach us, so the total
+     * shooter→server view lag is `RTT/2 + INTERP_DELAY_MS`. Compute the
+     * server tick that was current at that view moment so a follow-up
+     * hitscan inside mech_try_fire can rewind bone history to those
+     * positions. `weapons_fire_hitscan_lag_comp` falls back to the
+     * current-time path when the value is 0 or out of LAG_HIST_TICKS
+     * range, so stale-but-valid values stay safe. (See
+     * [05-networking.md] §5.) */
+    uint32_t rtt_ms = ((ENetPeer *)p->enet_peer)->roundTripTime;
+    uint32_t view_lag_ms = (rtt_ms / 2u) + ns->interp_delay_ms;
+    uint64_t view_lag_ticks = ((uint64_t)view_lag_ms * 60u + 999u) / 1000u;
+    m->input_view_tick = (g->world.tick > view_lag_ticks)
+                       ? (g->world.tick - view_lag_ticks)
+                       : 0u;
 }
 
 /* ---- Client: handle inbound LOBBY/STATE/EVENT --------------------- */
@@ -1189,8 +1281,18 @@ static void client_handle_accept(NetState *ns, const uint8_t *body, int blen) {
     (void)srv_ms; (void)srv_tick;
     ns->local_client_id        = client_id;
     ns->local_mech_id_assigned = (int)mech_id;
-    LOG_I("client: ACCEPT client_id=%u mech_id=%u",
-          (unsigned)client_id, (unsigned)mech_id);
+    /* Phase 2 — optional snapshot_hz suffix (u16). Missing from a
+     * pre-Phase-2 host; we keep the default (30 Hz / 100 ms interp). */
+    uint16_t hz_from_server = 0;
+    if (blen >= 20) hz_from_server = r_u16(&r);
+    if (hz_from_server >= 10 && hz_from_server <= 60) {
+        ns->snapshot_hz       = hz_from_server;
+        ns->snapshot_interval = 1.0 / (double)hz_from_server;
+        ns->interp_delay_ms   = net_interp_delay_for(hz_from_server);
+    }
+    LOG_I("client: ACCEPT client_id=%u mech_id=%u snapshot_hz=%u interp=%u ms",
+          (unsigned)client_id, (unsigned)mech_id,
+          (unsigned)ns->snapshot_hz, (unsigned)ns->interp_delay_ms);
     /* INITIAL_STATE follows on the same channel. */
 }
 
@@ -1429,7 +1531,7 @@ static void client_handle_snapshot(NetState *ns, const uint8_t *body,
          * track server_time directly (only ~16 ms behind in practice)
          * and snapshot_interp_remotes would always clamp to newest. */
         ns->client_render_time_ms =
-            (double)snap.header.server_time_ms - (double)NET_INTERP_DELAY_MS;
+            (double)snap.header.server_time_ms - (double)ns->interp_delay_ms;
         ns->client_render_clock_armed = true;
     }
     /* The snapshot's ack_input_seq tells us how far the server has
@@ -1889,9 +1991,27 @@ static void server_pump_events(NetState *ns, Game *g) {
                 p->remote_addr_host = ev.peer->address.host;
                 p->remote_port      = ev.peer->address.port;
                 ev.peer->data = p;
+
+                /* Phase 3 — tune ENet throttle so unreliable snapshots
+                 * don't get internally dropped under transient WAN
+                 * jitter. The default 5 s recalc interval is too lazy
+                 * for an action game; 1 s lets the throttle track
+                 * conditions tighter and recover faster. accel/decel
+                 * stay at default (2/2). Also lower the disconnect
+                 * timeout band so a real drop is detected in ~5..15 s
+                 * (was 5..30 s) — matches `documents/05-networking.md`
+                 * §"Disconnect / reconnect". */
+                enet_peer_throttle_configure(ev.peer,
+                    /*interval_ms*/ 1000u,
+                    /*accel*/       ENET_PEER_PACKET_THROTTLE_ACCELERATION,
+                    /*decel*/       ENET_PEER_PACKET_THROTTLE_DECELERATION);
+                enet_peer_timeout(ev.peer, /*limit*/32u,
+                                  /*timeout_min_ms*/5000u,
+                                  /*timeout_max_ms*/15000u);
+
                 char abuf[48];
                 net_format_addr(p->remote_addr_host, p->remote_port, abuf, sizeof abuf);
-                LOG_I("server: peer connected (%s) — slot %u",
+                LOG_I("server: peer connected (%s) — slot %u (throttle_interval=1000ms timeout=5..15s)",
                       abuf, (unsigned)p->client_id);
                 break;
             }
@@ -2255,12 +2375,29 @@ void net_server_broadcast_snapshot(NetState *ns, World *w) {
 
 void net_client_send_input(NetState *ns, ClientInput in) {
     if (ns->role != NET_ROLE_CLIENT || !ns->connected) return;
-    uint8_t buf[16]; uint8_t *p = buf;
-    w_u8 (&p, NET_MSG_INPUT);
-    w_u16(&p, in.seq);
-    w_u16(&p, in.buttons);
-    w_f32(&p, in.aim_x);
-    w_f32(&p, in.aim_y);
+
+    /* Phase 3 — push to the redundancy ring, then ship oldest→newest. */
+    int head = ns->recent_input_head;
+    ns->recent_inputs[head] = in;
+    ns->recent_input_head   = (head + 1) % NET_INPUT_REDUNDANCY;
+    if (ns->recent_input_count < NET_INPUT_REDUNDANCY) ns->recent_input_count++;
+
+    /* Wire: tag(1) + count(1) + count * [seq(2) + buttons(2) + ax(4) + ay(4)]
+     * For count=4: 1 + 1 + 48 = 50 bytes. */
+    enum { ONE = 12 };
+    uint8_t buf[2 + NET_INPUT_REDUNDANCY * ONE];
+    uint8_t *p = buf;
+    w_u8(&p, NET_MSG_INPUT);
+    w_u8(&p, (uint8_t)ns->recent_input_count);
+    int oldest = (ns->recent_input_head - ns->recent_input_count
+                  + NET_INPUT_REDUNDANCY) % NET_INPUT_REDUNDANCY;
+    for (int i = 0; i < ns->recent_input_count; ++i) {
+        const ClientInput *r = &ns->recent_inputs[(oldest + i) % NET_INPUT_REDUNDANCY];
+        w_u16(&p, r->seq);
+        w_u16(&p, r->buttons);
+        w_f32(&p, r->aim_x);
+        w_f32(&p, r->aim_y);
+    }
     enet_send_to(ns->server.enet_peer, NET_CH_STATE, /*flags*/0,
                  buf, (int)(p - buf));
     ns->bytes_sent += (uint32_t)(p - buf);

@@ -21,8 +21,14 @@
  *                                  wire so a mid-round-join client
  *                                  reads the right active_slot when
  *                                  the host's mech is on its
- *                                  secondary at first snapshot time). */
-#define SOLDUT_PROTOCOL_ID    ((uint32_t)0x53304C48u)   /* 'S0LH' */
+ *                                  secondary at first snapshot time).
+ *   net-phase-3 = 0x53304C49 ('S0LI') (NET_MSG_INPUT is now a length-
+ *                                  prefixed batch — each datagram
+ *                                  carries the last N=4 client inputs
+ *                                  so a single dropped UDP packet
+ *                                  doesn't desync prediction;
+ *                                  server dedupes by seq). */
+#define SOLDUT_PROTOCOL_ID    ((uint32_t)0x53304C49u)   /* 'S0LI' */
 
 /* Default UDP port for the listen socket. 23073 is a Soldat homage
  * (the original used the same port). */

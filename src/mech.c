@@ -1454,7 +1454,12 @@ static void fire_other_slot_one_shot(World *w, int mid) {
 
     switch ((int)wpn->fire) {
         case WFIRE_HITSCAN:
-            weapons_fire_hitscan(w, mid);
+            /* Lag-comp: pass m->input_view_tick (set by net.c on remote
+             * peer inputs; 0 for host's own mech / AI). The lag-comp
+             * function falls back to current-time hitscan when the tick
+             * is 0 or out of LAG_HIST_TICKS range, so this is safe for
+             * all callers. */
+            weapons_fire_hitscan_lag_comp(w, mid, m->input_view_tick);
             if (wpn->mag_size > 0) m->ammo--;
             break;
         case WFIRE_PROJECTILE:
@@ -1593,7 +1598,9 @@ bool mech_try_fire(World *w, int mid, ClientInput in) {
     if (wpn->fire == WFIRE_HITSCAN) {
         if (!fire_held) return false;
         if (wpn->mag_size > 0 && m->ammo <= 0) return false;
-        weapons_fire_hitscan(w, mid);
+        /* Route through lag-comp; falls back to current-time on
+         * input_view_tick == 0 (host's own / AI mechs) or out-of-range. */
+        weapons_fire_hitscan_lag_comp(w, mid, m->input_view_tick);
         if (wpn->mag_size > 0) m->ammo--;
     }
     else if (wpn->fire == WFIRE_PROJECTILE) {
