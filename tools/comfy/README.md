@@ -1,16 +1,158 @@
-# tools/comfy/ — Soldut ComfyUI asset pipeline
+# tools/comfy/ — Soldut chassis-atlas asset pipeline
 
-The ComfyUI side of the M5 art pipeline. P15 lands the runtime + scripts
-+ the Trooper-specific workflow; the goal is one approved
-`assets/sprites/trooper.png` atlas. P16 reuses the same pipeline for the
-four remaining chassis + the weapon atlas + HUD icons.
+The M5 art pipeline for the per-chassis mech sprite atlases
+(`assets/sprites/<chassis>.png`).
+
+**As of P15 (revised), the shipping path is `extract_gostek.py` — it
+slices a Soldat-style "gostek part sheet" straight into the atlas.**
+The AI-diffusion-canonical pipeline (ComfyUI: skeleton + style anchor →
+SDXL + ControlNet + IP-Adapter → 17-tile crop) is still here, but it's
+the *alternative* path now — it plateaued below the art bar (see
+`TRADE_OFFS.md` → "Chassis art is hand-authored gostek part sheets, not
+the AI-diffusion pipeline" and `documents/m5/11-art-direction.md` for
+the design rationale of *what* the art should look like). Whether the
+team keeps ComfyUI in the loop to *produce* gostek sheets — and what
+workflow does it best — is open.
+
+ComfyUI install (for the diffusion path): `~/ComfyUI` on the original
+dev box, `D:\ComfyUI` on the current asset-gen box.
+
+---
+
+## The shipping path — gostek part-sheet extraction
+
+A **gostek part sheet** is a single reference image
+(`tools/comfy/gostek_part_sheets/<chassis>_gostek_v*.png`) with all 22
+mech body parts laid out, each one flat-shaded, black-outlined, and
+captioned `N. PART_NAME` in reading order:
+
+```
+1. TORSO   2. HIP_PLATE   3. HEAD
+4. SHOULDER_L   5. SHOULDER_R
+6. UPPER_ARM_L   7. UPPER_ARM_R   8. FOREARM_L   9. FOREARM_R   10. HAND_L   11. HAND_R
+12. UPPER_LEG_L   13. UPPER_LEG_R
+14. LOWER_LEG_L   15. LOWER_LEG_R
+16. FOOT_L   17. FOOT_R
+18.-22. STUMP_CAP ×5
+```
+
+This is the layout Soldat itself uses — its "gostek" model is per-part
+rigid skinning, each sprite hooked to a skeleton point with a
+position-point / rotation-reference / anchor (see
+[`wiki.soldat.pl/index.php/Mod.ini`](https://wiki.soldat.pl/index.php/Mod.ini),
+[`urraka.github.io/soldat-gostek`](https://urraka.github.io/soldat-gostek/),
+and OpenSoldat's `client/GostekRendering.pas` /
+`shared/mechanics/Sprites.pas`). Soldut's renderer
+(`src/render.c::draw_mech_sprites` walking the 17-entry
+`g_render_parts[]` z-order over `src/mech_sprites.c::s_default_parts`)
+is the same shape — so a clean part sheet *is* the input the renderer
+wants, no detailed-illustration crop needed.
+
+How you produce the sheet is up to you — hand-drawn, traced, or
+generated out-of-repo (Trooper's `trooper_gostek_v1.png` was
+team-supplied). It just has to be: 22 distinct shapes on a white field,
+each shape ≥ ~12 px in its smallest dimension and ≥ 0.25 % of the
+image area, captioned in the order above, with the limbs drawn so the
+*parent end is at the top* of each part shape (the renderer authors
+limb sprites vertically and rotates them at draw time). 2 colours +
+black outline on white is the natural register; the extractor's
+optional palette snap will conform whatever you give it.
+
+### Run it
+
+```bash
+# from the soldut repo, with the ComfyUI venv (it has PIL + numpy + scipy):
+D:/ComfyUI/.venv/Scripts/python.exe tools/comfy/extract_gostek.py \
+    tools/comfy/gostek_part_sheets/trooper_gostek_v1.png trooper --palette foundry
+
+# keep the sheet's own colours instead of a 2-colour snap:
+... tools/comfy/extract_gostek.py SHEET.png <chassis> --no-post
+```
+
+What it does:
+
+1. **Detect** — `scipy.ndimage.label` over the non-white pixels;
+   keep components ≥ 0.25 % of the image and ≥ 12 px min-dimension
+   (this drops the caption text and any stray rules). Expects exactly
+   22; warns and proceeds if not.
+2. **Order** — band-cluster the 22 bboxes by top edge into reading
+   rows, sort left→right within each row, concatenate rows top→bottom
+   → caption sequence 1..22 → part name → `s_default_parts` slot
+   (`NAME_TO_SLOT`; the 5 `STUMP_CAP`s fill the 5 stump slots in
+   order).
+3. **Crop + key** — crop each shape tight (+3 px pad), then key the
+   white field transparent by flooding from the tile border
+   (`scipy.ndimage.binary_propagation`) so an *enclosed* white panel
+   inside a part stays opaque.
+4. **Orient** — `SLOT_FIX` applies the per-slot rotate/flip needed to
+   land the part in its atlas slot: forearms are drawn horizontally in
+   the sheet but the atlas slot is vertical → `ROTATE_270`; the head
+   gets `FLIP_TOP_BOTTOM` because the renderer's NECK→HEAD bone takes a
+   −180° render rotation.
+5. **Resize** — LANCZOS to the slot's `(draw_w, draw_h)` from the
+   `ATLAS` table (which mirrors `s_default_parts`).
+6. **Post** (unless `--no-post`) — 2-colour palette snap via
+   `crop_canonical.post_process_tile` (Foundry `#1A1612` dark +
+   `#D8731A` accent by default; `--palette` picks another map's pair).
+   **No Bayer/halftone is baked in** — the runtime `halftone_post`
+   shader does the screen at framebuffer resolution, so baking it into
+   the sprite would double-dither.
+7. **Composite** — `alpha_composite` each tile at its `(dst_x, dst_y)`
+   from `ATLAS`. Because `ATLAS` mirrors `s_default_parts`, the output
+   loads correctly with **no transcribe pass**.
+
+Outputs:
+
+- `assets/sprites/<chassis>.png` — the 1024×1024 RGBA atlas the game
+  loads.
+- `tools/comfy/output/<chassis>_gostek_atlas_preview.png` — the source
+  sheet with detected/assigned boxes drawn on, plus the packed atlas
+  at 2× in the corner. Eyeball this to confirm every part landed in
+  the right slot with the right orientation.
+- `tools/comfy/gostek_part_sheets/<chassis>_gostek_manifest.txt` — the
+  reproducibility record (source file + size + palette + per-part src
+  bbox → dst). This one is tracked; the preview lives under the
+  gitignored `output/`.
+
+### Tuning
+
+- **A part landed rotated/mirrored wrong** (e.g. a foot upside-down, a
+  forearm sideways) — adjust that slot's entry in `SLOT_FIX` in
+  `extract_gostek.py` (`{"rot": ±90|180}` and/or `{"flipv": True}`),
+  re-run, re-check the preview.
+- **The detector found ≠ 22 shapes** — usually a caption merged into a
+  part (lower `min_area_frac` won't help; tighten the gap between
+  caption and shape in the sheet) or two parts touched (add whitespace
+  between them in the sheet). The reading-row band tolerance is
+  `band_frac` in `order_by_reading` (fraction of image height) — bump
+  it if parts in the same visual row are being split across rows.
+- **The 2-colour snap is too aggressive / not what you want** —
+  `--no-post` keeps the sheet's colours; or add a palette to
+  `crop_canonical.PALETTES` and pass `--palette <name>`.
+
+### Then log it
+
+Add a row to [`documents/art_log.md`](../../documents/art_log.md) and
+an entry to [`assets/credits.txt`](../../assets/credits.txt) under
+"SPRITES — chassis". For a gostek-extracted sprite the workflow/LoRA/
+seed columns don't apply — note `tools/comfy/extract_gostek.py` + the
+source sheet path + the palette, and record the sheet's *own*
+provenance (who drew/generated it, from what, under what licence) if
+known.
+
+---
+
+## The alternative path — AI-diffusion canonical (ComfyUI)
+
+> Kept for reference and in case a future model / Soldut-trained LoRA
+> closes the quality gap. **Not** the shipping path. If you just want
+> chassis art, use `extract_gostek.py` above.
 
 Full design rationale: [`documents/m5/11-art-direction.md`](../../documents/m5/11-art-direction.md).
-ComfyUI install: `~/ComfyUI` (reused; not reinstalled).
 
-## TL;DR — one command
+### TL;DR — one command
 
-After the one-time setup below, the entire pipeline is one command:
+After the one-time setup below, the diffusion pipeline is one command:
 
 ```bash
 python3 tools/comfy/asset.py trooper            # full pipeline → in-game smoke test
@@ -33,23 +175,32 @@ to tune a single step.
 
 ```
 tools/comfy/
+├── gostek_part_sheets/
+│   ├── trooper_gostek_v1.png                # ← SHIPPING INPUT: the part sheet extract_gostek.py slices
+│   └── <chassis>_gostek_manifest.txt        # reproducibility record written by extract_gostek.py
+├── extract_gostek.py                         # ← SHIPPING PATH: gostek part sheet → assets/sprites/<chassis>.png
 ├── workflows/
 │   └── soldut/
-│       └── mech_chassis_canonical_v1.json   # The locked Pipeline 1 workflow
+│       ├── mech_chassis_canonical_v1.json   # alt path: full Pipeline 1 (≥12 GB VRAM)
+│       └── mech_chassis_canonical_8gb_v1.json  # alt path: 8 GB subset
 ├── skeletons/
-│   ├── trooper_tpose_skeleton.png           # PLACEHOLDER — replace with hand-drawn
-│   └── make_placeholder_skeleton.py          # Regenerator for the placeholder
+│   ├── make_trooper_skeleton.py             # programmatic full-frame T-pose skeleton (diffusion path)
+│   ├── prepare_skeleton.py                  # auto-detect a bare mech silhouette + stamp pivot dots/bone axes
+│   ├── trooper_tpose_skeleton_v2.png        # generated skeleton (diffusion path)
+│   └── trooper_joints.json                  # joint coords (feeds build_crop_table.py)
 ├── style_anchor/
-│   ├── trooper_anchor_v1.png                # PLACEHOLDER — replace with pencil sketch
-│   └── make_placeholder_anchor.py
+│   └── trooper_anchor_v2.png                # AI-generated TRO-ink style anchor (diffusion path)
 ├── crop_tables/
-│   └── trooper_crop.txt                     # 22-entry per-part bbox + pivot table
+│   └── trooper_crop.txt                     # 22-entry per-part bbox + pivot + rotate table (diffusion crop)
+├── build_crop_table.py                      # regenerate <chassis>_crop.txt from <chassis>_joints.json
 ├── stumps/
-│   └── trooper/                             # Drop hand-drawn 32×32 stump PNGs here (Pipeline 5)
-├── output/                                   # Where run_workflow.py drops downloaded PNGs
-├── crop_canonical.py                         # Slice canonical → atlas + Pipeline 7 post
-├── transcribe_atlas.py                       # Emit C literal for g_chassis_sprites
-├── run_workflow.py                           # Drive the API (no UI clicks needed)
+│   └── trooper/                             # hand-drawn 32×32 stump PNGs (Pipeline 5; gitignored)
+├── output/                                   # per-run candidate PNGs + extractor previews (gitignored)
+├── state/                                    # asset.py orchestrator state (gitignored)
+├── crop_canonical.py                         # shared infra: per-tile palette/post + PALETTES table; also slices a canonical → atlas
+├── contact_sheet.py                          # composite candidate PNGs into one review grid
+├── transcribe_atlas.py                       # emit C literal for g_chassis_sprites
+├── run_workflow.py                           # drive the ComfyUI API (no UI clicks needed)
 └── README.md                                 # ← you are here
 ```
 
@@ -88,45 +239,90 @@ or by `git clone`-ing into `~/ComfyUI/custom_nodes/`:
 
 ### 3. Download model files
 
-Place each into the matching `~/ComfyUI/models/<dir>/`. Don't symlink
-through `~/.local/share/ComfyUI/`; the install at `~/ComfyUI` reads
-from its own subtree.
+`mech_chassis_canonical_v1.json` (the full Pipeline 1) needs the four
+files below; ~12.6 GB total. Place each into the matching
+`<ComfyUI>/models/<dir>/` of your local install — on the original dev
+box that's `~/ComfyUI`; on the current asset-gen box it's
+`D:\ComfyUI`. (The 8 GB fallback workflow,
+`mech_chassis_canonical_8gb_v1.json`, needs a different — smaller — set;
+see its `_meta`.) All four are on HuggingFace, public, no auth:
 
-| File | Place under | Source | Notes |
+```bash
+cd <ComfyUI>/models
+curl -L -o checkpoints/Illustrious-XL-v0.1.safetensors \
+  https://huggingface.co/OnomaAIResearch/Illustrious-xl-early-release-v0/resolve/main/Illustrious-XL-v0.1.safetensors
+curl -L -o controlnet/controlnet-union-sdxl-1.0_promax.safetensors \
+  https://huggingface.co/xinsir/controlnet-union-sdxl-1.0/resolve/main/diffusion_pytorch_model_promax.safetensors
+mkdir -p ipadapter
+curl -L -o ipadapter/ip-adapter-plus_sdxl_vit-h.safetensors \
+  https://huggingface.co/h94/IP-Adapter/resolve/main/sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors
+curl -L -o vae/sdxl-vae-fp16-fix.safetensors \
+  https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors
+```
+
+| File on disk | Dir | Source repo (HF) | Notes |
 |---|---|---|---|
-| `illustriousXL_v20.safetensors` (~6.4 GB) | `models/checkpoints/` | https://civitai.com/models/795765/illustrious-xl | Base. Required. OpenRAIL-M. |
-| `battletech_battlemechs.safetensors` | `models/loras/` | https://civitai.com/models/136009/battletech-battlemechs | Mecha-shape LoRA. Required for chassis. Check model card for license. |
-| `super_robot_diffusion_xl.safetensors` | `models/loras/` | https://civitai.com/models/124747 | Optional variety; doc weights it at 0.4. |
-| `lineart_sdxl_v3.safetensors` | `models/loras/` | https://civitai.com/models/539031 | Lineart bias. Strongly recommended. |
-| `controlnet-union-sdxl-1.0/diffusion_pytorch_model_promax.safetensors` (~2.5 GB) | `models/controlnet/controlnet-union-sdxl-1.0/` | https://huggingface.co/xinsir/controlnet-union-sdxl-1.0 | Required. One ControlNet for canny / lineart / scribble. |
-| `ip-adapter-plus_sdxl_vit-h.safetensors` | `models/ipadapter/` (create the dir) | https://huggingface.co/h94/IP-Adapter | Required. Style-anchor conditioning. |
-| `model.safetensors` (image_encoder) | `models/clip_vision/` (rename to `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors`) | https://huggingface.co/h94/IP-Adapter (image_encoder folder) | Required by IPAdapterUnifiedLoader. |
-| `sdxl-vae-fp16-fix.safetensors` | `models/vae/` | https://huggingface.co/madebyollin/sdxl-vae-fp16-fix | Required. fp16-safe VAE. |
+| `Illustrious-XL-v0.1.safetensors` (~6.94 GB) | `models/checkpoints/` | `OnomaAIResearch/Illustrious-xl-early-release-v0` | Base checkpoint. SDXL-derived (`license:other` — commercial output OK per documents/m5/11-art-direction.md §License hygiene). |
+| `controlnet-union-sdxl-1.0_promax.safetensors` (~2.51 GB) | `models/controlnet/` | `xinsir/controlnet-union-sdxl-1.0` — file `diffusion_pytorch_model_promax.safetensors`, renamed to a flat top-level filename so the workflow path has no `/` vs `\` platform difference | One ControlNet, all conditioning types (canny / lineart / scribble / …). apache-2.0. |
+| `ip-adapter-plus_sdxl_vit-h.safetensors` (~0.85 GB) | `models/ipadapter/` (create the dir if missing) | `h94/IP-Adapter` — file `sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors` | Style-anchor conditioning. apache-2.0. |
+| `clip_vision_h.safetensors` (~1.26 GB) | `models/clip_vision/` | OpenCLIP ViT-H/14 laion2B (any `clip_vision_h.safetensors` or `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors`) — the image encoder IP-Adapter PLUS SDXL requires | If you don't have it, grab `sdxl_models/image_encoder/model.safetensors` from `h94/IP-Adapter` and rename. |
+| `sdxl-vae-fp16-fix.safetensors` (~0.33 GB) | `models/vae/` | `madebyollin/sdxl-vae-fp16-fix` — file `sdxl_vae.safetensors`, renamed | fp16-safe VAE. mit. |
 
-The workflow JSON references each by the exact filename above. If you
+The spec's LoRA stack (`battletech_battlemechs` @0.6 / `super_robot_diffusion_xl`
+@0.4 / `lineart_sdxl_v3` @0.5 — all on Civitai, gated) is **not wired**
+into the shipped workflow; the chassis output is currently
+prompt + ControlNet + IP-Adapter + Pipeline 7 post only. To add it,
+splice a `LoraLoader` chain between node 1 (`CheckpointLoaderSimple`)
+and node 23 (`IPAdapterAdvanced`) on the MODEL line and re-point the
+two `CLIPTextEncode` nodes (30, 31) at the last `LoraLoader`'s CLIP —
+the workflow `_meta.description` notes this. A custom Soldut-trained
+LoRA (per documents/m5/11-art-direction.md §"Escalation path 1") is
+the better long-term lever once ~30+ approved sprites exist.
+
+The workflow JSON references each file by the exact name above. If you
 download something with a different name, fix the workflow's
-`ckpt_name` / `lora_name` / `control_net_name` / `vae_name` strings.
+`ckpt_name` / `control_net_name` / `ipadapter_file` / `clip_name` /
+`vae_name` strings (or `lora_name` if you add LoRAs).
 
-### 4. Hand-draw a real T-pose skeleton
+### 4. T-pose skeleton (the ControlNet input)
 
-The placeholder at `tools/comfy/skeletons/trooper_tpose_skeleton.png`
-exists so the workflow loads. **It is not the input you ship from.**
+The diffusion path needs a 1024×1024 T-pose skeleton image with magenta
+pivot dots. Two ways to get one:
 
-Replace it with a hand-drawn 1024×1024 PNG. Specs (per
-[`documents/m5/11-art-direction.md`](../../documents/m5/11-art-direction.md)
-§"Pipeline 1"):
+- **`make_trooper_skeleton.py`** — programmatic full-frame mech anatomy
+  (helmet+visor, panel-lined torso with power core, hip plate, shoulder
+  pads, gauntlets, boots, 16 magenta pivot dots). A self-contained
+  starting point: `python tools/comfy/skeletons/make_trooper_skeleton.py`.
+- **`prepare_skeleton.py`** — if you already have a *bare* mech
+  silhouette (no dots), this auto-detects the silhouette
+  (frame-aware flood-fill so a decorative border doesn't confuse it),
+  derives the 16 joint positions from a chassis profile
+  (`PROFILE_TROOPER` and friends — head/neck/chest/pelvis rows, arm
+  row at the vertical centre of the horizontal arm, leg centres from
+  blob detection at the knee/foot rows), and stamps the magenta pivot
+  dots + faint bone axes:
+  `python tools/comfy/skeletons/prepare_skeleton.py INPUT.png trooper --clean --overlay --joints-out --size 1024`.
+  Output goes to `<chassis>_tpose_skeleton_v2.png`; `--overlay` writes a
+  debug overlay; `--joints-out` writes `<chassis>_joints.json` (which
+  `build_crop_table.py` then turns into `<chassis>_crop.txt`).
+
+Either way:
 
 - **1024×1024**, white background, pure black ink at 2-3 px line
   weight.
-- Trooper-sized mech in T-pose. **Arms hang vertically** (not
-  horizontal) — the renderer authors limb sprites vertically and
-  rotates them at draw time, so the canonical needs them in their
-  rest position.
+- Trooper-sized mech in T-pose. **Arms drawn horizontally** in the
+  canonical (the AI fills around the silhouette); the *atlas slots* are
+  vertical, so the crop step (`crop_canonical.py`, `rotate` column) /
+  the extractor (`extract_gostek.py`, `SLOT_FIX`) rotates the forearm
+  tiles −90° at pack time. The renderer authors limb sprites vertically
+  and rotates them at draw time.
 - **Magenta dots** (RGB 255, 0, 255) at every joint particle:
   NECK, HEAD, CHEST, PELVIS, L_SHOULDER, R_SHOULDER,
   L_ELBOW, R_ELBOW, L_HAND, R_HAND, L_HIP, R_HIP,
   L_KNEE, R_KNEE, L_FOOT, R_FOOT. (16 dots total — `crop_canonical.py`
-  doesn't extract these but they're the geometric source of truth.)
+  doesn't extract these, but they're the geometric source of truth, and
+  `build_crop_table.py` reads `<chassis>_joints.json` to derive the
+  per-part crop rects from them.)
 - **Light grey rectangles at parent-side overlap regions** (where the
   shoulder plate overlaps the upper-arm, hip plate overlaps the upper-
   leg, etc.). The AI honors these as "exposed end" markers per
@@ -135,29 +331,29 @@ Replace it with a hand-drawn 1024×1024 PNG. Specs (per
 - **Ragged silhouette edges** at the same overlap regions — wavy
   borders so the AI's continuation reads as torn metal where parent
   meets child.
-- Match the joint coords in
-  `tools/comfy/skeletons/make_placeholder_skeleton.py`. If you change
-  them, also update `tools/comfy/crop_tables/trooper_crop.txt`.
+- If you move joint coords, regenerate the crop table:
+  `python tools/comfy/build_crop_table.py trooper` (reads
+  `trooper_joints.json`, writes `trooper_crop.txt` + a
+  `<stem>_flat.png` with the canonical's background flattened to white).
 
-The placeholder regenerator (`make_placeholder_skeleton.py`) is a
-recoverable starting point if you delete the PNG by accident.
-
-### 5. (Optional) Hand-draw a style anchor
+### 5. (Optional) Style anchor
 
 The IP-Adapter step conditions on style, not geometry, so anything
-that reads as ink-on-paper Battletech-TRO works as the v1 anchor:
+that reads as ink-on-paper Battletech-TRO works as the anchor:
 
 - A pencil sketch from your notebook.
 - A page from a Battletech 3025/3039 TRO photographed at high
   contrast (study only — don't ship the source).
-- The placeholder anchor at
-  `tools/comfy/style_anchor/trooper_anchor_v1.png` (a crude rectangle
-  silhouette + halftone hatching). It works, but the canonical output
-  inherits its level of detail — better anchor = better output.
+- The shipped `tools/comfy/style_anchor/trooper_anchor_v2.png`
+  (itself AI-generated, best-of-4 from the prompt-only
+  `style_anchor_v1.json` workflow). The canonical output inherits the
+  anchor's level of detail — better anchor = better output.
 
-The proper iteration is **anchor recursion**: run the workflow with the
-v1 anchor, pick the best of 8 candidates as `trooper_anchor_v2.png`,
-re-run, pick again as `_v3.png`, and so on until the output converges.
+The proper iteration is **anchor recursion**: run the workflow, pick
+the best of 8 candidates as `<chassis>_anchor_v3.png`, re-run, pick
+again as `_v4.png`, and so on until the output converges. (In practice
+this is what hit the ceiling — see `TRADE_OFFS.md`. The gostek path
+sidesteps it.)
 
 ## Drive the workflow
 
@@ -172,8 +368,8 @@ cd ~/ComfyUI && python main.py --listen 127.0.0.1 --port 8188
 # In another shell, from the soldut repo:
 python3 tools/comfy/run_workflow.py \
     --workflow tools/comfy/workflows/soldut/mech_chassis_canonical_v1.json \
-    --skeleton tools/comfy/skeletons/trooper_tpose_skeleton.png \
-    --anchor   tools/comfy/style_anchor/trooper_anchor_v1.png \
+    --skeleton tools/comfy/skeletons/trooper_tpose_skeleton_v2.png \
+    --anchor   tools/comfy/style_anchor/trooper_anchor_v2.png \
     --seed 1000001 --batch 8
 ```
 
@@ -188,7 +384,7 @@ Re-run with different seeds to explore the anchor convergence quickly:
 ```bash
 python3 tools/comfy/run_workflow.py \
     --workflow tools/comfy/workflows/soldut/mech_chassis_canonical_v1.json \
-    --skeleton tools/comfy/skeletons/trooper_tpose_skeleton.png \
+    --skeleton tools/comfy/skeletons/trooper_tpose_skeleton_v2.png \
     --anchor   tools/comfy/style_anchor/trooper_anchor_v2.png \
     --seed 1000001 --batch 8 --prefix trooper_iter2
 ```
@@ -237,20 +433,30 @@ python3 tools/comfy/crop_canonical.py \
 ```
 
 The script:
-1. Reads `tools/comfy/crop_tables/trooper_crop.txt` (22 entries).
-2. Slices each part rectangle from the canonical.
+1. Reads `tools/comfy/crop_tables/trooper_crop.txt` (22 entries — incl.
+   the `rotate` column for the horizontal→vertical forearm/head tiles).
+2. Slices each part rectangle from the canonical, applies the per-row
+   `rotate`, resizes the tile to its runtime sprite size
+   (`draw_w × draw_h`).
 3. Pulls hand-drawn stump caps from `tools/comfy/stumps/trooper/`
    if present (otherwise uses the placeholder corner row from the
    canonical).
-4. Applies Pipeline 7 post: alpha-key the white background, run a
-   Bayer-8 halftone screen, remap to the foundry 2-color palette
-   (`#1A1612` dark + `#D8731A` accent), nearest-neighbor
-   round-trip downsample to kill any AI smoothness.
+4. Post: alpha-key the white background (border-flood so enclosed
+   white panels survive), then — unless `--no-post` — a **flat
+   2-colour luminance snap** to the map palette (`#1A1612` dark +
+   `#D8731A` accent for Foundry) with a nearest-neighbor half-size
+   round-trip to kill AI smoothness. (No Bayer/halftone is baked in:
+   the runtime `halftone_post` shader screens at framebuffer res, so
+   baking it here would double-dither.)
 5. Composites everything into a 1024×1024 atlas at the same dst
    positions as `src/mech_sprites.c::s_default_parts` — so no
    transcribe pass is needed.
 6. Writes `assets/sprites/trooper.png` + an annotated preview at
    `tools/comfy/output/trooper_atlas_preview.png`.
+
+(`crop_canonical.py` is also imported by `extract_gostek.py` for its
+`PALETTES` table + `post_process_tile` helper — same per-tile post,
+shared between the two paths.)
 
 If the canonical has the head right-side-up (and you want the head
 sprite to render correctly without re-tuning the runtime rotation
@@ -336,19 +542,26 @@ The model files aren't at the paths the workflow expects. Open a
 ComfyUI shell + run `ls ~/ComfyUI/models/checkpoints/` etc. and
 match the filenames against the workflow JSON.
 
-**`IPAdapterUnifiedLoader` errors with `clip_vision not found`**
-Move `model.safetensors` from IP-Adapter's `image_encoder/` directory
-into `~/ComfyUI/models/clip_vision/` and rename to
-`CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` (or whatever the node
-expects — check the IPAdapter_plus README).
+**`CLIPVisionLoader` errors with `clip_vision_h.safetensors` not in list**
+The full workflow uses explicit `IPAdapterModelLoader` +
+`CLIPVisionLoader` nodes (not `IPAdapterUnifiedLoader`), referencing
+`ip-adapter-plus_sdxl_vit-h.safetensors` and `clip_vision_h.safetensors`
+by exact name. If you don't have the ViT-H image encoder, grab
+`sdxl_models/image_encoder/model.safetensors` from `h94/IP-Adapter`,
+drop it in `<ComfyUI>/models/clip_vision/`, rename it (e.g. to
+`clip_vision_h.safetensors`), and update node 22's `clip_name` if you
+named it something else.
 
-**`controlnet-union` errors with `unable to load control net`**
-The Union ControlNet ships in a subdirectory; the path in the
-workflow is
-`controlnet-union-sdxl-1.0/diffusion_pytorch_model_promax.safetensors`.
-Check `~/ComfyUI/models/controlnet/controlnet-union-sdxl-1.0/` for the
-file. If yours is named differently, fix the workflow's
-`control_net_name`.
+**`ControlNetLoader` errors with `controlnet-union-...` not in list**
+The full workflow expects a flat filename
+`controlnet-union-sdxl-1.0_promax.safetensors` directly in
+`<ComfyUI>/models/controlnet/` (no subdir — the original repo file is
+`diffusion_pytorch_model_promax.safetensors` inside the
+`xinsir/controlnet-union-sdxl-1.0` repo; rename it on download). If you
+keep the subdir/original name, fix node 12's `control_net_name` to
+match exactly what `/object_info/ControlNetLoader` lists (ComfyUI on
+Windows reports `\` separators, on Linux `/` — the flat filename
+sidesteps that).
 
 **Output looks like a generic SDXL render, not Battletech-TRO**
 Either the LoRAs failed to load or the IP-Adapter weight is too low.

@@ -14,16 +14,28 @@ and fails CI if any shipped file lacks a row here.
 DISCLOSURE
 ----------------------------------------------------------------------
 
-Some 2D background and concept assets in this game were generated with
-the assistance of Stable Diffusion XL (Illustrious-XL fine-tune,
-OpenRAIL-M license) via ComfyUI, with substantial post-generation
-editing, palette mapping, compositing, and integration by the
+Some 2D background, concept, and (potentially) mech-related assets in
+this game were generated with the assistance of Stable Diffusion XL
+(Illustrious-XL fine-tune, SDXL-derived OpenRAIL-M-equivalent license)
+via ComfyUI, with geometry locked by hand-authored/programmatic
+skeleton inputs (ControlNet), style anchored to a single approved
+reference image (IP-Adapter), and substantial post-generation editing —
+2-color palette mapping, halftone screening, nearest-point
+downsampling, per-part cropping, compositing, and integration — by the
 developer.
 
-Each AI-assisted asset is listed below with its workflow file, LoRA
-stack, IP-Adapter anchor, seed, and modification chain. The same
-metadata is mirrored in `documents/art_log.md` per the project's
-mandatory iteration-log policy
+The per-chassis mech sprite atlases (`assets/sprites/<chassis>.png`)
+are sliced by `tools/comfy/extract_gostek.py` from "gostek part sheets"
+— hand-authored (or externally-produced) reference images of the 22
+mech body parts, in the layout Soldat's gostek model uses. Whether a
+given part sheet was itself AI-generated is recorded in that asset's
+row below; the slice + palette-snap + atlas-pack step is deterministic
+tooling, not generation.
+
+Each AI-assisted asset is listed below with its provenance and (where
+applicable) workflow file, LoRA stack, IP-Adapter anchor, seed, and
+modification chain. The same metadata is mirrored in
+`documents/art_log.md` per the project's mandatory iteration-log policy
 (see documents/m5/11-art-direction.md §"License hygiene").
 
 Hand-drawn, traced, and CC0-sourced assets are listed alongside; their
@@ -60,11 +72,16 @@ assets/shaders/halftone_post.fs.glsl
             and Daniel Ilett's Obra Dinn dithering walkthrough.
 
 ----------------------------------------------------------------------
-SPRITES — chassis (AI-assisted via Pipeline 1)
+SPRITES — chassis (gostek part-sheet extraction; see ASSETS REGISTRY below)
 ----------------------------------------------------------------------
 
 (Populated as each chassis atlas lands. P15 ships the Trooper; P16 the
-remaining four. Format below is the canonical entry shape.)
+remaining four. Since P15 (revised) the atlases come from
+`tools/comfy/extract_gostek.py` slicing a gostek part sheet — see
+`tools/comfy/README.md` → "The shipping path". The commented Pipeline-1
+example row below is kept for reference in case the AI-diffusion path is
+ever used for a chassis; the live rows are in the ASSETS REGISTRY
+section at the bottom of this file.)
 
 # Example row — fill in the seed, workflow_hash, and modification
 # columns when the first real Trooper atlas is approved:
@@ -116,54 +133,58 @@ ASSETS REGISTRY (populated as assets land)
 # format consistent so tools/credits/check.sh can validate it
 # mechanically.
 
-assets/sprites/trooper.png  (P15, first approved atlas)
-  source:           ComfyUI workflow
-                    tools/comfy/workflows/soldut/mech_chassis_canonical_8gb_v1.json
-                    (8GB-tuned variant of Pipeline 1; the spec'd
-                    mech_chassis_canonical_v1.json doesn't fit in 8GB VRAM)
-  base_model:       Illustrious-XL v0.1 (OpenRAIL-M, commercial OK)
-                    via OnomaAIResearch/Illustrious-xl-early-release-v0 on HF
-  controlnet:       T2I-Adapter Lineart SDXL fp16 (~150 MB) at strength 0.95
-                    via TencentARC/t2i-adapter-lineart-sdxl-1.0 on HF
-                    (substitute for the spec'd ControlNet-Union promax 2.5 GB,
-                    which doesn't fit alongside SDXL on 8 GB VRAM)
-  ip_adapter:       not used (8GB VRAM constraint — see TRADE_OFFS.md
-                    "ControlNet-Union promax + IP-Adapter chain doesn't fit
-                    in 8GB VRAM")
-  skeleton:         tools/comfy/skeletons/trooper_tpose_skeleton.png
-                    (1024×1024, programmatic full-frame mech anatomy via
-                    tools/comfy/skeletons/make_trooper_skeleton.py — helmet
-                    with visor, panel-lined torso with power core, hip plate,
-                    shoulder pads, gauntlets, boots; magenta pivot dots at
-                    every joint)
-  style_anchor:     tools/comfy/style_anchor/trooper_anchor_v2.png
-                    (AI-generated, best-of-4 from the prompt-only
-                    style_anchor_v1.json workflow at seed 7700001;
-                    Battletech-TRO ink-on-paper register; not consumed by the
-                    8GB workflow but kept on disk for the spec'd workflow on
-                    bigger GPUs)
-  vae:              SDXL VAE fp16-fix on CPU (madebyollin/sdxl-vae-fp16-fix on HF)
-                    — GPU VAE OOMs at 1024×1024 after the model+adapter swap
-                    on 8GB; CPU VAE adds ~25 sec but completes reliably
-  sampler:          KSampler dpmpp_2m_sde / karras, 28 steps, cfg 7.0
-  seed:             1000001
-  modification:     Pipeline 7 post applied via tools/comfy/crop_canonical.py:
-                    alpha-key white background → transparent, Bayer-8 halftone
-                    screen, 2-color palette remap to Foundry (dark #1A1612 +
-                    accent #D8731A), nearest-neighbor half-size round-trip
-                    downsample. Each tile resized to runtime sprite size
-                    (draw_w × draw_h) before paste. 22 sub-rects per
-                    tools/comfy/crop_tables/trooper_crop.txt.
-  human_direction:  workflow JSON authored, prompt authored, anchor reviewed
-                    (best of 4 candidates approved as v2), skeleton geometry
-                    authored, palette authored, crop table authored,
-                    post-process pipeline authored, atlas layout authored
-  caveats:          rough first-pass quality. Recognizable mech silhouette
-                    + correct anatomical positioning, but interior detail is
-                    sparse because IP-Adapter was dropped to fit 8GB VRAM.
-                    Style consistency comes from prompt + post-process rather
-                    than IP-Adapter conditioning. Suitable for runtime path
-                    validation + visible distinctness in playtest; ship-quality
-                    refinement comes through prompt + skeleton + anchor
-                    iteration in P16 (or moving to ≥12GB hardware where the
-                    spec'd workflow runs).
+assets/sprites/trooper.png  (P15 revised — gostek part-sheet extraction)
+  source:           tools/comfy/gostek_part_sheets/trooper_gostek_v1.png
+                    (a "gostek part sheet" — one 2048×2048 reference image
+                    with all 22 mech body parts laid out flat-shaded,
+                    black-outlined, and captioned in reading order, in the
+                    layout Soldat's gostek model uses for per-part rigid
+                    skinning; supplied by the team)
+  sheet_provenance: team-authored reference sheet; the production method
+                    (hand-drawn / vector / traced / generated out-of-repo)
+                    is not recorded in this commit. If the sheet was derived
+                    from a licensed source (e.g. an AI model + LoRA, or a
+                    traced image), record that here and in documents/art_log.md.
+  pipeline:         tools/comfy/extract_gostek.py
+                    tools/comfy/gostek_part_sheets/trooper_gostek_v1.png
+                    trooper --palette foundry
+                    (deterministic: scipy connected-component detect of the
+                    22 part shapes → reading-row order → s_default_parts slot
+                    → per-part rotate/flip [forearms ROTATE_270, head
+                    FLIP_TOP_BOTTOM] → resize to runtime sprite size → border-
+                    flood white-key → composite at the dst rects that mirror
+                    src/mech_sprites.c::s_default_parts. No transcribe step.)
+  modification:     2-colour palette snap to Foundry (dark #1A1612 + accent
+                    #D8731A) via tools/comfy/crop_canonical.post_process_tile,
+                    + nearest-neighbor half-size round-trip per tile. No
+                    Bayer/halftone is baked in — the runtime halftone_post
+                    shader screens at framebuffer resolution.
+  manifest:         tools/comfy/gostek_part_sheets/trooper_gostek_manifest.txt
+                    (per-part src bbox → dst, written by extract_gostek.py;
+                    detected 22 part shapes, 7 reading rows 3/2/6/2/2/2/5)
+  loras:            n/a (no diffusion step in this path)
+  ip_adapter:       n/a
+  seed:             n/a
+  human_direction:  gostek part sheet authored/sourced; extractor's slot/
+                    rotation table (SLOT_FIX) tuned against the preview;
+                    palette authored; in-game shot-test verified (Trooper
+                    renders as a chunky industrial mech, not capsules).
+  caveats:          first gostek pass — a clean, recognizable industrial mech
+                    in the Foundry 2-colour register. Refinement of the sheet
+                    itself (proportions, panel detail) is the iterative lever
+                    in P16; the renderer/extractor side is locked.
+  hardware_note:    NOT a build prerequisite — the extractor needs Python +
+                    PIL + numpy + scipy (the ComfyUI venv has them). To
+                    regenerate: `python tools/comfy/extract_gostek.py
+                    tools/comfy/gostek_part_sheets/trooper_gostek_v1.png
+                    trooper --palette foundry`.
+  diffusion_alt:    The AI-diffusion path (tools/comfy/workflows/soldut/
+                    mech_chassis_canonical_v1.json full Pipeline 1 + _8gb_v1
+                    subset; asset.py orchestrator; crop_canonical.py canonical-
+                    crop mode) stays in the repo but is NOT what shipped here —
+                    it plateaued below the art bar (see TRADE_OFFS.md "Chassis
+                    art is hand-authored gostek part sheets, not the
+                    AI-diffusion pipeline"). The previously-shipped Trooper
+                    atlas from that path (mech_chassis_canonical_v1.json,
+                    Illustrious-XL + ControlNet-Union promax + IP-Adapter Plus,
+                    seed 1000001) is superseded by this row.

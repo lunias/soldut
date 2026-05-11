@@ -25,6 +25,8 @@ Thumbs.db
 *~
 .vscode/
 .idea/
+__pycache__/
+*.pyc
 
 # Logs
 *.log
@@ -34,9 +36,12 @@ Thumbs.db
 # then).
 assets/maps/
 
-# ComfyUI iteration scratch (P15+). Workflow JSONs, skeletons,
-# anchors, crop tables are tracked; per-run candidate PNGs and
-# orchestrator state are not.
+# ComfyUI iteration scratch (P15+). Tracked inputs: workflow JSONs,
+# skeletons, style anchors, crop tables, and the gostek part sheets
+# (tools/comfy/gostek_part_sheets/<chassis>_gostek_v*.png — the
+# shipping path since the P15 revision). Not tracked: per-run
+# candidate PNGs, the extractor's preview/atlas dumps, orchestrator
+# state.
 tools/comfy/output/
 tools/comfy/state/
 tools/comfy/stumps/

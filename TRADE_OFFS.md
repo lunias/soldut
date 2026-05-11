@@ -13,23 +13,52 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-10** (post-P15 — first chassis atlas on disk
-+ sprite anchor fixes. Trooper canonical generated end-to-end on
-RTX 2080 8GB / WSL2; the spec'd ControlNet-Union promax + IP-Adapter
-PLUS chain at 1024×1024 doesn't fit (multiple OOMs / hangs this
-session). Working subset uses T2I-Adapter Lineart SDXL (~150MB) in
-place of ControlNet-Union (2.5GB), drops IP-Adapter, runs CPU VAE to
-avoid the GPU-VAE OOM at 1024×1024. **New entry**:
-"ControlNet-Union promax + IP-Adapter chain doesn't fit in 8GB VRAM".
-Two render-side sprite-anchor fixes (no trade-off entries — these
-are plain bug fixes): `draw_mech_sprites` now scales sprite dst_h
-to match the actual bone span (was authored 2.4–5.7× bigger, dense
-AI tiles overhung past particles); foot pivot moved to bottom edge
-so the boot draws above the FOOT particle (was clipping into the
-platform with center pivot). The "Mech capsule renderer is the
-no-asset fallback" entry's deletion gate is partially met (Trooper
-atlas shipped) but stays open until the remaining four chassis +
-stump caps land in P16.
+Last updated: **2026-05-10** (P15 revised — chassis art now comes
+from a Soldat-style **gostek part sheet** sliced by
+`tools/comfy/extract_gostek.py`, not the AI-diffusion-canonical
+pipeline. The diffusion path (skeleton + style anchor → SDXL +
+ControlNet-Union + IP-Adapter → crop) plateaued below the art bar:
+Illustrious-XL is fundamentally an anime base and IP-Adapter
+style-transfer can't pull it into the flat-shaded technical-readout
+register the 17-part rigid renderer wants, the spec'd BattleTech LoRA
+is SD1.5-incompatible, and a detailed-illustration crop renders as a
+same-colour mush at the ~80 px the mech occupies on screen. A gostek
+part sheet — one reference image with all 22 body parts laid out
+flat-shaded + black-outlined + captioned in reading order — *is* that
+register, and the extractor lands it straight into the atlas with a
+deterministic crop/rotate/resize/palette-snap pass against
+`s_default_parts`. `assets/sprites/trooper.png` now comes from
+`tools/comfy/gostek_part_sheets/trooper_gostek_v1.png` via
+`extract_gostek.py --palette foundry`. **New entry** "Chassis art is
+hand-authored gostek part sheets, not the AI-diffusion pipeline
+(P15 revised)" replaces "ControlNet-Union promax + IP-Adapter chain
+doesn't fit in 8GB VRAM" and the short-lived "Low-VRAM ComfyUI
+fallback workflow" — the AI-diffusion tools stay in `tools/comfy/`
+as a documented alternative but are no longer the shipping path. The
+"Mech capsule renderer is the no-asset fallback" entry stays open —
+only Trooper has a part sheet; Scout/Heavy/Sniper/Engineer + stump
+caps land in P16 via the same `extract_gostek.py` path.
+`tools/comfy/crop_canonical.py` (now shared infra between the gostek
+and diffusion paths) lost the baked Bayer screen from `post_process_tile`
+— the runtime `halftone_post` shader screens at framebuffer res, so
+baking a Bayer pattern into the sprite double-dithered it; it now does
+a flat 2-colour luminance snap and gained a `rotate` crop-table column.
+
+Previously: 2026-05-10 (P15-revisit — Trooper chassis atlas
+regenerated through the *full* Pipeline 1 on an RTX 5090 / 32 GB:
+Illustrious-XL v0.1 base + ControlNet-Union SDXL 1.0 promax + IP-Adapter
+Plus SDXL ViT-H + KSampler dpmpp_2m_sde/karras + sdxl-vae-fp16-fix on
+GPU; superseded by the gostek pivot above. The "ControlNet-Union promax
++ IP-Adapter chain doesn't fit in 8GB VRAM" entry was deleted then; the
+8 GB fallback workflow JSON stays on disk as part of the now-secondary
+diffusion path.).
+
+Previously: 2026-05-10 (post-P15 — first chassis atlas on disk +
+two render-side sprite-anchor bug fixes: `draw_mech_sprites` scales
+sprite dst_h to match the actual bone span; foot pivot moved to the
+bottom edge so the boot draws above the FOOT particle. First Trooper
+atlas was generated on an RTX 2080 8GB / WSL2 via an 8GB-tuned
+subset of Pipeline 1 — superseded.).
 
 Previously: 2026-05-09 (post-P14 — audio module shipped:
 `src/audio.{c,h}` with 47-entry SFX manifest + alias pool +
@@ -408,81 +437,84 @@ the ban-by-name simplification.).
   damage-feedback layers in BOTH render paths so a no-atlas build
   still gets hit-flash + decals + spray + emitter + smoke; only the
   stump-cap sub-rects skip in capsule mode (the spec explicitly
-  calls this out). **P15 partially addresses this**: Trooper now has
-  an authored atlas (`assets/sprites/trooper.png`) generated through
-  the ComfyUI Pipeline 1 (8GB-tuned subset). The remaining four
-  chassis (Scout / Heavy / Sniper / Engineer) still render as
-  capsules until P16.
+  calls this out). **P15 (revised) partially addresses this**:
+  Trooper has an authored atlas (`assets/sprites/trooper.png`),
+  extracted by `tools/comfy/extract_gostek.py` from a gostek part
+  sheet (`tools/comfy/gostek_part_sheets/trooper_gostek_v1.png`) and
+  snapped to the Foundry 2-colour register. The remaining four chassis
+  (Scout / Heavy / Sniper / Engineer) + the 5 stump caps still render
+  as capsules until P16.
 - **Why** — P10 deliberately split the runtime + per-chassis bone
   distinctness + data-table pipeline from the held-weapon-art (P11)
   and damage-feedback layers (P12) so each lands as a focused review
-  surface. Asset generation runs in P15–P16; per-chassis iteration
-  is gated on the user driving ComfyUI through the pipeline.
+  surface. Asset content for the chassis lands in P15–P16; per-chassis
+  iteration is gated on someone authoring (or generating) the gostek
+  part sheet for that chassis.
 - **Revisit when** —
-  - P16 ships the four remaining chassis atlases + stump caps. At
-    that point this entry deletes — the capsule path stays in source
-    as a dev-machine convenience for builds without asset packs,
+  - P16 ships the four remaining chassis part sheets (each →
+    `extract_gostek.py` → `assets/sprites/<chassis>.png`) + the stump
+    caps. At that point this entry deletes — the capsule path stays in
+    source as a dev-machine convenience for builds without asset packs,
     which is a tiny code surface.
   - The capsule fallback masks a real regression (e.g. a sprite-path
     bug that fires only when atlases load). Symptom: shot tests pass
     with capsules but break under synthetic-atlas sprite tests.
 
-### ControlNet-Union promax + IP-Adapter chain doesn't fit in 8GB VRAM (P15)
+### Chassis art is hand-authored gostek part sheets, not the AI-diffusion pipeline (P15 revised)
 
-- **What we did** — `documents/m5/11-art-direction.md` §"Pipeline 1"
-  specs SDXL + ControlNet-Union promax (2.5 GB) + IP-Adapter PLUS
-  (CLIP-Vision-H 1.2 GB + IPA 0.8 GB) at 1024×1024. On RTX 2080 / 8GB
-  VRAM under WSL2, multiple iterations this session OOMed during VAE
-  decode or hung indefinitely on the IP-Adapter→VAE swap (comfy at
-  0% GPU util, queue stuck at 1). The spec'd `mech_chassis_canonical_v1.json`
-  workflow stays as the reference for 12GB+ GPUs but is not the
-  shipping path on 8GB.
-  We ship a **drop-in 8GB substitute** —
-  `tools/comfy/workflows/soldut/mech_chassis_canonical_8gb_v1.json` —
-  with three differences from the spec:
-  1. ControlNet-Union promax (2.5 GB) replaced by **T2I-Adapter
-     Lineart SDXL** (TencentARC/t2i-adapter-lineart-sdxl-1.0 fp16,
-     ~150 MB). T2I-Adapter does the same job (skeleton-geometry
-     conditioning) at <10% the VRAM cost. Loaded through the same
-     `ControlNetLoader`/`ControlNetApplyAdvanced` nodes in modern
-     comfy.
-  2. IP-Adapter PLUS chain (CLIP-Vision-H + IPA, ~2.5 GB) **dropped
-     entirely**. Style consistency comes from prompt + Pipeline 7
-     post (palette remap + halftone screen) instead of conditioning
-     on the anchor image.
-  3. VAE decode at 1024×1024 runs on **CPU** (`--cpu-vae` server
-     flag). GPU VAE OOMs at this resolution after the model+adapter
-     swap; tiled GPU VAE OOMs too. CPU VAE is slower (~25 sec at
-     1024×1024) but reliable; total wall time still ~45 sec.
-  The Trooper atlas generated through this path (`assets/sprites/trooper.png`)
-  is rough first-pass quality — recognizable mech silhouette but
-  noisy interior — because we lose IP-Adapter's style anchoring and
-  the prompt+ControlNet alone don't enforce TRO-register surface
-  detail as strongly.
-- **Why** — The 8GB ceiling is hardware. Without a bigger GPU we
-  can't run the full chain; without the full chain the output drifts
-  from the spec'd register. Three options weighed:
-  (a) drop one piece and accept lower quality (chosen for P15
-  Trooper),
-  (b) iterate prompt + skeleton + multi-pass refinement to compensate
-  (the iteration lever; happens in P16+ candidate review),
-  (c) borrow / upgrade hardware (deferred — the user has friends with
-  bigger GPUs but doesn't want to chase that for the first pass).
+- **What we did** — `assets/sprites/<chassis>.png` is produced by
+  `tools/comfy/extract_gostek.py`: a "gostek part sheet" — one
+  reference image (Trooper's is 2048×2048) with all 22 body parts laid
+  out flat-shaded, black-outlined, and captioned in reading order
+  (the layout Soldat's gostek model uses: per-part rigid skinning,
+  each sprite hooked to a skeleton point — see
+  `wiki.soldat.pl/index.php/Mod.ini` and OpenSoldat's
+  `client/GostekRendering.pas`) — gets sliced (scipy connected-component
+  detection of the 22 shapes → band-cluster into reading rows →
+  caption-sequence → `s_default_parts` slot) and each part is
+  rotated/flipped to its vertical/horizontal atlas slot, resized to the
+  runtime sprite size, white-keyed (border flood so enclosed white
+  panels survive), and optionally palette-snapped to the map's two
+  colours. The output composites at the same dst rects as
+  `src/mech_sprites.c::s_default_parts`, so no transcribe pass is
+  needed. The AI-diffusion-canonical pipeline (`asset.py` orchestrator
+  + `mech_chassis_canonical_v1.json` / `_8gb_v1.json` workflows +
+  `crop_canonical.py` canonical-crop mode + `make_trooper_skeleton.py`
+  / `prepare_skeleton.py` skeletons + `build_crop_table.py`) stays in
+  `tools/comfy/` as a documented alternative path but is **not** what
+  the build ships from.
+- **Why** — The diffusion path plateaued below the art bar after four
+  parameter/prompt iterations (committed config → tuned knobs →
+  +lineart LoRA → +Canny preproc + LoRA @1.0 + technical-readout
+  prompt): Illustrious-XL is fundamentally an anime base, IP-Adapter
+  *style transfer* re-weights but can't override that prior, and the
+  one BattleTech-Battlemechs LoRA the art-direction doc names is
+  SD1.5-architecture and won't load on SDXL. Even when the canonical
+  *looked* acceptable at 1024², cropping it into 17 detailed-illustration
+  tiles produced same-colour orange mush at the ~80 px the mech occupies
+  on screen — the rigid 17-part renderer wants clean flat plates with
+  hard outlines, which is exactly what a gostek part sheet is. So the
+  pivot isn't a stopgap — it's choosing the input format that matches
+  the renderer. The cost: the chassis sheets are authored (by hand, or
+  generated out-of-repo) and committed as PNGs rather than being
+  reproducible from a prompt + seed in this repo; `assets/credits.txt`
+  + `documents/art_log.md` carry the provenance per the iteration-log
+  convention.
 - **Revisit when** —
-  - Any 12GB+ GPU is available: switch to `mech_chassis_canonical_v1.json`
-    (the spec workflow). Quality should jump because IP-Adapter +
-    full ControlNet-Union are back in the chain. The 8GB workflow
-    stays in source as the lower-tier fallback.
-  - A quantized variant of ControlNet-Union (4-bit?) ships small
-    enough to fit alongside SDXL + IP-Adapter on 8 GB. Worth checking
-    HuggingFace periodically; SDXL ecosystem moves fast.
-  - The output quality from the 8GB path is acceptable for ship after
-    candidate iteration. Plausible — the Pipeline 7 post-process is
-    designed to unify rough output, and for indie-game-scale 32×32
-    sprite slots a lot of detail is lost in the downsample anyway.
-  - We discover the IP-Adapter-VAE swap hang has a config fix (e.g.
-    explicit unload before VAE node, or a different IP-Adapter wrapper).
-    None found this session after ~6 iterations.
+  - A Soldut-trained LoRA (per `documents/m5/11-art-direction.md`
+    §"Escalation path 1", once ~30+ approved sprites exist) or a
+    different base model closes the quality gap *at the renderer's
+    on-screen size* — at which point the diffusion path could feed the
+    gostek-extraction step (generate the part-sheet layout with AI,
+    still slice it deterministically) and this entry narrows to "the
+    gostek sheet is now AI-generated".
+  - A contributor produces a higher-quality hand-drawn or vector
+    gostek sheet for any chassis — drop it in `gostek_part_sheets/`,
+    re-run `extract_gostek.py`, update `art_log.md` + `credits.txt`.
+  - We decide the diffusion tooling has bit-rotted and nobody uses it —
+    delete `asset.py` + the canonical workflows + `crop_canonical.py`'s
+    canonical-crop mode and fold this entry's "alternative path" clause
+    away.
 
 ### Whole-mech hit flash, not per-particle (P12)
 

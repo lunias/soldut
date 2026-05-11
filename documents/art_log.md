@@ -14,19 +14,31 @@ Pure hand-drawn assets (Pipeline 5 stump caps, Pipeline 6 HUD icons —
 the Aseprite-redraw step) are logged in the same table with
 `Workflow = hand-drawn` and the toolchain noted in the row.
 
+**Gostek part sheets (the P15-revised chassis path).** Since P15 the
+chassis atlases come from `tools/comfy/extract_gostek.py` slicing a
+"gostek part sheet" — see `tools/comfy/README.md` → "The shipping path".
+A gostek-extracted sprite has no workflow JSON / LoRA stack / IP-Adapter
+anchor / seed, so those columns hold `n/a` and the `Workflow` column
+notes `extract_gostek.py` + the source sheet path + the `--palette`.
+The *sheet's own* provenance (who drew/generated it, from what source,
+under what licence) goes in `assets/credits.txt`.
+
 ## Conventions
 
 - One row per approved asset (the ones that actually ship in `assets/`).
 - Failed iterations are not logged — only the locked output.
 - `Workflow` references a checked-in JSON in
-  `tools/comfy/workflows/soldut/`. If you rename a workflow, bump its
-  `_v<n>` and add a fresh row.
-- `LoRA stack` is the actual chain (`name @ weight`), in load order.
+  `tools/comfy/workflows/soldut/` (diffusion path) or
+  `tools/comfy/extract_gostek.py <sheet> --palette <p>` (gostek path).
+  If you rename a workflow, bump its `_v<n>` and add a fresh row.
+- `LoRA stack` is the actual chain (`name @ weight`), in load order;
+  `n/a` for gostek/hand-drawn.
 - `IP-Adapter` references the file under
-  `tools/comfy/style_anchor/`. Update the row when a v2 anchor lands.
-- `Seed` is the literal KSampler seed (e.g. `1000001` for Trooper).
+  `tools/comfy/style_anchor/`; `n/a` for gostek/hand-drawn.
+- `Seed` is the literal KSampler seed (e.g. `1000001` for Trooper);
+  `n/a` for gostek/hand-drawn.
 - `Prompt-version` is the workflow's `_meta.version` field — bump it
-  whenever the prompt text changes, even by a word.
+  whenever the prompt text changes, even by a word; `n/a` for gostek.
 - `Approved` is YYYY-MM-DD; the date the row was committed.
 
 ## Approved assets
@@ -42,4 +54,4 @@ Example rows for reference (delete when the first real row lands):
 | trooper/stump_shoulder_l.png | hand-drawn (Krita Ink-2 Fineliner) | — | — | — | — | 2026-MM-DD |
 -->
 
-| trooper.png (rough first pass) | mech_chassis_canonical_8gb_v1.json (T2I-Adapter Lineart SDXL substitute for ControlNet-Union promax; IP-Adapter dropped; CPU VAE — see TRADE_OFFS "ControlNet-Union promax + IP-Adapter chain doesn't fit in 8GB VRAM") | none (LoRA stack from spec doesn't apply — Battletech / SRD on Civitai gated; Lineart substitute is Flux-keyed) | (not consumed by the 8GB workflow; trooper_anchor_v2.png on disk for ≥12GB) | 1000001 | v1 | 2026-05-10 |
+| trooper.png | `extract_gostek.py tools/comfy/gostek_part_sheets/trooper_gostek_v1.png trooper --palette foundry` (gostek part-sheet path — slices the 22 captioned flat-plate parts into the s_default_parts atlas; per-part rotate/flip + resize + border-flood white-key + Foundry 2-colour snap; no Bayer baked in) | n/a | n/a | n/a | n/a | 2026-05-10 |
