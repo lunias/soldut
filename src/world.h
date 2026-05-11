@@ -287,6 +287,20 @@ typedef struct {
     Vec2      pose_target  [PART_COUNT];
     float     pose_strength[PART_COUNT];
 
+    /* wan-fixes-3 followup — air-time hysteresis for anim_id.
+     * Increments each tick that !grounded, resets to 0 when grounded.
+     * The walk cycle (ANIM_RUN) lifts each foot off the ground for
+     * ~3 ticks per swing phase. Without hysteresis, anim_id flickers
+     * RUN → FALL → STAND → RUN every snapshot — invisible on the
+     * server (constraint solver smooths over it) but visibly jittery
+     * on the client where wan-fixes-3 made remote mechs kinematic
+     * (no constraint smoothing). We require `air_ticks > GAIT_LIFT_MAX`
+     * before transitioning to FALL, so brief gait lifts stay
+     * classified as RUN / STAND. Authoritative side only; clients
+     * mirror by deriving from snapshot velocity instead of
+     * grounded-bit flicker. */
+    uint8_t   air_ticks;
+
     /* P14 — gait phase tracking for footstep audio. Updated by
      * build_pose's ANIM_RUN case each tick; the wrap from >0.5 → <0.5
      * is the swing→stance transition that fires SFX_FOOTSTEP_*. Both

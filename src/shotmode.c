@@ -818,6 +818,17 @@ static void networked_shot_bootstrap(Game *g, const Script *s) {
             return;
         }
         net_discovery_open(&g->net);
+        /* P07/wan-fixes-3 — `map <short>` directive applies to network
+         * host mode too. Without this, the host always builds
+         * MAP_FOUNDRY for the lobby + first round (Foundry's parallax_
+         * near layer obscures mechs in screenshots; using `map
+         * slipstream` lets tests render mech bodies cleanly). Seed
+         * `config.map_rotation[0]` so start_round's `config_pick_map`
+         * lands on the chosen map. */
+        if (s->map_id >= 0) {
+            g->config.map_rotation[0]   = s->map_id;
+            g->config.map_rotation_count = 1;
+        }
         /* Mirror main.c::bootstrap_host — load any persisted bans so
          * shotmode tests can exercise the auto-save+reload of bans.txt
          * (without this, ban directives in scripts wouldn't write the
@@ -833,13 +844,16 @@ static void networked_shot_bootstrap(Game *g, const Script *s) {
             lobby_set_loadout(&g->lobby, slot, s->loadout);
         }
         /* Pre-build the level so the lobby has something to draw the
-         * world frame against. ROUND_START rebuilds for the chosen map. */
-        map_build(MAP_FOUNDRY, &g->world, &g->level_arena);
+         * world frame against. ROUND_START rebuilds for the chosen map.
+         * wan-fixes-3 — honors the `map` directive (via map_rotation[0]
+         * seeded above); Foundry stays the fallback. */
+        MapId pre_map = (s->map_id >= 0) ? (MapId)s->map_id : MAP_FOUNDRY;
+        map_build(pre_map, &g->world, &g->level_arena);
         decal_init((int)level_width_px(&g->world.level),
                    (int)level_height_px(&g->world.level));
         /* P08 — refresh the host's serve descriptor so INITIAL_STATE
          * carries the map crc. Mirrors main.c::bootstrap_host. */
-        maps_refresh_serve_info(map_def(MAP_FOUNDRY)->short_name,
+        maps_refresh_serve_info(map_def(pre_map)->short_name,
                                 NULL, &g->server_map_desc,
                                 g->server_map_serve_path,
                                 sizeof(g->server_map_serve_path));

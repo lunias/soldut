@@ -106,6 +106,7 @@ void snapshot_capture(const World *w, SnapshotFrame *out, uint16_t ack_input_seq
         if (m->facing_left)        bits |= SNAP_STATE_FACING_LEFT;
         if (m->anim_id == ANIM_JET)  bits |= SNAP_STATE_JET;
         if (m->anim_id == ANIM_FIRE) bits |= SNAP_STATE_FIRE;
+        if (m->anim_id == ANIM_RUN)  bits |= SNAP_STATE_RUNNING;
         if (m->reload_timer > 0.0f)  bits |= SNAP_STATE_RELOAD;
         if (m->is_dummy)           bits |= SNAP_STATE_IS_DUMMY;
         /* P05 — powerup state. Timers tick down server-side; the bit is
@@ -509,26 +510,24 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
             m->grapple.anchor_mech    = -1;
             m->grapple.constraint_idx = -1;
         }
+        /* wan-fixes-3 followup — anim_id mirrors the server's
+         * authoritative classification (SNAP_STATE_JET / RUNNING) so
+         * the client doesn't have to guess from velocity (which
+         * flickered RUN → STAND mid-stride) or grounded (which
+         * flickered FALL → STAND on each gait foot-lift). build_pose
+         * treats ANIM_FALL / FIRE / STAND identically (same default
+         * pose case), so we just distinguish RUN / JET / "default."
+         * Hysteresis for FALL lives on the server in mech_step_drive's
+         * air_ticks counter and only affects the snapshot's RUNNING
+         * bit indirectly via the server's anim_id. */
         if (e->state_bits & SNAP_STATE_JET) {
             m->anim_id = ANIM_JET;
-        } else if (m->grounded) {
-            /* Derive RUN from velocity. The server-side anim_id is
-             * computed from BTN_LEFT/RIGHT input bits which don't ride
-             * the snapshot — without this fallback the client sees the
-             * remote mech in STAND mode regardless of motion, so its
-             * legs don't swing in the run cycle and the body appears
-             * to SLIDE across the ground instead of walking.
-             *
-             * Threshold 2 px/tick (~120 px/s) is comfortably below
-             * intentional run (~4.66 px/tick at standard RUN_SPEED)
-             * but above incidental drift, post-impact slide, or
-             * floating-point settle noise. */
-            float vx = dequant_vel(e->vel_x_q);
-            if (fabsf(vx) > 2.0f) m->anim_id = ANIM_RUN;
-            else                  m->anim_id = ANIM_STAND;
+        } else if (e->state_bits & SNAP_STATE_RUNNING) {
+            m->anim_id = ANIM_RUN;
         } else {
-            m->anim_id = ANIM_FALL;
+            m->anim_id = ANIM_STAND;
         }
+        m->air_ticks = 0;   /* unused on client now; kept for struct compat */
 
         /* (per-hit blood/sparks now ride NET_MSG_HIT_EVENT — see
          * the long comment above where prev_health is captured) */
