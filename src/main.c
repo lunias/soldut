@@ -1,8 +1,3 @@
-/* _POSIX_C_SOURCE 200809L unlocks clock_gettime(CLOCK_MONOTONIC) and
- * nanosleep(); needed by dedicated_main's wall-clock + sleep helpers
- * which run without raylib's GetTime / Sleep wrappers. */
-#define _POSIX_C_SOURCE 200809L
-
 #include "audio.h"
 #include "config.h"
 #include "ctf.h"
@@ -33,11 +28,9 @@
 #include "version.h"
 #include "weapons.h"
 
-#include <signal.h>
-#include <time.h>
-
 #include "../third_party/raylib/src/raylib.h"
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1066,20 +1059,14 @@ static void dedicated_signal(int sig) {
     s_dedicated_quit = 1;
 }
 
+/* Monotonic time + sleep live in proc_spawn.c (cross-platform; the
+ * dedicated child can't pull <windows.h> in this TU without colliding
+ * with raylib's Rectangle / CloseWindow typedefs). */
 static double mono_seconds(void) {
-    struct timespec ts;
-#if defined(CLOCK_MONOTONIC_RAW)
-    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
-#else
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-#endif
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    return time_now_ms() * 1e-3;
 }
-
 static void sleep_ms_portable(int ms) {
-    if (ms <= 0) return;
-    struct timespec ts = { ms / 1000, (long)((ms % 1000) * 1000000L) };
-    nanosleep(&ts, NULL);
+    time_sleep_ms(ms);
 }
 
 /* The dedicated-server tick loop. No raylib, no audio, no render. Owns

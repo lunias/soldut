@@ -64,3 +64,20 @@ bool proc_wait(ProcHandle h, int timeout_ms);
 /* Close the handle's OS-side resources. Idempotent. After this the
  * handle should be reset to PROC_HANDLE_NULL by the caller. */
 void proc_close(ProcHandle h);
+
+/* ---- Portable time + sleep ---------------------------------------- *
+ *
+ * Lives here because proc_spawn.c already has the Win32 vs POSIX
+ * platform fork wired up for spawn/kill/wait, and main.c's dedicated
+ * server loop needs monotonic time + sleep without dragging
+ * <windows.h> into the same TU as raylib (which collides on Rectangle
+ * / CloseWindow). Use these from any TU; the implementation is
+ * isolated in proc_spawn.c.
+ *
+ *   time_now_ms()     — milliseconds since arbitrary epoch
+ *                       (CLOCK_MONOTONIC on POSIX, QPC on Win32).
+ *                       Suitable for delta-time / scheduling.
+ *   time_sleep_ms(ms) — block for at least `ms` milliseconds. Negative
+ *                       or zero is a no-op. */
+double time_now_ms(void);
+void   time_sleep_ms(int ms);

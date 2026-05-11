@@ -123,6 +123,22 @@ void proc_close(ProcHandle h) {
     (void)h;
 }
 
+double time_now_ms(void) {
+    struct timespec ts;
+#if defined(CLOCK_MONOTONIC_RAW)
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec * 1e-6;
+}
+
+void time_sleep_ms(int ms) {
+    if (ms <= 0) return;
+    struct timespec ts = { ms / 1000, (long)((ms % 1000) * 1000000L) };
+    nanosleep(&ts, NULL);
+}
+
 #else  /* _WIN32 */
 
 /* ---- Win32 implementation ----------------------------------------- */
@@ -235,6 +251,19 @@ void proc_close(ProcHandle h) {
     if (!proc_handle_valid(h)) return;
     HANDLE p = (HANDLE)(uintptr_t)h.native;
     CloseHandle(p);
+}
+
+double time_now_ms(void) {
+    static LARGE_INTEGER s_freq = {0};
+    if (s_freq.QuadPart == 0) QueryPerformanceFrequency(&s_freq);
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return (double)now.QuadPart * 1000.0 / (double)s_freq.QuadPart;
+}
+
+void time_sleep_ms(int ms) {
+    if (ms <= 0) return;
+    Sleep((DWORD)ms);
 }
 
 #endif
