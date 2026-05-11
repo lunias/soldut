@@ -5,6 +5,7 @@
 #include "match.h"
 #include "mech.h"
 #include "platform.h"
+#include "ui.h"
 #include "weapons.h"
 
 #include "../third_party/raylib/src/raylib.h"
@@ -168,49 +169,110 @@ static void hud_draw_killflag_icon(int slot, int x, int y, Color tint) {
  * the row stays parseable. The text uses the new VG5000 display font
  * via UI_FONT_DISPLAY for the "kill feed flag chips" voice the spec
  * calls out in `documents/m5/11-art-direction.md` §"Fonts". */
+/* wan-fixes-13 — KILL_FEED_LIFETIME_SEC bumped from 6 to 15 so
+ * players have time to read kills mid-fight without missing them.
+ * Last 3 seconds linearly fade alpha to zero for a smooth exit. */
+#define KILL_FEED_LIFETIME_SEC 15.0f
+#define KILL_FEED_FADE_TAIL_SEC 3.0f
+
 static void draw_kill_feed(const World *w, int screen_w) {
     int n = (w->killfeed_count < KILLFEED_CAPACITY)
             ? w->killfeed_count : KILLFEED_CAPACITY;
-    int row_h = 22;
-    int x = screen_w - 420;
-    int y = 12;
+    /* wan-fixes-13 — kill feed lives in the top-right CORNER (same
+     * row as the centered match banner). DPI-aware: at 720p sc=1.0,
+     * at 1080p sc=1.5, at 4K sc=3.0 — font + row height scale so the
+     * feed stays readable across resolutions.
+     *
+     * Layout math: the match banner is centered at sw/2 with
+     * half-width 220*sc (see match_overlay_draw). Anchor the kill
+     * feed to start a 16*sc px gap to the right of the banner; let
+     * width fill the remaining space to a 16*sc right-edge margin.
+     * Across every resolution this leaves the kill feed in the
+     * top-right with no banner overlap. */
+    float sc       = ui_compute_scale(GetScreenHeight());
+    int   gap_x    = (int)(16.0f * sc + 0.5f);
+    int   row_h    = (int)(26.0f * sc + 0.5f);
+    int   banner_half_w = (int)(220.0f * sc + 0.5f);
+    int   banner_right  = screen_w / 2 + banner_half_w;
+    int   x = banner_right + gap_x;
+    int   feed_w = screen_w - x - gap_x;
+    if (feed_w < (int)(200.0f * sc + 0.5f)) {
+        /* Window too narrow to fit beside the banner — fall back to
+         * the corner with as much width as we can scrape. */
+        feed_w = (int)(200.0f * sc + 0.5f);
+        x = screen_w - feed_w - gap_x;
+    }
+    int   y = (int)(12.0f * sc + 0.5f);
     Font name_font = ui_font_for(UI_FONT_BODY);
     Font flag_font = ui_font_for(UI_FONT_DISPLAY);
+    /* Font sized to match the centered match banner (18*sc) so they
+     * read as the same UI register. Clamped at 14 so small windows
+     * still have legible names. */
+    int  font_px   = (int)(18.0f * sc + 0.5f);
+    if (font_px < 14) font_px = 14;
     for (int i = 0; i < n; ++i) {
         /* Walk newest → oldest. */
         int slot = (w->killfeed_count - 1 - i) % KILLFEED_CAPACITY;
         if (slot < 0) slot += KILLFEED_CAPACITY;
         const KillFeedEntry *k = &w->killfeed[slot];
-        if (k->age >= 6.0f) continue;
-        unsigned char a = (unsigned char)((1.0f - (k->age / 6.0f)) * 235.0f);
+        if (k->age >= KILL_FEED_LIFETIME_SEC) continue;
+        /* Hold full alpha until KILL_FEED_FADE_TAIL_SEC remaining;
+         * then linear fade to zero. Without this, every entry started
+         * fading immediately and read as urgent / disappearing. */
+        float age_remaining = KILL_FEED_LIFETIME_SEC - k->age;
+        float a_frac        = (age_remaining < KILL_FEED_FADE_TAIL_SEC)
+                              ? (age_remaining / KILL_FEED_FADE_TAIL_SEC)
+                              : 1.0f;
+        if (a_frac < 0.0f) a_frac = 0.0f;
+        unsigned char a = (unsigned char)(a_frac * 235.0f);
         Color row_bg = (Color){ 0, 0, 0, (unsigned char)(a / 3) };
-        DrawRectangle(x - 6, y - 2, 420, row_h, row_bg);
+        DrawRectangle(x - 6, y - 2, feed_w, row_h, row_bg);
 
+        /* wan-fixes-13 — names live IN the entry now (server fills
+         * them via lobby_find_slot_by_mech in apply_new_kills, client
+         * decodes them off the wire). Fall back to "mech#N" only if
+         * the name slot is empty (e.g. test path that bypassed
+         * apply_new_kills). */
         char shooter[32], victim[32];
-        if (k->killer_mech_id < 0) snprintf(shooter, sizeof shooter, "world");
-        else snprintf(shooter, sizeof shooter, "mech#%d", k->killer_mech_id);
-        snprintf(victim, sizeof victim, "mech#%d", k->victim_mech_id);
+        if (k->killer_mech_id < 0) {
+            snprintf(shooter, sizeof shooter, "world");
+        } else if (k->killer_name[0]) {
+            snprintf(shooter, sizeof shooter, "%s", k->killer_name);
+        } else {
+            snprintf(shooter, sizeof shooter, "mech#%d", k->killer_mech_id);
+        }
+        if (k->victim_name[0]) {
+            snprintf(victim, sizeof victim, "%s", k->victim_name);
+        } else {
+            snprintf(victim, sizeof victim, "mech#%d", k->victim_mech_id);
+        }
 
         Color text_col = (Color){240, 230, 220, a};
         Color icon_tint = (Color){255, 255, 255, a};
 
+        float fp_f       = (float)font_px;
+        int   icon_step  = (int)(22.0f * sc + 0.5f);
+        int   flag_step  = (int)(18.0f * sc + 0.5f);
+        int   gap        = (int)(8.0f  * sc + 0.5f);
+        int   icon_y_off = (int)(2.0f  * sc + 0.5f);
+
         int cx = x;
         if (!(k->flags & KILLFLAG_SUICIDE)) {
             DrawTextEx(name_font, shooter, (Vector2){(float)cx, (float)y},
-                       16.0f, 1.0f, text_col);
-            cx += (int)MeasureTextEx(name_font, shooter, 16.0f, 1.0f).x + 8;
-            hud_draw_weapon_icon(k->weapon_id, cx, y + 2, icon_tint);
-            cx += 22;
+                       fp_f, 1.0f, text_col);
+            cx += (int)MeasureTextEx(name_font, shooter, fp_f, 1.0f).x + gap;
+            hud_draw_weapon_icon(k->weapon_id, cx, y + icon_y_off, icon_tint);
+            cx += icon_step;
             DrawTextEx(name_font, victim, (Vector2){(float)cx, (float)y},
-                       16.0f, 1.0f, text_col);
-            cx += (int)MeasureTextEx(name_font, victim, 16.0f, 1.0f).x + 8;
+                       fp_f, 1.0f, text_col);
+            cx += (int)MeasureTextEx(name_font, victim, fp_f, 1.0f).x + gap;
         } else {
             /* Suicide: weapon icon → "[victim]" — no shooter chip. */
-            hud_draw_weapon_icon(k->weapon_id, cx, y + 2, icon_tint);
-            cx += 22;
+            hud_draw_weapon_icon(k->weapon_id, cx, y + icon_y_off, icon_tint);
+            cx += icon_step;
             DrawTextEx(name_font, victim, (Vector2){(float)cx, (float)y},
-                       16.0f, 1.0f, text_col);
-            cx += (int)MeasureTextEx(name_font, victim, 16.0f, 1.0f).x + 8;
+                       fp_f, 1.0f, text_col);
+            cx += (int)MeasureTextEx(name_font, victim, fp_f, 1.0f).x + gap;
         }
 
         /* Flag icons in bit order, drawn as 16x16 atlas sub-rects (or
@@ -224,8 +286,8 @@ static void draw_kill_feed(const World *w, int screen_w) {
         };
         for (size_t fi = 0; fi < sizeof flag_slots / sizeof flag_slots[0]; ++fi) {
             if (!(k->flags & flag_slots[fi].bit)) continue;
-            hud_draw_killflag_icon(flag_slots[fi].slot, cx, y + 2, icon_tint);
-            cx += 18;
+            hud_draw_killflag_icon(flag_slots[fi].slot, cx, y + icon_y_off, icon_tint);
+            cx += flag_step;
         }
         (void)flag_font;  /* reserved for the M6 HUD-final pass */
 

@@ -572,12 +572,22 @@ typedef enum {
     KILLFLAG_SUICIDE  = 1u << 4,
 } KillFlag;
 
+/* wan-fixes-13 — name strings live IN the killfeed entry so the HUD
+ * doesn't need to thread Lobby through hud_draw's signature, and so
+ * the entry survives the slot getting freed (player leaves mid-
+ * round). Server populates these in apply_new_kills via
+ * lobby_find_slot_by_mech right before broadcast; client populates
+ * them by decoding the wire payload in client_handle_kill_event. */
+#define KILLFEED_NAME_BYTES 16
+
 typedef struct {
     int      killer_mech_id;       /* -1 for environmental kill */
     int      victim_mech_id;
     int      weapon_id;
     uint32_t flags;                /* KillFlag bits */
     float    age;                  /* seconds since the kill */
+    char     killer_name[KILLFEED_NAME_BYTES];
+    char     victim_name[KILLFEED_NAME_BYTES];
 } KillFeedEntry;
 
 /* ---- Blood / sparks (FX particles, AoS for simplicity at M1 scale).
