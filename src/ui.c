@@ -54,10 +54,13 @@ int ui_measure(const UIContext *u, const char *text, int base_size) {
 }
 
 void ui_begin(UIContext *u, Vec2 mouse_screen, float dt, int screen_h) {
-    u->mouse           = mouse_screen;
-    u->mouse_pressed   = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-    u->mouse_released  = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
-    u->mouse_down      = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    u->mouse              = mouse_screen;
+    u->mouse_pressed      = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    u->mouse_released     = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
+    u->mouse_down         = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    /* wan-fixes-11 — RMB on cycle buttons walks the choice list
+     * backward. Track the edge here so any widget can opt in. */
+    u->mouse_right_pressed = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
     u->shift_down      = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
     u->dt              = dt;
     u->scale           = ui_compute_scale(screen_h);
@@ -149,6 +152,55 @@ bool ui_button(UIContext *u, Rectangle r, const char *label, bool enabled) {
     bool clicked = enabled && hover && u->mouse_pressed;
     if (clicked) audio_play_global(SFX_UI_CLICK);
     return clicked;
+}
+
+/* wan-fixes-11 — cycle button. Same look as ui_button but with small
+ * "◀" / "▶" arrows on either edge and dual-button input: LMB steps
+ * forward (+1), RMB steps backward (-1). Returns the step, or 0 when
+ * nothing was clicked this frame. */
+int ui_cycle_button(UIContext *u, Rectangle r, const char *label, bool enabled) {
+    bool hover = ui_point_in_rect(u->mouse, r);
+    Color bg;
+    if (!enabled) bg = u->button_disabled;
+    else if (hover && u->mouse_down) bg = u->button_press;
+    else if (hover) bg = u->button_hover;
+    else bg = u->button_bg;
+
+    DrawRectangleRec(r, bg);
+    DrawRectangleLinesEx(r, u->scale, u->panel_edge);
+
+    int fp = ui_font_px(u);
+
+    /* Arrows. Dim when not hovered so they read as affordances, not
+     * primary content. The "◀" / "▶" glyphs aren't in raylib's
+     * default 7-bit font, but every TTF in our atlas (Atkinson,
+     * VG5000, Steps Mono) carries U+25C0 / U+25B6 — `ui_draw_text`
+     * falls back gracefully when missing. */
+    Color arrow_col = enabled
+        ? (hover ? u->text_col : u->text_dim)
+        : u->text_dim;
+    int arrow_y = (int)(r.y + (r.height - (float)fp) * 0.5f);
+    int pad     = (int)(u->scale * 12.0f);
+    ui_draw_text(u, "<", (int)(r.x + pad), arrow_y, u->font_size, arrow_col);
+    int rw = ui_measure(u, ">", u->font_size);
+    ui_draw_text(u, ">",
+                 (int)(r.x + r.width - pad - rw),
+                 arrow_y, u->font_size, arrow_col);
+
+    Color text = enabled ? u->text_col : u->text_dim;
+    if (label) {
+        int tw = ui_measure(u, label, u->font_size);
+        int tx = (int)(r.x + (r.width - (float)tw) * 0.5f);
+        int ty = (int)(r.y + (r.height - (float)fp) * 0.5f);
+        ui_draw_text(u, label, tx, ty, u->font_size, text);
+    }
+
+    if (!enabled) return 0;
+    int step = 0;
+    if (hover && u->mouse_pressed)       step = +1;
+    else if (hover && u->mouse_right_pressed) step = -1;
+    if (step != 0) audio_play_global(SFX_UI_CLICK);
+    return step;
 }
 
 /* ---- Toggle -------------------------------------------------------- */

@@ -1527,6 +1527,17 @@ static void draw_diag(void *user, int sw, int sh) {
      * doing two swaps per frame produces a per-other-frame "blank +
      * banner only" present, which reads as flicker. */
     match_overlay_draw(g, sw, sh);
+
+    /* wan-fixes-11 — match-start loading overlay. The MODE_MATCH
+     * render path runs this callback inside its own Begin/EndDrawing
+     * pair; if local_mech_id hasn't resolved yet, the world is empty
+     * and the user would otherwise see a black/empty frame. We
+     * recompute the flag every frame (cheap) and let the overlay
+     * paint over the empty render. */
+    lobby_ui_update_match_loading(ctx->ui, g);
+    if (ctx->ui->match_loading) {
+        match_loading_overlay_draw(ctx->ui, g, sw, sh);
+    }
 }
 
 /* Summary overlay: draws the round-summary panel on top of the frozen
@@ -2120,8 +2131,16 @@ int main(int argc, char **argv) {
                 }
             }
 
+            /* wan-fixes-11 — recompute the match-loading flag every
+             * frame so the overlay drops in cleanly when countdown
+             * < 1 s (start_round about to fire on the host). */
+            lobby_ui_update_match_loading(&ui, &game);
+
             BeginDrawing();
             lobby_screen_run(&ui, &game, pf.render_w, pf.render_h);
+            if (ui.match_loading) {
+                match_loading_overlay_draw(&ui, &game, pf.render_w, pf.render_h);
+            }
             EndDrawing();
 
             /* Honor the lobby UI's "Leave" button. */
