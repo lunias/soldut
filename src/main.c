@@ -86,6 +86,16 @@ typedef struct {
     char        mode_override[8];     /* M5 P07 — --mode <ffa|tdm|ctf>, overrides
                                        * the test-play META auto-detect. Empty
                                        * means "use the auto-detect path". */
+    /* wan-fixes-6 — host-setup forwarding for the dedicated-child
+     * spawn. The host UI ("Host Server" → MODE_HOST_SETUP) writes the
+     * user's mode/map/score/time/ff selections into `game.config`,
+     * then bootstraps the dedicated server. The child is a SEPARATE
+     * process with its own config defaults; without forwarding via
+     * CLI, the lobby ignores the user's choices. These fields carry
+     * those choices into the child's parse_args + dedicated_main. */
+    char        map_name[24];         /* --map foundry|slipstream|crossfire|... */
+    int         score_limit;          /* --score N; 0 = leave cfg default */
+    int         time_limit_s;         /* --time N; 0 = leave cfg default */
     bool        friendly_fire;
     bool        skip_title;
     bool        ff_set;
@@ -178,6 +188,25 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
          * so an explicit pick wins over the .lvl's mode_mask hint. */
         else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
             snprintf(out->mode_override, sizeof out->mode_override, "%s", argv[++i]);
+        }
+        /* wan-fixes-6 — host-setup forwarding. The UI host-setup flow
+         * spawns a dedicated child with these CLI flags so the
+         * dedicated server's config reflects the user's choices
+         * (instead of falling back to soldut.cfg defaults / built-ins
+         * in the child's cwd). Useful directly on the CLI too:
+         *   ./soldut --dedicated 23073 --map slipstream --mode tdm \
+         *            --score 25 --time 600 --ff
+         */
+        else if (strcmp(argv[i], "--map") == 0 && i + 1 < argc) {
+            snprintf(out->map_name, sizeof out->map_name, "%s", argv[++i]);
+        }
+        else if (strcmp(argv[i], "--score") == 0 && i + 1 < argc) {
+            int n = atoi(argv[++i]);
+            if (n > 0) out->score_limit = n;
+        }
+        else if (strcmp(argv[i], "--time") == 0 && i + 1 < argc) {
+            int n = atoi(argv[++i]);
+            if (n > 0) out->time_limit_s = n;
         }
     }
 }
@@ -1075,8 +1104,9 @@ static void sleep_ms_portable(int ms) {
  * MATCH_PHASE_ACTIVE.
  *
  * Returns process exit code. */
-static int dedicated_main(uint16_t port) {
+static int dedicated_main(const LaunchArgs *args) {
     log_init("soldut-server.log");
+    uint16_t port = (args && args->port) ? args->port : SOLDUT_DEFAULT_PORT;
     LOG_I("soldut " SOLDUT_VERSION_STRING " (dedicated server, port=%u)", port);
 
     /* The dedicated server is the natural place to emit diagnostic
@@ -1098,9 +1128,41 @@ static int dedicated_main(uint16_t port) {
 
     /* Server config — same soldut.cfg path as the listen-server. CLI
      * --dedicated PORT wins over cfg.port; cfg drives snapshot_hz,
-     * map_rotation, etc. */
+     * map_rotation, etc. wan-fixes-6 — the host UI forwards its
+     * mode/map/score/time/ff selections as CLI args after the cfg
+     * load so the user's lobby choices reach the dedicated server. */
     config_load(&game.config, "soldut.cfg");
     if (port != 0) game.config.port = port;
+
+    if (args && args->mode_override[0]) {
+        MatchModeId m = match_mode_from_name(args->mode_override);
+        game.config.mode               = m;
+        game.config.mode_rotation[0]   = m;
+        game.config.mode_rotation_count = 1;
+        LOG_I("dedicated: --mode %s", match_mode_name(m));
+    }
+    if (args && args->map_name[0]) {
+        int mid = map_id_from_name(args->map_name);
+        if (mid >= 0) {
+            game.config.map_rotation[0]    = mid;
+            game.config.map_rotation_count = 1;
+            LOG_I("dedicated: --map %s (id=%d)", args->map_name, mid);
+        } else {
+            LOG_W("dedicated: --map '%s' unknown — keeping cfg default", args->map_name);
+        }
+    }
+    if (args && args->score_limit > 0) {
+        game.config.score_limit = args->score_limit;
+        LOG_I("dedicated: --score %d", args->score_limit);
+    }
+    if (args && args->time_limit_s > 0) {
+        game.config.time_limit = (float)args->time_limit_s;
+        LOG_I("dedicated: --time %d", args->time_limit_s);
+    }
+    if (args && args->ff_set) {
+        game.config.friendly_fire = args->friendly_fire;
+        LOG_I("dedicated: --ff %d", (int)args->friendly_fire);
+    }
 
     if (!net_init()) { game_shutdown(&game); log_shutdown(); return EXIT_FAILURE; }
     if (!net_server_start(&game.net, game.config.port, &game)) {
@@ -1227,9 +1289,48 @@ static bool bootstrap_host_via_dedicated(Game *g, const LaunchArgs *args,
     uint16_t port = args->port ? args->port : g->config.port;
     if (port == 0) port = SOLDUT_DEFAULT_PORT;
 
-    char port_str[16];
-    snprintf(port_str, sizeof port_str, "%u", (unsigned)port);
-    const char *child_argv[] = { "--dedicated", port_str, NULL };
+    /* wan-fixes-6 — forward the host's MODE_HOST_SETUP choices to the
+     * dedicated child as CLI args. The choices live in `g->config`
+     * (the host UI applies them there before this call); the child is
+     * a separate process with its own config defaults, so without
+     * forwarding the lobby would silently reset to map=foundry /
+     * mode=ffa / etc. The arg-pack format mirrors the public CLI so
+     * power users get the same UX from the shell. */
+    char port_str[16];     snprintf(port_str, sizeof port_str, "%u", (unsigned)port);
+    char score_str[16];    snprintf(score_str, sizeof score_str, "%d", g->config.score_limit);
+    char time_str[16];     snprintf(time_str,  sizeof time_str,  "%d", (int)g->config.time_limit);
+    const char *mode_name = match_mode_name((MatchModeId)g->config.mode);
+    const MapDef *map = (g->config.map_rotation_count > 0)
+                            ? map_def(g->config.map_rotation[0])
+                            : map_def(MAP_FOUNDRY);
+    const char *map_name_str = (map && map->short_name[0]) ? map->short_name : "foundry";
+
+    enum { CHILD_ARGV_CAP = 16 };
+    const char *child_argv[CHILD_ARGV_CAP];
+    int n = 0;
+    child_argv[n++] = "--dedicated";
+    child_argv[n++] = port_str;
+    child_argv[n++] = "--mode";
+    child_argv[n++] = mode_name;
+    child_argv[n++] = "--map";
+    child_argv[n++] = map_name_str;
+    if (g->config.score_limit > 0) {
+        child_argv[n++] = "--score";
+        child_argv[n++] = score_str;
+    }
+    if (g->config.time_limit > 0.0f) {
+        child_argv[n++] = "--time";
+        child_argv[n++] = time_str;
+    }
+    if (g->config.friendly_fire) {
+        child_argv[n++] = "--ff";
+    }
+    child_argv[n] = NULL;
+
+    LOG_I("bootstrap_host: spawn args mode=%s map=%s score=%d time=%d ff=%d port=%u",
+          mode_name, map_name_str, g->config.score_limit,
+          (int)g->config.time_limit, (int)g->config.friendly_fire,
+          (unsigned)port);
 
     ProcHandle child = proc_spawn_self(argv0_self, child_argv);
     if (!proc_handle_valid(child)) {
@@ -1373,15 +1474,15 @@ int main(int argc, char **argv) {
     /* wan-fixes-5 — `--dedicated PORT` early-exit. Detected BEFORE
      * log_init / game_init so the dedicated server has its own log
      * file (`soldut-server.log`) and doesn't fight the parent client's
-     * `soldut.log` when both run on the same machine. */
+     * `soldut.log` when both run on the same machine. wan-fixes-6 —
+     * also parse the full argv so the child picks up the host's
+     * mode / map / score / time / ff selections that the parent
+     * forwards. */
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--dedicated") == 0) {
-            uint16_t port = SOLDUT_DEFAULT_PORT;
-            if (i + 1 < argc && argv[i+1][0] != '-') {
-                port = (uint16_t)atoi(argv[i+1]);
-                if (port == 0) port = SOLDUT_DEFAULT_PORT;
-            }
-            return dedicated_main(port);
+            LaunchArgs dargs;
+            parse_args(argc, argv, &dargs);
+            return dedicated_main(&dargs);
         }
     }
 

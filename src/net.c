@@ -914,9 +914,19 @@ static void server_handle_challenge_response(NetState *ns, NetPeer *p,
     }
 
     /* M4 join flow: place the peer in a lobby slot. The mech is
-     * spawned only at ROUND_START. */
+     * spawned only at ROUND_START. wan-fixes-6 — on a dedicated
+     * server (no in-process host player), the first peer to ACCEPT
+     * is treated as the host so the lobby UI's mode/map controls
+     * stay editable. Subsequent joiners are non-host clients. The
+     * listen-server path doesn't reach here for slot 0 (the host
+     * was pre-added by bootstrap_host), so this gate only kicks in
+     * under dedicated. */
+    bool any_filled = false;
+    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+        if (g->lobby.slots[i].in_use) { any_filled = true; break; }
+    }
     int slot = lobby_add_slot(&g->lobby, (int)p->client_id, p->name,
-                              /*is_host*/false);
+                              /*is_host*/!any_filled);
     if (slot < 0) {
         send_reject(p->enet_peer, NET_REJECT_SERVER_FULL);
         enet_peer_disconnect_later((ENetPeer *)p->enet_peer, 0);
@@ -1081,6 +1091,86 @@ static void server_handle_lobby_kick_or_ban(NetState *ns, NetPeer *p,
     }
     int target = (int)body[0];
     net_server_kick_or_ban_slot(ns, g, target, ban);
+}
+
+/* wan-fixes-6 — host pushed new lobby settings. Only `slot.is_host`
+ * may send; we trust the senders not to flood (the lobby UI throttles
+ * naturally — one update per click). Applies to match + config, then
+ * re-broadcasts the canonical MATCH_STATE + MAP_DESCRIPTOR so every
+ * client (including the sender) renders the canonical post-change
+ * state. */
+static void server_handle_lobby_host_setup(NetState *ns, NetPeer *p,
+                                           const uint8_t *body, int blen,
+                                           Game *g)
+{
+    if (blen < 8) return;
+    int requester = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
+    if (requester < 0) return;
+    if (!g->lobby.slots[requester].is_host) {
+        LOG_W("server: non-host slot %d tried HOST_SETUP", requester);
+        return;
+    }
+    /* Only accept during LOBBY / SUMMARY (between rounds). Mid-match
+     * setting changes would break the active simulation. */
+    if (g->match.phase != MATCH_PHASE_LOBBY &&
+        g->match.phase != MATCH_PHASE_SUMMARY)
+    {
+        LOG_W("server: HOST_SETUP rejected mid-round (phase=%d)", (int)g->match.phase);
+        return;
+    }
+
+    const uint8_t *r = body;
+    uint8_t  mode_byte    = r_u8 (&r);
+    uint16_t map_id       = r_u16(&r);
+    uint16_t score_limit  = r_u16(&r);
+    uint16_t time_limit_s = r_u16(&r);
+    uint8_t  ff           = r_u8 (&r);
+
+    MatchModeId mode = (MatchModeId)mode_byte;
+    if (mode != MATCH_MODE_FFA && mode != MATCH_MODE_TDM && mode != MATCH_MODE_CTF) {
+        LOG_W("server: HOST_SETUP bad mode=%u", (unsigned)mode_byte);
+        return;
+    }
+    /* Map-id validation against the active registry. */
+    if (map_id >= (uint16_t)g_map_registry.count) {
+        LOG_W("server: HOST_SETUP bad map_id=%u (count=%d)",
+              (unsigned)map_id, g_map_registry.count);
+        return;
+    }
+
+    g->match.mode          = mode;
+    g->match.map_id        = (int)map_id;
+    if (score_limit > 0)  g->match.score_limit = (int)score_limit;
+    if (time_limit_s > 0) g->match.time_limit  = (float)time_limit_s;
+    g->match.friendly_fire = (ff != 0) || (mode == MATCH_MODE_FFA);
+    g->world.friendly_fire = g->match.friendly_fire;
+    /* Mirror into config so the rotation pickers and subsequent
+     * start_round derive from the new state. */
+    g->config.mode               = mode;
+    g->config.score_limit        = g->match.score_limit;
+    g->config.time_limit         = g->match.time_limit;
+    g->config.friendly_fire      = (ff != 0);
+    g->config.map_rotation[0]    = (int)map_id;
+    g->config.map_rotation_count = 1;
+    g->config.mode_rotation[0]   = mode;
+    g->config.mode_rotation_count= 1;
+
+    /* Rebuild the lobby map so INITIAL_STATE / serve descriptor /
+     * map_kit follow. */
+    arena_reset(&g->level_arena);
+    map_build((MapId)g->match.map_id, &g->world, &g->level_arena);
+    const MapDef *md = map_def(g->match.map_id);
+    maps_refresh_serve_info(md ? md->short_name : NULL,
+                            NULL, &g->server_map_desc,
+                            g->server_map_serve_path,
+                            sizeof(g->server_map_serve_path));
+
+    LOG_I("server: HOST_SETUP applied: mode=%s map=%s score=%d time=%d ff=%d",
+          match_mode_name(mode), md ? md->short_name : "?",
+          g->match.score_limit, (int)g->match.time_limit, (int)g->match.friendly_fire);
+
+    net_server_broadcast_match_state(ns, &g->match);
+    net_server_broadcast_map_descriptor(ns, &g->server_map_desc);
 }
 
 /* ---- M5 P08 — server-side map sharing ---------------------------- */
@@ -2093,6 +2183,8 @@ static void server_pump_events(NetState *ns, Game *g) {
                         server_handle_lobby_kick_or_ban(ns, p, body, blen, g, false); break;
                     case NET_MSG_LOBBY_BAN:
                         server_handle_lobby_kick_or_ban(ns, p, body, blen, g, true); break;
+                    case NET_MSG_LOBBY_HOST_SETUP:
+                        server_handle_lobby_host_setup(ns, p, body, blen, g); break;
                     case NET_MSG_MAP_REQUEST:
                         server_handle_map_request(ns, p, g, body, blen); break;
                     case NET_MSG_MAP_READY:
@@ -2780,6 +2872,23 @@ void net_client_send_ban(NetState *ns, int target_slot) {
     uint8_t buf[2] = { NET_MSG_LOBBY_BAN, (uint8_t)target_slot };
     enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
                  buf, 2);
+}
+
+void net_client_send_host_setup(NetState *ns,
+                                int mode, int map_id,
+                                int score_limit, int time_limit_s,
+                                bool friendly_fire)
+{
+    if (!ns || ns->role != NET_ROLE_CLIENT || !ns->connected) return;
+    uint8_t buf[9]; uint8_t *p = buf;
+    w_u8 (&p, NET_MSG_LOBBY_HOST_SETUP);
+    w_u8 (&p, (uint8_t)mode);
+    w_u16(&p, (uint16_t)map_id);
+    w_u16(&p, (uint16_t)(score_limit > 0 ? score_limit : 0));
+    w_u16(&p, (uint16_t)(time_limit_s > 0 ? time_limit_s : 0));
+    w_u8 (&p, friendly_fire ? 1u : 0u);
+    enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
+                 buf, (int)(p - buf));
 }
 
 /* ---- Server: spawn slot helper (used by handshake) ----------------- */

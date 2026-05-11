@@ -982,7 +982,17 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     ui_draw_text(&L->ui, "LOBBY", S(32), S(20), 28,
                  (Color){200, 220, 240, 255});
 
-    bool is_host = (g->net.role == NET_ROLE_SERVER || g->offline_solo);
+    /* wan-fixes-6 — "host" is now also the FIRST client to connect to
+     * a dedicated server (which has no in-process host player). The
+     * server marks that peer's slot is_host=true in net.c on accept;
+     * the lobby_list broadcast propagates it to everyone, so any
+     * client can identify the host. */
+    bool slot_is_host = (g->local_slot_id >= 0 &&
+                         g->local_slot_id < MAX_LOBBY_SLOTS &&
+                         g->lobby.slots[g->local_slot_id].in_use &&
+                         g->lobby.slots[g->local_slot_id].is_host);
+    bool is_host = (g->net.role == NET_ROLE_SERVER || g->offline_solo ||
+                    slot_is_host);
     bool can_change = is_host && (g->match.phase == MATCH_PHASE_LOBBY ||
                                    g->match.phase == MATCH_PHASE_SUMMARY);
 
@@ -1060,6 +1070,15 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
             if (g->net.role == NET_ROLE_SERVER) {
                 net_server_broadcast_match_state(&g->net, &g->match);
                 net_server_broadcast_map_descriptor(&g->net, &g->server_map_desc);
+            } else if (g->net.role == NET_ROLE_CLIENT && slot_is_host) {
+                /* wan-fixes-6 — dedicated server flow: host is a
+                 * client. Push the change over the wire; server
+                 * validates + re-broadcasts MATCH_STATE so every
+                 * client converges. */
+                net_client_send_host_setup(&g->net,
+                    (int)g->match.mode, g->match.map_id,
+                    g->match.score_limit, (int)g->match.time_limit,
+                    g->match.friendly_fire);
             }
             LOG_I("host: lobby mode → %s map → %s",
                   match_mode_name(g->match.mode),
@@ -1124,6 +1143,13 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
             if (g->net.role == NET_ROLE_SERVER) {
                 net_server_broadcast_match_state(&g->net, &g->match);
                 net_server_broadcast_map_descriptor(&g->net, &g->server_map_desc);
+            } else if (g->net.role == NET_ROLE_CLIENT && slot_is_host) {
+                /* wan-fixes-6 — same dedicated-host wire push as the
+                 * mode-change branch. */
+                net_client_send_host_setup(&g->net,
+                    (int)g->match.mode, g->match.map_id,
+                    g->match.score_limit, (int)g->match.time_limit,
+                    g->match.friendly_fire);
             }
             LOG_I("host: lobby map → %s",
                   map_def(g->match.map_id)->display_name);
