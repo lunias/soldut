@@ -479,6 +479,10 @@ void weapons_fire_hitscan_lag_comp(World *w, int mid, uint64_t shot_at_tick) {
     Vec2 final_end;
     if (hit_t >= 0.0f) {
         final_end = (Vec2){ origin.x + dir.x * hit_t, origin.y + dir.y * hit_t };
+        SHOT_LOG("t=%llu fire mech=%d wpn=%d hit mech=%d part=%d at=(%.1f,%.1f) dmg=%.1f lag_comp=%llu",
+                 (unsigned long long)w->tick, mid, me->weapon_id,
+                 hit_mech, hit_part, final_end.x, final_end.y, wpn->damage,
+                 (unsigned long long)shot_at_tick);
         if (w->authoritative) {
             w->mechs[hit_mech].last_killshot_weapon = me->weapon_id;
             mech_apply_damage(w, hit_mech, hit_part, wpn->damage, dir, mid);
@@ -486,6 +490,11 @@ void weapons_fire_hitscan_lag_comp(World *w, int mid, uint64_t shot_at_tick) {
         audio_play_at(SFX_HIT_FLESH, final_end);
     } else {
         final_end = (Vec2){ origin.x + dir.x * t_max, origin.y + dir.y * t_max };
+        SHOT_LOG("t=%llu fire mech=%d wpn=%d miss end=(%.1f,%.1f) wall=%d lag_comp=%llu",
+                 (unsigned long long)w->tick, mid, me->weapon_id,
+                 final_end.x, final_end.y,
+                 (int)(t_max < wpn->range_px),
+                 (unsigned long long)shot_at_tick);
         if (t_max < wpn->range_px) {
             for (int k = 0; k < 6; ++k) {
                 fx_spawn_spark(&w->fx, final_end,

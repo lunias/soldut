@@ -1159,6 +1159,24 @@ static void server_handle_input(NetState *ns, NetPeer *p,
     Mech *m = &g->world.mechs[p->mech_id];
     m->latched_input = p->latest_input;
     m->last_processed_input_seq = seq;
+
+    /* Lag-compensation view tick: the world tick the shooter was *seeing*
+     * when they generated this input. The client renders remote players at
+     *   client_render_time = latest_server_time - INTERP_DELAY_MS
+     * and the input had to travel one-way to reach us, so the total
+     * shooter→server view lag is `RTT/2 + INTERP_DELAY_MS`. Compute the
+     * server tick that was current at that view moment so a follow-up
+     * hitscan inside mech_try_fire can rewind bone history to those
+     * positions. `weapons_fire_hitscan_lag_comp` falls back to the
+     * current-time path when the value is 0 or out of LAG_HIST_TICKS
+     * range, so stale-but-valid values stay safe. (See
+     * [05-networking.md] §5.) */
+    uint32_t rtt_ms = ((ENetPeer *)p->enet_peer)->roundTripTime;
+    uint32_t view_lag_ms = (rtt_ms / 2u) + NET_INTERP_DELAY_MS;
+    uint64_t view_lag_ticks = ((uint64_t)view_lag_ms * 60u + 999u) / 1000u;
+    m->input_view_tick = (g->world.tick > view_lag_ticks)
+                       ? (g->world.tick - view_lag_ticks)
+                       : 0u;
 }
 
 /* ---- Client: handle inbound LOBBY/STATE/EVENT --------------------- */
