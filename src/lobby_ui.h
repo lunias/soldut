@@ -98,6 +98,16 @@ typedef struct LobbyUIState {
     bool       host_starting;
     double     host_starting_t0;
     char       host_starting_status[64];
+
+    /* wan-fixes-11 — "Loading match..." overlay shown between the
+     * countdown banner's last second and the first world snapshot,
+     * so the user sees a continuous "match is starting" affordance
+     * instead of a frozen "starts in 0s" / black-frame gap. Driven
+     * by lobby_ui_update_match_loading each frame; t0 latches on
+     * rising edge so the elapsed-time pill counts from when the
+     * overlay first showed. */
+    bool       match_loading;
+    double     match_loading_t0;
 } LobbyUIState;
 
 void lobby_ui_init(LobbyUIState *L);
@@ -134,6 +144,30 @@ void host_setup_screen_run(LobbyUIState *L, struct Game *g, int sw, int sh);
  * routing by ignoring request_start_host etc. while host_starting is
  * true. */
 void host_setup_screen_draw_overlay(LobbyUIState *L, int sw, int sh);
+
+/* wan-fixes-11 — recompute the `match_loading` flag on `L` from the
+ * current game state. Set when the visible match is about to come up
+ * but the world isn't on screen yet:
+ *
+ *   - MATCH_PHASE_COUNTDOWN ticked under ~1s remaining (start_round
+ *     is imminent on the host; ROUND_START broadcast is queued).
+ *   - mode == MODE_MATCH but local_mech_id < 0 (we entered MATCH
+ *     after ROUND_START rebuilt the level but haven't received the
+ *     first snapshot yet — without an overlay the user sees a black
+ *     frame).
+ *
+ * Cleared otherwise. Main.c calls this every frame in MODE_LOBBY and
+ * MODE_MATCH so the overlay can stay live across the LOBBY → MATCH
+ * transition. */
+void lobby_ui_update_match_loading(LobbyUIState *L, struct Game *g);
+
+/* wan-fixes-11 — full-screen loading overlay rendered between the
+ * countdown banner and the first world frame. Same visual language
+ * as host_setup_screen_draw_overlay (scrim + centered panel +
+ * indeterminate bar + elapsed-time pill) but with match-specific
+ * sub-status ("Building map…", "Waiting for first snapshot…", etc.). */
+void match_loading_overlay_draw(LobbyUIState *L, struct Game *g,
+                                int sw, int sh);
 void browser_screen_run   (LobbyUIState *L, struct Game *g, int sw, int sh);
 void connect_screen_run   (LobbyUIState *L, struct Game *g, int sw, int sh);
 void lobby_screen_run     (LobbyUIState *L, struct Game *g, int sw, int sh);

@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade host-overlay-preview shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade host-overlay-preview lobby-overlay-preview shot \
         debug gdb gdb-host gdb-client valgrind editor \
         assets-palettes assets-process
 
@@ -171,6 +171,17 @@ $(BUILD_DIR)/host_overlay_preview: tests/host_overlay_preview.c $(HEADLESS_OBJ) 
 host-overlay-preview: $(BUILD_DIR)/host_overlay_preview
 	mkdir -p build/shots
 	./$(BUILD_DIR)/host_overlay_preview
+
+# wan-fixes-11 — visual preview for the new Ready Up button (idle +
+# ready states) and the match-start loading overlay. Same headless-
+# CI-skip rationale as host-overlay-preview. Saves three PNGs into
+# build/shots/lobby_overlay_*.png.
+$(BUILD_DIR)/lobby_overlay_preview: tests/lobby_overlay_preview.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/lobby_overlay_preview.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+lobby-overlay-preview: $(BUILD_DIR)/lobby_overlay_preview
+	mkdir -p build/shots
+	./$(BUILD_DIR)/lobby_overlay_preview
 
 # M5 P07 — CTF runtime: ctf_init_round + ctf_step + ctf_drop_on_death.
 # Builds a synthetic level with a Red/Blue flag pair, exercises pickup /

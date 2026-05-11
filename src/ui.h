@@ -26,6 +26,9 @@ typedef struct UIContext {
     bool  mouse_pressed;     /* this frame's left-button down edge */
     bool  mouse_released;
     bool  mouse_down;
+    /* wan-fixes-11 — right-button edge. Cycle buttons in the lobby
+     * read this to walk the choice list backward (LMB = forward). */
+    bool  mouse_right_pressed;
     bool  shift_down;
     float dt;
 
@@ -98,6 +101,12 @@ int  ui_text_width(const UIContext *u, const char *text);
 
 /* Simple button. Returns true on the press-edge that lands inside. */
 bool ui_button(UIContext *u, Rectangle r, const char *label, bool enabled);
+
+/* wan-fixes-11 — cycle button. Same look as ui_button plus small
+ * "<" / ">" arrows on the edges. Returns +1 for LMB (next), -1 for
+ * RMB (previous), 0 otherwise. Callers walk their choice list by the
+ * returned step. */
+int  ui_cycle_button(UIContext *u, Rectangle r, const char *label, bool enabled);
 
 /* On/off toggle. Stores state in *on; returns true if toggled this frame. */
 bool ui_toggle(UIContext *u, Rectangle r, const char *label, bool *on);

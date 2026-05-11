@@ -122,6 +122,11 @@ void lobby_ui_reset_session(LobbyUIState *L) {
     L->host_starting         = false;
     L->host_starting_t0      = 0.0;
     L->host_starting_status[0] = '\0';
+    /* wan-fixes-11 — match-loading overlay state. Always clear on
+     * session reset so the next host/connect doesn't carry over
+     * stale "Loading match..." UX from the previous session. */
+    L->match_loading         = false;
+    L->match_loading_t0      = 0.0;
 }
 
 /* ---- Title screen ------------------------------------------------- */
@@ -604,6 +609,135 @@ void host_setup_screen_draw_overlay(LobbyUIState *L, int sw, int sh) {
                  et_size, (Color){120, 140, 160, 200});
 }
 
+/* wan-fixes-11 — driven each frame from main.c's MODE_LOBBY and
+ * MODE_MATCH render branches. Decides whether the "Loading match…"
+ * overlay should be visible right now. Latches the t0 timestamp on
+ * the rising edge so the elapsed-time pill counts from when the user
+ * first saw the overlay. */
+void lobby_ui_update_match_loading(LobbyUIState *L, Game *g) {
+    if (!L || !g) return;
+    bool active = false;
+    /* Last sliver of countdown — start_round is firing on the host
+     * right about now, ROUND_START is in flight. */
+    if (g->match.phase == MATCH_PHASE_COUNTDOWN &&
+        g->match.countdown_remaining > 0.0f &&
+        g->match.countdown_remaining < 1.0f)
+    {
+        active = true;
+    }
+    /* We've entered MODE_MATCH but the first snapshot hasn't
+     * resolved our local mech yet — render is about to draw an empty
+     * world. */
+    if (g->mode == MODE_MATCH && g->world.local_mech_id < 0) {
+        active = true;
+    }
+    /* Rising edge → latch t0. Cleared on falling edge. */
+    if (active && !L->match_loading) {
+        L->match_loading_t0 = GetTime();
+    }
+    L->match_loading = active;
+}
+
+void match_loading_overlay_draw(LobbyUIState *L, Game *g, int sw, int sh) {
+    if (!L || !L->match_loading) return;
+
+    /* Layer 1 — scrim. Heavier than the host-setup overlay (200 vs
+     * 153) because the user is meant to read the panel, not the
+     * lobby underneath. */
+    DrawRectangle(0, 0, sw, sh, (Color){0, 0, 0, 200});
+
+    int panel_w = S(560);
+    int panel_h = S(180);
+    int panel_x = (sw - panel_w) / 2;
+    int panel_y = (sh - panel_h) / 2;
+    Rectangle panel = (Rectangle){panel_x, panel_y, panel_w, panel_h};
+    DrawRectangleRec(panel, (Color){16, 22, 32, 240});
+    DrawRectangleLinesEx(panel, L->ui.scale * 2.0f,
+                         (Color){80, 160, 220, 255});
+
+    /* Headline — round number when relevant, generic otherwise. */
+    char title[64];
+    if (g->match.rounds_per_match > 1) {
+        snprintf(title, sizeof title, "Round %d / %d",
+                 g->match.rounds_played + 1, g->match.rounds_per_match);
+    } else {
+        snprintf(title, sizeof title, "Loading match");
+    }
+    int title_size = 24;
+    int tw = ui_measure(&L->ui, title, title_size);
+    ui_draw_text(&L->ui, title,
+                 panel_x + (panel_w - tw) / 2,
+                 panel_y + S(18),
+                 title_size, (Color){230, 240, 250, 255});
+
+    /* Map name — comes from the runtime registry when populated, the
+     * static map table otherwise. */
+    char map_line[80];
+    const MapDef *md = map_def(g->match.map_id);
+    /* `display_name` is a char array (always-addressable) — check its
+     * first byte for "populated" rather than the array address, which
+     * GCC -Werror=address flags as a constant comparison. */
+    const char *map_name = (md && md->display_name[0]) ? md->display_name : "?";
+    const char *mode_name = match_mode_name((MatchModeId)g->match.mode);
+    /* ASCII separator — U+00B7 falls back to `?` in the body font. */
+    snprintf(map_line, sizeof map_line, "%s - %s",
+             map_name, mode_name ? mode_name : "?");
+    int map_size = 16;
+    int mw = ui_measure(&L->ui, map_line, map_size);
+    ui_draw_text(&L->ui, map_line,
+                 panel_x + (panel_w - mw) / 2,
+                 panel_y + S(56),
+                 map_size, (Color){180, 200, 220, 255});
+
+    /* Status sub-line — what's blocking the world from rendering. */
+    const char *status;
+    if (g->mode == MODE_MATCH && g->world.local_mech_id < 0) {
+        status = "Waiting for first snapshot...";
+    } else if (g->match.phase == MATCH_PHASE_COUNTDOWN) {
+        status = "Building map...";
+    } else {
+        status = "Loading match...";
+    }
+    int sub_size = 16;
+    int sw_  = ui_measure(&L->ui, status, sub_size);
+    ui_draw_text(&L->ui, status,
+                 panel_x + (panel_w - sw_) / 2,
+                 panel_y + S(82),
+                 sub_size, (Color){150, 170, 190, 255});
+
+    /* Indeterminate bar (same triangle-wave thumb as the host-setup
+     * overlay so the two screens feel like one family). */
+    int track_h     = S(10);
+    int track_inset = S(28);
+    int track_x     = panel_x + track_inset;
+    int track_y     = panel_y + panel_h - S(38);
+    int track_w     = panel_w - 2 * track_inset;
+    Rectangle track = (Rectangle){track_x, track_y, track_w, track_h};
+    DrawRectangleRec(track, (Color){32, 40, 52, 255});
+    DrawRectangleLinesEx(track, 1.0f, (Color){60, 80, 110, 255});
+
+    double elapsed = GetTime() - L->match_loading_t0;
+    if (elapsed < 0) elapsed = 0;
+    double period = 1.4;
+    double t_norm = (elapsed - period * (int)(elapsed / period)) / period;
+    double tri = (t_norm < 0.5) ? (t_norm * 2.0) : (2.0 - t_norm * 2.0);
+    int thumb_w = (int)(track_w * 0.30f);
+    int thumb_x = track_x + (int)((track_w - thumb_w) * tri);
+    DrawRectangle(thumb_x, track_y, thumb_w, track_h,
+                  (Color){80, 180, 240, 255});
+
+    /* Elapsed seconds pill — same affordance as the host-setup
+     * overlay so users learn it once and recognize it. */
+    char et[32];
+    snprintf(et, sizeof et, "%.1fs", elapsed);
+    int et_size = 12;
+    int etw = ui_measure(&L->ui, et, et_size);
+    ui_draw_text(&L->ui, et,
+                 panel_x + panel_w - etw - S(14),
+                 panel_y + panel_h - S(18),
+                 et_size, (Color){120, 140, 160, 200});
+}
+
 /* ---- Browser screen ----------------------------------------------- */
 
 typedef struct BrowserDrawCtx {
@@ -846,6 +980,18 @@ static int next_in_cycle(int current, const int *choices, int n) {
     int idx = 0;
     for (int i = 0; i < n; ++i) if (choices[i] == current) { idx = i; break; }
     return choices[(idx + 1) % n];
+}
+
+/* wan-fixes-11 — step by ±N in the choice list with wraparound.
+ * Used by the loadout cycle buttons: LMB sends step=+1, RMB sends
+ * step=-1. Positive modulo so a single backward step on the first
+ * entry lands cleanly on the last. */
+static int step_in_cycle(int current, const int *choices, int n, int step) {
+    if (n <= 0) return current;
+    int idx = 0;
+    for (int i = 0; i < n; ++i) if (choices[i] == current) { idx = i; break; }
+    int next = ((idx + step) % n + n) % n;
+    return choices[next];
 }
 
 static void sync_loadout_from_server(LobbyUIState *L, Game *g) {
@@ -1529,68 +1675,108 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                  (Color){200, 220, 240, 255});
     ly += S(28);
 
-    if (ui_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
-                  TextFormat("Chassis: %s", chassis_label(L->lobby_chassis)),
-                  true))
-    {
-        L->lobby_chassis = next_in_cycle(L->lobby_chassis, g_chassis_choices,
-                                         (int)(sizeof g_chassis_choices / sizeof g_chassis_choices[0]));
+    /* wan-fixes-11 — cycle buttons: LMB forward (+1), RMB back (-1).
+     * Arrows on the button edges hint at the directional affordance;
+     * the same gesture stays as the M4-era LMB-only flow for anyone
+     * who never finds the right click. */
+    int step;
+    step = ui_cycle_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
+                           TextFormat("Chassis: %s", chassis_label(L->lobby_chassis)),
+                           true);
+    if (step != 0) {
+        L->lobby_chassis = step_in_cycle(L->lobby_chassis, g_chassis_choices,
+                                         (int)(sizeof g_chassis_choices / sizeof g_chassis_choices[0]), step);
         apply_loadout_change(L, g);
     } ly += row_h + gap;
 
-    if (ui_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
-                  TextFormat("Primary: %s", primary_label(L->lobby_primary)),
-                  true))
-    {
-        L->lobby_primary = next_in_cycle(L->lobby_primary, g_primary_choices,
-                                         (int)(sizeof g_primary_choices / sizeof g_primary_choices[0]));
+    step = ui_cycle_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
+                           TextFormat("Primary: %s", primary_label(L->lobby_primary)),
+                           true);
+    if (step != 0) {
+        L->lobby_primary = step_in_cycle(L->lobby_primary, g_primary_choices,
+                                         (int)(sizeof g_primary_choices / sizeof g_primary_choices[0]), step);
         apply_loadout_change(L, g);
     } ly += row_h + gap;
 
-    if (ui_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
-                  TextFormat("Secondary: %s", primary_label(L->lobby_secondary)),
-                  true))
-    {
-        L->lobby_secondary = next_in_cycle(L->lobby_secondary, g_secondary_choices,
-                                           (int)(sizeof g_secondary_choices / sizeof g_secondary_choices[0]));
+    step = ui_cycle_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
+                           TextFormat("Secondary: %s", primary_label(L->lobby_secondary)),
+                           true);
+    if (step != 0) {
+        L->lobby_secondary = step_in_cycle(L->lobby_secondary, g_secondary_choices,
+                                           (int)(sizeof g_secondary_choices / sizeof g_secondary_choices[0]), step);
         apply_loadout_change(L, g);
     } ly += row_h + gap;
 
-    if (ui_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
-                  TextFormat("Armor: %s", armor_label(L->lobby_armor)),
-                  true))
-    {
-        L->lobby_armor = next_in_cycle(L->lobby_armor, g_armor_choices,
-                                       (int)(sizeof g_armor_choices / sizeof g_armor_choices[0]));
+    step = ui_cycle_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
+                           TextFormat("Armor: %s", armor_label(L->lobby_armor)),
+                           true);
+    if (step != 0) {
+        L->lobby_armor = step_in_cycle(L->lobby_armor, g_armor_choices,
+                                       (int)(sizeof g_armor_choices / sizeof g_armor_choices[0]), step);
         apply_loadout_change(L, g);
     } ly += row_h + gap;
 
-    if (ui_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
-                  TextFormat("Jetpack: %s", jet_label(L->lobby_jet)),
-                  true))
-    {
-        L->lobby_jet = next_in_cycle(L->lobby_jet, g_jet_choices,
-                                     (int)(sizeof g_jet_choices / sizeof g_jet_choices[0]));
+    step = ui_cycle_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
+                           TextFormat("Jetpack: %s", jet_label(L->lobby_jet)),
+                           true);
+    if (step != 0) {
+        L->lobby_jet = step_in_cycle(L->lobby_jet, g_jet_choices,
+                                     (int)(sizeof g_jet_choices / sizeof g_jet_choices[0]), step);
         apply_loadout_change(L, g);
     } ly += row_h + gap;
 
-    /* Ready button — taller + accent color. */
+    /* wan-fixes-11 — Ready button visually distinct from the loadout
+     * cycle row above so the player's eye lands on it as the primary
+     * commit action. Gap + bright green chrome + larger font + 2-px
+     * outline + subtle pulse on the not-ready idle state so it
+     * reads as "press me." */
     bool me_ready = (g->local_slot_id >= 0) ?
         g->lobby.slots[g->local_slot_id].ready : false;
-    Rectangle rr = (Rectangle){lx, ly, lp_w, row_h + S(8)};
-    bool hover = ui_point_in_rect(L->ui.mouse, rr);
-    Color rb = me_ready ? (Color){40, 110, 60, 255}
-                        : hover ? L->ui.button_hover : L->ui.button_bg;
-    DrawRectangleRec(rr, rb);
-    DrawRectangleLinesEx(rr, L->ui.scale, L->ui.panel_edge);
-    const char *rl = me_ready ? "READY ✓" : "Ready up";
-    int trw = ui_measure(&L->ui, rl, 20);
-    int trh = (int)(20.0f * L->ui.scale + 0.5f);
+    /* Visual separator gap — half a row of breathing room. */
+    ly += S(14);
+    int rb_h = row_h + S(20);
+    Rectangle rr = (Rectangle){lx, ly, lp_w, rb_h};
+    bool ready_hover = ui_point_in_rect(L->ui.mouse, rr);
+
+    /* Idle: a soft pulse on the green so the button reads as "do
+     * this next." When ready, hold a darker confirmed-green and stop
+     * pulsing. When hovered, jump to a brighter highlight. */
+    double now = GetTime();
+    float pulse = 0.5f + 0.5f * sinf((float)now * 3.6f);
+    Color rb_col;
+    if (me_ready) {
+        rb_col = (Color){36, 120, 64, 255};
+    } else if (ready_hover) {
+        rb_col = (Color){100, 220, 130, 255};
+    } else {
+        /* Lerp between two greens by the pulse fraction. */
+        unsigned char r = (unsigned char)(60 + (int)(pulse * 24));
+        unsigned char G = (unsigned char)(170 + (int)(pulse * 40));
+        unsigned char B = (unsigned char)(90 + (int)(pulse * 20));
+        rb_col = (Color){r, G, B, 255};
+    }
+    DrawRectangleRec(rr, rb_col);
+    /* 2 px outline picks the button out from neighboring tiles. */
+    Color rb_edge = me_ready ? (Color){80, 200, 120, 255}
+                             : (Color){180, 240, 200, 255};
+    DrawRectangleLinesEx(rr, L->ui.scale * 2.0f, rb_edge);
+
+    /* ASCII only — Atkinson body / VG5000 display / Steps Mono don't
+     * carry U+2713 (✓), so the original `READY ✓` rendered with a
+     * fallback `?` glyph (existing "Match over - back to lobby in"
+     * label uses ASCII hyphen for the same reason). */
+    const char *rl = me_ready ? "READY!" : "READY UP";
+    int rl_font = 26;
+    int trw = ui_measure(&L->ui, rl, rl_font);
+    int trh = (int)((float)rl_font * L->ui.scale + 0.5f);
+    Color rl_text = me_ready ? (Color){220, 250, 230, 255}
+                             : (Color){14, 32, 18, 255};
     ui_draw_text(&L->ui, rl,
                  (int)(rr.x + (rr.width - (float)trw) * 0.5f),
                  (int)(rr.y + (rr.height - (float)trh) * 0.5f),
-                 20, L->ui.text_col);
-    if (hover && L->ui.mouse_pressed) apply_ready_toggle(g, !me_ready);
+                 rl_font, rl_text);
+    if (ready_hover && L->ui.mouse_pressed) apply_ready_toggle(g, !me_ready);
+    ly += rb_h - row_h;       /* compensate the extra height vs the cycle rows */
 
     /* ---- Chat (bottom of left column, separate from loadout) ----
      * Sits below the player list, constrained to left_w so it doesn't
