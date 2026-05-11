@@ -1763,6 +1763,11 @@ int main(int argc, char **argv) {
             net_shutdown();
             lobby_clear_round_mechs(&game.lobby, &game.world);
             lobby_init(&game.lobby, game.config.auto_start_seconds);
+            /* wan-fixes-7 — reset the lobby UI's "have I synced /
+             * pushed my loadout draft to this session's server" flags
+             * so the next host attempt re-publishes the user's
+             * cached loadout. */
+            lobby_ui_reset_session(&ui);
             game.local_slot_id = -1;
             game.world.local_mech_id = -1;
             game.world.authoritative = false;
@@ -1944,6 +1949,9 @@ int main(int argc, char **argv) {
                 match_init(&game.match, game.config.mode, game.config.score_limit,
                            game.config.time_limit, game.config.friendly_fire);
                 game.match.rounds_per_match = game.config.rounds_per_match;
+                /* wan-fixes-7 — see comment in the connection-lost
+                 * handler above. */
+                lobby_ui_reset_session(&ui);
                 game.local_slot_id = -1;
                 game.offline_solo  = false;
             }
@@ -2090,10 +2098,13 @@ int main(int argc, char **argv) {
                 } else {
                     /* Client: drop the connection, return to title.
                      * wan-fixes-5: if we host a dedicated child, kill
-                     * it so the next host attempt can rebind. */
+                     * it so the next host attempt can rebind.
+                     * wan-fixes-7: reset session UI trackers so the
+                     * next lobby entry re-pushes our cached loadout. */
                     stop_dedicated_child_if_any(&game);
                     net_close(&game.net);
                     net_shutdown();
+                    lobby_ui_reset_session(&ui);
                     game.mode = MODE_TITLE;
                     game.offline_solo = false;
                 }
@@ -2150,6 +2161,8 @@ int main(int argc, char **argv) {
                 match_init(&game.match, game.config.mode, game.config.score_limit,
                            game.config.time_limit, game.config.friendly_fire);
                 game.match.rounds_per_match = game.config.rounds_per_match;
+                /* wan-fixes-7 — re-publish loadout on next session. */
+                lobby_ui_reset_session(&ui);
                 game.local_slot_id = -1;
                 game.offline_solo  = false;
             }

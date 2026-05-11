@@ -44,6 +44,14 @@ typedef struct LobbyUIState {
     int        lobby_jet;
     int        lobby_team;        /* MATCH_TEAM_* */
     int        lobby_loadout_synced;   /* 0 until we've seen a server slot for ourselves */
+    /* wan-fixes-7 — "have we PUSHED our cached UI draft to the
+     * current server" tracker. After disconnect + re-host, the UI's
+     * loadout cache survives but the new dedicated server starts
+     * everyone at defaults; without pushing, the draft is visible in
+     * the lobby UI but the round spawns with defaults. Reset to 0
+     * by lobby_ui_reset_session on disconnect / leave so the lobby's
+     * first sync re-publishes the cached draft to the new server. */
+    int        lobby_loadout_pushed;
 
     /* Chat draft (lobby chat input field). */
     char       chat_draft[LOBBY_UI_CHAT_DRAFT_BYTES];
@@ -81,6 +89,15 @@ typedef struct LobbyUIState {
 } LobbyUIState;
 
 void lobby_ui_init(LobbyUIState *L);
+
+/* wan-fixes-7 — clear session-scoped UI state so the next host /
+ * connect attempt starts fresh on the wire side. Preserves player_name
+ * + cached loadout/team drafts so the user doesn't re-pick what they
+ * already chose, but flips the "pushed to server" + "synced from
+ * server" trackers so the next lobby entry pushes the cached draft
+ * to the new server. Called from every disconnect/leave path in
+ * main.c. */
+void lobby_ui_reset_session(LobbyUIState *L);
 
 /* Sample input + render the relevant screen. Caller handles raylib
  * Begin/EndDrawing wrapping. */
