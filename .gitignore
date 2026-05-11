@@ -18,6 +18,12 @@ build/
 !third_party/raylib/lib/**/*.a
 !third_party/raylib/src/libraylib.a
 
+# Per-user runtime state — written by the running game next to the
+# binary. soldut-prefs.cfg is the wan-fixes-8 prefs file; bans.txt is
+# the P09 host-set persistent ban list.
+/soldut-prefs.cfg
+/bans.txt
+
 # Editor / OS
 .DS_Store
 Thumbs.db

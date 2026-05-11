@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs host-overlay-preview shot \
         debug gdb gdb-host gdb-client valgrind editor \
         assets-palettes assets-process
 
@@ -147,6 +147,18 @@ $(BUILD_DIR)/prefs_test: tests/prefs_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET
 
 test-prefs: $(BUILD_DIR)/prefs_test
 	./$(BUILD_DIR)/prefs_test
+
+# wan-fixes-9 — visual preview for the "Starting server..." overlay.
+# Opens a real raylib window (needs DISPLAY); saves three PNGs to
+# build/shots/host_overlay_*.png at known sweep phases of the
+# indeterminate bar. Not run in CI (CI is headless); used by devs to
+# verify the overlay LOOKS right after layout / animation tweaks.
+$(BUILD_DIR)/host_overlay_preview: tests/host_overlay_preview.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/host_overlay_preview.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+host-overlay-preview: $(BUILD_DIR)/host_overlay_preview
+	mkdir -p build/shots
+	./$(BUILD_DIR)/host_overlay_preview
 
 # M5 P07 — CTF runtime: ctf_init_round + ctf_step + ctf_drop_on_death.
 # Builds a synthetic level with a Red/Blue flag pair, exercises pickup /
