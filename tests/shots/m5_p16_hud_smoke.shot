@@ -1,0 +1,34 @@
+# m5_p16_hud_smoke.shot — M5 P16
+#
+# HUD verification: HP bar, jet bar, armor pip, weapon icon + ammo,
+# kill-feed lane, crosshair. Single Trooper standing still on default
+# map with a weapon equipped + the secondary slot shown in kill-feed
+# preview. Fires once at tick 30 so a kill-feed entry appears for
+# the verification frame.
+#
+# Run:
+#   ./soldut --shot tests/shots/m5_p16_hud_smoke.shot
+# Output:
+#   build/shots/m5_p16_hud_smoke/hud.png
+#
+# Verification:
+#   - the log shows `hud: atlas loaded (256x256)`
+#   - the rendered PNG shows:
+#     * HP bar (cyan/blue) bottom-left with `HP: 150 / 150` text
+#     * Jet bar below HP in a different tone
+#     * Armor pip "Light 36" tag
+#     * `[1] Pulse Rifle 30 / 30` ammo + `[2] Frag Grenades` secondary
+#       at bottom-right with weapon icons
+#     * Crosshair near cursor (`+` shape, cyan when bink low)
+
+window 1280 720
+seed   3 5
+out    build/shots/m5_p16_hud_smoke
+
+loadout Trooper "Pulse Rifle" "Frag Grenades" Medium Heavy
+spawn_at 1060 984
+mouse    700 400
+
+at  30 tap fire
+at  60 shot hud
+at  90 end

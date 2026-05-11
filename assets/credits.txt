@@ -133,7 +133,7 @@ ASSETS REGISTRY (populated as assets land)
 # format consistent so tools/credits/check.sh can validate it
 # mechanically.
 
-assets/sprites/trooper.png  (P15 revised — gostek part-sheet extraction)
+assets/sprites/trooper.png  (P15 revised → P16 — gostek part-sheet extraction + torso squeeze 0.75)
   source:           tools/comfy/gostek_part_sheets/trooper_gostek_v1.png
                     (a "gostek part sheet" — one 2048×2048 reference image
                     with all 22 mech body parts laid out flat-shaded,
@@ -147,12 +147,16 @@ assets/sprites/trooper.png  (P15 revised — gostek part-sheet extraction)
                     traced image), record that here and in documents/art_log.md.
   pipeline:         tools/comfy/extract_gostek.py
                     tools/comfy/gostek_part_sheets/trooper_gostek_v1.png
-                    trooper --palette foundry
+                    trooper --palette foundry --torso-squeeze 0.75
                     (deterministic: scipy connected-component detect of the
                     22 part shapes → reading-row order → s_default_parts slot
-                    → per-part rotate/flip [forearms ROTATE_270, head
-                    FLIP_TOP_BOTTOM] → resize to runtime sprite size → border-
-                    flood white-key → composite at the dst rects that mirror
+                    → per-part rotate/flip [Trooper baseline: forearms
+                    ROTATE_270, head FLIP_TOP_BOTTOM] → torso + hip_plate
+                    horizontally squeezed to 75% width before slot resize
+                    (P16 fix for the front-facing "looks fat" read; transparent
+                    padding centered in the slot keeps mech_sprites.c rects
+                    unchanged) → resize to runtime sprite size → border-flood
+                    white-key → composite at the dst rects that mirror
                     src/mech_sprites.c::s_default_parts. No transcribe step.)
   modification:     2-colour palette snap to Foundry (dark #1A1612 + accent
                     #D8731A) via tools/comfy/crop_canonical.post_process_tile,
@@ -188,3 +192,177 @@ assets/sprites/trooper.png  (P15 revised — gostek part-sheet extraction)
                     atlas from that path (mech_chassis_canonical_v1.json,
                     Illustrious-XL + ControlNet-Union promax + IP-Adapter Plus,
                     seed 1000001) is superseded by this row.
+
+assets/sprites/heavy.png  (P16 — gostek part-sheet extraction)
+  source:           tools/comfy/gostek_part_sheets/heavy_gostek_forged.png
+                    (a "gostek part sheet" — one 2048×2048 reference image
+                    with all 22 mech body parts laid out flat-shaded,
+                    black-outlined, and captioned in reading order; supplied
+                    by the team. The `forged` variant was selected because
+                    its parts are in strict 5/6/6/5 reading-row layout —
+                    the alternate `heavy_gostek_normal.png` has caption
+                    numbers 1,3,4,5 / 2,6,7,8 / ... which break the
+                    extractor's left-to-right top-to-bottom assignment.)
+  sheet_provenance: team-authored reference sheet; the production method
+                    (hand-drawn / vector / traced / generated out-of-repo)
+                    is not recorded in this commit. If the sheet was derived
+                    from a licensed source, record that here and in
+                    documents/art_log.md.
+  pipeline:         tools/comfy/extract_gostek.py
+                    tools/comfy/gostek_part_sheets/heavy_gostek_forged.png
+                    heavy --palette foundry
+                    (Heavy uses CHASSIS_FIX[heavy] = SLOT_FIX_DEFAULT — only
+                    head FLIP_TOP_BOTTOM, forearms stay vertical as authored.
+                    No torso squeeze — Heavy is intentionally barrel-chested.
+                    Detected 22 part shapes, 5 reading rows 5/6/6/2/3 — the
+                    fourth/fifth row split is on the visual stump-cap row;
+                    captions still resolve to 18-22 in reading order.)
+  modification:     2-colour palette snap to Foundry (dark #1A1612 + accent
+                    #D8731A) via tools/comfy/crop_canonical.post_process_tile,
+                    + nearest-neighbor half-size round-trip per tile. No
+                    Bayer/halftone is baked in.
+  manifest:         tools/comfy/gostek_part_sheets/heavy_gostek_manifest.txt
+  loras:            n/a (no diffusion step in this path)
+  ip_adapter:       n/a
+  seed:             n/a
+  human_direction:  picked the `forged` variant over `normal` for caption
+                    ordering; no per-slot SLOT_FIX overrides needed; in-game
+                    chassis-distinctness shot confirms Heavy renders as a
+                    visibly barrel-chested heavy mech with armor plates.
+  caveats:          the sheet's foot parts are drawn TALL (full boot-shaft)
+                    rather than short (boot-top); they get vertically
+                    compressed into the 32×24 foot slot. Acceptable for v1;
+                    if the foot reads wrong in playtest, re-author the foot
+                    parts as wide-short or grow the foot slot per-chassis.
+
+assets/sprites/engineer.png  (P16 — gostek part-sheet extraction)
+  source:           tools/comfy/gostek_part_sheets/engineer_gostek_normal.png
+                    (team-authored 2048×2048 part sheet in strict caption-order
+                    layout)
+  sheet_provenance: team-authored reference sheet (production method not
+                    recorded in this commit).
+  pipeline:         tools/comfy/extract_gostek.py
+                    tools/comfy/gostek_part_sheets/engineer_gostek_normal.png
+                    engineer --palette foundry
+                    (Engineer uses CHASSIS_FIX[engineer] = SLOT_FIX_DEFAULT.
+                    Detected 27 part shapes — 22 valid + 5 extras filtered
+                    after the stumps (likely panel-detail markings on the
+                    engineer torso/equipment that are visually disconnected
+                    from the part outline they belong to). The first 22 in
+                    reading order are the actual 22 parts; the 5 extras land
+                    in the "no slot — skipped" path without displacing any
+                    real part.)
+  modification:     2-colour palette snap to Foundry (dark #1A1612 + accent
+                    #D8731A) via tools/comfy/crop_canonical.post_process_tile.
+  manifest:         tools/comfy/gostek_part_sheets/engineer_gostek_manifest.txt
+  loras:            n/a (no diffusion step in this path)
+  ip_adapter:       n/a
+  seed:             n/a
+  human_direction:  no per-slot SLOT_FIX overrides needed; in-game chassis-
+                    distinctness shot confirms Engineer renders as a chunky,
+                    equipment-laden tank-engineer mech.
+  caveats:          the 5 detected "extras" (component shapes 23-27) are
+                    silently skipped. If a future engineer-sheet revision
+                    fixes the panel-detail markings to be connected to their
+                    parent part outline, the detection should drop to a clean
+                    22. The current build's render is correct.
+
+
+assets/sprites/scout.png  (P16 — gostek part-sheet extraction)
+  source:           tools/comfy/gostek_part_sheets/scout_gostek_v1.png
+                    (team-regenerated 2048² gostek sheet via Perplexity; the
+                    earlier blade/insect variants had layout defects the
+                    deterministic extractor couldn't recover from — duplicate
+                    9.FOREARM_R on scout_blade, mixed numbering on scout_insect.)
+  sheet_provenance: Perplexity AI (team-prompted; one-shot generation against
+                    the gostek-sheet brief: 22 captioned parts in 5/6/6/5
+                    reading-row layout, flat-shaded 2-color register).
+  pipeline:         tools/comfy/extract_gostek.py
+                    tools/comfy/gostek_part_sheets/scout_gostek_v1.png
+                    scout --palette foundry
+  modification:     2-colour palette snap to Foundry.
+  manifest:         tools/comfy/gostek_part_sheets/scout_gostek_manifest.txt
+  loras:            n/a
+  ip_adapter:       n/a
+  seed:             n/a
+  human_direction:  Scout is the shortest + slimmest chassis (-16% all over
+                    per src/mech.c::g_chassis[]); v1 sheet adheres to those
+                    proportions.
+  caveats:          —
+
+assets/sprites/sniper.png  (P16 — gostek part-sheet extraction)
+  source:           tools/comfy/gostek_part_sheets/sniper_gostek_v1.png
+                    (team-regenerated 2048² gostek sheet via Perplexity; the
+                    earlier tripod variant had 28 components from a 3-legged
+                    design theme that broke the extractor's 22-part assumption.)
+  sheet_provenance: Perplexity AI (one-shot generation, same brief as scout).
+  pipeline:         tools/comfy/extract_gostek.py
+                    tools/comfy/gostek_part_sheets/sniper_gostek_v1.png
+                    sniper --palette foundry
+  modification:     2-colour palette snap to Foundry.
+  manifest:         tools/comfy/gostek_part_sheets/sniper_gostek_manifest.txt
+  loras:            n/a
+  ip_adapter:       n/a
+  seed:             n/a
+  human_direction:  Sniper is anisotropic (forearm 17→19, shin 18→21 per
+                    src/mech.c::g_chassis[]); v1 sheet adheres to those
+                    long-limbed proportions.
+  caveats:          —
+
+assets/sprites/weapons.png  (P16 — weapon-rack pack)
+  source:           tools/comfy/raw_atlases/weapons_source.png (2816×1536
+                    14-weapon rack from Perplexity against a checkerboard
+                    #C9C9C9 + white background).
+  pipeline:         tools/comfy/pack_weapons_atlas.py
+                    tools/comfy/raw_atlases/weapons_source.png
+                    (scipy connected-component detect with tone-band filter
+                    on the checkerboard, reading-row sort, first 14 mapped
+                    to g_weapon_sprites[] slot order; each cropped + alpha-
+                    keyed + resized + composited into the 1024×256 atlas at
+                    the slot's source rect.)
+  manifest:         tools/comfy/weapons_atlas_manifest.txt
+  human_direction:  Slot order: Pulse Rifle / Plasma SMG / Riot Cannon / Rail
+                    Cannon / Auto-Cannon / Mass Driver / Plasma Cannon /
+                    Microgun / Sidearm / Burst SMG / Frag Grenades / Micro-
+                    Rockets / Combat Knife / Grappling Hook.
+
+assets/ui/hud.png  (P16 — HUD atlas)
+  source:           Perplexity (single prompt for the 256×256 HUD atlas —
+                    HP bar end-caps, jet bar end-caps, weapon-icon family
+                    for all 14 weapons, kill-flag glyphs, crosshair sprite,
+                    ammo-box frame).
+  pipeline:         direct save to assets/ui/hud.png; no post-process.
+  human_direction:  Runtime falls back to procedural bars + text-only kill-
+                    feed when missing — atlas presence is an enhancement, not
+                    a requirement.
+
+assets/maps/foundry/parallax_far.png  (P16 — Foundry parallax kit, far layer)
+  source:           Perplexity (per-map prompt for the deepest parallax layer
+                    — orange-on-dark Foundry sky + distant crucible / smokestack
+                    skyline silhouettes at 2912×1440).
+  pipeline:         palette-snapped via make assets-process (Pipeline 7 ordered-
+                    dither halftone + Foundry palette remap + nearest-point
+                    halve-double round-trip).
+  human_direction:  Drawn at 0.10x scroll behind the world. Stays opaque — the
+                    deepest layer is the skybox.
+
+assets/maps/foundry/parallax_mid.png  (P16 — Foundry parallax kit, mid layer)
+  source:           Perplexity (per-map prompt for the mid-distance industrial
+                    silhouettes at 2912×1440 — large machinery, conveyor belts,
+                    smokestack mid-grounds).
+  pipeline:         palette-snapped via make assets-process, then
+                    tools/comfy/keyout_halftone_bg.py applied
+                    (scipy local-dark-fraction detector keys out the dithered
+                    canvas — foreground silhouettes stay opaque, background
+                    dither becomes alpha=0).
+  human_direction:  Drawn at 0.40x scroll behind the world. Alpha-keyed so the
+                    world's empty space lets parallax_far show through.
+
+assets/maps/foundry/parallax_near.png  (P16 — Foundry parallax kit, near layer)
+  source:           Perplexity (per-map prompt for the foreground catwalk +
+                    crucible-spout machinery at 3072×1536).
+  pipeline:         palette-snapped via make assets-process, then
+                    tools/comfy/keyout_halftone_bg.py applied.
+  human_direction:  Drawn at 0.95x scroll AFTER the world in renderer_draw_frame.
+                    Alpha-keying is CRITICAL here — without it the near layer
+                    covers the chassis entirely.

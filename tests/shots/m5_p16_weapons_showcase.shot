@@ -1,0 +1,36 @@
+# m5_p16_weapons_showcase.shot — M5 P16
+#
+# Cycles five Trooper dummies through five different weapons across the
+# weapon-atlas range. Combined with m5_p16_chassis_lineup.shot's four
+# additional weapons (Burst SMG / Mass Driver / Rail Cannon / Grappling
+# Hook), this hits 9 of the 14 sprites in g_weapon_sprites[]. The
+# remaining 5 (Plasma SMG, Sidearm, Frag Grenades, Micro Rockets,
+# Combat Knife) have smaller silhouettes that read at the foundry-shot
+# zoom too — hitting the most-used 9 weapons is sufficient for ship.
+#
+# Run:
+#   ./soldut --shot tests/shots/m5_p16_weapons_showcase.shot
+# Output:
+#   build/shots/m5_p16_weapons_showcase/showcase.png
+#
+# Verification:
+#   - the log shows `weapons_atlas: loaded assets/sprites/weapons.png`
+#     (1024x256 expected)
+#   - 5 visibly different weapon silhouettes in the 5 R_HANDs across
+#     the lineup
+
+window 1280 720
+seed   11 7
+out    build/shots/m5_p16_weapons_showcase
+
+loadout Trooper "Pulse Rifle" "Frag Grenades" Light Standard
+spawn_at 1060 984
+mouse    640 360
+
+extra_chassis Trooper  740 984 "Riot Cannon"
+extra_chassis Trooper  900 984 "Auto-Cannon"
+extra_chassis Trooper 1220 984 "Plasma Cannon"
+extra_chassis Trooper 1380 984 "Microgun"
+
+at  90 shot showcase
+at 120 end

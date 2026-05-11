@@ -31,10 +31,12 @@ __pycache__/
 # Logs
 *.log
 
-# Generated assets (editor shots + cook_maps write here; authored
+# Generated .lvl files (editor shots + cook_maps write here; authored
 # .lvl files for shipped maps land at P17/P18 and will be tracked
-# then).
-assets/maps/
+# then). Per-map kit textures (parallax_*.png + tiles.png) shipped
+# at P16 stay tracked because we narrow the ignore to .lvl only.
+assets/maps/*.lvl
+assets/maps/**/*.lvl
 
 # ComfyUI iteration scratch (P15+). Tracked inputs: workflow JSONs,
 # skeletons, style anchors, crop tables, and the gostek part sheets

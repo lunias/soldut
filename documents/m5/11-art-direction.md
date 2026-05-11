@@ -442,6 +442,8 @@ Goal: a parallax decoration like "vintage steel-mill boiler" at 256×128. **No A
 
 ### Pipeline 5 — Hand-drawn stump caps (5 per chassis × 5 chassis = 25 sprites)
 
+> **Production-path note (P15 revised, 2026-05-10).** Stump caps now ship as the last 5 of the 22 captioned parts in a chassis's **gostek part sheet** (`stump_shoulder_l/r`, `stump_hip_l/r`, `stump_neck` — see the Trooper manifest at `tools/comfy/gostek_part_sheets/trooper_gostek_manifest.txt` rows 18–22). `extract_gostek.py` slices them into the chassis atlas's `MSP_STUMP_*` sub-rects in the same pass that lays out the 17 body parts. The standalone hand-draw-in-Krita pipeline below stays as the fallback only for a chassis whose sheet was authored without stump rows — that case requires zero current work since all 5 ship-target chassis are getting fresh sheets at P16. Authors of gostek sheets *do* still need the cross-section iconography references in step 1 below — the sheet's stump rows are drawn to the same brief.
+
 Per [12-rigging-and-damage.md](12-rigging-and-damage.md) §"Stump cap art is hand-drawn", AI is bad at "the inside of a torn-off mech limb" — minimal training data for the subject. We hand-draw all stump caps in Krita.
 
 1. **Reference**: search HAER for cross-sections of pipes, valves, industrial conduits. The cross-section iconography is what we're emulating.

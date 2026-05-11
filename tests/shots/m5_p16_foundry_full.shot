@@ -1,0 +1,47 @@
+# m5_p16_foundry_full.shot — M5 P16
+#
+# Verifies the Foundry map kit (parallax + tile assets) end-to-end:
+#   - parallax_far drawn behind world (orange clouds on dark sky)
+#   - parallax_mid + parallax_near alpha-keyed (foreground silhouettes
+#     only, no opaque canvas covering the world)
+#   - halftone post-process screen over the whole frame
+#   - Trooper chassis sprite + Pulse Rifle held in R_HAND
+#   - HUD: HP bar, jet bar, armor pip, crosshair, ammo text, weapon labels
+#
+# Use m5_p16_chassis_lineup.shot for the 5-chassis-on-tutorial sprite
+# verification — at the Foundry's 1.4x camera zoom only ~914 px of world
+# is visible per frame, which can't fit a 5-chassis lineup. This shot
+# is the "look at one chassis with parallax behind it" check.
+#
+# Run:
+#   ./soldut --shot tests/shots/m5_p16_foundry_full.shot
+# Output:
+#   build/shots/m5_p16_foundry_full/full.png
+#   build/shots/m5_p16_foundry_full/m5_p16_foundry_full.log
+#
+# Verification:
+#   - the log shows `map_kit: loaded N/4 textures for 'foundry'` with
+#     N >= 3 (parallax_far/mid/near; tiles.png is optional)
+#   - the log shows `mech_sprites: loaded` for trooper.png (no
+#     "renders as capsules" lines)
+#   - the log shows `halftone: shader loaded` + `hud: atlas loaded`
+#   - the rendered PNG shows orange clouds (parallax_far), industrial
+#     silhouettes layered over them (parallax_mid + near), the Trooper
+#     standing on the spawn platform holding a rifle, and the HUD
+
+window 1280 720
+seed   42 7
+out    build/shots/m5_p16_foundry_full
+
+# Foundry is a 100x40-tile map (3200x1280 px). Spawn platform sits at
+# row 30 (top y = 960). Place the player on the platform.
+map foundry
+loadout Trooper "Pulse Rifle" "Frag Grenades" Light Standard
+
+# Player centered in the visible viewport — camera follows him.
+spawn_at 600 920
+mouse    900 350
+
+# Let physics settle the pose, then capture once.
+at  90 shot full
+at 120 end

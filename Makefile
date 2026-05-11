@@ -49,7 +49,8 @@ RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
 .PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot shot \
-        debug gdb gdb-host gdb-client valgrind editor
+        debug gdb gdb-host gdb-client valgrind editor \
+        assets-palettes assets-process
 
 all: $(BIN)
 
@@ -332,6 +333,29 @@ EDITOR_SHOT_SCRIPT ?= tools/editor/shots/smoke.shot
 editor-shot: editor
 	./build/soldut_editor --shot $(EDITOR_SHOT_SCRIPT)
 
+# M5 P16 — ImageMagick post-process for non-chassis assets.
+#
+# Chassis sprites at assets/sprites/<chassis>.png are pre-snapped by
+# tools/comfy/extract_gostek.py (palette + halve-then-double round-trip
+# baked into the extractor) and do NOT go through this step.
+#
+# Parallax + decorations + per-map tiles authored under assets/raw/ run
+# through Pipeline 7 (per documents/m5/11-art-direction.md): ordered-
+# dither halftone + palette remap + optional paper-noise multiply +
+# nearest-point halve-then-double round-trip. Output lands at the
+# corresponding path under assets/ with raw/ stripped.
+#
+# `assets-palettes` generates the 8 per-map 2-colour palette PNGs from
+# the table in documents/m5/11-art-direction.md §"Two-color print, per
+# map". Re-run whenever the palette table changes.
+#
+# Both targets require ImageMagick (`magick` IM7 or `convert` IM6).
+assets-palettes:
+	bash tools/build_palettes.sh
+
+assets-process: assets-palettes
+	bash tools/process_assets.sh
+
 clean:
 	rm -rf $(BUILD_DIR) $(BIN) soldut.exe soldut.log
 	rm -f $(ENET_OBJ)
@@ -358,6 +382,8 @@ help:
 	@echo "  make shot        run scripted scene → build/shots/*.png"
 	@echo "                   override script: make shot SCRIPT=path/to/x.shot"
 	@echo "  make editor      build the M5 level editor → build/soldut_editor"
+	@echo "  make assets-palettes  generate 8 per-map palette PNGs (foundry/slipstream/...)"
+	@echo "  make assets-process   run ImageMagick post on assets/raw/ → assets/"
 
 -include $(DEP)
 -include $(DBG_DEP)
