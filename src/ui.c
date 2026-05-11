@@ -241,12 +241,14 @@ bool ui_toggle(UIContext *u, Rectangle r, const char *label, bool *on) {
 bool ui_text_input(UIContext *u, Rectangle r, char *buf, int buf_cap,
                    uint32_t widget_id, const char *placeholder)
 {
-    bool hover   = ui_point_in_rect(u->mouse, r);
-    bool focused = (u->focus_id == widget_id);
+    bool hover         = ui_point_in_rect(u->mouse, r);
+    bool was_focused   = (u->focus_id == widget_id);
+    bool gained_focus  = false;
     if (hover && u->mouse_pressed) {
         u->next_focus_id = widget_id;
-        focused = true;       /* visual feedback this frame */
+        gained_focus     = !was_focused;
     }
+    bool focused = was_focused || (hover && u->mouse_pressed);
 
     Color bg = focused ? (Color){34, 42, 56, 255} : u->button_bg;
     DrawRectangleRec(r, bg);
@@ -259,25 +261,70 @@ bool ui_text_input(UIContext *u, Rectangle r, char *buf, int buf_cap,
     while (len < buf_cap && buf[len] != '\0') len++;
     bool committed = false;
 
+    /* wan-fixes-12 — caret position. On focus-gain (a click on this
+     * widget that wasn't already focused), seed to end of buffer so
+     * the user can keep typing where they left off. The clamp lives
+     * inside the focused branch so a non-focused widget can't truncate
+     * the focused widget's caret to its own (shorter) buf. */
+    if (gained_focus) {
+        u->caret_pos = len;
+    }
+
     if (focused) {
+        if (u->caret_pos < 0)   u->caret_pos = 0;
+        if (u->caret_pos > len) u->caret_pos = len;
         /* Pull characters off raylib's input queue. We accept printable
          * ASCII; everything else (codepoints >127) is dropped at this
-         * scale of typing. */
+         * scale of typing. Insertion happens at `caret_pos`, sliding
+         * the trailing tail right one byte. */
         for (;;) {
             int ch = GetCharPressed();
             if (ch == 0) break;
             if (ch < 32 || ch > 126) continue;
-            if (len + 1 < buf_cap) {
-                buf[len++] = (char)ch;
-                buf[len]   = '\0';
-            }
+            if (len + 1 >= buf_cap) continue;
+            int cp = u->caret_pos;
+            for (int i = len; i > cp; --i) buf[i] = buf[i - 1];
+            buf[cp]     = (char)ch;
+            buf[++len]  = '\0';
+            u->caret_pos = cp + 1;
         }
-        /* Backspace — repeats while held. */
+        /* Backspace — deletes the byte BEFORE the caret (the
+         * conventional behavior). Repeats while held. */
         if (IsKeyPressed(KEY_BACKSPACE) ||
             (IsKeyDown(KEY_BACKSPACE) && IsKeyPressedRepeat(KEY_BACKSPACE)))
         {
-            if (len > 0) { buf[--len] = '\0'; }
+            if (u->caret_pos > 0) {
+                int cp = u->caret_pos - 1;
+                for (int i = cp; i < len; ++i) buf[i] = buf[i + 1];
+                len--;
+                u->caret_pos = cp;
+            }
         }
+        /* Delete — deletes the byte AT the caret (the byte to the
+         * right of the cursor). Repeats while held. */
+        if (IsKeyPressed(KEY_DELETE) ||
+            (IsKeyDown(KEY_DELETE) && IsKeyPressedRepeat(KEY_DELETE)))
+        {
+            if (u->caret_pos < len) {
+                int cp = u->caret_pos;
+                for (int i = cp; i < len; ++i) buf[i] = buf[i + 1];
+                len--;
+            }
+        }
+        /* Left / Right cursor walk. Repeats so holding scrubs. */
+        if (IsKeyPressed(KEY_LEFT) ||
+            (IsKeyDown(KEY_LEFT) && IsKeyPressedRepeat(KEY_LEFT)))
+        {
+            if (u->caret_pos > 0) u->caret_pos--;
+        }
+        if (IsKeyPressed(KEY_RIGHT) ||
+            (IsKeyDown(KEY_RIGHT) && IsKeyPressedRepeat(KEY_RIGHT)))
+        {
+            if (u->caret_pos < len) u->caret_pos++;
+        }
+        /* Home / End — jump to extremes. */
+        if (IsKeyPressed(KEY_HOME)) u->caret_pos = 0;
+        if (IsKeyPressed(KEY_END))  u->caret_pos = len;
         /* Enter commits. We don't clear the buffer; the caller decides. */
         if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
             committed = true;
@@ -298,9 +345,18 @@ bool ui_text_input(UIContext *u, Rectangle r, char *buf, int buf_cap,
     } else {
         ui_draw_text(u, buf, (int)r.x + pad, ty, u->font_size, u->text_col);
     }
-    /* Caret. */
+    /* Caret. Measure the substring up to caret_pos for the x-offset
+     * so the bar sits between glyphs no matter where the user typed.
+     * Temporary NUL-terminate the prefix to reuse `ui_measure` without
+     * allocating; we restore the byte immediately. */
     if (focused && u->caret_phase < 0.5f) {
-        int cw = (len > 0) ? ui_measure(u, buf, u->font_size) : 0;
+        int cw = 0;
+        if (u->caret_pos > 0) {
+            char saved = buf[u->caret_pos];
+            buf[u->caret_pos] = '\0';
+            cw = ui_measure(u, buf, u->font_size);
+            buf[u->caret_pos] = saved;
+        }
         int cx = (int)r.x + pad + cw + 1;
         DrawRectangle(cx, ty, (int)(2 * u->scale + 0.5f), fp, u->text_col);
     }
