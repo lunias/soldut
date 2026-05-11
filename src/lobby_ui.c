@@ -94,6 +94,31 @@ void lobby_ui_init(LobbyUIState *L) {
              (unsigned)SOLDUT_DEFAULT_PORT);
 }
 
+void lobby_ui_reset_session(LobbyUIState *L) {
+    if (!L) return;
+    /* wan-fixes-7 — flip the "pushed to server" tracker so the next
+     * lobby entry re-publishes our cached draft to the new server.
+     *
+     * Critically, DO NOT reset `lobby_loadout_synced` here: that flag
+     * gates the "snap UI from server defaults" branch in
+     * sync_loadout_from_server. If we cleared it, the next session
+     * would overwrite the user's cached chassis / weapon / armor
+     * picks with the new server's defaults BEFORE pushing, defeating
+     * the entire fix. Leaving it set keeps the UI authoritative on
+     * reconnect (push wins); a first-ever launch still has it at 0
+     * from lobby_ui_init's memset and gets the normal sync-then-push
+     * flow.
+     *
+     * Preserves: player_name, chassis/primary/secondary/armor/jet,
+     * team, connect_addr. */
+    L->lobby_loadout_pushed  = 0;
+    L->setup_initialized     = false;
+    /* Modal / transient state — drop anything that wouldn't make sense
+     * to carry into the next session. */
+    L->kick_target_slot      = -1;
+    L->ban_target_slot       = -1;
+}
+
 /* ---- Title screen ------------------------------------------------- */
 
 void title_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
@@ -711,12 +736,20 @@ static int next_in_cycle(int current, const int *choices, int n) {
     return choices[(idx + 1) % n];
 }
 
-static void sync_loadout_from_server(LobbyUIState *L, const Game *g) {
+static void sync_loadout_from_server(LobbyUIState *L, Game *g) {
     if (g->local_slot_id < 0) return;
     const LobbySlot *me = &g->lobby.slots[g->local_slot_id];
     if (!me->in_use) return;
-    /* First-entry: snap the loadout draft to whatever the server has
-     * for our slot (handles re-join / mid-round join). */
+    /* First-entry on a FRESH client process: snap the loadout draft to
+     * whatever the server has for our slot (handles mid-round join or
+     * a clean launch with no UI cache yet). On re-host after a
+     * disconnect, lobby_ui_reset_session resets `synced = 0` too — we
+     * still snap, but the cached draft is preserved because the
+     * "pushed" branch below re-publishes it on the same call.
+     *
+     * Order matters: snap first so we capture any server-only fields
+     * (slot/team/etc.) the UI didn't have, then push our cached draft
+     * if we haven't on this session yet. The push wins. */
     if (!L->lobby_loadout_synced) {
         L->lobby_chassis   = me->loadout.chassis_id;
         L->lobby_primary   = me->loadout.primary_id;
@@ -725,14 +758,41 @@ static void sync_loadout_from_server(LobbyUIState *L, const Game *g) {
         L->lobby_jet       = me->loadout.jetpack_id;
         L->lobby_loadout_synced = 1;
     }
-    /* Team: ALWAYS sync from server so the TEAM picker reflects the
-     * authoritative state. The local optimistic update in
-     * apply_team_change already set L->lobby_team before the wire
-     * round-trip; the server's confirmation comes back through this
-     * path. If the server force-assigned (e.g., team auto-balance,
-     * future kick-to-team), the picker updates to match without the
-     * user having to click. */
-    L->lobby_team = me->team;
+    /* wan-fixes-7 — push the local UI draft to the server on each
+     * fresh session. Without this, a re-host (parent process spawns
+     * a new dedicated child) leaves the user's cached draft visible
+     * in the lobby but never communicated to the new server, and
+     * round_start spawns mechs from the default loadout. The
+     * `lobby_loadout_pushed` flag is reset by lobby_ui_reset_session
+     * in main.c's disconnect / leave paths. */
+    if (!L->lobby_loadout_pushed && g->local_slot_id >= 0) {
+        MechLoadout lo = (MechLoadout){
+            .chassis_id   = L->lobby_chassis,
+            .primary_id   = L->lobby_primary,
+            .secondary_id = L->lobby_secondary,
+            .armor_id     = L->lobby_armor,
+            .jetpack_id   = L->lobby_jet,
+        };
+        if (g->net.role == NET_ROLE_CLIENT) {
+            net_client_send_loadout(&g->net, lo);
+        } else {
+            lobby_set_loadout(&g->lobby, g->local_slot_id, lo);
+        }
+        /* Same for team. apply_team_change normally fires on click,
+         * but a reconnect with the previously-picked team needs an
+         * explicit push too. FFA's "Playing" default = MATCH_TEAM_FFA;
+         * non-FFA modes (TDM/CTF) use MATCH_TEAM_RED/_BLUE. */
+        if (g->net.role == NET_ROLE_CLIENT) {
+            net_client_send_team_change(&g->net, L->lobby_team);
+        } else {
+            lobby_set_team(&g->lobby, g->local_slot_id, L->lobby_team);
+        }
+        L->lobby_loadout_pushed = 1;
+    } else {
+        /* Already pushed this session — keep team in sync from the
+         * server in case the server force-assigned (auto-balance). */
+        L->lobby_team = me->team;
+    }
 }
 
 static MechLoadout build_local_loadout(const LobbyUIState *L) {
