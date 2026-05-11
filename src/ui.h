@@ -40,6 +40,14 @@ typedef struct UIContext {
     /* Caret blink phase, ticked by ui_end(). */
     float caret_phase;
 
+    /* wan-fixes-12 — caret column for the currently-focused text
+     * input. Persists across frames so LEFT/RIGHT (and future
+     * HOME/END/DELETE) walk a stable position. Re-seeded to the end
+     * of the buffer each time a widget gains focus; clamped to
+     * [0, strlen(buf)] inside ui_text_input every frame so an
+     * external buf truncation can't strand the caret past EOL. */
+    int      caret_pos;
+
     /* DPI/UI scale factor. 1.0 at the 1280×720 design baseline; ~3.0
      * on a 4K display. Computed each ui_begin from the current screen
      * height so widgets stay legible regardless of resolution. The
