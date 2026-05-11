@@ -148,6 +148,22 @@ Resolved three M4-era entries: "Map vote picker UI is partial",
 post-P09 entries below cover the placeholder map-vote thumbnails and
 the ban-by-name simplification.).
 
+2026-05-11 — **wan-fixes 1–15** ship between P16 and P17 as off-roadmap
+WAN polish. Net effect on the trade-off ledger:
+
+- **Deleted** "Single-byte (7-byte) kill event drops headshot/gib/overkill flags"
+  (wan-fixes-13 widens to 39 bytes + populates client `world.killfeed[]`).
+- **Deleted** "Loadout doesn't survive client process restart" (wan-fixes-8
+  ships `soldut-prefs.cfg`).
+- **Amended** "Remote mechs render in rest pose on the client" entry to
+  mention wan-fixes-4's `SNAP_STATE_RUNNING` wire bit + gait-lift
+  hysteresis (the anim_id still rides the wire; bone-state remains
+  rest pose with kinematic rigid-translate per wan-fixes-3).
+- **New entries** added below for: AOE explosion ~RTT/2 visual gap,
+  kill-feed 16-byte name truncation, host architecture forces a
+  dedicated child even for offline-solo, host-setup overlay can't be
+  cancelled mid-spawn, prefs file is per-cwd not per-user.
+
 ---
 
 ## Physics
@@ -181,6 +197,19 @@ the ban-by-name simplification.).
   Death ragdolls also won't tumble freely (severed limbs stick to the
   body rather than falling under gravity). At LAN we don't notice
   much; at WAN the user prefers stable poses to jittering ones.
+  **wan-fixes-4 follow-up**: new `SNAP_STATE_RUNNING` wire bit +
+  gait-lift hysteresis on the server side stabilizes the
+  RUN/STAND classification (previously the client guessed from
+  velocity, which flickered RUN ↔ STAND mid-stride; now the server
+  ships the authoritative anim_id classification). The
+  rest-pose-on-the-client cost is still real — pose drive still
+  runs but its results don't survive the constraint solver because
+  inv_mass=0 — but the visible flicker on remote walk is gone.
+  **wan-fixes-10 follow-up**: the rest-pose remote bones also drive
+  the new `NET_MSG_EXPLOSION` work-around — AOE projectile visuals
+  now ride server events instead of client-local detonations against
+  rest-pose bones (see "AOE explosion has a ~RTT/2 visual gap" entry
+  in the Networking section).
 - **Revisit when** —
   - The lack of walk / aim animation on remote mechs reads as broken
     to playtesters (it almost certainly will once we have proper
@@ -1273,6 +1302,160 @@ the ban-by-name simplification.).
   - P17/P18 ship 8 authored maps — at that point distinctive
     thumbnails become real navigation aid (the map names alone
     blur together when you have 8 of them in rotation).
+
+### AOE explosion has a ~RTT/2 visual gap on the client (wan-fixes-10)
+
+- **What we did** — Frag grenade / rocket / Mass Driver dud /
+  plasma orb all detonate AOE on a `NET_MSG_EXPLOSION` event the
+  server broadcasts in `apply_new_kills`-style fashion from
+  `broadcast_new_explosions`. The wire payload is 7 bytes (pos at
+  1/4 px quant + owner mech + weapon_id; client looks up
+  radius/damage/impulse from `weapon_def`). The client's local
+  visual grenade (spawned from `FIRE_EVENT`) dies silently in
+  `projectile.c::detonate` when authoritative=false — no
+  `explosion_spawn` call. The event handler `client_handle_explosion`
+  kills any matching alive projectile from the same owner + spawns
+  the visual via `explosion_spawn` (which on the client paints
+  sparks + sfx + screen shake and early-returns before the damage
+  loop).
+- **Why** — Per wan-fixes-3 remote mechs are kinematic on the
+  client in REST POSE; the server runs animated bones. A bouncy
+  frag rolling on the floor detonates against the target's
+  R_KNEE at world x=480 on the server (animated knee pos), at
+  world x=489 on both clients (rest-pose knee pos) — 9 px off.
+  Pre-fix the client's local detonate painted the explosion at
+  the wrong location while damage applied at the server's
+  location. Routing the visual through the server event makes
+  it match where damage actually lands.
+- **Cost** — Between the moment the client's visual grenade
+  silently dies and the moment `NET_MSG_EXPLOSION` arrives the
+  user sees no projectile + no boom — ~RTT/2 gap. On localhost
+  it's a single frame and invisible. On WAN (~50–150 ms RTT)
+  it's a ~25–75 ms dropout the user might perceive as a brief
+  pause. Acceptable vs the alternative (boom in the wrong
+  place). Also, non-AOE projectiles (Pulse Rifle / Sidearm /
+  hitscan) still detonate visually on the client at impact —
+  the trade-off only applies to AOE projectiles where the
+  server's auth position diverges from the client's local sim.
+- **Revisit when** —
+  - WAN ping crosses ~200 ms regularly and the gap reads as a
+    glitch. Mitigations: the client could keep its local
+    projectile alive for ~RTT after detonate (waiting for the
+    event) and only paint visual at the server's coords once
+    received; OR ship full bone-state in snapshots so the
+    client's projectile_step sees the same bone positions as
+    the server (defeats wan-fixes-3 cost).
+  - A future cosmetic-vs-authoritative split lets the client
+    render a "pending detonation" sprite at the local impact
+    until the event lands — bridges the gap visually.
+
+### Kill-feed names truncate at 16 bytes (wan-fixes-13)
+
+- **What we did** — `NET_MSG_KILL_EVENT` payload widened from 7
+  to 39 bytes (u16 killer + u16 victim + u16 weapon + u8 flags
+  + 16-byte killer_name + 16-byte victim_name). The lobby
+  allows up to `LOBBY_UI_NAME_BYTES = 24` for player names; the
+  wire truncates to the first 15 characters + NUL terminator.
+  `KillFeedEntry.killer_name` / `victim_name` are the same 16-
+  byte storage on the World.
+- **Why** — Names ride every kill event reliably; a 24-byte
+  field would push the kill-event packet to 55 bytes per kill,
+  not catastrophic but the visual layout of the kill feed only
+  has room for ~12-character names before they collide with the
+  weapon icon. Capping at 16 keeps the wire under 40 bytes and
+  the HUD layout clean.
+- **Cost** — Players with names longer than 15 characters get
+  truncated in the kill feed (their full name still shows in
+  the lobby + scoreboard, which uses the slot's `name[24]`
+  directly). Most names are well under 12 characters; few users
+  notice.
+- **Revisit when** —
+  - A friend group consistently uses long handles (e.g.
+    `GamerTagXyz_2026`) and complain about truncation.
+  - Mitigation: bump the wire to 24 bytes per name (kill event
+    grows to 55 bytes), OR ship a slot_id-keyed lookup so the
+    event carries `u8 killer_slot` + `u8 victim_slot` and the
+    client resolves names from `g->lobby.slots[].name`
+    (untruncated). The latter needs the lobby table to be
+    reliably populated on the client at the moment of kill —
+    P09's lobby-list broadcast pattern makes that mostly true
+    but not guaranteed.
+
+### Host's dedicated child is the only architecture (wan-fixes-5)
+
+- **What we did** — "Host Server" in the title screen calls
+  `host_start_begin` which spawns a `--dedicated PORT` child of
+  the same binary and the host UI joins as a regular client
+  loopback (127.0.0.1). The listen-server path (`--listen-host`
+  or `bootstrap_host(... offline=false)`) is retained but no
+  longer reachable from the production UI; only shotmode tests
+  + offline-solo + `--listen-host` CLI fast-path use it.
+- **Why** — Pre-fix the host had zero-latency to its own world
+  (`world.authoritative = true` in the same process) while the
+  joiner ate full RTT. Asymmetric experience — kills felt
+  instant on host, sluggish on client. The dedicated child gives
+  both peers the same client pipeline.
+- **Cost** — Process spawn adds ~50–300 ms between "Start
+  Hosting" and "in lobby" (covered by wan-fixes-9's async
+  overlay). Memory is doubled (host process + dedi child each
+  own a full `Game`). Offline-solo (single-player) still uses
+  the in-process listen-server because spawning a child for
+  100% local play is pointless overhead.
+- **Revisit when** —
+  - We want a true single-process listen-server for low-end
+    hardware (memory-budget machines). The plumbing exists:
+    flip the UI's `host_start_begin` to call `bootstrap_host(...
+    offline=false)` instead, skip the spawn-overlay, world stays
+    authoritative.
+  - Cross-platform process-spawn becomes fragile (Windows path
+    quoting, macOS bundle layout). Spawn currently works via
+    `proc_spawn_self` in `src/proc_spawn.c` on all three.
+
+### Host-setup overlay can't cancel mid-spawn (wan-fixes-9)
+
+- **What we did** — While the polled bootstrap is in flight
+  (`L->host_starting == true`), `host_setup_screen_run` disables
+  both Back and Start Hosting via the existing `ui_button`
+  disabled branch. The user has no in-UI way to abort.
+- **Why** — Aborting mid-spawn would orphan the
+  `s_host_start.child` handle. Cleanly cancelling needs a
+  cancel-request flag on the static spawn state + a teardown
+  path in `host_start_abort`; doable but small scope. The
+  current escape hatch is window-close (which calls
+  `host_start_abort` from the shutdown path).
+- **Cost** — User who clicked Start Hosting by mistake has to
+  wait ≤5 s for the timeout or close the window. Annoying but
+  rare; cost is friction, not lost work.
+- **Revisit when** —
+  - Players report being stuck staring at the spinner. Wire a
+    visible Cancel button into the overlay that calls
+    `host_start_abort` + returns to MODE_TITLE.
+
+### Prefs file is per-cwd, not per-user (wan-fixes-8)
+
+- **What we did** — `prefs_load` / `prefs_save` use
+  `PREFS_PATH = "soldut-prefs.cfg"` — relative to the process's
+  current working directory. Mirrors the `soldut.cfg` and
+  `bans.txt` convention so the file lives next to the binary in
+  artifact zips.
+- **Why** — A platform-correct per-user path (XDG on Linux,
+  `~/Library/Preferences/Soldut/` on macOS, `%APPDATA%\Soldut\`
+  on Windows) would need the `getenv` + `mkdir -p` plumbing
+  that's already in `src/map_cache.c::resolve_cache_dir`. Extra
+  scope; the cwd-relative path works fine for users who
+  download the artifact zip + run from there. Users who run
+  multiple Soldut binaries in different directories get
+  per-install prefs — debatable whether that's a bug or a
+  feature (a "competition build" gets its own loadout pick).
+- **Cost** — Players running from multiple shells with
+  different cwds get different prefs files. Players running on
+  Windows from a write-protected Program Files install get
+  prefs save failures (no error surfaced beyond LOG_W).
+- **Revisit when** —
+  - User reports "my prefs reset whenever I move the .exe."
+  - Mitigation: copy `resolve_cache_dir`'s pattern from
+    `map_cache.c` into `prefs.c`; `PREFS_PATH` becomes the
+    fallback when the platform path can't be resolved.
 
 ### Bans are by display name only (no IP) (P09)
 

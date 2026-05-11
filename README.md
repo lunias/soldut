@@ -114,12 +114,19 @@ make
 ./soldut
 ```
 
-A 1280×720 window opens at the **title screen** with five entries:
+A 1920×1080 window opens at the **title screen** with five entries:
 Single Player, Host Server, Browse Servers (LAN), Direct Connect,
 Quit. Pick one and the lobby flow takes over — pick chassis +
 loadout + team, hit Ready, the round starts on a 3-second countdown
 once everyone is ready (or on a 60s auto-start once half the slots
-are filled).
+are filled). Player picks persist to `soldut-prefs.cfg` next to the
+binary so loadout + name + last-connected address survive between
+launches.
+
+The host UI spawns a `--dedicated PORT` child of the same binary
+and connects to it as a regular client — so both peers experience
+identical latency and rendering. See [wan-fixes log](#wan-fixes-log)
+for the iteration history.
 
 Controls:
 
@@ -392,6 +399,50 @@ strategic view.
 - [x] **P16** — All 5 chassis atlases ship via the gostek part-sheet extraction path (`tools/comfy/extract_gostek.py` slices each `<chassis>_gostek_v*.png` from `tools/comfy/gostek_part_sheets/` into `assets/sprites/<chassis>.png`); weapon atlas (`assets/sprites/weapons.png`, 1024×256, all 14 slots) via new `tools/comfy/pack_weapons_atlas.py` (scipy CC detect with tone-band filter against a Perplexity checkerboard `#C9C9C9` + white "fake-transparent" background, reading-row sort + slot-order remap into the runtime sub-rect layout); HUD atlas (`assets/ui/hud.png`, 256×256, weapon-icon family + bar end-caps + crosshair + kill-flag glyphs + ammo-box frame); Foundry parallax kit (`assets/maps/foundry/parallax_{far,mid,near}.png`, all 3 layers). New pipeline step: `tools/comfy/keyout_halftone_bg.py` (scipy local-dark-fraction detector) keys out the opaque dithered canvas in `parallax_mid` + `parallax_near` so foreground silhouettes stay opaque and the rest becomes alpha=0 — required because `parallax_near` draws AFTER the world inside `renderer_draw_frame` at 95% scroll and would otherwise cover the chassis entirely. Originals backed up to `tools/comfy/raw_atlases/parallax_originals/`. One shotmode fix in `src/shotmode.c::shotmode_run`: call `map_registry_init()` before `parse_script` so the new `map <short>` directive resolves at parse time (`game_init` re-runs it idempotently). Four new shot tests verify the asset pipeline end-to-end: `tests/shots/m5_p16_foundry_full.shot` (parallax + chassis + HUD end-to-end on Foundry — keyout makes the world visible behind the layered industrial silhouettes), `m5_p16_chassis_lineup.shot` (all 5 chassis on a flat floor with 5 distinct weapons), `m5_p16_weapons_showcase.shot` (5 Trooper dummies cycling through Riot Cannon / Auto-Cannon / Pulse Rifle / Plasma Cannon / Microgun for the wider-silhouette half of `g_weapon_sprites[]`), `m5_p16_hud_smoke.shot` (HP/jet bars + armor pip + weapon-icon ammo + crosshair on a single Trooper). All editor shots still pass (`make test-editor` → 0 assertion failures). `TRADE_OFFS.md` deltas: "Mech capsule renderer is the no-asset fallback" entry **deleted** (5/5 chassis ship sprites in real play — the capsule path stays in source as a dev-machine convenience for builds without asset packs); "Per-map kit textures aren't on disk yet" entry **narrowed** to "Foundry only ships parallax (P16-partial)" with the keyout step documented. Per-map parallax kits for the 7 other maps (Slipstream / Concourse / Reactor / Catwalk / Aurora / Crossfire / Citadel) remain pending as P16-followup work.
 - [ ] **P17–P18** — Author 8 `.lvl` maps + bake-test harness
 - [ ] **P19** — Audio assets (~47 SFX + per-map music + ambient loops) against the P14 runtime manifest
+
+## wan-fixes log
+
+Off-roadmap WAN-play polish iterations, shipped between P16 and P17
+based on a real two-laptop bake test (MN ↔ AZ) and a follow-up
+local-LAN test session.
+
+| Tag | What | Why |
+|-----|------|-----|
+| **wan-fixes-1** (PR #19) | Server-side hitscan lag-comp + 60 Hz snapshots + redundant input packets + grapple-head lag-comp | M2 baseline was 30 Hz snapshots + no lag-comp on the grapple head; remote shots felt 100–200 ms late at WAN ping. |
+| **wan-fixes-2** (PR #20) | Bundle `assets/` into the artifact zip + restore 100 ms render interp | First MN ↔ AZ test launched the .exe without assets so atlases/SFX/fonts all hit the no-asset fallbacks; interp had crept to 0 in an earlier patch. |
+| **wan-fixes-3** (PR #21) | Remote mechs are now **kinematic** on the client (`inv_mass=0`); only `snapshot_interp_remotes` moves them | Pre-fix the client ran full pose-drive + 12-iter solver on remote bones with stale `latched_input`, producing visible wobble. |
+| **wan-fixes-4** (PR #22) | `SNAP_STATE_RUNNING` wire bit + gait-lift hysteresis | Remote walk animation flickered between Run and Idle each tick because the gait detector ran against pelvis velocity only. |
+| **wan-fixes-5** (PR #23) | "Host Server" now spawns a child `--dedicated PORT` Soldut and the host UI joins as a regular client | Listen-server host had asymmetric latency (zero on host, full RTT on joiner). Dedicated child gives both sides the same client pipeline. |
+| **wan-fixes-6** (PR #24) | Forward host setup (mode / map / score / time / ff) to the dedicated child + in-lobby host controls | The dedi child started with `soldut.cfg` defaults regardless of what the host UI picked. |
+| **wan-fixes-7** (PR #25) | Re-publish cached UI loadout on re-host | After disconnect + re-host, the lobby UI showed the previous draft but `round_start` spawned the default mech. |
+| **wan-fixes-8** (PR #26) | Persist player prefs to `soldut-prefs.cfg` | Loadout / name / team / last-connect-addr now survive cold launches; key=value file next to the binary. |
+| **wan-fixes-9** (PR #27) | Async "Starting server..." overlay on Host Setup | Synchronous spawn + 5 s connect-poll froze the window with no feedback. |
+| **wan-fixes-10** (PR #28) | Frag-grenade sync fix (server-driven `NET_MSG_EXPLOSION` event) + lobby loadout-snap clobber | Client's visual grenade detonated against rest-pose remote bones (per wan-fixes-3) ~9 px off from the server's animated bones; sync_loadout_from_server also silently reverted prefs to defaults on every fresh connect. |
+| **wan-fixes-11** (PR #29) | Lobby polish — `<` / `>` arrows on cycle buttons (RMB walks backward), Ready Up gets pulsing-green chrome, "Loading match..." overlay between countdown end and first snapshot | Cycle buttons were LMB-only forward; Ready button shared chrome with the loadout row above; the COUNTDOWN→ACTIVE gap had no visual feedback. |
+| **wan-fixes-12** (PR #30) | Text-input cursor (`Left / Right / Home / End / Delete`, mid-string insertion) | Name + direct-connect + chat fields were append-only with EOL-only Backspace. |
+| **wan-fixes-13** (PR #31) | Kill feed wire flags + names end-to-end, top-right corner with banner-aware layout, 15 s linger with 3 s fade-tail, **default window 1920×1080** | Client never populated `world.killfeed[]`, wire dropped the flag byte (no headshot/gib/overkill icons), HUD rendered "mech#N". |
+| **wan-fixes-14** (PR #32) | Loadout + team picker lock once Ready Up is committed | You could ready up and keep tweaking weapons; `round_start` used whatever the slot held when ready latched. |
+| **wan-fixes-15** (PR #33) | HP numerals 18 → 22 px, armor bar lifted 10 px above the text top | Armor bar's bottom edge clipped the top of the HP digits by 4 px. |
+
+Five new wire messages cumulatively (`NET_MSG_EXPLOSION` for AOE
+events; the kill-event payload widened from 7 to 39 bytes for flags
++ names; the input payload bundles last-N inputs as redundancy;
+snapshot frequency bumped 30 → 60 Hz; map-share kept at P08's four
+existing tags). Protocol id stays `S0LG` (all additions are
+length-prefixed or gated on existing state bits).
+
+Three new regression test runners shipped alongside:
+`tests/shots/net/run_frag_grenade.sh` (paired-dedi grenade sync,
+both throw directions), `tests/shots/net/run_kill_feed.sh`
+(end-to-end kill-event flags + names), and the `make
+host-overlay-preview` / `make lobby-overlay-preview` visual smoke
+binaries for the new spinners.
+
+User-visible state files written next to the binary now include
+`soldut.cfg` (server defaults), `bans.txt` (P09 ban list), and
+`soldut-prefs.cfg` (wan-fixes-8 per-user picks). All cwd-relative
+so they live next to `Soldut.exe` / `Soldut.app` in the artifact
+zip. `.gitignore` covers the last two.
 
 ## License
 
