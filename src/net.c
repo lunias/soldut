@@ -973,9 +973,16 @@ static void server_handle_lobby_loadout(NetPeer *p, const uint8_t *body,
 {
     if (blen < 5) return;
     int slot = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
-    if (slot < 0) return;
+    if (slot < 0) {
+        LOG_W("server_handle_lobby_loadout: no slot for peer client_id=%u",
+              (unsigned)p->client_id);
+        return;
+    }
     /* Valid in lobby/countdown/summary; ignored once a round is active. */
-    if (g->match.phase == MATCH_PHASE_ACTIVE) return;
+    if (g->match.phase == MATCH_PHASE_ACTIVE) {
+        LOG_W("server_handle_lobby_loadout: rejecting (match active) slot=%d", slot);
+        return;
+    }
     const uint8_t *r = body;
     MechLoadout lo = {0};
     lo.chassis_id   = (int)r_u8(&r);
@@ -983,6 +990,9 @@ static void server_handle_lobby_loadout(NetPeer *p, const uint8_t *body,
     lo.secondary_id = (int)r_u8(&r);
     lo.armor_id     = (int)r_u8(&r);
     lo.jetpack_id   = (int)r_u8(&r);
+    LOG_I("server_handle_lobby_loadout: slot %d chassis=%d primary=%d secondary=%d armor=%d jet=%d phase=%d",
+          slot, lo.chassis_id, lo.primary_id, lo.secondary_id, lo.armor_id, lo.jetpack_id,
+          (int)g->match.phase);
     /* Clamp ids so a malicious or stale client can't crash us. */
     if (lo.chassis_id < 0 || lo.chassis_id >= CHASSIS_COUNT) lo.chassis_id = CHASSIS_TROOPER;
     if (lo.primary_id < 0 || lo.primary_id >= WEAPON_COUNT)  lo.primary_id = WEAPON_PULSE_RIFLE;
@@ -1973,6 +1983,54 @@ static void client_handle_hit_event(NetState *ns, const uint8_t *body, int blen,
     (void)dir;
 }
 
+/* wan-fixes-10 — client-side EXPLOSION handler. Spawns the visual
+ * explosion (sparks + sfx + screen shake) at the SERVER's
+ * authoritative pos, and kills any matching visual-only projectile
+ * the client still has alive from the original FIRE_EVENT so the
+ * bouncing grenade vanishes the moment the boom appears. Damage is
+ * NOT applied here (already happened on the server before this
+ * broadcast); explosion_spawn's authoritative gate makes the damage
+ * loop a no-op on the client. */
+static void client_handle_explosion(NetState *ns, const uint8_t *body, int blen, Game *g) {
+    (void)ns;
+    if (blen < 7) return;
+    const uint8_t *r = body;
+    int16_t  pxq    = (int16_t)r_u16(&r);
+    int16_t  pyq    = (int16_t)r_u16(&r);
+    uint16_t owner  = r_u16(&r);
+    uint8_t  weapon = r_u8 (&r);
+
+    Vec2 pos = { (float)pxq / 4.0f, (float)pyq / 4.0f };
+    const Weapon *wpn = weapon_def((int)weapon);
+    if (!wpn) return;
+
+    /* Find + kill any AOE projectile from this shooter that hasn't
+     * already detonated. Most rounds have ≤2 in flight per owner so a
+     * linear scan is fine. Match by owner+kind; same-owner same-kind
+     * projectiles in quick succession are extremely rare (frag fire
+     * rate 0.6 s = 36 ticks > typical RTT). */
+    ProjectilePool *pp = &g->world.projectiles;
+    for (int i = 0; i < pp->count; ++i) {
+        if (!pp->alive[i]) continue;
+        if (pp->aoe_radius[i] <= 0.0f) continue;
+        if ((int)pp->owner_mech[i] != (int)owner) continue;
+        if ((int)pp->kind[i] != (int)wpn->projectile_kind) continue;
+        pp->alive[i]    = 0;
+        pp->exploded[i] = 1;
+    }
+
+    /* Spawn the visual. explosion_spawn's authoritative gate causes
+     * the damage loop to early-return on the client; we get sparks +
+     * sfx + shake at the server-correct position with no double-damage. */
+    int owner_team = ((int)owner < g->world.mech_count)
+                         ? (int)g->world.mechs[owner].team : 0;
+    explosion_spawn(&g->world, pos, wpn->aoe_radius, wpn->aoe_damage,
+                    wpn->aoe_impulse, (int)owner, owner_team, (int)weapon);
+    SHOT_LOG("t=%llu client_handle_explosion owner=%d weapon=%d at=(%.2f,%.2f)",
+             (unsigned long long)g->world.tick, (int)owner, (int)weapon,
+             pos.x, pos.y);
+}
+
 static void client_handle_reject(NetState *ns, const uint8_t *body, int blen) {
     if (blen < 1) return;
     uint8_t reason = body[0];
@@ -2375,6 +2433,8 @@ static void client_dispatch_event(NetState *ns, Game *g, ENetEvent *ev) {
                     client_handle_pickup_state(ns, body, blen, g); break;
                 case NET_MSG_FLAG_STATE:
                     client_handle_flag_state(ns, body, blen, g); break;
+                case NET_MSG_EXPLOSION:
+                    client_handle_explosion(ns, body, blen, g); break;
                 case NET_MSG_LOBBY_LIST:
                     client_handle_lobby_list(body, blen, g); break;
                 case NET_MSG_LOBBY_SLOT_UPDATE:
@@ -2634,6 +2694,45 @@ void net_server_broadcast_hit(NetState *ns, int victim_mech_id, int hit_part,
     w_u16(&p, (uint16_t)dir_x_q);
     w_u16(&p, (uint16_t)dir_y_q);
     w_u8 (&p, (uint8_t)dmg_clamped);
+    ENetPacket *pkt = enet_packet_create(buf, (size_t)(p - buf),
+                                          ENET_PACKET_FLAG_RELIABLE);
+    enet_host_broadcast((ENetHost *)ns->enet_host, NET_CH_EVENT, pkt);
+}
+
+/* wan-fixes-10 — EXPLOSION wire layout (7 bytes):
+ *   u8  type = NET_MSG_EXPLOSION
+ *   i16 pos_x_q  (1/4 px, same quant as snapshot pos)
+ *   i16 pos_y_q
+ *   u16 owner_mech_id  (so client can find + kill its visual-only
+ *                       projectile spawned from the matching
+ *                       FIRE_EVENT — passes through to
+ *                       client_handle_explosion)
+ *   u8  weapon_id      (lookup table on the client supplies
+ *                       aoe_radius / damage / impulse; saves 6
+ *                       bytes per event vs shipping them inline)
+ *
+ * Damage / impulse stay server-authoritative — this is purely a
+ * visual sync event. The server's per-mech damage pass already ran
+ * in explosion_spawn before this broadcast was queued. */
+void net_server_broadcast_explosion(NetState *ns, int owner_mech_id,
+                                    int weapon_id, float pos_x, float pos_y)
+{
+    if (ns->role != NET_ROLE_SERVER) return;
+    float qx = pos_x * 4.0f;
+    float qy = pos_y * 4.0f;
+    if (qx >  32760.0f) qx =  32760.0f;
+    if (qx < -32760.0f) qx = -32760.0f;
+    if (qy >  32760.0f) qy =  32760.0f;
+    if (qy < -32760.0f) qy = -32760.0f;
+    int16_t pos_x_q = (int16_t)(qx < 0 ? qx - 0.5f : qx + 0.5f);
+    int16_t pos_y_q = (int16_t)(qy < 0 ? qy - 0.5f : qy + 0.5f);
+
+    uint8_t buf[8]; uint8_t *p = buf;
+    w_u8 (&p, NET_MSG_EXPLOSION);
+    w_u16(&p, (uint16_t)pos_x_q);
+    w_u16(&p, (uint16_t)pos_y_q);
+    w_u16(&p, (uint16_t)owner_mech_id);
+    w_u8 (&p, (uint8_t)weapon_id);
     ENetPacket *pkt = enet_packet_create(buf, (size_t)(p - buf),
                                           ENET_PACKET_FLAG_RELIABLE);
     enet_host_broadcast((ENetHost *)ns->enet_host, NET_CH_EVENT, pkt);

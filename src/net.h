@@ -60,6 +60,7 @@ enum {
     NET_MSG_FIRE_EVENT         = 14,    /* server → client (EVENT) — fire origin+dir+weapon for tracer/projectile FX */
     NET_MSG_PICKUP_STATE       = 15,    /* server → client (EVENT) — pickup spawner state transition (P05) */
     NET_MSG_FLAG_STATE         = 16,    /* server → client (EVENT) — CTF flag state transition (P07) */
+    NET_MSG_EXPLOSION          = 17,    /* server → client (EVENT) — AOE detonation pos+weapon (wan-fixes-10) */
     NET_MSG_CHAT               = 10,    /* both directions   (CHAT) */
     NET_MSG_DISCOVERY_QUERY    = 11,    /* connectionless broadcast */
     NET_MSG_DISCOVERY_REPLY    = 12,    /* connectionless reply    */
@@ -417,6 +418,17 @@ void net_server_broadcast_hit(NetState *ns, int victim_mech_id, int hit_part,
 void net_server_broadcast_fire(NetState *ns, int shooter_mech_id, int weapon_id,
                                float origin_x, float origin_y,
                                float dir_x, float dir_y);
+
+/* wan-fixes-10 — an AOE explosion event. Broadcast on every
+ * authoritative `detonate()` call (frag grenade, rocket, plasma orb,
+ * mass driver dud). Clients spawn the visual explosion at the
+ * server's authoritative pos and kill any matching visual-only
+ * projectile they still have alive (so the bouncing grenade
+ * disappears at the moment it visually explodes). 7 bytes per
+ * event, reliable on NET_CH_EVENT. */
+void net_server_broadcast_explosion(NetState *ns, int owner_mech_id,
+                                    int weapon_id,
+                                    float pos_x, float pos_y);
 
 /* Pickup state event (P05) — full spawner data so clients can both
  * mirror state transitions on level-defined pickups AND learn about

@@ -117,7 +117,17 @@ static void detonate(World *w, int i) {
     ProjectilePool *p = &w->projectiles;
     if (p->exploded[i]) return;
     p->exploded[i] = 1;
-    if (p->aoe_radius[i] > 0.0f) {
+    /* wan-fixes-10 — only the SERVER spawns the explosion visual from
+     * the projectile-step detonate path. The client's visual grenade
+     * collides against rest-pose remote bones (wan-fixes-3) which can
+     * be ~10 px off from the server's animated bone positions; the
+     * client's locally-spawned visual then landed in a different place
+     * than where damage was applied. With server-driven EXPLOSION
+     * events, clients spawn the visual on event receipt at the
+     * server's authoritative pos. Client's projectile here just dies
+     * silently; explosion_spawn is called from
+     * client_handle_explosion in net.c. */
+    if (w->authoritative && p->aoe_radius[i] > 0.0f) {
         explosion_spawn(w,
             (Vec2){ p->pos_x[i], p->pos_y[i] },
             p->aoe_radius[i],
@@ -350,6 +360,14 @@ void projectile_step(World *w, float dt) {
             p->pos_x[i] = a.x + (b.x - a.x) * t_hit;
             p->pos_y[i] = a.y + (b.y - a.y) * t_hit;
 
+            SHOT_LOG("t=%llu proj=%d kind=%d hit owner=%d authoritative=%d at=(%.2f,%.2f) "
+                     "wall=%d mech=%d part=%d bouncy=%d vel=(%.1f,%.1f)",
+                     (unsigned long long)w->tick, i, (int)p->kind[i],
+                     (int)p->owner_mech[i], (int)w->authoritative,
+                     p->pos_x[i], p->pos_y[i],
+                     (int)hit_wall, hit_mech, hit_part,
+                     (int)p->bouncy[i], p->vel_x[i], p->vel_y[i]);
+
             /* Bouncy projectiles (frag grenades) ricochet off tiles
              * instead of detonating; they keep their fuse and continue
              * to integrate. We pick a normal by which axis crossed
@@ -535,6 +553,20 @@ void explosion_spawn(World *w, Vec2 pos, float radius, float damage,
     if (damage >= 100.0f) audio_request_duck(0.5f, 0.30f);
 
     if (!w->authoritative) return;   /* damage is server-authoritative */
+
+    /* wan-fixes-10 — queue the detonation so main.c can broadcast it
+     * via NET_MSG_EXPLOSION. Clients use the server's pos as the
+     * visual anchor instead of detonating their own visual grenade
+     * against rest-pose remote bones (which differ from the server's
+     * animated bones — see ExplosionFeedEntry doc in world.h). */
+    if (w->explosionfeed_count < EXPLOSIONFEED_CAPACITY) {
+        ExplosionFeedEntry *e = &w->explosionfeed[w->explosionfeed_count++];
+        e->owner_mech_id = (int16_t)owner_mech_id;
+        e->weapon_id     = (uint8_t)weapon_id;
+        e->reserved      = 0;
+        e->pos_x         = pos.x;
+        e->pos_y         = pos.y;
+    }
 
     for (int mi = 0; mi < w->mech_count; ++mi) {
         Mech *m = &w->mechs[mi];

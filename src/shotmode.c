@@ -870,11 +870,13 @@ static void networked_shot_bootstrap(Game *g, const Script *s) {
             return;
         }
         g->world.authoritative = false;
-        /* Send a LOADOUT message to the server so the client's
-         * spawned mech uses the right chassis + weapons. */
-        if (s->have_loadout) {
-            net_client_send_loadout(&g->net, s->loadout);
-        }
+        /* wan-fixes-10 — the lobby UI is what publishes loadout to the
+         * server (via sync_loadout_from_server's push branch). The
+         * UI's L->lobby_* fields are seeded after this function
+         * returns (see the `if (s.netmode != NETMODE_NONE)` block
+         * below). The earlier net_client_send_loadout from here was
+         * superfluous AND racy — the lobby UI's first push could land
+         * on the same wire frame and overwrite this one. */
         /* The handshake moved us to MODE_LOBBY via INITIAL_STATE. */
         LOG_I("shotmode: connected to %s:%u as '%s' (slot %d)",
               s->nethost, (unsigned)s->netport, nm, g->local_slot_id);
@@ -883,10 +885,11 @@ static void networked_shot_bootstrap(Game *g, const Script *s) {
 
 /* Same kill-feed → lobby score path main.c uses. We re-implement it
  * here (rather than refactor main.c) to keep shotmode self-contained. */
-static int g_shot_kill_processed   = 0;
-static int g_shot_hit_processed    = 0;
-static int g_shot_fire_processed   = 0;
-static int g_shot_pickup_processed = 0;
+static int g_shot_kill_processed     = 0;
+static int g_shot_hit_processed      = 0;
+static int g_shot_fire_processed     = 0;
+static int g_shot_pickup_processed   = 0;
+static int g_shot_explosion_processed = 0;
 
 /* Mirror main.c's broadcast_new_hits — drain the world hitfeed and
  * ship NET_MSG_HIT_EVENT to every peer. Without this, networked shot
@@ -905,6 +908,28 @@ static void shot_broadcast_new_hits(Game *g) {
             h->pos_x, h->pos_y, h->dir_x, h->dir_y, (int)h->damage);
     }
     g_shot_hit_processed = cur;
+}
+
+/* wan-fixes-10 — Mirror broadcast_new_explosions for the shotmode
+ * host path so paired-shot tests exercise the new EXPLOSION wire
+ * event. Without this, AOE detonations on the shot-server never
+ * cross the wire and tests still see the old client-locally-spawned
+ * explosion (defeating the regression coverage). */
+static void shot_broadcast_new_explosions(Game *g) {
+    if (g->net.role != NET_ROLE_SERVER) return;
+    int cur = g->world.explosionfeed_count;
+    int begin = g_shot_explosion_processed;
+    if (cur - begin > EXPLOSIONFEED_CAPACITY) {
+        begin = cur - EXPLOSIONFEED_CAPACITY;
+    }
+    for (int n = begin; n < cur; ++n) {
+        int idx = n % EXPLOSIONFEED_CAPACITY;
+        if (idx < 0) idx += EXPLOSIONFEED_CAPACITY;
+        const ExplosionFeedEntry *e = &g->world.explosionfeed[idx];
+        net_server_broadcast_explosion(&g->net,
+            (int)e->owner_mech_id, (int)e->weapon_id, e->pos_x, e->pos_y);
+    }
+    g_shot_explosion_processed = cur;
 }
 
 /* Mirror broadcast_new_fires — without this, FIRE_EVENT never crosses
@@ -1190,6 +1215,7 @@ static void shot_host_flow(Game *g, float dt) {
             shot_broadcast_new_hits(g);
             shot_broadcast_new_fires(g);
             shot_broadcast_new_pickups(g);
+            shot_broadcast_new_explosions(g);
             /* Drain CTF dirty bit on the host. */
             if (g->net.role == NET_ROLE_SERVER && g->world.flag_state_dirty) {
                 net_server_broadcast_flag_state(&g->net, &g->world);
@@ -1657,6 +1683,19 @@ int shotmode_run(const char *script_path) {
         lobby_ui_init(&ui_n);
         snprintf(ui_n.player_name, sizeof ui_n.player_name, "%s",
                  s.netname[0] ? s.netname : "shot");
+        /* wan-fixes-10 — seed the UI loadout draft from the script's
+         * `loadout` directive (mirrors how main.c seeds from
+         * soldut-prefs.cfg in production). Without this, the lobby
+         * UI's first push (sync_loadout_from_server) sends
+         * lobby_ui_init defaults regardless of what the script
+         * requested, and the spawned mech matches the wrong loadout. */
+        if (s.have_loadout) {
+            ui_n.lobby_chassis   = s.loadout.chassis_id;
+            ui_n.lobby_primary   = s.loadout.primary_id;
+            ui_n.lobby_secondary = s.loadout.secondary_id;
+            ui_n.lobby_armor     = s.loadout.armor_id;
+            ui_n.lobby_jet       = s.loadout.jetpack_id;
+        }
 
         const float TICK_DT = 1.0f / 60.0f;
         int ev_idx_n = 0;
