@@ -40,6 +40,12 @@ void map_kit_load(const char *short_name) {
         map_kit_unload();
         return;
     }
+    /* wan-fixes-5 — `--dedicated` runs without a raylib window / GL
+     * context. raylib's LoadTexture crashes (or no-ops with garbage
+     * id) without one, so skip kit-load when no window is ready. The
+     * dedicated server never renders these textures itself; clients
+     * load their own copies. */
+    if (!IsWindowReady()) return;
     if (strncmp(g_map_kit.short_name, short_name,
                 sizeof g_map_kit.short_name) == 0 &&
         (g_map_kit.parallax_far .id != 0 ||

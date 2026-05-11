@@ -70,6 +70,11 @@ static bool init_single_rt(int level_w, int level_h) {
 }
 
 void decal_init(int level_w, int level_h) {
+    /* wan-fixes-5 — `--dedicated` runs without a raylib window / GL
+     * context. LoadRenderTexture would assert / crash. The dedicated
+     * server doesn't render decals; clients init their own decal RTs
+     * after platform_init. Bail cleanly when there's no GL. */
+    if (!IsWindowReady()) return;
     if (g_layer_ready) decal_shutdown();
     memset(&g_layer, 0, sizeof g_layer);
     g_layer.level_w = level_w;

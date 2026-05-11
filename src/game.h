@@ -8,6 +8,7 @@
 #include "map_download.h"
 #include "match.h"
 #include "net.h"
+#include "proc_spawn.h"
 #include "reconcile.h"
 #include "world.h"
 
@@ -117,6 +118,15 @@ typedef struct Game {
 
     MapDescriptor pending_map;
     MapDownload   map_download;
+
+    /* wan-fixes-5 — when the host UI launches "Host Server", the
+     * process spawns a child `--dedicated PORT` Soldut and connects
+     * to it as a regular client (so both players experience the same
+     * latency profile). This handle owns the child; closing the game
+     * window terminates the child cleanly. PROC_HANDLE_NULL when the
+     * current session isn't hosting a dedicated child (i.e., pure
+     * --connect or LISTEN_HOST mode). */
+    ProcHandle    dedicated_proc;
 } Game;
 
 bool game_init(Game *g);

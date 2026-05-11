@@ -1,0 +1,45 @@
+# 2p_dedi_combat — client A (first connector → slot 0). Pure-connect
+# client of a `--dedicated PORT` server. Crossfire's authored spawn
+# points land slots 0 and 1 ~200 px apart on the same elevated
+# platform, so both mechs are in view of each other with no
+# movement required.
+#
+# A stands still and fires at B's chest. Hits should produce
+# matching damage events on both clients.
+
+window 1280 720
+out build/shots/net/dedi/2p_dedi_combat.client_a
+network connect 127.0.0.1:{{PORT}}
+name ClientA
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+
+# Aim at where mech_1 typically spawns on Crossfire (slot 1 → spawn[1]
+# at (12*32, plat_top) ≈ (384, 984) on the RED platform). A is at
+# slot 0 (spawn[0] at (6*32, plat_top) ≈ (192, 984)) so we aim right.
+aim 480 980
+
+# Stand still, fire a salvo at B.
+at 200 tap fire
+at 240 tap fire
+at 280 tap fire
+at 320 tap fire
+
+# Swap to secondary, RMB one-shot.
+at 400 tap swap
+at 440 tap fire
+
+# A small jet pulse to verify air-anim flows across the wire too.
+at 540 press jet
+at 600 release jet
+
+# Walk briefly (just enough to flip facing) and fire again.
+at 680 press right
+at 720 release right
+at 750 tap fire
+
+at 150 shot t150_spawn
+at 260 shot t260_firing
+at 410 shot t410_swap
+at 580 shot t580_jet
+at 760 shot t760_walkback
+at 900 end

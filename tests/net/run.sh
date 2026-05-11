@@ -68,7 +68,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Launch host first.
-( cd "$HOST_DIR" && exec "$BIN" --host "$PORT" --name HostA ) \
+( cd "$HOST_DIR" && exec "$BIN" --listen-host "$PORT" --name HostA ) \
     > "$HOST_DIR/stdout.log" 2>&1 &
 HOST_PID=$!
 

@@ -59,6 +59,13 @@ typedef struct ServerConfig {
      * defaults; LAN-only hosts can dial lower to claw back latency. */
     int       interp_delay_ms;
 
+    /* Pre-round countdown in seconds (wan-fixes-5). The lobby auto-
+     * start fires → match enters COUNTDOWN → start_round spawns
+     * mechs. Default 5 s gives players time to read the map / mode
+     * line. Shot tests want this much shorter so PNG timing can land
+     * inside MATCH_PHASE_ACTIVE. 0 keeps the in-code default. */
+    float     countdown_default;
+
     /* Match rules. */
     MatchModeId mode;
     int         score_limit;
