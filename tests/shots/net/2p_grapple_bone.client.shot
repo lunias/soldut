@@ -1,0 +1,30 @@
+# 2p_grapple_bone — client. Equips Grappling Hook on the secondary,
+# swaps to it, aims at the stationary host's chest, fires. The hook
+# head flies across the platform and lands on the host's body — the
+# bone-hit branch in projectile_step.
+#
+# What proves Phase 4: on the host side, the `grapple_attach`
+# SHOT_LOG line carries `lag_comp=N` with N > 0 because the firer
+# (mech=1) has `input_view_tick` set by server_handle_input. Without
+# Phase 4, lag_comp=0 even though mech=1's view tick was non-zero —
+# the projectile_step bone test ran current-time regardless.
+
+window 1280 720
+out build/shots/net/grapple_bone_client
+network connect 127.0.0.1:24191
+name ClientB
+loadout - "Pulse Rifle" "Grappling Hook" Light Standard
+
+spawn_at 2100 1080
+aim 2300 1080
+
+# Round-start arrives ~tick 130 (shotmode's 1s auto-start +
+# handshake settle); 2p_combat fires its first weapon at tick 280
+# for the same reason. Wait for the mech to spawn before swapping
+# slots, then fire a tick later.
+at 250 tap swap
+at 280 tap fire
+at 320 shot t320_in_flight
+at 380 shot t380_attached
+at 500 shot t500_swinging
+at 700 end

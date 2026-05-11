@@ -5,6 +5,7 @@
 #include "log.h"
 #include "mech.h"
 #include "particle.h"
+#include "snapshot.h"
 
 #include <math.h>
 #include <string.h>
@@ -190,15 +191,65 @@ void projectile_step(World *w, float dt) {
         int   hit_mech = -1;
         int   hit_part = -1;
 
+        /* Phase 4 — Grapple head lag-comp. For PROJ_GRAPPLE_HEAD only
+         * (per the matching TRADE_OFFS entry "Grapple anchor uses
+         * server-current position"), pre-load each target mech's bone
+         * positions from snapshot_lag_lookup at the firer's input view
+         * tick. Other projectiles intentionally remain current-time —
+         * slower projectile travel-time is part of the gameplay and
+         * Source's standard stance is to lag-comp hitscan only.
+         *
+         * Without this, a client firing the hook at a moving target
+         * regularly missed at WAN ping (~50–150 ms RTT) because the
+         * server tested the head's swept segment against where the
+         * target IS, not where the firer's screen showed it. With it,
+         * the swept test runs against the rewound bones; if it hits,
+         * we still attach the constraint to the bone's *current*
+         * particle (rope visually snaps over ~1 frame as the
+         * constraint solver pulls the firer toward the new anchor —
+         * acceptable given the alternative is missing). */
+        bool lag_comp_used = false;
+        float lc_bx[PART_COUNT], lc_by[PART_COUNT];
+        uint64_t lc_view_tick = 0;
+        if (p->kind[i] == PROJ_GRAPPLE_HEAD) {
+            int fmid = (int)p->owner_mech[i];
+            if (fmid >= 0 && fmid < w->mech_count) {
+                lc_view_tick = w->mechs[fmid].input_view_tick;
+            }
+        }
+
         for (int mi = 0; mi < w->mech_count; ++mi) {
             const Mech *m = &w->mechs[mi];
             if (!m->alive) continue;
             if (mi == p->owner_mech[i]) continue;   /* don't hit yourself */
+
+            /* For PROJ_GRAPPLE_HEAD with a remote firer, fetch this
+             * target's rewound bone snapshot once per mech. If the
+             * lookup fails (no history covering view_tick), fall back
+             * to current positions via the per-bone read below. */
+            const float *bx_lookup = NULL;
+            const float *by_lookup = NULL;
+            if (lc_view_tick > 0) {
+                if (snapshot_lag_lookup(w, mi, lc_view_tick, lc_bx, lc_by)) {
+                    bx_lookup = lc_bx;
+                    by_lookup = lc_by;
+                    lag_comp_used = true;
+                }
+            }
+
             for (int bi = 0; bi < NUM_BONES; ++bi) {
                 int pa = m->particle_base + g_bones[bi].parent;
                 int pb = m->particle_base + g_bones[bi].child;
-                Vec2 va = { w->particles.pos_x[pa], w->particles.pos_y[pa] };
-                Vec2 vb = { w->particles.pos_x[pb], w->particles.pos_y[pb] };
+                Vec2 va, vb;
+                if (bx_lookup) {
+                    va = (Vec2){ bx_lookup[g_bones[bi].parent],
+                                 by_lookup[g_bones[bi].parent] };
+                    vb = (Vec2){ bx_lookup[g_bones[bi].child],
+                                 by_lookup[g_bones[bi].child]  };
+                } else {
+                    va = (Vec2){ w->particles.pos_x[pa], w->particles.pos_y[pa] };
+                    vb = (Vec2){ w->particles.pos_x[pb], w->particles.pos_y[pb] };
+                }
                 float th = swept_seg_vs_bone(a, b, va, vb, /*r*/ 8.0f);
                 if (th < 0.0f) continue;
                 if (th < t_hit) {
@@ -208,6 +259,7 @@ void projectile_step(World *w, float dt) {
                 }
             }
         }
+        (void)lag_comp_used; /* surfaced via SHOT_LOG at attach time below */
 
         bool any_hit = (hit_mech >= 0) || hit_wall;
 
@@ -264,11 +316,12 @@ void projectile_step(World *w, float dt) {
                         if (L < GRAPPLE_INIT_MIN_LEN) L = GRAPPLE_INIT_MIN_LEN;
                         firer->grapple.rest_length = L;
                         mech_grapple_attach(w, fmid);
-                        SHOT_LOG("t=%llu mech=%d grapple_attach anchor=(%.1f,%.1f) tgt_mech=%d part=%d L=%.1f",
+                        SHOT_LOG("t=%llu mech=%d grapple_attach anchor=(%.1f,%.1f) tgt_mech=%d part=%d L=%.1f lag_comp=%llu",
                                  (unsigned long long)w->tick, fmid,
                                  anchor.x, anchor.y,
                                  (int)firer->grapple.anchor_mech,
-                                 (int)firer->grapple.anchor_part, L);
+                                 (int)firer->grapple.anchor_part, L,
+                                 (unsigned long long)(lag_comp_used ? lc_view_tick : 0u));
                     }
                 }
                 /* Tiny visual sparks at landing point on both sides. */
