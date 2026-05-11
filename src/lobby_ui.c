@@ -1602,6 +1602,17 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                  (Color){200, 220, 240, 255});
     ly += S(28);
 
+    /* wan-fixes-14 — once the local player clicks "READY UP", the
+     * lobby treats the loadout as locked: team picker, all five
+     * cycle buttons, and the loadout-driven commit path are
+     * disabled until the user clicks the ready button a second
+     * time to un-ready. Stops the "click ready, then keep tweaking
+     * weapons" anti-pattern; round_start uses whatever the slot
+     * held the moment ready latched. */
+    bool me_ready = (g->local_slot_id >= 0)
+                  ? g->lobby.slots[g->local_slot_id].ready
+                  : false;
+
     /* ---- Team picker (always shown, mode-aware) ----
      * TDM/CTF: side-by-side RED / BLUE / SPEC — the player taps the
      * one they want. The press goes through net_client_send_team_change
@@ -1623,13 +1634,22 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                 Rectangle r = (Rectangle){lx + i * (slot_w + gap), ly,
                                            slot_w, row_h};
                 bool active = (L->lobby_team == tslot[i].team);
-                bool hover  = ui_point_in_rect(L->ui.mouse, r);
-                Color bg = active ? tslot[i].col
-                                  : hover ? L->ui.button_hover : L->ui.button_bg;
+                bool hover  = !me_ready && ui_point_in_rect(L->ui.mouse, r);
+                Color bg;
+                if (me_ready && !active) {
+                    bg = L->ui.button_disabled;
+                } else if (active) {
+                    bg = tslot[i].col;
+                } else if (hover) {
+                    bg = L->ui.button_hover;
+                } else {
+                    bg = L->ui.button_bg;
+                }
                 DrawRectangleRec(r, bg);
                 DrawRectangleLinesEx(r, L->ui.scale, L->ui.panel_edge);
                 int tw = ui_measure(&L->ui, tslot[i].label, 18);
-                Color tc = active ? (Color){12, 18, 26, 255} : L->ui.text_col;
+                Color tc = active ? (Color){12, 18, 26, 255}
+                                  : (me_ready ? L->ui.text_dim : L->ui.text_col);
                 ui_draw_text(&L->ui, tslot[i].label,
                              (int)(r.x + (r.width - tw) * 0.5f),
                              (int)(r.y + (r.height - 18*L->ui.scale) * 0.5f),
@@ -1649,13 +1669,22 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                 Rectangle r = (Rectangle){lx + i * (slot_w + gap), ly,
                                            slot_w, row_h};
                 bool active = (cells[i].play == playing);
-                bool hover  = ui_point_in_rect(L->ui.mouse, r);
-                Color bg = active ? L->ui.accent
-                                  : hover ? L->ui.button_hover : L->ui.button_bg;
+                bool hover  = !me_ready && ui_point_in_rect(L->ui.mouse, r);
+                Color bg;
+                if (me_ready && !active) {
+                    bg = L->ui.button_disabled;
+                } else if (active) {
+                    bg = L->ui.accent;
+                } else if (hover) {
+                    bg = L->ui.button_hover;
+                } else {
+                    bg = L->ui.button_bg;
+                }
                 DrawRectangleRec(r, bg);
                 DrawRectangleLinesEx(r, L->ui.scale, L->ui.panel_edge);
                 int tw = ui_measure(&L->ui, cells[i].label, 18);
-                Color tc = active ? (Color){12, 18, 26, 255} : L->ui.text_col;
+                Color tc = active ? (Color){12, 18, 26, 255}
+                                  : (me_ready ? L->ui.text_dim : L->ui.text_col);
                 ui_draw_text(&L->ui, cells[i].label,
                              (int)(r.x + (r.width - tw) * 0.5f),
                              (int)(r.y + (r.height - 18*L->ui.scale) * 0.5f),
@@ -1678,11 +1707,16 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     /* wan-fixes-11 — cycle buttons: LMB forward (+1), RMB back (-1).
      * Arrows on the button edges hint at the directional affordance;
      * the same gesture stays as the M4-era LMB-only flow for anyone
-     * who never finds the right click. */
+     * who never finds the right click.
+     *
+     * wan-fixes-14 — `enabled = !me_ready`. ui_cycle_button's
+     * existing disabled branch paints the row dim + returns 0 so
+     * the loadout draft stays frozen once the user commits. */
+    bool can_edit = !me_ready;
     int step;
     step = ui_cycle_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
                            TextFormat("Chassis: %s", chassis_label(L->lobby_chassis)),
-                           true);
+                           can_edit);
     if (step != 0) {
         L->lobby_chassis = step_in_cycle(L->lobby_chassis, g_chassis_choices,
                                          (int)(sizeof g_chassis_choices / sizeof g_chassis_choices[0]), step);
@@ -1691,7 +1725,7 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
 
     step = ui_cycle_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
                            TextFormat("Primary: %s", primary_label(L->lobby_primary)),
-                           true);
+                           can_edit);
     if (step != 0) {
         L->lobby_primary = step_in_cycle(L->lobby_primary, g_primary_choices,
                                          (int)(sizeof g_primary_choices / sizeof g_primary_choices[0]), step);
@@ -1700,7 +1734,7 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
 
     step = ui_cycle_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
                            TextFormat("Secondary: %s", primary_label(L->lobby_secondary)),
-                           true);
+                           can_edit);
     if (step != 0) {
         L->lobby_secondary = step_in_cycle(L->lobby_secondary, g_secondary_choices,
                                            (int)(sizeof g_secondary_choices / sizeof g_secondary_choices[0]), step);
@@ -1709,7 +1743,7 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
 
     step = ui_cycle_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
                            TextFormat("Armor: %s", armor_label(L->lobby_armor)),
-                           true);
+                           can_edit);
     if (step != 0) {
         L->lobby_armor = step_in_cycle(L->lobby_armor, g_armor_choices,
                                        (int)(sizeof g_armor_choices / sizeof g_armor_choices[0]), step);
@@ -1718,7 +1752,7 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
 
     step = ui_cycle_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
                            TextFormat("Jetpack: %s", jet_label(L->lobby_jet)),
-                           true);
+                           can_edit);
     if (step != 0) {
         L->lobby_jet = step_in_cycle(L->lobby_jet, g_jet_choices,
                                      (int)(sizeof g_jet_choices / sizeof g_jet_choices[0]), step);
@@ -1729,9 +1763,12 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
      * cycle row above so the player's eye lands on it as the primary
      * commit action. Gap + bright green chrome + larger font + 2-px
      * outline + subtle pulse on the not-ready idle state so it
-     * reads as "press me." */
-    bool me_ready = (g->local_slot_id >= 0) ?
-        g->lobby.slots[g->local_slot_id].ready : false;
+     * reads as "press me."
+     *
+     * wan-fixes-14 — `me_ready` is now hoisted to the top of the
+     * loadout panel so the cycle + team rows can gate on it. The
+     * button itself stays clickable in both states (so the user
+     * can toggle back to "not ready" and tweak loadout again). */
     /* Visual separator gap — half a row of breathing room. */
     ly += S(14);
     int rb_h = row_h + S(20);
