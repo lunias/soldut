@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs shot \
         debug gdb gdb-host gdb-client valgrind editor \
         assets-palettes assets-process
 
@@ -138,6 +138,15 @@ $(BUILD_DIR)/snapshot_test: tests/snapshot_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) 
 
 test-snapshot: $(BUILD_DIR)/snapshot_test
 	./$(BUILD_DIR)/snapshot_test
+
+# wan-fixes-8 — user-prefs persistence (soldut-prefs.cfg). Round-trips
+# a UserPrefs, exercises hand-edited cfg parsing + comment stripping +
+# unknown-name fallbacks + atomic-save tmp cleanup.
+$(BUILD_DIR)/prefs_test: tests/prefs_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/prefs_test.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+test-prefs: $(BUILD_DIR)/prefs_test
+	./$(BUILD_DIR)/prefs_test
 
 # M5 P07 — CTF runtime: ctf_init_round + ctf_step + ctf_drop_on_death.
 # Builds a synthetic level with a Red/Blue flag pair, exercises pickup /

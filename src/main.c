@@ -19,6 +19,7 @@
 #include "net.h"
 #include "pickup.h"
 #include "platform.h"
+#include "prefs.h"
 #include "proc_spawn.h"
 #include "reconcile.h"
 #include "render.h"
@@ -1662,6 +1663,26 @@ int main(int argc, char **argv) {
 
     LobbyUIState ui = (LobbyUIState){0};
     lobby_ui_init(&ui);
+    /* wan-fixes-8 — load persisted prefs from soldut-prefs.cfg (next
+     * to the executable, cwd-relative). Player name + loadout draft
+     * + team + last-connected address survive between client
+     * launches. The lobby UI saves back to the same file on every
+     * cycle-button click via prefs_save_from_ui. */
+    {
+        UserPrefs prefs;
+        if (prefs_load(&prefs, PREFS_PATH)) {
+            snprintf(ui.player_name, sizeof ui.player_name, "%s", prefs.name);
+            ui.lobby_chassis   = prefs.loadout.chassis_id;
+            ui.lobby_primary   = prefs.loadout.primary_id;
+            ui.lobby_secondary = prefs.loadout.secondary_id;
+            ui.lobby_armor     = prefs.loadout.armor_id;
+            ui.lobby_jet       = prefs.loadout.jetpack_id;
+            ui.lobby_team      = prefs.team;
+            snprintf(ui.connect_addr, sizeof ui.connect_addr, "%s",
+                     prefs.connect_addr);
+        }
+    }
+    /* CLI --name overrides the persisted value. */
     if (args.name[0]) snprintf(ui.player_name, sizeof ui.player_name, "%s", args.name);
 
     Renderer rd;
@@ -1787,6 +1808,9 @@ int main(int argc, char **argv) {
             else if (ui.request_single_player) {
                 ui.request_single_player = false;
                 snprintf(args.name, sizeof args.name, "%s", ui.player_name);
+                /* wan-fixes-8 — capture player_name + connect_addr
+                 * edits made on the title screen this session. */
+                lobby_ui_save_prefs(&ui);
                 if (bootstrap_host(&game, &args, /*offline*/true)) {
                     /* Auto-start with a short countdown. */
                     lobby_auto_start_arm(&game.lobby, 1.0f);
@@ -1801,6 +1825,7 @@ int main(int argc, char **argv) {
                  * the dedicated-child spawn so both players are clients. */
                 ui.request_host = false;
                 snprintf(args.name, sizeof args.name, "%s", ui.player_name);
+                lobby_ui_save_prefs(&ui);
                 if (bootstrap_host_via_dedicated(&game, &args, argv[0])) {
                     game.mode = MODE_LOBBY;
                 }
@@ -1851,7 +1876,12 @@ int main(int argc, char **argv) {
                 snprintf(args.name, sizeof args.name, "%s", ui.player_name);
                 /* wan-fixes-5 — spawn dedicated child + connect locally.
                  * Replaces the listen-server bootstrap so both players
-                 * (host UI + joiner) run identical client pipelines. */
+                 * (host UI + joiner) run identical client pipelines.
+                 * wan-fixes-8 — also persist player_name + the
+                 * chosen mode/map (those flow through g->config
+                 * already; the UI saves loadout/team separately on
+                 * cycle clicks). */
+                lobby_ui_save_prefs(&ui);
                 if (bootstrap_host_via_dedicated(&game, &args, argv[0])) {
                     game.mode = MODE_LOBBY;
                 } else {
