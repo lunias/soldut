@@ -1,6 +1,17 @@
 # M5 implementation prompts
 
-18 implementation prompts (P01–P18), executed sequentially, that ship M5 — plus a P00 prologue to read first. Each is a self-contained brief for a fresh Claude Code session — you paste the prompt, Claude reads the listed context, then implements that one chunk of work.
+19 implementation prompts (P01–P19), executed sequentially, that ship M5 — plus a P00 prologue to read first. Each is a self-contained brief for a fresh Claude Code session — you paste the prompt, Claude reads the listed context, then implements that one chunk of work.
+
+> **P19 scheduling note (2026-05-10).** P19 was added after the P14 audio
+> module shipped its runtime without any `.wav` / music / ambient assets
+> and the P15 chassis-art pivot meant P15–P18 stopped scheduling audio
+> work (P15 → Trooper chassis; P16 → remaining chassis + weapon atlas +
+> HUD icons + per-map parallax kits; P17–P18 → 8 authored maps + bake-test).
+> P19 is the sourcing/manifesting/verification pass against the P14
+> runtime. The prompt itself isn't written yet — see the `Done when`
+> section of `documents/m5/09-audio.md` for the asset list and
+> `TRADE_OFFS.md` → "SFX manifest assets aren't on disk yet (post-P14)"
+> for the running entry.
 
 ## How to use
 
@@ -43,12 +54,30 @@ P13 ─ Parallax + HUD final art + TTF font + halftone post + decal chunking
 P14 ─ Audio module
 
 P15 ─ ComfyUI setup + first chassis (Trooper) generation
+       — shipped 2026-05-10 (revised); pivoted from AI-diffusion to
+       a Soldat-style gostek part-sheet pipeline. See
+       `tools/comfy/README.md` and `TRADE_OFFS.md` → "Chassis art is
+       hand-authored gostek part sheets".
 P16 ─ Remaining chassis + weapon atlas + HUD icons (asset generation)
+       — shipped 2026-05-10. All 5 chassis atlases now ship (Trooper /
+       Scout / Heavy / Sniper / Engineer) via `extract_gostek.py`;
+       `assets/sprites/weapons.png` (1024×256, 14 slots) via
+       `pack_weapons_atlas.py` from a Perplexity rack PNG;
+       `assets/ui/hud.png` (256×256) from Perplexity. Parallax kit
+       shipped for **Foundry only** (3 layers: far/mid/near, with
+       `keyout_halftone_bg.py` alpha-keying the dithered canvas so
+       parallax_near doesn't cover the world). 7 other maps' parallax
+       remains pending in P16-followup. See CURRENT_STATE.md top entry.
 P17 ─ Author maps 1-4 (Foundry/Slipstream/Reactor as .lvl + Concourse)
 P18 ─ Author maps 5-8 (Catwalk/Aurora/Crossfire/Citadel) + bake-test harness
+P19 ─ Audio assets (~47 SFX + per-map music + ambient loops)
+       — sourcing against the P14 runtime manifest. CC0 from
+       freesound.org / opengameart.org / Kenney + Soldut-original
+       recordings per `documents/m5/09-audio.md`. Prompt brief
+       pending; see scheduling note above.
 ```
 
-The runtime work (P01–P14) can be done before any asset work. The asset work (P15–P18) needs the runtime in place to verify against. **Don't generate art before the renderer can use it.**
+The runtime work (P01–P14) can be done before any asset work. The asset work (P15–P19) needs the runtime in place to verify against. **Don't generate art before the renderer can use it.**
 
 ## Estimated time per prompt
 
@@ -61,11 +90,12 @@ The runtime work (P01–P14) can be done before any asset work. The asset work (
 | P08b | 2–3 hours |
 | P10–P12 | 2–4 hours each |
 | P13–P14 | 4–6 hours each |
-| P15 | 2–4 hours (plus iteration time you do, not Claude) |
-| P16 | mostly your time generating in ComfyUI; Claude wires up the atlas |
+| P15 | 2–4 hours (plus iteration time you do, not Claude) — shipped |
+| P16 | shipped; ~3 sessions including chassis re-extraction, weapons-rack packer, parallax keyout, shot tests |
 | P17–P18 | 4–8 hours each |
+| P19 | 4–6 hours (mostly Claude sourcing/manifesting; iteration is your ear) |
 
-Total Claude-time: ~50–80 hours. Plus your own ComfyUI iteration time for asset gen.
+Total Claude-time: ~55–90 hours. Plus your own gostek-sheet authoring time for asset gen.
 
 ## Each prompt's structure
 

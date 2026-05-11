@@ -1525,6 +1525,14 @@ static void build_contact_sheet(const Script *s) {
 /* ---- The runner ---------------------------------------------------- */
 
 int shotmode_run(const char *script_path) {
+    /* P08b: the script parser resolves `map <short_name>` via
+     * map_id_from_name(), which reads g_map_registry. game_init()
+     * populates the registry — but it runs AFTER parse_script below.
+     * Seed the builtin entries here so `map foundry` / `map crossfire`
+     * etc. resolve at parse time. game_init() re-runs this idempotently
+     * (rescans assets/maps/ for .lvl files to surface custom maps). */
+    map_registry_init();
+
     Script s = {0};
     if (!parse_script(script_path, &s)) {
         free(s.events);

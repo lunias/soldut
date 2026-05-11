@@ -1,0 +1,56 @@
+# m5_p16_chassis_lineup.shot — M5 P16
+#
+# Clean side-by-side lineup of all 5 chassis (Trooper / Scout / Heavy /
+# Sniper / Engineer) each holding a different weapon. Uses the default
+# (no-map) flat-floor playground so the chassis silhouettes are the
+# only thing in the frame — no parallax, no industrial geometry.
+#
+# This is the gold-standard verification that every chassis atlas
+# loaded cleanly and that draw_mech_sprites picks the right
+# MechSpriteSet for each chassis_id, AND that the per-chassis weapon
+# in R_HAND draws via g_weapon_sprites[].
+#
+# Run:
+#   ./soldut --shot tests/shots/m5_p16_chassis_lineup.shot
+# Output:
+#   build/shots/m5_p16_chassis_lineup/lineup.png
+#   build/shots/m5_p16_chassis_lineup/m5_p16_chassis_lineup.log
+#
+# Verification:
+#   - the log shows `mech_sprites: loaded` for ALL 5 chassis
+#     (trooper / scout / heavy / sniper / engineer)
+#   - no "renders as capsules" lines anywhere
+#   - the rendered PNG shows 5 visibly distinct chassis silhouettes:
+#     * Heavy: tallest + widest torso
+#     * Scout: shortest + slimmest
+#     * Sniper: long-limbed, anisotropic
+#     * Engineer: compact, slightly shorter than Trooper
+#     * Trooper: baseline middle
+#   - each chassis holds a different weapon (5 distinct R_HAND sprites)
+#   - the log shows `weapons_atlas: loaded` (1024x256)
+
+window 1280 720
+seed   7 7
+out    build/shots/m5_p16_chassis_lineup
+
+# Player Trooper at the centerline of the lineup — camera smooth-follows
+# to here. 160 px spacing fits 5 chassis cleanly inside the visible
+# viewport at the default camera zoom (see m5_chassis_distinctness.shot
+# for the empirically-validated coordinate range).
+loadout Trooper "Pulse Rifle" "Frag Grenades" Light Standard
+spawn_at 1060 984
+mouse    640 360
+
+# Y = 32*32 - 36 (feet_below_pelvis) - 4 (foot_clearance) = 984. The
+# default map's solid floor sits at row 32, so this puts every chassis
+# pelvis above the same shared floor — gravity settles each one onto
+# its own feet over the first few ticks.
+extra_chassis Heavy     740 984 "Mass Driver"
+extra_chassis Scout     900 984 "Burst SMG"
+extra_chassis Sniper   1220 984 "Rail Cannon"
+extra_chassis Engineer 1380 984 "Grappling Hook"
+
+# Let the Verlet solver settle each chassis into its standing pose
+# (post-physics anchor + slope check both run), then capture once.
+at  90 shot lineup
+at 120 end

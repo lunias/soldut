@@ -134,15 +134,67 @@ ATLAS = {
     "stump_hip_r": (108, 264, 16, 16, 32, 32),
     "stump_neck": (144, 264, 16, 16, 32, 32),
 }
-# per-slot orientation fix: the sheet draws forearms horizontally (atlas
-# slots are vertical) and the head crown-up (the NECK->HEAD bone gets a
-# -180° render rotation, so the source must be authored upside-down).
-#   "rot": degrees clockwise to apply;  "flipv": vertical flip after rot.
-SLOT_FIX = {
+# per-slot orientation fix: each entry rotates / flips a tile to land in
+# its atlas slot's expected orientation. The HEAD slot always gets
+# `flipv: True` (the NECK->HEAD bone renders with a -180° rotation, so
+# the source has to be authored upside-down) — that's a renderer
+# convention, not a per-sheet thing. Forearms are the load-bearing case:
+# some sheets draw them horizontally (Trooper P15), others vertically
+# (Heavy / Engineer P16 sheets), so the rotation is sheet-specific.
+#   "rot":  degrees clockwise to apply (use -90, 90, 180; other values
+#           get a slow PIL.rotate via crop_canonical fallback)
+#   "flipv": vertical flip after rot
+#   "fliph": horizontal flip after rot
+# All P16-ship sheets author parts in the renderer-expected orientation
+# (forearms vertical, head crown-up). Only the head flip survives because
+# the renderer's -180° NECK->HEAD rotation is fixed regardless of source.
+SLOT_FIX_DEFAULT = {
+    "head": {"flipv": True},
+}
+# Legacy P15 Trooper baseline — used the v1 sheet where forearms were
+# drawn HORIZONTALLY. Kept as a documented exception in case anyone
+# regenerates from `trooper_gostek_v1.png`. The shipping path uses v2
+# (vertical forearms) and `CHASSIS_FIX["trooper"] = SLOT_FIX_DEFAULT`.
+SLOT_FIX_TROOPER_V1 = {
     "arm_lower_l": {"rot": -90},
     "arm_lower_r": {"rot": -90},
     "head": {"flipv": True},
 }
+CHASSIS_FIX = {
+    "trooper":  SLOT_FIX_DEFAULT,
+    "heavy":    SLOT_FIX_DEFAULT,
+    "scout":    SLOT_FIX_DEFAULT,
+    "sniper":   SLOT_FIX_DEFAULT,
+    "engineer": SLOT_FIX_DEFAULT,
+}
+# Back-compat alias for external readers (manifest tools, art-log dumps).
+SLOT_FIX = SLOT_FIX_DEFAULT
+
+
+def parse_fix_arg(spec):
+    """`slot=key:value[,key:value...]` -> ("slot", {key: value, ...}).
+    `flipv` / `fliph` with no value default to True. `rot` parses as
+    int (signed). Unknown keys raise ValueError."""
+    slot, _, body = spec.partition("=")
+    slot = slot.strip()
+    if not slot:
+        raise ValueError(f"--fix: empty slot in {spec!r}")
+    fix = {}
+    if not body:
+        return slot, fix
+    for kv in body.split(","):
+        k, _, v = kv.partition(":")
+        k = k.strip()
+        v = v.strip()
+        if k == "rot":
+            fix["rot"] = int(v) if v else 0
+        elif k == "flipv":
+            fix["flipv"] = v.lower() not in ("0", "false", "no", "off") if v else True
+        elif k == "fliph":
+            fix["fliph"] = v.lower() not in ("0", "false", "no", "off") if v else True
+        else:
+            raise ValueError(f"--fix: unknown key {k!r} in {spec!r}")
+    return slot, fix
 
 
 def detect_parts(rgb: np.ndarray, min_area_frac=0.0025):
@@ -232,6 +284,24 @@ def main(argv=None):
     ap.add_argument("--preview", default=None)
     ap.add_argument("--atlas-w", type=int, default=1024)
     ap.add_argument("--atlas-h", type=int, default=1024)
+    ap.add_argument(
+        "--torso-squeeze",
+        type=float,
+        default=1.0,
+        help="Horizontal scale for TORSO + HIP_PLATE (default 1.0). <1.0 "
+        "narrows the chest — fixes the 'looks fat' read when the sheet "
+        "draws the chest dead-on front rather than 3/4 view. The narrowed "
+        "tile is centered in the slot with transparent padding; slot "
+        "dimensions in mech_sprites.c stay constant.",
+    )
+    ap.add_argument(
+        "--fix",
+        action="append",
+        default=[],
+        help="Override a slot's orientation fix, e.g. "
+        "--fix arm_lower_l=rot:-90 or --fix head=flipv,fliph. Repeatable. "
+        "Overrides the per-chassis defaults in CHASSIS_FIX.",
+    )
     args = ap.parse_args(argv)
 
     out_path = args.out or os.path.join(
@@ -246,6 +316,19 @@ def main(argv=None):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     os.makedirs(os.path.dirname(prev_path), exist_ok=True)
     os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+
+    # Resolve the effective per-slot fix map: per-chassis baseline +
+    # any --fix overrides from the CLI.
+    fix_map = dict(CHASSIS_FIX.get(args.chassis, SLOT_FIX_DEFAULT))
+    for spec in args.fix:
+        slot, fix = parse_fix_arg(spec)
+        fix_map[slot] = fix
+    print(
+        f"chassis={args.chassis}  fix_map: "
+        + ", ".join(f"{k}={v}" for k, v in sorted(fix_map.items()))
+    )
+    if args.torso_squeeze != 1.0:
+        print(f"torso-squeeze: {args.torso_squeeze:.3f}x (applied to torso + hip_plate)")
 
     img = Image.open(args.sheet).convert("RGB")
     W, H = img.size
@@ -265,7 +348,8 @@ def main(argv=None):
     atlas = Image.new("RGBA", (args.atlas_w, args.atlas_h), (0, 0, 0, 0))
     manifest = [
         f"# {args.chassis} gostek manifest — source {os.path.basename(args.sheet)} ({W}x{H})",
-        f"# palette={args.palette}  post={'no' if args.no_post else 'yes'}",
+        f"# palette={args.palette}  post={'no' if args.no_post else 'yes'}  "
+        f"torso_squeeze={args.torso_squeeze:.3f}",
         "# caption_idx  part_name  slot  src_bbox(x0,y0,x1,y1)  fix  -> dst(x,y) draw(w,h)",
     ]
     stump_i = 0
@@ -283,7 +367,7 @@ def main(argv=None):
         dx, dy, px, py, dw, dh = ATLAS[slot]
         y0, x0, y1, x1 = box[:4]
         tile = crop_part(img, box)
-        fix = SLOT_FIX.get(slot, {})
+        fix = fix_map.get(slot, {})
         rot = fix.get("rot", 0)
         if rot == -90:
             tile = tile.transpose(Image.ROTATE_270)
@@ -291,21 +375,47 @@ def main(argv=None):
             tile = tile.transpose(Image.ROTATE_90)
         elif rot == 180:
             tile = tile.transpose(Image.ROTATE_180)
+        elif rot:
+            # Off-cardinal angle. PIL.rotate is slow + adds a fringe; we
+            # accept the cost for whatever non-90 angle the artist needed.
+            tile = tile.rotate(rot, expand=True, resample=Image.BICUBIC,
+                               fillcolor=(0, 0, 0, 0))
         if fix.get("flipv"):
             tile = tile.transpose(Image.FLIP_TOP_BOTTOM)
-        tile = tile.resize((dw, dh), Image.LANCZOS)
+        if fix.get("fliph"):
+            tile = tile.transpose(Image.FLIP_LEFT_RIGHT)
+        # Torso/hip horizontal squeeze: shrink to a narrower interior
+        # then center the result in a transparent slot-sized canvas, so
+        # the chest reads as 3/4-profile rather than dead-on front.
+        if slot in ("torso", "hip_plate") and args.torso_squeeze != 1.0:
+            squeeze_w = max(1, int(round(dw * args.torso_squeeze)))
+            inner = tile.resize((squeeze_w, dh), Image.LANCZOS)
+            padded = Image.new("RGBA", (dw, dh), (0, 0, 0, 0))
+            padded.alpha_composite(inner, ((dw - squeeze_w) // 2, 0))
+            tile = padded
+        else:
+            tile = tile.resize((dw, dh), Image.LANCZOS)
         if not args.no_post:
             tile = post_process_tile(tile, palette)
         atlas.alpha_composite(tile, (dx, dy))
         placed.append((idx, name, slot, (x0, y0, x1, y1), fix, dx, dy, dw, dh))
+        squeeze_tag = (f"  sq{args.torso_squeeze:.2f}"
+                       if slot in ("torso", "hip_plate") and args.torso_squeeze != 1.0
+                       else "")
         print(
             f"  #{idx:2d} {name:<12} -> slot {slot:<14} src {x1 - x0 + 1}x{y1 - y0 + 1}"
-            f"{('  ' + ('rot' + str(rot)) if rot else '') + ('  flipv' if fix.get('flipv') else '')}"
+            f"{('  ' + ('rot' + str(rot)) if rot else '')}"
+            f"{('  flipv' if fix.get('flipv') else '')}"
+            f"{('  fliph' if fix.get('fliph') else '')}"
+            f"{squeeze_tag}"
             f"  -> dst {dx},{dy} ({dw}x{dh})"
         )
         manifest.append(
             f"{idx:>2}  {name:<12} {slot:<14} ({x0},{y0},{x1},{y1})  "
-            f"{('rot' + str(rot) if rot else '-') + ('+flipv' if fix.get('flipv') else '')}  "
+            f"{('rot' + str(rot) if rot else '-')}"
+            f"{('+flipv' if fix.get('flipv') else '')}"
+            f"{('+fliph' if fix.get('fliph') else '')}"
+            f"{squeeze_tag.strip()}  "
             f"-> ({dx},{dy}) ({dw}x{dh})"
         )
 

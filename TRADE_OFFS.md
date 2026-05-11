@@ -427,39 +427,6 @@ the ban-by-name simplification.).
     visible after the body ragdolls). The render-tick form requires
     the firer's mech alive to read; pooled FX would survive.
 
-### Mech capsule renderer is the no-asset fallback (post-P15 partial)
-
-- **What we did** — P10 shipped the sprite path: `draw_mech_sprites`
-  walks the 17-entry `g_render_parts[]` z-order table when
-  `g_chassis_sprites[chassis].atlas.id != 0`, otherwise `draw_mech`
-  falls through to `draw_mech_capsules` (preserved from M4 — bone =
-  thick line, particle = small filled circle). P12 added the four
-  damage-feedback layers in BOTH render paths so a no-atlas build
-  still gets hit-flash + decals + spray + emitter + smoke; only the
-  stump-cap sub-rects skip in capsule mode (the spec explicitly
-  calls this out). **P15 (revised) partially addresses this**:
-  Trooper has an authored atlas (`assets/sprites/trooper.png`),
-  extracted by `tools/comfy/extract_gostek.py` from a gostek part
-  sheet (`tools/comfy/gostek_part_sheets/trooper_gostek_v1.png`) and
-  snapped to the Foundry 2-colour register. The remaining four chassis
-  (Scout / Heavy / Sniper / Engineer) + the 5 stump caps still render
-  as capsules until P16.
-- **Why** — P10 deliberately split the runtime + per-chassis bone
-  distinctness + data-table pipeline from the held-weapon-art (P11)
-  and damage-feedback layers (P12) so each lands as a focused review
-  surface. Asset content for the chassis lands in P15–P16; per-chassis
-  iteration is gated on someone authoring (or generating) the gostek
-  part sheet for that chassis.
-- **Revisit when** —
-  - P16 ships the four remaining chassis part sheets (each →
-    `extract_gostek.py` → `assets/sprites/<chassis>.png`) + the stump
-    caps. At that point this entry deletes — the capsule path stays in
-    source as a dev-machine convenience for builds without asset packs,
-    which is a tiny code surface.
-  - The capsule fallback masks a real regression (e.g. a sprite-path
-    bug that fires only when atlases load). Symptom: shot tests pass
-    with capsules but break under synthetic-atlas sprite tests.
-
 ### Chassis art is hand-authored gostek part sheets, not the AI-diffusion pipeline (P15 revised)
 
 - **What we did** — `assets/sprites/<chassis>.png` is produced by
@@ -634,25 +601,35 @@ the ban-by-name simplification.).
 
 ## Rendering kit (P13)
 
-### Per-map kit textures aren't on disk yet (post-P13)
+### Per-map kit textures: Foundry only ships parallax (P16-partial)
 
-- **What we did** — P13 ships the runtime: `src/map_kit.{c,h}` loads
+- **What we did** — P13 shipped the runtime: `src/map_kit.{c,h}` loads
   `assets/maps/<short>/parallax_far.png` / `parallax_mid.png` /
-  `parallax_near.png` / `tiles.png` on every `map_build`. The
-  `MapKit` slots stay zeroed and the renderer falls back to the M4
-  flat-color paths (2-tone tile checkerboard, no parallax draw)
-  because none of those PNGs exist on disk yet — they ship at
-  P15/P16 with the ComfyUI parallax + per-kit tile-atlas pipelines.
-- **Why** — Same staging as P10/P11/P12: ship the runtime first as a
-  focused review surface, fill the assets later. Splitting means the
-  per-map asset pipeline can iterate against a working renderer
-  without engineering churn between bake passes.
+  `parallax_near.png` / `tiles.png` on every `map_build`. **P16**:
+  Foundry now ships `parallax_far.png` + `parallax_mid.png` +
+  `parallax_near.png` (3 of 4 — `tiles.png` still missing; the M5
+  spec-color polygon path covers it). The 7 other maps (Slipstream,
+  Concourse, Reactor, Catwalk, Aurora, Crossfire, Citadel) keep the
+  M4 flat-color fallbacks. New pipeline step in P16 — Perplexity-
+  generated parallax PNGs come back with an opaque dithered canvas;
+  `tools/comfy/keyout_halftone_bg.py` keys out the checker pattern
+  by local-dark-fraction so foreground silhouettes stay opaque and
+  background dither becomes alpha=0. Without this step `parallax_near`
+  (drawn AFTER world inside `renderer_draw_frame`) covers the
+  chassis underneath. Originals stay in `tools/comfy/raw_atlases/parallax_originals/`.
+- **Why** — Asset generation runs on an external service (Perplexity)
+  one prompt at a time, and each parallax kit needs three prompts
+  (far / mid / near) × eight maps = 24 individual generations.
+  Foundry came first as the focus-map for verification (it's also the
+  default map in single-player + the most-iterated map). The other 7
+  maps' parallax prompts ship in `documents/m5/prompts/` (one per
+  map, post-decomposed from the original "all maps" Prompt 5) and
+  the team works through them as bandwidth allows.
 - **Revisit when** —
-  - P15/P16 ship `assets/maps/<short>/*.png` for at least one map.
-    At that point the kit-loaded paths fire and the M4 fallbacks
-    become dead code in real play. The fallback can stay as a
-    dev-machine convenience for builds without assets, which is a
-    tiny code surface.
+  - The remaining 7 maps ship their parallax kits. At that point the
+    fallback paths become dead code in real play; the entry deletes.
+    Keep the no-asset fallback in source — it's a tiny code surface
+    that helps dev-machine builds without asset packs.
   - A custom map ships parallax PNGs that are taller / shorter than
     the screen and the "anchor at top, tile horizontally only" v1
     behavior reads wrong. At that point: add per-map vertical anchor
@@ -1325,10 +1302,19 @@ the ban-by-name simplification.).
   CC0-sourced (freesound.org / opengameart.org) plus Soldut-original
   recordings per `documents/m5/09-audio.md` §"Where to source samples".
 - **Revisit when** —
-  - P15-P18 ships `assets/sfx/*.wav` for at least one cue. The audio
-    module's `audio_register_hotreload` already plumbs the manifest
-    into the P13 mtime watcher, so designers iterating on samples get
-    the per-file reload without further wiring.
+  - **P19 ships `assets/sfx/*.wav` + per-map music/ambient** for at
+    least one cue. P19 is the scheduled audio-asset prompt (added
+    2026-05-10 after the P14 entry's original "P15-P18 ships the
+    audio assets" plan didn't survive contact with the P15 chassis-art
+    pivot — P15 → Trooper chassis, P16 → remaining chassis + weapon
+    atlas + HUD icons + per-map parallax kits, P17–P18 → 8 authored
+    `.lvl` maps, P19 → audio). The audio module's
+    `audio_register_hotreload` already plumbs the manifest into the
+    P13 mtime watcher, so designers iterating on samples get the
+    per-file reload without further wiring. Until P19 lands audio is
+    silent in real play but the runtime is exercised by `tests/net/`
+    + shot mode without issue (every `audio_play_*` no-ops for the
+    47 missing ids).
   - The startup INFO + raylib WARNING noise becomes a real concern
     (e.g., users seeing 50 lines per launch in `soldut.log`). Bump
     raylib's `SetTraceLogLevel` to `LOG_ERROR` around `audio_init` to
