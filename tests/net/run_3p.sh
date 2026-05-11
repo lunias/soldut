@@ -44,7 +44,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-( cd "$HOST_DIR" && exec "$BIN" --host "$PORT" --name HostA ) > "$HOST_DIR/stdout.log" 2>&1 &
+( cd "$HOST_DIR" && exec "$BIN" --listen-host "$PORT" --name HostA ) > "$HOST_DIR/stdout.log" 2>&1 &
 PIDS+=($!)
 sleep 0.6
 

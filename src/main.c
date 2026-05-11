@@ -1,3 +1,8 @@
+/* _POSIX_C_SOURCE 200809L unlocks clock_gettime(CLOCK_MONOTONIC) and
+ * nanosleep(); needed by dedicated_main's wall-clock + sleep helpers
+ * which run without raylib's GetTime / Sleep wrappers. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "audio.h"
 #include "config.h"
 #include "ctf.h"
@@ -19,6 +24,7 @@
 #include "net.h"
 #include "pickup.h"
 #include "platform.h"
+#include "proc_spawn.h"
 #include "reconcile.h"
 #include "render.h"
 #include "shotmode.h"
@@ -26,6 +32,9 @@
 #include "snapshot.h"
 #include "version.h"
 #include "weapons.h"
+
+#include <signal.h>
+#include <time.h>
 
 #include "../third_party/raylib/src/raylib.h"
 
@@ -57,6 +66,17 @@ typedef enum {
     LAUNCH_OFFLINE = 0,
     LAUNCH_HOST,
     LAUNCH_CLIENT,
+    /* wan-fixes-5 — `--dedicated PORT`. Runs the authoritative server
+     * with no raylib/audio/render. Spawned as a child of the host UI's
+     * "Host Server" flow so both players join as clients (symmetric
+     * latency + identical rendering). See dedicated_main(). */
+    LAUNCH_DEDICATED,
+    /* Internal: `--listen-host PORT`. Old M2-era listen-server (server
+     * + client in one process). Retained for offline solo + the
+     * shotmode regression tests that haven't moved to the dedicated
+     * flow. The default `--host` path goes through the spawn-child
+     * route. */
+    LAUNCH_LISTEN_HOST,
 } LaunchMode;
 
 typedef struct {
@@ -85,6 +105,25 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--host") == 0) {
             out->mode = LAUNCH_HOST;
+            out->skip_title = true;
+            if (i + 1 < argc && argv[i+1][0] != '-') {
+                out->port = (uint16_t)atoi(argv[++i]);
+                if (out->port == 0) out->port = SOLDUT_DEFAULT_PORT;
+            }
+        }
+        else if (strcmp(argv[i], "--listen-host") == 0) {
+            /* M2-era listen-server. The default --host spawns a
+             * dedicated child + connects; --listen-host keeps the
+             * single-process path for offline / regression tests. */
+            out->mode = LAUNCH_LISTEN_HOST;
+            out->skip_title = true;
+            if (i + 1 < argc && argv[i+1][0] != '-') {
+                out->port = (uint16_t)atoi(argv[++i]);
+                if (out->port == 0) out->port = SOLDUT_DEFAULT_PORT;
+            }
+        }
+        else if (strcmp(argv[i], "--dedicated") == 0) {
+            out->mode = LAUNCH_DEDICATED;
             out->skip_title = true;
             if (i + 1 < argc && argv[i+1][0] != '-') {
                 out->port = (uint16_t)atoi(argv[++i]);
@@ -804,9 +843,17 @@ static void host_match_flow_step(Game *g, float dt) {
                 } else {
                     /* Auto-start fired → enter countdown. test-play uses
                      * a 1 s countdown (set in match.countdown_default at
-                     * startup) so designers' F5 round-trip stays short. */
-                    float secs = g->test_play_lvl[0]
-                                     ? g->match.countdown_default : 5.0f;
+                     * startup) so designers' F5 round-trip stays short.
+                     * wan-fixes-5 — cfg.countdown_default also flows
+                     * through match.countdown_default at dedicated_main
+                     * startup, so shot-test cfgs can shrink it without
+                     * touching the test-play path. */
+                    float secs = (g->match.countdown_default > 0.0f &&
+                                  g->match.countdown_default < 5.0f)
+                                     ? g->match.countdown_default
+                                     : (g->test_play_lvl[0]
+                                          ? g->match.countdown_default
+                                          : 5.0f);
                     match_begin_countdown(&g->match, secs);
                     if (g->net.role == NET_ROLE_SERVER) {
                         net_server_broadcast_match_state(&g->net, &g->match);
@@ -990,6 +1037,257 @@ static bool bootstrap_client(Game *g, const LaunchArgs *args) {
     return true;
 }
 
+/* ---- Dedicated server flow ---------------------------------------- *
+ *
+ * The host UI's "Host Server" button used to start a listen-server
+ * (server + client in one process). That gave the host an asymmetric
+ * advantage: their input fed the simulation immediately while joining
+ * clients ate one-way + interp delay. For a competitive shooter we
+ * want every player rendered identically.
+ *
+ * Post-fix flow:
+ *   1. Player clicks "Host Server" → bootstrap_host_via_dedicated()
+ *   2. Spawns a child of the SAME binary with `--dedicated PORT`
+ *      (dedicated_main below — no raylib / audio / render).
+ *   3. Polls connect to 127.0.0.1:PORT until the child's net_server_start
+ *      has bound the socket and the ENet handshake succeeds.
+ *   4. Caller is now a regular CLIENT — same prediction path, same
+ *      interp delay, same lag-comp as any other peer.
+ *   5. Game owns the child handle on `Game.dedicated_proc`; closing the
+ *      client (window close / ESC quit) kills the child.
+ *
+ * The dedicated child registers SIGINT/SIGTERM so the spawning client
+ * can ask it to shut down cleanly via proc_terminate; if that fails
+ * we fall through to proc_kill. */
+
+static volatile sig_atomic_t s_dedicated_quit = 0;
+static void dedicated_signal(int sig) {
+    (void)sig;
+    s_dedicated_quit = 1;
+}
+
+static double mono_seconds(void) {
+    struct timespec ts;
+#if defined(CLOCK_MONOTONIC_RAW)
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+static void sleep_ms_portable(int ms) {
+    if (ms <= 0) return;
+    struct timespec ts = { ms / 1000, (long)((ms % 1000) * 1000000L) };
+    nanosleep(&ts, NULL);
+}
+
+/* The dedicated-server tick loop. No raylib, no audio, no render. Owns
+ * the world + lobby + match-flow controller; broadcasts snapshots on
+ * the server's snapshot cadence; runs simulate_step at 60 Hz during
+ * MATCH_PHASE_ACTIVE.
+ *
+ * Returns process exit code. */
+static int dedicated_main(uint16_t port) {
+    log_init("soldut-server.log");
+    LOG_I("soldut " SOLDUT_VERSION_STRING " (dedicated server, port=%u)", port);
+
+    /* The dedicated server is the natural place to emit diagnostic
+     * SHOT_LOG events (fire events, anim transitions, hit reports)
+     * since it owns the authoritative simulation. Production hosts
+     * can silence this with SOLDUT_SHOT_LOG=0; test runners
+     * (tests/shots/net/run_dedi.sh) leave it on so per-fire +
+     * per-hit lines reach soldut-server.log for assertion. */
+    const char *shot_env = getenv("SOLDUT_SHOT_LOG");
+    if (!shot_env || shot_env[0] != '0') g_shot_mode = 1;
+
+    /* Catch Ctrl-C and SIGTERM (from proc_terminate). On Windows the
+     * console handler path also surfaces as SIGINT via the CRT shim. */
+    signal(SIGINT,  dedicated_signal);
+    signal(SIGTERM, dedicated_signal);
+
+    Game game;
+    if (!game_init(&game)) { log_shutdown(); return EXIT_FAILURE; }
+
+    /* Server config — same soldut.cfg path as the listen-server. CLI
+     * --dedicated PORT wins over cfg.port; cfg drives snapshot_hz,
+     * map_rotation, etc. */
+    config_load(&game.config, "soldut.cfg");
+    if (port != 0) game.config.port = port;
+
+    if (!net_init()) { game_shutdown(&game); log_shutdown(); return EXIT_FAILURE; }
+    if (!net_server_start(&game.net, game.config.port, &game)) {
+        LOG_E("dedicated: failed to bind UDP %u", (unsigned)game.config.port);
+        net_shutdown();
+        game_shutdown(&game);
+        log_shutdown();
+        return EXIT_FAILURE;
+    }
+    if (game.config.snapshot_hz > 0) {
+        net_server_set_snapshot_hz(&game.net, game.config.snapshot_hz);
+    }
+    if (game.config.interp_delay_ms > 0) {
+        net_set_interp_delay_override(&game.net,
+            (uint32_t)game.config.interp_delay_ms);
+    }
+    net_discovery_open(&game.net);
+
+    lobby_load_bans(&game.lobby, "bans.txt");
+
+    /* Re-apply MatchState defaults from cfg. */
+    match_init(&game.match, game.config.mode, game.config.score_limit,
+               game.config.time_limit, game.config.friendly_fire);
+    game.match.rounds_per_match = game.config.rounds_per_match;
+    game.match.map_id           = config_pick_map(&game.config, 0);
+    game.lobby.auto_start_default = game.config.auto_start_seconds;
+    if (game.config.countdown_default > 0.0f) {
+        game.match.countdown_default = game.config.countdown_default;
+    }
+    game.world.friendly_fire    = game.config.friendly_fire;
+    game.world.authoritative    = true;
+    /* No host slot. The first connecting peer gets slot 0; the
+     * existing >= 2 active-slot threshold for auto-start kicks in
+     * once two clients are in (or one if cfg lowers the threshold). */
+    game.local_slot_id = -1;
+
+    /* Pre-build the lobby map so INITIAL_STATE carries a sensible
+     * crc/descriptor. start_round rebuilds for whatever map_rotation /
+     * vote picks for round 1. */
+    map_build((MapId)game.match.map_id, &game.world, &game.level_arena);
+    decal_init((int)level_width_px(&game.world.level),
+               (int)level_height_px(&game.world.level));
+    maps_refresh_serve_info(map_def(game.match.map_id)->short_name,
+                            NULL, &game.server_map_desc,
+                            game.server_map_serve_path,
+                            sizeof(game.server_map_serve_path));
+
+    game.mode = MODE_LOBBY;
+    LOG_I("dedicated: listening on %u, map='%s', mode=%s",
+          (unsigned)game.config.port,
+          map_def(game.match.map_id)->short_name,
+          match_mode_name((MatchModeId)game.match.mode));
+
+    /* Main tick loop. We don't have raylib's `GetTime`, so monotonic
+     * clock + sleep. Net polling drives snapshot broadcast at the
+     * configured Hz; simulate_step runs during MATCH_PHASE_ACTIVE. */
+    double last_time = mono_seconds();
+    double sim_accum = 0.0;
+    while (!s_dedicated_quit) {
+        double now = mono_seconds();
+        double dt  = now - last_time;
+        last_time = now;
+        if (dt > MAX_FRAME_DT) dt = MAX_FRAME_DT;
+
+        net_poll(&game.net, &game, dt);
+        host_match_flow_step(&game, (float)dt);
+
+        if (game.match.phase == MATCH_PHASE_ACTIVE) {
+            sim_accum += dt;
+            while (sim_accum >= TICK_DT) {
+                simulate_step(&game.world, (float)TICK_DT);
+                sim_accum -= TICK_DT;
+            }
+        } else {
+            sim_accum = 0.0;
+        }
+
+        /* Sleep ~2 ms between iterations to avoid burning a core in
+         * the lobby. 2 ms is comfortably below the 16.7 ms tick budget
+         * at 60 Hz; the next iteration's net_poll handles snapshot
+         * timing internally. */
+        sleep_ms_portable(2);
+    }
+
+    LOG_I("dedicated: shutting down");
+    net_close(&game.net);
+    net_shutdown();
+    game_shutdown(&game);
+    log_shutdown();
+    return EXIT_SUCCESS;
+}
+
+/* Tear down a dedicated child if the host spawned one. Idempotent —
+ * safe to call from any shutdown path (window close, ESC quit,
+ * MODE_TITLE return, error paths). */
+static void stop_dedicated_child_if_any(Game *g) {
+    if (!proc_handle_valid(g->dedicated_proc)) return;
+    LOG_I("stop_dedicated_child: terminating pid=%d", g->dedicated_proc.pid);
+    proc_terminate(g->dedicated_proc);
+    if (!proc_wait(g->dedicated_proc, 1500)) {
+        LOG_W("stop_dedicated_child: pid=%d did not exit on SIGTERM — sending SIGKILL",
+              g->dedicated_proc.pid);
+        proc_kill(g->dedicated_proc);
+        proc_wait(g->dedicated_proc, 500);
+    }
+    proc_close(g->dedicated_proc);
+    g->dedicated_proc = PROC_HANDLE_NULL;
+}
+
+/* Spawn a child `--dedicated PORT` server, then connect to it as a
+ * regular client. Caller (the host UI flow) owns the returned process
+ * handle on `Game.dedicated_proc` and is responsible for cleanup on
+ * exit (handled in main()'s shutdown path).
+ *
+ * argv0_self is the current process's argv[0] (passed through from
+ * main) — used so the spawned child reuses the same binary. */
+static bool bootstrap_host_via_dedicated(Game *g, const LaunchArgs *args,
+                                         const char *argv0_self) {
+    if (!argv0_self) {
+        LOG_E("bootstrap_host: argv0 missing — cannot spawn dedicated child");
+        return false;
+    }
+
+    uint16_t port = args->port ? args->port : g->config.port;
+    if (port == 0) port = SOLDUT_DEFAULT_PORT;
+
+    char port_str[16];
+    snprintf(port_str, sizeof port_str, "%u", (unsigned)port);
+    const char *child_argv[] = { "--dedicated", port_str, NULL };
+
+    ProcHandle child = proc_spawn_self(argv0_self, child_argv);
+    if (!proc_handle_valid(child)) {
+        LOG_E("bootstrap_host: proc_spawn_self failed");
+        return false;
+    }
+    LOG_I("bootstrap_host: launched dedicated child pid=%d on port %u",
+          child.pid, (unsigned)port);
+
+    /* Poll connect to localhost. The child needs ~20-200 ms to init
+     * raylib-less, bind the socket, and reach the ACCEPT-ready state.
+     * Retry every 50 ms for up to 5 s. */
+    LaunchArgs client_args = *args;
+    snprintf(client_args.host, sizeof client_args.host, "%s", "127.0.0.1");
+    client_args.port = port;
+
+    bool connected = false;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        if (!proc_alive(child)) {
+            LOG_E("bootstrap_host: dedicated child exited before client could "
+                  "connect");
+            break;
+        }
+        if (bootstrap_client(g, &client_args)) {
+            connected = true;
+            break;
+        }
+        sleep_ms_portable(50);
+    }
+
+    if (!connected) {
+        LOG_E("bootstrap_host: client connect to local dedicated server timed out");
+        proc_terminate(child);
+        proc_wait(child, 500);
+        proc_kill(child);
+        proc_close(child);
+        return false;
+    }
+
+    g->dedicated_proc = child;
+    LOG_I("bootstrap_host: connected to local dedicated server (pid=%d)",
+          child.pid);
+    return true;
+}
+
 /* ---- Diag overlay ------------------------------------------------- */
 
 /* Frame context the overlay callbacks need. raylib's overlay-callback
@@ -1085,6 +1383,21 @@ static void reload_halftone_shader(const char *path) {
 /* ---- Main --------------------------------------------------------- */
 
 int main(int argc, char **argv) {
+    /* wan-fixes-5 — `--dedicated PORT` early-exit. Detected BEFORE
+     * log_init / game_init so the dedicated server has its own log
+     * file (`soldut-server.log`) and doesn't fight the parent client's
+     * `soldut.log` when both run on the same machine. */
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--dedicated") == 0) {
+            uint16_t port = SOLDUT_DEFAULT_PORT;
+            if (i + 1 < argc && argv[i+1][0] != '-') {
+                port = (uint16_t)atoi(argv[i+1]);
+                if (port == 0) port = SOLDUT_DEFAULT_PORT;
+            }
+            return dedicated_main(port);
+        }
+    }
+
     log_init("soldut.log");
     LOG_I("soldut " SOLDUT_VERSION_STRING " starting");
 
@@ -1106,7 +1419,10 @@ int main(int argc, char **argv) {
 
     /* Server config — load file, then let CLI flags override. */
     config_load(&game.config, "soldut.cfg");
-    if (args.mode == LAUNCH_HOST && args.port != 0) game.config.port = args.port;
+    if ((args.mode == LAUNCH_HOST || args.mode == LAUNCH_LISTEN_HOST)
+        && args.port != 0) {
+        game.config.port = args.port;
+    }
     if (args.ff_set) game.config.friendly_fire = args.friendly_fire;
     /* M5 P04 — editor test-play overrides match config: FFA, 60 s round,
      * 1 s auto-start, no networking. Stash the .lvl path on Game so
@@ -1266,10 +1582,19 @@ int main(int argc, char **argv) {
     /* Initial mode: title (unless CLI shortcut). */
     if (args.skip_title) {
         if (args.mode == LAUNCH_HOST) {
-            /* test-play forces offline-solo so we don't bind a UDP port
-             * the user's running game might already be using. */
+            /* wan-fixes-5 — default `--host` now spawns a child
+             * `--dedicated PORT` and connects to it locally so both
+             * players have identical client paths. test-play needs the
+             * in-process listen-server (no UDP collisions with the
+             * user's running game), so it falls back to that path. */
             bool offline = (args.test_play_lvl[0] != 0);
-            if (!bootstrap_host(&game, &args, offline)) {
+            bool ok;
+            if (offline) {
+                ok = bootstrap_host(&game, &args, /*offline*/true);
+            } else {
+                ok = bootstrap_host_via_dedicated(&game, &args, argv[0]);
+            }
+            if (!ok) {
                 game_shutdown(&game); log_shutdown(); return EXIT_FAILURE;
             }
             game.mode = MODE_LOBBY;
@@ -1278,6 +1603,14 @@ int main(int argc, char **argv) {
                  * the lobby UX and drop the player into the map. */
                 lobby_auto_start_arm(&game.lobby, 1.0f);
             }
+        } else if (args.mode == LAUNCH_LISTEN_HOST) {
+            /* Legacy in-process server (server + client in one
+             * process). Retained for offline solo + the regression
+             * tests / shotmode runs that pre-date dedicated. */
+            if (!bootstrap_host(&game, &args, /*offline*/false)) {
+                game_shutdown(&game); log_shutdown(); return EXIT_FAILURE;
+            }
+            game.mode = MODE_LOBBY;
         } else if (args.mode == LAUNCH_CLIENT) {
             if (!bootstrap_client(&game, &args)) {
                 game_shutdown(&game); log_shutdown(); return EXIT_FAILURE;
@@ -1334,6 +1667,10 @@ int main(int argc, char **argv) {
             game.mode != MODE_TITLE && game.mode != MODE_QUIT)
         {
             LOG_I("client: server connection lost — returning to title");
+            /* wan-fixes-5 — if our dedicated child server is what we
+             * lost connection to (e.g., it crashed), tear it down so
+             * the next host attempt can rebind the port. */
+            stop_dedicated_child_if_any(&game);
             net_close(&game.net);
             net_shutdown();
             lobby_clear_round_mechs(&game.lobby, &game.world);
@@ -1367,10 +1704,11 @@ int main(int argc, char **argv) {
                 /* Legacy fast-path (still wired so existing CLI / older
                  * UI paths keep working). The new UI sets MODE_HOST_SETUP
                  * directly from the title button, so this branch is
-                 * mainly belt-and-braces. */
+                 * mainly belt-and-braces. wan-fixes-5 — routes through
+                 * the dedicated-child spawn so both players are clients. */
                 ui.request_host = false;
                 snprintf(args.name, sizeof args.name, "%s", ui.player_name);
-                if (bootstrap_host(&game, &args, /*offline*/false)) {
+                if (bootstrap_host_via_dedicated(&game, &args, argv[0])) {
                     game.mode = MODE_LOBBY;
                 }
             }
@@ -1418,7 +1756,10 @@ int main(int argc, char **argv) {
                                             (game.match.mode == MATCH_MODE_FFA);
 
                 snprintf(args.name, sizeof args.name, "%s", ui.player_name);
-                if (bootstrap_host(&game, &args, /*offline*/false)) {
+                /* wan-fixes-5 — spawn dedicated child + connect locally.
+                 * Replaces the listen-server bootstrap so both players
+                 * (host UI + joiner) run identical client pipelines. */
+                if (bootstrap_host_via_dedicated(&game, &args, argv[0])) {
                     game.mode = MODE_LOBBY;
                 } else {
                     game.mode = MODE_TITLE;
@@ -1501,7 +1842,10 @@ int main(int argc, char **argv) {
 
             /* Honor the lobby UI's "Leave" button. */
             if (game.mode == MODE_TITLE) {
-                /* Disconnect / shut down server. */
+                /* Disconnect / shut down server. wan-fixes-5: if we
+                 * own a dedicated child, terminate it first so the
+                 * port is free for the next host. */
+                stop_dedicated_child_if_any(&game);
                 if (game.net.role != NET_ROLE_OFFLINE) {
                     net_close(&game.net);
                     net_shutdown();
@@ -1656,7 +2000,10 @@ int main(int argc, char **argv) {
                     /* Host: end the round early. */
                     end_round(&game);
                 } else {
-                    /* Client: drop the connection, return to title. */
+                    /* Client: drop the connection, return to title.
+                     * wan-fixes-5: if we host a dedicated child, kill
+                     * it so the next host attempt can rebind. */
+                    stop_dedicated_child_if_any(&game);
                     net_close(&game.net);
                     net_shutdown();
                     game.mode = MODE_TITLE;
@@ -1704,6 +2051,7 @@ int main(int argc, char **argv) {
 
             if (game.mode == MODE_TITLE) {
                 /* User clicked Leave. Tear down. */
+                stop_dedicated_child_if_any(&game);
                 if (game.net.role != NET_ROLE_OFFLINE) {
                     net_close(&game.net);
                     net_shutdown();
@@ -1731,6 +2079,7 @@ int main(int argc, char **argv) {
     LOG_I("soldut shutting down (ran %llu sim ticks)",
           (unsigned long long)game.world.tick);
 
+    stop_dedicated_child_if_any(&game);
     if (game.net.role != NET_ROLE_OFFLINE) {
         net_close(&game.net);
         net_shutdown();

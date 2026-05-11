@@ -1,0 +1,37 @@
+# 2p_dedi_combat — client B (second connector → slot 1). Mirror of
+# client A: stands at spawn[1] ≈ (384, 984) on the RED platform,
+# aims LEFT toward A, returns fire after a small offset so the two
+# pulse-rifle exchanges interleave on the dedicated server.
+
+window 1280 720
+out build/shots/net/dedi/2p_dedi_combat.client_b
+network connect 127.0.0.1:{{PORT}}
+name ClientB
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+
+# Aim toward A (slot 0 spawn ≈ (192, 984)).
+aim 96 980
+
+# Return fire — offset by 20 ticks so the salvo isn't lock-step.
+at 220 tap fire
+at 260 tap fire
+at 300 tap fire
+at 340 tap fire
+
+# Swap + RMB shortly after A does.
+at 420 tap swap
+at 460 tap fire
+
+at 560 press jet
+at 620 release jet
+
+at 700 press left
+at 740 release left
+at 770 tap fire
+
+at 150 shot t150_spawn
+at 260 shot t260_firing
+at 410 shot t410_swap
+at 580 shot t580_jet
+at 760 shot t760_walkback
+at 900 end

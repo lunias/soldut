@@ -16,6 +16,7 @@ void config_defaults(ServerConfig *cfg) {
     cfg->max_players        = 16;
     cfg->snapshot_hz        = 60;           /* Phase 2 — was 30 (M2 default) */
     cfg->interp_delay_ms    = 0;            /* 0 = derive from snapshot_hz */
+    cfg->countdown_default  = 0.0f;         /* 0 = use match_init's 5 s */
     cfg->mode               = MATCH_MODE_FFA;
     cfg->score_limit        = 25;
     cfg->time_limit         = 600.0f;       /* 10 min */
@@ -80,6 +81,11 @@ static void apply_kv(ServerConfig *cfg, const char *key, char *val) {
         int n = atoi(val);
         if (n == 0 || (n >= 40 && n <= 200)) cfg->interp_delay_ms = n;
         else LOG_W("config: interp_delay_ms '%s' out of range (0 or 40..200)", val);
+    }
+    else if (strcasecmp(key, "countdown_default") == 0) {
+        float f = (float)atof(val);
+        if (f >= 0.0f && f <= 30.0f) cfg->countdown_default = f;
+        else LOG_W("config: countdown_default '%s' out of range (0..30)", val);
     }
     else if (strcasecmp(key, "mode") == 0) {
         cfg->mode = match_mode_from_name(val);
