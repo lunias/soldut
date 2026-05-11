@@ -916,7 +916,13 @@ static bool bootstrap_host(Game *g, const LaunchArgs *args, bool offline) {
         }
         /* Phase 2 — apply cfg.snapshot_hz before any peer ACCEPTs (the
          * rate is shipped in ACCEPT). Falls back to net_server_start's
-         * 60 Hz default if cfg is unset / 0. */
+         * 60 Hz default if cfg is unset / 0. wan-fixes-2 — install the
+         * interp delay override FIRST so net_server_set_snapshot_hz
+         * picks it up. */
+        if (g->config.interp_delay_ms > 0) {
+            net_set_interp_delay_override(&g->net,
+                (uint32_t)g->config.interp_delay_ms);
+        }
         if (g->config.snapshot_hz > 0) {
             net_server_set_snapshot_hz(&g->net, g->config.snapshot_hz);
         }

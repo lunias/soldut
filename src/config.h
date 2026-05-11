@@ -42,12 +42,22 @@ typedef struct ServerConfig {
     int       max_players;
 
     /* Snapshot broadcast rate in Hz. Default 60 for crisp remote-player
-     * motion + 50 ms interp delay on the client. 30 (the M2 default) is
-     * still valid for tight upstream bandwidth (16+ player public hosts).
-     * The interp delay is derived as `3 * (1000 / snapshot_hz)` clamped
-     * to [40, 150] ms — see net.c. Capped at 60 because the sim is fixed
-     * at 60 Hz; broadcasting faster than the sim has nothing new to say. */
+     * motion. 30 (the M2 default) is still valid for tight upstream
+     * bandwidth on 16+ player public hosts. The interp delay is derived
+     * as `3 * (1000 / snapshot_hz)` floored at NET_INTERP_DELAY_MS
+     * (100 ms) for WAN jitter tolerance — see net.h. Capped at 60
+     * because the sim is fixed at 60 Hz; broadcasting faster than the
+     * sim has nothing new to say. */
     int       snapshot_hz;
+
+    /* Optional render-interp-delay override (ms). 0 = derive from
+     * snapshot_hz via the standard formula (the default).
+     * Non-zero = use this value verbatim, applied both server-side
+     * (lag-comp offset) and client-side (remote-mech render time)
+     * after the same 40..200 ms clamp. Knob added in wan-fixes-2 so
+     * hosts on jittery WAN can bump the buffer past the formula's
+     * defaults; LAN-only hosts can dial lower to claw back latency. */
+    int       interp_delay_ms;
 
     /* Match rules. */
     MatchModeId mode;

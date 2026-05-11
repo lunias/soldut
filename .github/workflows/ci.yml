@@ -55,6 +55,13 @@ jobs:
           path: |
             soldut
             build/soldut_editor
+            assets/fonts
+            assets/maps
+            assets/parallax
+            assets/shaders
+            assets/sprites
+            assets/ui
+            assets/credits.txt
 
   build-windows:
     name: Windows (zig cc cross)
@@ -70,12 +77,50 @@ jobs:
       - name: Cross-build to Windows (game + editor)
         run: ./cross-windows.sh
 
+      # The .exe loads textures / fonts / shaders / parallax relative
+      # to its working directory, so the runtime needs the assets/
+      # tree alongside it. Stage everything into build/windows/ so
+      # actions/upload-artifact preserves the relative layout — the
+      # extracted zip is the user's playable directory.
+      - name: Stage assets next to Soldut.exe
+        run: |
+          mkdir -p build/windows/assets
+          cp -r assets/fonts    build/windows/assets/
+          cp -r assets/maps     build/windows/assets/
+          cp -r assets/parallax build/windows/assets/
+          cp -r assets/shaders  build/windows/assets/
+          cp -r assets/sprites  build/windows/assets/
+          cp -r assets/ui       build/windows/assets/
+          cp    assets/credits.txt build/windows/assets/
+          # An empty cfg so the exe picks up its built-in defaults
+          # without warning about "soldut.cfg not found". Players can
+          # edit this file to tweak port / snapshot_hz / etc.
+          cat > build/windows/soldut.cfg <<'CFG'
+          # Soldut server config — see documents/05-networking.md
+          # All fields are optional; defaults match the in-game settings.
+          port=23073
+          max_players=16
+          mode=ffa
+          friendly_fire=0
+          # Broadcast rate, 10..60 Hz (Phase 2).
+          snapshot_hz=60
+          # Render interp delay in ms. Higher = smoother under
+          # WAN jitter, more visible lag on remote players. Default
+          # 100 ms (~6 snapshot intervals at 60 Hz). Drop to 60..80
+          # for LAN play; bump to 120..150 for very jittery WAN.
+          # interp_delay_ms=100
+          CFG
+          ls -la build/windows/
+          ls -la build/windows/assets/
+
       - uses: actions/upload-artifact@v7
         with:
           name: soldut-windows-x86_64
           path: |
             build/windows/Soldut.exe
             build/windows/SoldutEditor.exe
+            build/windows/soldut.cfg
+            build/windows/assets
 
   build-macos:
     name: macOS (native clang)
@@ -112,3 +157,10 @@ jobs:
           path: |
             soldut
             build/soldut_editor
+            assets/fonts
+            assets/maps
+            assets/parallax
+            assets/shaders
+            assets/sprites
+            assets/ui
+            assets/credits.txt

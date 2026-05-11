@@ -251,14 +251,22 @@ typedef struct NetState {
      * include the field). */
     uint16_t snapshot_hz;
 
-    /* Effective render interp delay in ms. Derived as
-     *   `3 * 1000 / snapshot_hz` clamped to [40, 150]
-     * because three snapshot intervals of buffer covers ENet's typical
-     * jitter without over-buffering. 60 Hz → 50 ms; 30 Hz → 100 ms.
-     * Server uses this to compute `Mech.input_view_tick` lag-comp
-     * offset; client uses it to time-shift remote-mech rendering.
-     * Replaces the old compile-time `NET_INTERP_DELAY_MS = 100`. */
+    /* Effective render interp delay in ms. Derived per
+     * `net_interp_delay_for(snapshot_hz)`: 3 snapshot intervals
+     * floored at NET_INTERP_DELAY_MS (100 ms) for WAN-jitter
+     * tolerance. Server uses this to compute `Mech.input_view_tick`
+     * lag-comp offset; client uses it to time-shift remote-mech
+     * rendering. */
     uint32_t interp_delay_ms;
+
+    /* Optional cfg-driven override. 0 = no override; use the formula.
+     * Non-zero = use this value verbatim (after the same 40..200 ms
+     * clamp). Set via `net_set_interp_delay_override`. The override
+     * lets LAN-only hosts dial below the 100 ms safe default; WAN
+     * hosts can bump it past the formula's clamp for very noisy
+     * connections. Read at both server start (net_server_set_snapshot_hz)
+     * and client ACCEPT (client_handle_accept). */
+    uint32_t interp_delay_override_ms;
 
     /* Cached server-side snapshots indexed [0..NET_MAX_PEERS) for
      * delta encoding: for each peer, the most recent snapshot the
@@ -287,24 +295,36 @@ typedef struct NetState {
     int         recent_input_head;    /* next slot to overwrite */
 } NetState;
 
-/* Default render-time delay for remote-mech interpolation. 100 ms is the
- * 30 Hz default (3 snapshot intervals × 33 ms). With Phase 2's 60 Hz
- * default, the runtime `NetState.interp_delay_ms` overrides this to
- * 50 ms (3 × 17 ms). The macro is the back-compat baseline used when
- * the server doesn't ship snapshot_hz in ACCEPT. */
+/* Default render-time delay for remote-mech interpolation. 100 ms is
+ * the safe baseline: at 60 Hz that's six snapshot intervals of buffer,
+ * comfortably absorbing typical WAN jitter (a single late snapshot
+ * doesn't starve the interp ring and produce a visible hitch). The
+ * macro is the back-compat fallback used when the server doesn't
+ * ship snapshot_hz in ACCEPT — and the floor for the
+ * net_interp_delay_for(...) derivation below. */
 #define NET_INTERP_DELAY_MS 100u
 
-/* Helper: derive an interp delay (ms) from a snapshot Hz. Three intervals
- * of buffer covers ENet jitter; the clamp keeps it sane at extreme rates.
+/* Helper: derive an interp delay (ms) from a snapshot Hz. Three
+ * snapshot intervals plus a 100 ms floor for jitter tolerance.
  *
- *   30 Hz → 100 ms (M2 default)
- *   60 Hz →  50 ms (Phase 2 default)
- *   20 Hz → 150 ms (clamped)
- *  120 Hz →  40 ms (clamped — sim only runs at 60 Hz so this is moot) */
+ * The earlier wan-lag-fixes pass shipped a 40 ms floor (yielding
+ * 50 ms at 60 Hz, only 3 intervals of buffer) on the rationale that
+ * lower interp delay reduces visible remote-player lag. In WAN
+ * playtesting (~60 ms RTT, ~10–20 ms typical jitter), that floor
+ * proved too tight — a single late snapshot popped the ring and
+ * produced visible jitter / hitching on remote mechs. Bumping the
+ * floor to 100 ms restores the M2 behavior at the cost of ~50 ms of
+ * the latency win; hosts who play exclusively on LAN can set a
+ * shorter `interp_delay_ms` in soldut.cfg to dial it back down.
+ *
+ *   30 Hz → 100 ms (3 × 33 ms)
+ *   60 Hz → 100 ms (floor; was 50 ms pre-wan-fixes-2)
+ *   20 Hz → 150 ms
+ *  120 Hz → 100 ms (floor; sim only runs at 60 Hz anyway) */
 static inline uint32_t net_interp_delay_for(uint32_t snapshot_hz) {
     if (snapshot_hz == 0) snapshot_hz = 30;
     uint32_t d = (3u * 1000u + snapshot_hz / 2u) / snapshot_hz;
-    if (d < 40u)  d = 40u;
+    if (d < NET_INTERP_DELAY_MS) d = NET_INTERP_DELAY_MS;
     if (d > 150u) d = 150u;
     return d;
 }
@@ -323,6 +343,15 @@ bool net_server_start(NetState *ns, uint16_t port, struct Game *g);
  * any peer connects. Clamped to [10, 60]. The interp delay is rederived
  * from the new rate and shipped to clients in ACCEPT. */
 void net_server_set_snapshot_hz(NetState *ns, int hz);
+
+/* wan-fixes-2 — install a cfg-driven interp delay override that bypasses
+ * the snapshot-rate-derived value. Pass 0 to clear the override. Effect
+ * applies both server-side (lag-comp offset) and client-side
+ * (remote-mech render time). Hosts who run pure-LAN play can set
+ * something like 60 ms to claw back the latency the 100 ms safe
+ * default leaves on the table; hosts on jittery WAN can go higher.
+ * Clamped to [40, 200] ms when applied. */
+void net_set_interp_delay_override(NetState *ns, uint32_t ms);
 
 /* Connect to host:port. Returns true on connect ACK; populates
  * ns->local_mech_id_assigned with the server's choice (>=0). On

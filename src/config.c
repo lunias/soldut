@@ -15,6 +15,7 @@ void config_defaults(ServerConfig *cfg) {
     cfg->port               = SOLDUT_DEFAULT_PORT;
     cfg->max_players        = 16;
     cfg->snapshot_hz        = 60;           /* Phase 2 — was 30 (M2 default) */
+    cfg->interp_delay_ms    = 0;            /* 0 = derive from snapshot_hz */
     cfg->mode               = MATCH_MODE_FFA;
     cfg->score_limit        = 25;
     cfg->time_limit         = 600.0f;       /* 10 min */
@@ -74,6 +75,11 @@ static void apply_kv(ServerConfig *cfg, const char *key, char *val) {
         int n = atoi(val);
         if (n >= 10 && n <= 60) cfg->snapshot_hz = n;
         else LOG_W("config: snapshot_hz '%s' out of range (10..60)", val);
+    }
+    else if (strcasecmp(key, "interp_delay_ms") == 0) {
+        int n = atoi(val);
+        if (n == 0 || (n >= 40 && n <= 200)) cfg->interp_delay_ms = n;
+        else LOG_W("config: interp_delay_ms '%s' out of range (0 or 40..200)", val);
     }
     else if (strcasecmp(key, "mode") == 0) {
         cfg->mode = match_mode_from_name(val);

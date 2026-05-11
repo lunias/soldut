@@ -240,8 +240,32 @@ void net_server_set_snapshot_hz(NetState *ns, int hz) {
     if (hz > 60) hz = 60;
     ns->snapshot_hz       = (uint16_t)hz;
     ns->snapshot_interval = 1.0 / (double)hz;
-    ns->interp_delay_ms   = net_interp_delay_for((uint32_t)hz);
-    LOG_I("net: snapshot_hz=%d interp=%u ms", hz, (unsigned)ns->interp_delay_ms);
+    /* If the cfg installed an override (wan-fixes-2), it wins over
+     * the rate-derived value. Otherwise fall back to the formula. */
+    ns->interp_delay_ms   = (ns->interp_delay_override_ms > 0)
+                              ? ns->interp_delay_override_ms
+                              : net_interp_delay_for((uint32_t)hz);
+    LOG_I("net: snapshot_hz=%d interp=%u ms%s",
+          hz, (unsigned)ns->interp_delay_ms,
+          ns->interp_delay_override_ms > 0 ? " (cfg override)" : "");
+}
+
+void net_set_interp_delay_override(NetState *ns, uint32_t ms) {
+    if (!ns) return;
+    if (ms > 0) {
+        if (ms < 40u)  ms = 40u;
+        if (ms > 200u) ms = 200u;
+    }
+    ns->interp_delay_override_ms = ms;
+    /* Apply immediately if we know our snapshot rate (i.e., the rate
+     * has already been set on the server, or the client has already
+     * received an ACCEPT). Otherwise the next *_set_snapshot_hz /
+     * client_handle_accept call picks it up. */
+    if (ns->snapshot_hz > 0) {
+        ns->interp_delay_ms = (ms > 0)
+            ? ms
+            : net_interp_delay_for(ns->snapshot_hz);
+    }
 }
 
 bool net_client_connect(NetState *ns, const char *host, uint16_t port,
@@ -258,6 +282,16 @@ bool net_client_connect(NetState *ns, const char *host, uint16_t port,
     ns->snapshot_interval = 1.0 / 30.0;
     ns->interp_delay_ms   = NET_INTERP_DELAY_MS;
     ns->local_mech_id_assigned = -1;
+    /* wan-fixes-2 — install the cfg interp delay override BEFORE the
+     * ACCEPT round-trip so client_handle_accept sees it. The memset
+     * just above wiped any pre-call setter; reading from g->config
+     * here is the cleanest path. */
+    if (g && g->config.interp_delay_ms > 0) {
+        ns->interp_delay_override_ms = (uint32_t)g->config.interp_delay_ms;
+        if (ns->interp_delay_override_ms < 40u)  ns->interp_delay_override_ms = 40u;
+        if (ns->interp_delay_override_ms > 200u) ns->interp_delay_override_ms = 200u;
+        ns->interp_delay_ms = ns->interp_delay_override_ms;
+    }
 
     /* Outgoing-only ENet host: 1 peer, NET_CH_COUNT channels. */
     ENetHost *eh = enet_host_create(NULL, 1, NET_CH_COUNT, 0, 0);
@@ -1288,11 +1322,17 @@ static void client_handle_accept(NetState *ns, const uint8_t *body, int blen) {
     if (hz_from_server >= 10 && hz_from_server <= 60) {
         ns->snapshot_hz       = hz_from_server;
         ns->snapshot_interval = 1.0 / (double)hz_from_server;
-        ns->interp_delay_ms   = net_interp_delay_for(hz_from_server);
+        /* wan-fixes-2 — local cfg override (from soldut.cfg's
+         * `interp_delay_ms`) wins over the rate-derived value so
+         * players can adapt to their own connection's jitter. */
+        ns->interp_delay_ms   = (ns->interp_delay_override_ms > 0)
+                                  ? ns->interp_delay_override_ms
+                                  : net_interp_delay_for(hz_from_server);
     }
-    LOG_I("client: ACCEPT client_id=%u mech_id=%u snapshot_hz=%u interp=%u ms",
+    LOG_I("client: ACCEPT client_id=%u mech_id=%u snapshot_hz=%u interp=%u ms%s",
           (unsigned)client_id, (unsigned)mech_id,
-          (unsigned)ns->snapshot_hz, (unsigned)ns->interp_delay_ms);
+          (unsigned)ns->snapshot_hz, (unsigned)ns->interp_delay_ms,
+          ns->interp_delay_override_ms > 0 ? " (cfg override)" : "");
     /* INITIAL_STATE follows on the same channel. */
 }
 
