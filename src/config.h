@@ -41,6 +41,14 @@ typedef struct ServerConfig {
     uint16_t  port;
     int       max_players;
 
+    /* Snapshot broadcast rate in Hz. Default 60 for crisp remote-player
+     * motion + 50 ms interp delay on the client. 30 (the M2 default) is
+     * still valid for tight upstream bandwidth (16+ player public hosts).
+     * The interp delay is derived as `3 * (1000 / snapshot_hz)` clamped
+     * to [40, 150] ms — see net.c. Capped at 60 because the sim is fixed
+     * at 60 Hz; broadcasting faster than the sim has nothing new to say. */
+    int       snapshot_hz;
+
     /* Match rules. */
     MatchModeId mode;
     int         score_limit;

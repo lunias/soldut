@@ -199,7 +199,11 @@ bool net_server_start(NetState *ns, uint16_t port, Game *g) {
     ns->role = NET_ROLE_SERVER;
     ns->bind_port = port ? port : SOLDUT_DEFAULT_PORT;
     ns->discovery_socket = -1;
-    ns->snapshot_interval = 1.0 / 30.0;     /* 30 Hz */
+    /* Phase 2 — bumped from 30 to 60 Hz default. bootstrap_host will
+     * override from cfg.snapshot_hz before any peer connects. */
+    ns->snapshot_hz       = 60;
+    ns->snapshot_interval = 1.0 / (double)ns->snapshot_hz;
+    ns->interp_delay_ms   = net_interp_delay_for(ns->snapshot_hz);
 
     ENetAddress addr;
     addr.host = ENET_HOST_ANY;
@@ -214,12 +218,30 @@ bool net_server_start(NetState *ns, uint16_t port, Game *g) {
     }
     ns->enet_host = h;
 
+    /* Phase 2 — ENet's built-in range coder. Free 30–50% bandwidth
+     * reduction on snapshot streams (lots of zero / repeated bytes in
+     * the SoA EntitySnapshot layout). Safe with no peer caps: the
+     * coder is fully symmetric on both ends. */
+    enet_host_compress_with_range_coder(h);
+
     mint_secret(ns->secret);
     g->world.authoritative = true;
 
-    LOG_I("net_server_start: listening on port %u (max %d peers)",
-          (unsigned)ns->bind_port, NET_MAX_PEERS);
+    LOG_I("net_server_start: listening on port %u (max %d peers, snapshot=%u Hz, "
+          "interp=%u ms, range_coder=on)",
+          (unsigned)ns->bind_port, NET_MAX_PEERS,
+          (unsigned)ns->snapshot_hz, (unsigned)ns->interp_delay_ms);
     return true;
+}
+
+void net_server_set_snapshot_hz(NetState *ns, int hz) {
+    if (!ns || ns->role != NET_ROLE_SERVER) return;
+    if (hz < 10) hz = 10;
+    if (hz > 60) hz = 60;
+    ns->snapshot_hz       = (uint16_t)hz;
+    ns->snapshot_interval = 1.0 / (double)hz;
+    ns->interp_delay_ms   = net_interp_delay_for((uint32_t)hz);
+    LOG_I("net: snapshot_hz=%d interp=%u ms", hz, (unsigned)ns->interp_delay_ms);
 }
 
 bool net_client_connect(NetState *ns, const char *host, uint16_t port,
@@ -228,7 +250,13 @@ bool net_client_connect(NetState *ns, const char *host, uint16_t port,
     memset(ns, 0, sizeof *ns);
     ns->role = NET_ROLE_CLIENT;
     ns->discovery_socket = -1;
+    /* Defaults; the server's ACCEPT will overwrite snapshot_hz +
+     * interp_delay_ms based on the host's actual configured rate. We
+     * start at 30 Hz / 100 ms because that's the M2 wire-default and
+     * what a pre-Phase-2 host (no ACCEPT field) implies. */
+    ns->snapshot_hz       = 30;
     ns->snapshot_interval = 1.0 / 30.0;
+    ns->interp_delay_ms   = NET_INTERP_DELAY_MS;
     ns->local_mech_id_assigned = -1;
 
     /* Outgoing-only ENet host: 1 peer, NET_CH_COUNT channels. */
@@ -239,6 +267,10 @@ bool net_client_connect(NetState *ns, const char *host, uint16_t port,
         return false;
     }
     ns->enet_host = eh;
+    /* Phase 2 — symmetric with the server; ENet drops the compression
+     * silently if the peer doesn't have a matching coder, but our
+     * server enables the same one in net_server_start. */
+    enet_host_compress_with_range_coder(eh);
 
     ENetAddress addr;
     addr.port = port ? port : SOLDUT_DEFAULT_PORT;
@@ -426,14 +458,21 @@ static void send_challenge(void *peer, uint32_t nonce, uint32_t token) {
 }
 
 static void send_accept(void *peer, uint32_t client_id, int mech_id,
-                        uint32_t server_time_ms, uint64_t server_tick)
+                        uint32_t server_time_ms, uint64_t server_tick,
+                        uint16_t snapshot_hz)
 {
+    /* Phase 2: appended snapshot_hz (u16) so the client can derive its
+     * interp delay from the actual host rate. Back-compat: an old
+     * client reads the first 19 bytes and ignores trailing — keeps its
+     * own default rate. A new client connecting to an old host gets
+     * blen=19 and falls back to default snapshot_hz=30. */
     uint8_t buf[24]; uint8_t *p = buf;
     w_u8 (&p, NET_MSG_ACCEPT);
     w_u32(&p, client_id);
     w_u16(&p, (uint16_t)mech_id);
     w_u32(&p, server_time_ms);
     w_u64(&p, server_tick);
+    w_u16(&p, snapshot_hz);
     enet_send_to(peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
                  buf, (int)(p - buf));
 }
@@ -860,7 +899,8 @@ static void server_handle_challenge_response(NetState *ns, NetPeer *p,
     lobby_chat_system(&g->lobby, welcome);
 
     uint32_t srv_ms = (uint32_t)(ns->server_time * 1000.0);
-    send_accept(p->enet_peer, p->client_id, slot, srv_ms, g->world.tick);
+    send_accept(p->enet_peer, p->client_id, slot, srv_ms, g->world.tick,
+                ns->snapshot_hz);
     send_initial_state(p->enet_peer, g);
 
     /* The next net_poll iteration will run the dirty-broadcast pass
@@ -1172,7 +1212,7 @@ static void server_handle_input(NetState *ns, NetPeer *p,
      * range, so stale-but-valid values stay safe. (See
      * [05-networking.md] §5.) */
     uint32_t rtt_ms = ((ENetPeer *)p->enet_peer)->roundTripTime;
-    uint32_t view_lag_ms = (rtt_ms / 2u) + NET_INTERP_DELAY_MS;
+    uint32_t view_lag_ms = (rtt_ms / 2u) + ns->interp_delay_ms;
     uint64_t view_lag_ticks = ((uint64_t)view_lag_ms * 60u + 999u) / 1000u;
     m->input_view_tick = (g->world.tick > view_lag_ticks)
                        ? (g->world.tick - view_lag_ticks)
@@ -1207,8 +1247,18 @@ static void client_handle_accept(NetState *ns, const uint8_t *body, int blen) {
     (void)srv_ms; (void)srv_tick;
     ns->local_client_id        = client_id;
     ns->local_mech_id_assigned = (int)mech_id;
-    LOG_I("client: ACCEPT client_id=%u mech_id=%u",
-          (unsigned)client_id, (unsigned)mech_id);
+    /* Phase 2 — optional snapshot_hz suffix (u16). Missing from a
+     * pre-Phase-2 host; we keep the default (30 Hz / 100 ms interp). */
+    uint16_t hz_from_server = 0;
+    if (blen >= 20) hz_from_server = r_u16(&r);
+    if (hz_from_server >= 10 && hz_from_server <= 60) {
+        ns->snapshot_hz       = hz_from_server;
+        ns->snapshot_interval = 1.0 / (double)hz_from_server;
+        ns->interp_delay_ms   = net_interp_delay_for(hz_from_server);
+    }
+    LOG_I("client: ACCEPT client_id=%u mech_id=%u snapshot_hz=%u interp=%u ms",
+          (unsigned)client_id, (unsigned)mech_id,
+          (unsigned)ns->snapshot_hz, (unsigned)ns->interp_delay_ms);
     /* INITIAL_STATE follows on the same channel. */
 }
 
@@ -1447,7 +1497,7 @@ static void client_handle_snapshot(NetState *ns, const uint8_t *body,
          * track server_time directly (only ~16 ms behind in practice)
          * and snapshot_interp_remotes would always clamp to newest. */
         ns->client_render_time_ms =
-            (double)snap.header.server_time_ms - (double)NET_INTERP_DELAY_MS;
+            (double)snap.header.server_time_ms - (double)ns->interp_delay_ms;
         ns->client_render_clock_armed = true;
     }
     /* The snapshot's ack_input_seq tells us how far the server has
