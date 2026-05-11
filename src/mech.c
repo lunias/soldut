@@ -1099,13 +1099,29 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
          * On the server, every mech has authoritative input — the
          * host's own keyboard for slot 0, the per-peer NET_MSG_INPUT
          * latched on each remote slot — so we always run the
-         * input-based path there. */
+         * input-based path there.
+         *
+         * wan-fixes-3 followup — gait-lift hysteresis. The walk
+         * cycle (build_pose's ANIM_RUN) lifts each foot off the
+         * ground for ~3 ticks per swing. Without hysteresis, the
+         * grounded check flipped tick-to-tick during walking and
+         * anim_id flickered RUN → FALL → STAND → RUN. Invisible on
+         * the server (constraints smooth it) but visible on the
+         * client after wan-fixes-3 made remote mechs kinematic.
+         * Track consecutive airborne ticks and only transition to
+         * FALL after we've stayed off the ground long enough for it
+         * to be a real jump / fall rather than a stride. */
+        enum { GAIT_LIFT_MAX = 6 };
+        if (grounded) m->air_ticks = 0;
+        else if (m->air_ticks < 255u) m->air_ticks++;
+        bool really_airborne = (m->air_ticks > (uint8_t)GAIT_LIFT_MAX);
+
         bool input_drives_anim = w->authoritative || mid == w->local_mech_id;
         if (input_drives_anim) {
-            if (jetting)        m->anim_id = ANIM_JET;
-            else if (!grounded) m->anim_id = ANIM_FALL;
-            else if (moving)    m->anim_id = ANIM_RUN;
-            else                m->anim_id = ANIM_STAND;
+            if (jetting)            m->anim_id = ANIM_JET;
+            else if (really_airborne) m->anim_id = ANIM_FALL;
+            else if (moving)        m->anim_id = ANIM_RUN;
+            else                    m->anim_id = ANIM_STAND;
         }
 
     } else if (m->alive && m->is_dummy) {

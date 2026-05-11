@@ -140,6 +140,15 @@ enum {
     SNAP_STATE_GODMODE     = 1u << 10,    /* powerup: ignore incoming damage */
     SNAP_STATE_IS_DUMMY    = 1u << 11,    /* practice dummy — skips arm-aim drive */
     SNAP_STATE_GRAPPLING   = 1u << 12,    /* P06: trailing 8-byte grapple suffix follows entity record */
+    /* wan-fixes-3 followup — server-authoritative "is running" flag.
+     * Set when the server's anim_id == ANIM_RUN (i.e., the player is
+     * intentionally walking, not just briefly mid-gait-lift). Pre-
+     * existing client derivation from velocity flickered between RUN
+     * and STAND during stride transitions because vx briefly dipped
+     * below the threshold; reading this bit makes the client's
+     * anim_id mirror the server's deterministically. Additive bit;
+     * old clients ignore it and fall back to the velocity heuristic. */
+    SNAP_STATE_RUNNING     = 1u << 13,
 };
 
 /* Bits used in the per-entity dirty mask when delta-encoding. (We

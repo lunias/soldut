@@ -1,0 +1,28 @@
+# 2p_anim_check — host. Diagnostic shot for the wan-fixes-3 remote-
+# mech rendering: walk back and forth on Slipstream (no parallax
+# overlay, so the body is fully visible on the client's view).
+# Pairs with 2p_anim_check.client.shot.
+
+window 1280 720
+out build/shots/net/anim_host
+network host 24171
+name HostA
+map slipstream
+
+spawn_at 2300 1112
+peer_spawn 1 2500 1112
+aim 2500 1080
+
+at 130 press right
+at 220 release right
+at 240 press left
+at 360 release left
+at 380 press right
+at 470 release right
+
+at 150 shot t150_start_right
+at 200 shot t200_running_right
+at 300 shot t300_running_left
+at 420 shot t420_running_right
+at 550 shot t550_stopped
+at 650 end
