@@ -417,18 +417,29 @@ void hud_draw(const World *w, int screen_w, int screen_h, Vec2 cursor,
     Font font_mono = ui_font_for(UI_FONT_MONO);
     Font font_body = ui_font_for(UI_FONT_BODY);
 
-    /* Health (bottom-left). */
+    /* Health (bottom-left). wan-fixes-15 — HP numerals bumped from
+     * 18 to 22 px so they're readable at a glance during play, with
+     * an 8 px gap to the bar below + the armor bar above pushed
+     * upward by ~18 px to clear the taller text. Previously the
+     * armor bar (top edge at y-26, 8 px tall) clipped through the
+     * HP text (top at y-22, 18 px tall) — the armor bar's bottom
+     * sat 4 px BELOW the HP text top, obscuring the digits. */
     int x = 16, y = screen_h - 60, bw = 240, bh = 18;
+    int hp_font     = 22;
+    int hp_text_y   = y - (hp_font + 8);          /* 8 px gap to bar below */
     DrawTextEx(font_mono, TextFormat("HP %d / %d",
                                      (int)m->health, (int)m->health_max),
-               (Vector2){(float)x, (float)(y - 22)}, 18.0f, 1.0f, RAYWHITE);
+               (Vector2){(float)x, (float)hp_text_y}, (float)hp_font, 1.0f, RAYWHITE);
     draw_bar_v2(x, y, bw, bh, m->health / m->health_max,
                 (Color){180, 40, 40, 230});
 
-    /* Armor bar above HP, only if any. */
+    /* Armor bar above HP text, only if any. The armor bar's bottom
+     * edge sits ~10 px above the HP text top so the two never
+     * collide regardless of the digit width. */
     if (m->armor_hp_max > 0.0f) {
-        int ay = y - 26;
-        draw_bar_v2(x, ay, bw, 8, m->armor_hp / m->armor_hp_max,
+        int armor_h = 8;
+        int ay = hp_text_y - 10 - armor_h;
+        draw_bar_v2(x, ay, bw, armor_h, m->armor_hp / m->armor_hp_max,
                     (Color){80, 160, 220, 230});
         DrawTextEx(font_body, TextFormat("%s %d", ar->name, (int)m->armor_hp),
                    (Vector2){(float)(x + bw + 8), (float)(ay - 2)},
