@@ -147,6 +147,58 @@ void simulate_step(World *w, float dt) {
         return;
     }
 
+    /* wan-fixes-3 — client-side stability for REMOTE mechs.
+     *
+     * On the client (`!w->authoritative`), remote mechs have their
+     * pelvis position written each tick by snapshot_interp_remotes
+     * (lerping between bracketing snapshots in `remote_snap_ring`).
+     * They are NOT predicted; the snapshot stream is authoritative.
+     *
+     * Pre-fix: simulate_step still ran the full physics stack on
+     * remote mech particles — gravity, Verlet, pose drive, the
+     * 12-iter constraint+collide pass. Because remote latched_input
+     * is stale (snapshot_apply only sets aim_world / facing / state
+     * bits, not buttons), the pose drive produced erratic targets;
+     * the constraint solver couldn't fully converge in 12 iters
+     * against those + gravity + tile pushes; bone offsets from
+     * pelvis drifted tick-to-tick. snapshot_interp_remotes
+     * rigid-translates the whole body to put pelvis on the lerp
+     * target — but the *shape* (bone offsets) was whatever the
+     * physics pass left it, so the per-frame render saw the body
+     * wobble around its smooth pelvis path. That was the residual
+     * jitter reported after Phase 2's interp-delay restoration.
+     *
+     * Post-fix: zero inv_mass for every non-local mech particle on
+     * the client. Verlet (lines 48, 76) and the constraint solver
+     * (solve_distance / solve_distance_limit / solve_fixed_anchor)
+     * all early-return on `inv_mass <= 0`. Direct kinematic writes
+     * (physics_translate_kinematic / physics_set_velocity_x|y) are
+     * unaffected, so snapshot_interp_remotes still moves the body.
+     * The body stays in whatever pose mech_create initialized it to
+     * (the chassis rest pose); pelvis path is the interp lerp;
+     * bones rigid-translate with the pelvis — no shape drift, no
+     * jitter.
+     *
+     * Trade-off: remote mechs render in rest pose only — no walk
+     * cycle, no aim-arm tracking, no ragdoll on death. Walk/aim
+     * animation should come from a procedural pose pass driven by
+     * snapshot state (a follow-on); ragdoll wants per-limb wire
+     * data we don't ship yet. Cost-of-change here is one loop;
+     * benefit is smooth remote motion at WAN ping. (See
+     * TRADE_OFFS.md: "Remote mechs render in rest pose on the
+     * client".) */
+    if (!w->authoritative) {
+        ParticlePool *pp = &w->particles;
+        int local_id = w->local_mech_id;
+        for (int i = 0; i < w->mech_count; ++i) {
+            if (i == local_id) continue;
+            const Mech *m = &w->mechs[i];
+            for (int part = 0; part < PART_COUNT; ++part) {
+                pp->inv_mass[m->particle_base + part] = 0.0f;
+            }
+        }
+    }
+
     /* For each mech: drive (pose, input forces). Each mech consumes
      * its own latched_input (filled by the platform layer for the
      * local mech, by net.c for remote mechs on the server, or by
@@ -216,8 +268,14 @@ void simulate_step(World *w, float dt) {
 
     /* Post-physics: lift any grounded mech up to standing height
      * kinematically, so gravity sag doesn't accumulate from frame to
-     * frame. Skip-foot translation preserves the chain. */
+     * frame. Skip-foot translation preserves the chain. wan-fixes-3 —
+     * on the client, only run the anchor for the local (predicted)
+     * mech. Remote mechs are kinematic (inv_mass=0) and positioned
+     * by snapshot_interp_remotes; an extra anchor pull here would
+     * shift body parts away from their rest-pose offsets before the
+     * interp translate runs. */
     for (int i = 0; i < w->mech_count; ++i) {
+        if (!w->authoritative && i != w->local_mech_id) continue;
         mech_post_physics_anchor(w, i);
     }
 

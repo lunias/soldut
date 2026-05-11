@@ -333,6 +333,14 @@ static void collide_map_one_pass(World *w, bool finalize_velocity) {
 
     for (int i = 0; i < p->count; ++i) {
         if (!(p->flags[i] & PARTICLE_FLAG_ACTIVE)) continue;
+        /* wan-fixes-3 — kinematic particles (inv_mass == 0) are
+         * authoritatively positioned elsewhere (e.g. snapshot_interp_remotes
+         * for non-local mechs on the client). Tile collision must NOT
+         * displace them; otherwise the body shape drifts asymmetrically
+         * (one foot pushed out of a wall, pelvis lerps smoothly, render
+         * shows wobbling limbs). Mirrors the inv_mass == 0 early-return
+         * in physics_apply_gravity / physics_integrate / solve_distance. */
+        if (p->inv_mass[i] <= 0.0f) continue;
 
         float px = p->pos_x[i];
         float py = p->pos_y[i];
@@ -546,6 +554,8 @@ static void collide_polys_one_pass(World *w, bool finalize_velocity) {
 
     for (int i = 0; i < pp->count; ++i) {
         if (!(pp->flags[i] & PARTICLE_FLAG_ACTIVE)) continue;
+        /* wan-fixes-3 — same kinematic gate as collide_map_one_pass. */
+        if (pp->inv_mass[i] <= 0.0f) continue;
 
         float px = pp->pos_x[i];
         float py = pp->pos_y[i];
