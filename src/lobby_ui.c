@@ -852,24 +852,26 @@ static void sync_loadout_from_server(LobbyUIState *L, Game *g) {
     if (g->local_slot_id < 0) return;
     const LobbySlot *me = &g->lobby.slots[g->local_slot_id];
     if (!me->in_use) return;
-    /* First-entry on a FRESH client process: snap the loadout draft to
-     * whatever the server has for our slot (handles mid-round join or
-     * a clean launch with no UI cache yet). On re-host after a
-     * disconnect, lobby_ui_reset_session resets `synced = 0` too — we
-     * still snap, but the cached draft is preserved because the
-     * "pushed" branch below re-publishes it on the same call.
+    /* wan-fixes-10 — UI draft is authoritative. The previous "snap
+     * from server first, push back if not yet pushed" pattern silently
+     * clobbered prefs-loaded values (wan-fixes-8) because main.c
+     * seeds L->lobby_* from soldut-prefs.cfg before connect, but the
+     * fresh server's slot starts at defaults — the snap then
+     * overwrote prefs with server defaults BEFORE the push ran. Both
+     * branches then sent the SAME defaults to the server, locking the
+     * user's loadout to Sidearm/Trooper regardless of prefs.
      *
-     * Order matters: snap first so we capture any server-only fields
-     * (slot/team/etc.) the UI didn't have, then push our cached draft
-     * if we haven't on this session yet. The push wins. */
-    if (!L->lobby_loadout_synced) {
-        L->lobby_chassis   = me->loadout.chassis_id;
-        L->lobby_primary   = me->loadout.primary_id;
-        L->lobby_secondary = me->loadout.secondary_id;
-        L->lobby_armor     = me->loadout.armor_id;
-        L->lobby_jet       = me->loadout.jetpack_id;
-        L->lobby_loadout_synced = 1;
-    }
+     * Fix: skip the snap. L->lobby_* is set in main.c at startup from
+     * prefs (with sensible lobby_ui_init defaults when no prefs file
+     * exists), updated by the user's clicks during the session, and
+     * preserved across disconnects via lobby_ui_reset_session (which
+     * intentionally does NOT reset lobby_chassis/primary/etc.). The
+     * snap was a no-op for fresh launches anyway (lobby_add_slot uses
+     * mech_default_loadout, identical to lobby_ui_init's defaults),
+     * and harmful for any session with custom prefs or a remembered
+     * draft. We still call lobby_loadout_synced so the team auto-sync
+     * branch below knows we've completed the first-sync handshake. */
+    L->lobby_loadout_synced = 1;
     /* wan-fixes-7 — push the local UI draft to the server on each
      * fresh session. Without this, a re-host (parent process spawns
      * a new dedicated child) leaves the user's cached draft visible

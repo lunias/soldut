@@ -526,6 +526,40 @@ typedef struct {
     float    dir_x, dir_y;           /* normalized fire direction */
 } FireFeedEntry;
 
+/* ---- Explosion feed: server-side queue of AOE detonations broadcast
+ * to clients via NET_MSG_EXPLOSION so the visual explosion lands at
+ * the SERVER's authoritative position rather than wherever the
+ * client's visual-only projectile happened to detonate locally
+ * (wan-fixes-10).
+ *
+ * Background: wan-fixes-3 makes remote mechs render in REST POSE on
+ * the client (`inv_mass = 0`, snapshot_interp_remotes rigid-translates
+ * the body but bones don't animate). The server runs animated poses
+ * (idle wobble, walk, aim-arm), so the bone hit-volume positions
+ * differ between server and client by up to ~10 px. For a bouncy
+ * frag grenade rolling along the ground, this offset means the
+ * server's grenade detonates against the target's animated R_KNEE
+ * 5–10 px before the client's visual grenade detonates against the
+ * same target's rest-pose R_KNEE. Result: damage applies at one
+ * place, visual fires at another — the user sees the grenade
+ * explode "near" them but takes damage as if it exploded "a bit to
+ * the left."
+ *
+ * Fix: server records each detonation here; main.c broadcasts;
+ * client kills its visual projectile and spawns the explosion visual
+ * at the server's authoritative position. Damage stays
+ * server-authoritative as before. Capacity 32 covers worst-case
+ * tick bursts (multiple grenades + rockets airborne, several
+ * detonate in the same tick). */
+#define EXPLOSIONFEED_CAPACITY 32
+
+typedef struct {
+    int16_t  owner_mech_id;
+    uint8_t  weapon_id;
+    uint8_t  reserved;
+    float    pos_x, pos_y;          /* authoritative explosion center */
+} ExplosionFeedEntry;
+
 /* ---- Kill feed ring buffer (HUD top-right). Holds the last few kill
  * events for display + fade. */
 #define KILLFEED_CAPACITY 5
@@ -888,6 +922,14 @@ typedef struct World {
      * remote player's fire. */
     FireFeedEntry firefeed[FIREFEED_CAPACITY];
     int           firefeed_count;
+
+    /* Explosion feed — server-side queue of AOE detonations (frag
+     * grenade, rocket, plasma orb, mass driver dud) broadcast to
+     * clients so the explosion visual lands at the SERVER's
+     * authoritative pos rather than the client's locally-detonated
+     * pos (wan-fixes-10). Same drain-each-tick pattern. */
+    ExplosionFeedEntry explosionfeed[EXPLOSIONFEED_CAPACITY];
+    int                explosionfeed_count;
 
     /* Pickup-event feed (P05). Server-side queue of spawner indices
      * that changed state this tick (touched / respawned / transient

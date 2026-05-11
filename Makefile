@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs host-overlay-preview shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade host-overlay-preview shot \
         debug gdb gdb-host gdb-client valgrind editor \
         assets-palettes assets-process
 
@@ -147,6 +147,18 @@ $(BUILD_DIR)/prefs_test: tests/prefs_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET
 
 test-prefs: $(BUILD_DIR)/prefs_test
 	./$(BUILD_DIR)/prefs_test
+
+# wan-fixes-10 — frag-grenade AOE-explosion sync regression. Drives a
+# paired-shot 2p test (Client A throws three grenades at Client B on
+# Crossfire) against a real dedicated server; asserts both clients
+# receive matching NET_MSG_EXPLOSION events at the server's
+# authoritative position. -b variant tests the reverse (B throws at
+# A) for symmetry. Skipped on CI (needs DISPLAY for the shot
+# renderer); used locally to verify the wan-fixes-3 trade-off doesn't
+# leak into explosion visuals.
+test-frag-grenade: $(BIN)
+	bash tests/shots/net/run_frag_grenade.sh
+	bash tests/shots/net/run_frag_grenade.sh -b
 
 # wan-fixes-9 — visual preview for the "Starting server..." overlay.
 # Opens a real raylib window (needs DISPLAY); saves three PNGs to

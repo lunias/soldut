@@ -1,0 +1,34 @@
+# 2p_frag_grenade_a — client B (slot 1). Observer side: A is throwing
+# at B; B holds position and aims so it doesn't reposition.
+#
+# Captures mirror A's so we can diff what each side sees frame-for-
+# frame. B watches A's grenades come in.
+
+window 1280 720
+out build/shots/net/dedi/2p_frag_grenade_a.client_b
+network connect 127.0.0.1:{{PORT}}
+name ClientB
+loadout - "Pulse Rifle" "Frag Grenades" Light Standard
+
+# Aim toward A (~192, 984). B doesn't move or fire — just observes.
+aim 96 950
+
+# Same capture cadence as A.
+at 230 shot t230_pre_swap
+at 260 shot t260_post_swap
+at 290 shot t290_throw1
+at 310 shot t310_g1_arc
+at 340 shot t340_g1_late
+at 370 shot t370_g1_boom
+at 390 shot t390_g1_aftermath
+
+at 360 shot t360_pre_throw2
+at 400 shot t400_g2_arc
+at 450 shot t450_g2_boom
+
+at 440 shot t440_pre_throw3
+at 480 shot t480_g3_arc
+at 530 shot t530_g3_boom
+
+at 560 shot t560_done
+at 600 end

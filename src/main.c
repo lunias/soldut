@@ -259,6 +259,7 @@ static int g_killfeed_processed  = 0;
 static int g_hitfeed_processed   = 0;
 static int g_firefeed_processed  = 0;
 static int g_pickupfeed_processed = 0;
+static int g_explosionfeed_processed = 0;
 
 /* Server: walk new hit events from the world's hitfeed queue and
  * broadcast each one to clients so they can spawn matching blood/spark
@@ -281,6 +282,28 @@ static void broadcast_new_hits(Game *g) {
             h->pos_x, h->pos_y, h->dir_x, h->dir_y, (int)h->damage);
     }
     g_hitfeed_processed = cur;
+}
+
+/* wan-fixes-10 — Server: drain the explosion feed and broadcast each
+ * AOE detonation. Clients use the pos to spawn the visual explosion
+ * at the server's authoritative location instead of letting their
+ * local visual-only projectile detonate against rest-pose remote
+ * bones (which would land 5–10 px off). */
+static void broadcast_new_explosions(Game *g) {
+    if (g->net.role != NET_ROLE_SERVER) return;
+    int cur = g->world.explosionfeed_count;
+    int begin = g_explosionfeed_processed;
+    if (cur - begin > EXPLOSIONFEED_CAPACITY) {
+        begin = cur - EXPLOSIONFEED_CAPACITY;
+    }
+    for (int n = begin; n < cur; ++n) {
+        int idx = n % EXPLOSIONFEED_CAPACITY;
+        if (idx < 0) idx += EXPLOSIONFEED_CAPACITY;
+        const ExplosionFeedEntry *e = &g->world.explosionfeed[idx];
+        net_server_broadcast_explosion(&g->net,
+            (int)e->owner_mech_id, (int)e->weapon_id, e->pos_x, e->pos_y);
+    }
+    g_explosionfeed_processed = cur;
 }
 
 /* Server: walk new fire events and broadcast so clients can spawn
@@ -902,6 +925,7 @@ static void host_match_flow_step(Game *g, float dt) {
             broadcast_new_hits(g);
             broadcast_new_fires(g);
             broadcast_new_pickups(g);
+            broadcast_new_explosions(g);
             broadcast_flag_state_if_dirty(g);
             /* End on score limit (FFA = any per-player slot >= cap). */
             bool end = false;

@@ -1,0 +1,29 @@
+# 2p_frag_grenade_b — client A (slot 0). Observer side: B is throwing
+# at A; A holds position and aims so it doesn't reposition.
+
+window 1280 720
+out build/shots/net/dedi/2p_frag_grenade_b.client_a
+network connect 127.0.0.1:{{PORT}}
+name ClientA
+loadout - "Pulse Rifle" "Frag Grenades" Light Standard
+
+aim 480 950
+
+at 230 shot t230_pre_swap
+at 260 shot t260_post_swap
+at 290 shot t290_throw1
+at 310 shot t310_g1_arc
+at 340 shot t340_g1_late
+at 370 shot t370_g1_boom
+at 390 shot t390_g1_aftermath
+
+at 360 shot t360_pre_throw2
+at 400 shot t400_g2_arc
+at 450 shot t450_g2_boom
+
+at 440 shot t440_pre_throw3
+at 480 shot t480_g3_arc
+at 530 shot t530_g3_boom
+
+at 560 shot t560_done
+at 600 end

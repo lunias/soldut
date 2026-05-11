@@ -1,0 +1,50 @@
+# 2p_frag_grenade_b — client B (slot 1) throws frag grenades at A.
+#
+# Mirror of 2p_frag_grenade_a but with the SECOND connector (slot 1,
+# non-host client) as the thrower. Verifies the wan-fixes-10 wire fix
+# is symmetric — server should detonate authoritatively no matter
+# which peer initiated the throw, and both clients should receive
+# the matching EXPLOSION events.
+#
+# B is at Crossfire spawn[1] (~384, 984); A is at spawn[0] (~192, 984).
+# B aims LEFT toward A.
+
+window 1280 720
+out build/shots/net/dedi/2p_frag_grenade_b.client_b
+network connect 127.0.0.1:{{PORT}}
+name ClientB
+loadout - "Pulse Rifle" "Frag Grenades" Light Standard
+
+# Aim left at A (~192, 950).
+aim 96 950
+
+# Swap to secondary (frag grenades).
+at 240 press swap
+at 248 release swap
+
+# Three throws.
+at 280 press fire
+at 288 release fire
+at 360 press fire
+at 368 release fire
+at 440 press fire
+at 448 release fire
+
+at 230 shot t230_pre_swap
+at 260 shot t260_post_swap
+at 290 shot t290_throw1
+at 310 shot t310_g1_arc
+at 340 shot t340_g1_late
+at 370 shot t370_g1_boom
+at 390 shot t390_g1_aftermath
+
+at 360 shot t360_pre_throw2
+at 400 shot t400_g2_arc
+at 450 shot t450_g2_boom
+
+at 440 shot t440_pre_throw3
+at 480 shot t480_g3_arc
+at 530 shot t530_g3_boom
+
+at 560 shot t560_done
+at 600 end
