@@ -292,6 +292,7 @@ bool net_client_connect(NetState *ns, const char *host, uint16_t port,
         memset(ns, 0, sizeof *ns);
         return false;
     }
+
     ns->server.enet_peer = peer;
     ns->server.state     = NET_PEER_CONNECTING;
     ns->server.remote_addr_host = addr.host;
@@ -319,6 +320,18 @@ bool net_client_connect(NetState *ns, const char *host, uint16_t port,
         memset(ns, 0, sizeof *ns);
         return false;
     }
+
+    /* Phase 3 — apply throttle + timeout AFTER the ENet connect ack
+     * lands. Configuring on a pending CONNECTING peer queues commands
+     * before the protocol handshake completes, which (in 1.3.18) can
+     * blunt the initial round-trip and silently kill the connect. */
+    enet_peer_throttle_configure(peer,
+        /*interval_ms*/ 1000u,
+        /*accel*/       ENET_PEER_PACKET_THROTTLE_ACCELERATION,
+        /*decel*/       ENET_PEER_PACKET_THROTTLE_DECELERATION);
+    enet_peer_timeout(peer, /*limit*/32u,
+                      /*timeout_min_ms*/5000u,
+                      /*timeout_max_ms*/15000u);
     LOG_I("net_client_connect: enet handshake complete; sending CONNECT_REQUEST");
 
     /* Send CONNECT_REQUEST(version, name) on LOBBY reliable. */
@@ -1177,28 +1190,49 @@ static void server_handle_input(NetState *ns, NetPeer *p,
         }
     }
     if (p->mech_id < 0) return;
-    if (blen < 12) return;
+
+    /* Phase 3 wire: tag has already been consumed. Body starts with
+     * a u8 count followed by `count` 12-byte input records (oldest
+     * first). The client always packs the most recent N=NET_INPUT_REDUNDANCY
+     * inputs from its ring; the server applies any whose seq is
+     * strictly newer than its `latest_input_seq` (cheap u16-wrap-safe
+     * compare), dropping the rest as redundant resends. */
+    if (blen < 1) return;
     const uint8_t *r = body;
-    uint16_t seq     = r_u16(&r);
-    uint16_t buttons = r_u16(&r);
-    float    aim_x   = r_f32(&r);
-    float    aim_y   = r_f32(&r);
+    uint8_t count = r_u8(&r);
+    if (count == 0 || count > NET_INPUT_REDUNDANCY) return;
+    if (blen < 1 + (int)count * 12) return;
 
-    /* Drop out-of-order inputs (uint16 seq with wrap). */
-    int16_t delta = (int16_t)(seq - p->latest_input_seq);
-    if (p->latest_input_seq != 0 && delta <= 0) return;
+    int applied = 0;
+    bool advanced = false;
+    for (int i = 0; i < (int)count; ++i) {
+        uint16_t seq     = r_u16(&r);
+        uint16_t buttons = r_u16(&r);
+        float    aim_x   = r_f32(&r);
+        float    aim_y   = r_f32(&r);
 
-    p->latest_input.buttons = buttons;
-    p->latest_input.seq     = seq;
-    p->latest_input.aim_x   = aim_x;
-    p->latest_input.aim_y   = aim_y;
-    p->latest_input.dt      = 0.0f;     /* server uses its own dt */
-    p->latest_input_seq     = seq;
+        int16_t delta = (int16_t)(seq - p->latest_input_seq);
+        if (p->latest_input_seq != 0 && delta <= 0) continue; /* dup / stale */
 
-    /* Latch onto the mech for the next sim tick. */
+        p->latest_input.buttons = buttons;
+        p->latest_input.seq     = seq;
+        p->latest_input.aim_x   = aim_x;
+        p->latest_input.aim_y   = aim_y;
+        p->latest_input.dt      = 0.0f;     /* server uses its own dt */
+        p->latest_input_seq     = seq;
+        advanced = true;
+        applied++;
+    }
+    if (!advanced) return;
+    SHOT_LOG("net: input batch peer=%u count=%d applied=%d latest_seq=%u",
+             (unsigned)p->client_id, (int)count, applied,
+             (unsigned)p->latest_input_seq);
+
+    /* Latch the most recent (whatever stayed in p->latest_input after
+     * the loop) onto the mech for the next sim tick. */
     Mech *m = &g->world.mechs[p->mech_id];
     m->latched_input = p->latest_input;
-    m->last_processed_input_seq = seq;
+    m->last_processed_input_seq = p->latest_input_seq;
 
     /* Lag-compensation view tick: the world tick the shooter was *seeing*
      * when they generated this input. The client renders remote players at
@@ -1957,9 +1991,27 @@ static void server_pump_events(NetState *ns, Game *g) {
                 p->remote_addr_host = ev.peer->address.host;
                 p->remote_port      = ev.peer->address.port;
                 ev.peer->data = p;
+
+                /* Phase 3 — tune ENet throttle so unreliable snapshots
+                 * don't get internally dropped under transient WAN
+                 * jitter. The default 5 s recalc interval is too lazy
+                 * for an action game; 1 s lets the throttle track
+                 * conditions tighter and recover faster. accel/decel
+                 * stay at default (2/2). Also lower the disconnect
+                 * timeout band so a real drop is detected in ~5..15 s
+                 * (was 5..30 s) — matches `documents/05-networking.md`
+                 * §"Disconnect / reconnect". */
+                enet_peer_throttle_configure(ev.peer,
+                    /*interval_ms*/ 1000u,
+                    /*accel*/       ENET_PEER_PACKET_THROTTLE_ACCELERATION,
+                    /*decel*/       ENET_PEER_PACKET_THROTTLE_DECELERATION);
+                enet_peer_timeout(ev.peer, /*limit*/32u,
+                                  /*timeout_min_ms*/5000u,
+                                  /*timeout_max_ms*/15000u);
+
                 char abuf[48];
                 net_format_addr(p->remote_addr_host, p->remote_port, abuf, sizeof abuf);
-                LOG_I("server: peer connected (%s) — slot %u",
+                LOG_I("server: peer connected (%s) — slot %u (throttle_interval=1000ms timeout=5..15s)",
                       abuf, (unsigned)p->client_id);
                 break;
             }
@@ -2323,12 +2375,29 @@ void net_server_broadcast_snapshot(NetState *ns, World *w) {
 
 void net_client_send_input(NetState *ns, ClientInput in) {
     if (ns->role != NET_ROLE_CLIENT || !ns->connected) return;
-    uint8_t buf[16]; uint8_t *p = buf;
-    w_u8 (&p, NET_MSG_INPUT);
-    w_u16(&p, in.seq);
-    w_u16(&p, in.buttons);
-    w_f32(&p, in.aim_x);
-    w_f32(&p, in.aim_y);
+
+    /* Phase 3 — push to the redundancy ring, then ship oldest→newest. */
+    int head = ns->recent_input_head;
+    ns->recent_inputs[head] = in;
+    ns->recent_input_head   = (head + 1) % NET_INPUT_REDUNDANCY;
+    if (ns->recent_input_count < NET_INPUT_REDUNDANCY) ns->recent_input_count++;
+
+    /* Wire: tag(1) + count(1) + count * [seq(2) + buttons(2) + ax(4) + ay(4)]
+     * For count=4: 1 + 1 + 48 = 50 bytes. */
+    enum { ONE = 12 };
+    uint8_t buf[2 + NET_INPUT_REDUNDANCY * ONE];
+    uint8_t *p = buf;
+    w_u8(&p, NET_MSG_INPUT);
+    w_u8(&p, (uint8_t)ns->recent_input_count);
+    int oldest = (ns->recent_input_head - ns->recent_input_count
+                  + NET_INPUT_REDUNDANCY) % NET_INPUT_REDUNDANCY;
+    for (int i = 0; i < ns->recent_input_count; ++i) {
+        const ClientInput *r = &ns->recent_inputs[(oldest + i) % NET_INPUT_REDUNDANCY];
+        w_u16(&p, r->seq);
+        w_u16(&p, r->buttons);
+        w_f32(&p, r->aim_x);
+        w_f32(&p, r->aim_y);
+    }
     enet_send_to(ns->server.enet_peer, NET_CH_STATE, /*flags*/0,
                  buf, (int)(p - buf));
     ns->bytes_sent += (uint32_t)(p - buf);

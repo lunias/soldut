@@ -15,6 +15,11 @@
  * Post-fix: primary_id rides the wire as u8; the client reads it
  * directly. ENTITY_SNAPSHOT_WIRE_BYTES grew 28→29; protocol id
  * bumped S0LG → S0LH (0x53304C47 → 0x53304C48).
+ *
+ * Net Phase 3: protocol id bumped S0LH → S0LI (0x53304C48 → 0x53304C49)
+ * because NET_MSG_INPUT widened from a single record to a count-prefixed
+ * batch of up to NET_INPUT_REDUNDANCY=4 inputs per datagram (server
+ * dedupes by seq so packet loss doesn't desync prediction).
  */
 
 #include "../src/log.h"
@@ -41,9 +46,9 @@ static int g_failed = 0;
 int main(void) {
     log_init("/tmp/snapshot_test.log");
 
-    /* ---- Test 1: protocol id bumped to S0LH ---------------------- */
-    ASSERT_EQ("SOLDUT_PROTOCOL_ID == 'S0LH'", SOLDUT_PROTOCOL_ID,
-              0x53304C48u);
+    /* ---- Test 1: protocol id bumped to S0LI (Phase 3) ------------ */
+    ASSERT_EQ("SOLDUT_PROTOCOL_ID == 'S0LI'", SOLDUT_PROTOCOL_ID,
+              0x53304C49u);
 
     /* ---- Test 2: ENTITY_SNAPSHOT_WIRE_BYTES grew to 29 ----------- */
     ASSERT_EQ("ENTITY_SNAPSHOT_WIRE_BYTES == 29",

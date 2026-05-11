@@ -154,6 +154,15 @@ typedef enum {
 
 #define NET_MAX_PEERS  32
 
+/* Phase 3 — number of inputs packed into each NET_MSG_INPUT datagram.
+ * The client ships [last 4 inputs] every tick (60/s upstream). Server
+ * deduplicates by seq, so the only effect is making a single dropped
+ * UDP packet recoverable without a reconcile jump (next datagram
+ * contains the dropped seq among its 4 redundant copies). Bandwidth
+ * cost: 4 * 12 = 48 input bytes + 2 byte header = 50 B/packet vs the
+ * old 13 B; 60 Hz × 50 = 3 KB/s upstream — trivial. */
+#define NET_INPUT_REDUNDANCY 4
+
 typedef struct NetPeer {
     void        *enet_peer;       /* ENetPeer*; opaque to keep enet out of public API */
     NetPeerState state;
@@ -266,6 +275,16 @@ typedef struct NetState {
     double   client_render_time_ms;
     uint32_t client_latest_server_time_ms;
     bool     client_render_clock_armed;
+
+    /* Phase 3 — client redundancy ring. `net_client_send_input` pushes
+     * every tick into `recent_inputs[head]`, then ships up to
+     * NET_INPUT_REDUNDANCY of them (newest first) in each datagram.
+     * Server dedupes by seq via the existing latest_input_seq filter,
+     * so this is invisible to the rest of the codebase — just makes
+     * input loss tolerance go up by 4×. */
+    ClientInput recent_inputs[NET_INPUT_REDUNDANCY];
+    int         recent_input_count;   /* 0..NET_INPUT_REDUNDANCY */
+    int         recent_input_head;    /* next slot to overwrite */
 } NetState;
 
 /* Default render-time delay for remote-mech interpolation. 100 ms is the
