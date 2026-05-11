@@ -152,6 +152,53 @@ the ban-by-name simplification.).
 
 ## Physics
 
+### Remote mechs render in rest pose on the client (wan-fixes-3)
+
+- **What we did** — On the client (`!w->authoritative`), `simulate_step`
+  zeroes `inv_mass` for every non-local mech particle at the top of
+  each tick. Verlet integrate, gravity, the constraint solver
+  (`solve_distance` / `solve_distance_limit` / `solve_fixed_anchor`),
+  and the tile / polygon collision passes all early-return on
+  `inv_mass <= 0`, so remote mech particles only move via the
+  rigid-translate inside `snapshot_interp_remotes`. Also skips
+  `mech_post_physics_anchor` for non-local non-authoritative mechs.
+- **Why** — Pre-fix, remote mechs ran the full physics stack on the
+  client (gravity, Verlet, constraint, tile collision) every tick.
+  Their `latched_input` is stale (only `aim_world` / `facing` / state
+  bits flow through snapshots — buttons stay zeroed), so the pose
+  drive produced erratic targets that the 12-iter constraint solver
+  couldn't fully converge against. Bone offsets relative to pelvis
+  drifted tick-to-tick. `snapshot_interp_remotes` then rigid-translated
+  the body to put pelvis on a smooth lerp path, but the *shape* (bone
+  offsets) was whatever the physics pass left it — so the per-frame
+  render lerp showed limbs wobbling around the smooth pelvis path.
+  User-reported as "jittery / shaking" on WAN. Making remote mech
+  particles kinematic eliminates the drift; the body holds whatever
+  pose `mech_create` initialized it to (chassis rest pose), pelvis
+  path stays smooth, bones rigid-translate with it.
+- **Cost** — Remote mechs on the client don't visually animate beyond
+  rest pose: no walk cycle, no arm-aim tracking, no aim-arm direction.
+  Death ragdolls also won't tumble freely (severed limbs stick to the
+  body rather than falling under gravity). At LAN we don't notice
+  much; at WAN the user prefers stable poses to jittering ones.
+- **Revisit when** —
+  - The lack of walk / aim animation on remote mechs reads as broken
+    to playtesters (it almost certainly will once we have proper
+    sprites + animation curves).
+  - We ship a procedural pose pass driven by snapshot state — compute
+    desired bone positions per tick from `aim_world` + `anim_id` +
+    `facing_left` + `grounded` and write them DIRECTLY (no physics).
+    The kinematic gate stays, the body animates from data instead of
+    a frozen reference pose.
+  - Dismemberment ragdoll on remote-viewed kills feels static. The
+    fix probably ships per-limb position data in `EntitySnapshot` for
+    detached limbs, or spawns the ragdoll as a per-tick projectile-
+    style entity the server already simulates and clients interpolate.
+  - A future netcode revisit (e.g. delta encoding for bone offsets, or
+    full bone-state in snapshots) makes the kinematic-only path
+    unnecessary because the snapshot stream is authoritative for full
+    pose, not just pelvis position.
+
 ### Post-physics kinematic anchor for standing pose
 
 - **What we did** — `mech_post_physics_anchor()` runs after the physics
