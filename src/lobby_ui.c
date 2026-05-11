@@ -674,7 +674,10 @@ void match_loading_overlay_draw(LobbyUIState *L, Game *g, int sw, int sh) {
      * static map table otherwise. */
     char map_line[80];
     const MapDef *md = map_def(g->match.map_id);
-    const char *map_name = (md && md->display_name) ? md->display_name : "?";
+    /* `display_name` is a char array (always-addressable) — check its
+     * first byte for "populated" rather than the array address, which
+     * GCC -Werror=address flags as a constant comparison. */
+    const char *map_name = (md && md->display_name[0]) ? md->display_name : "?";
     const char *mode_name = match_mode_name((MatchModeId)g->match.mode);
     /* ASCII separator — U+00B7 falls back to `?` in the body font. */
     snprintf(map_line, sizeof map_line, "%s - %s",
