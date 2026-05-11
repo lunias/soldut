@@ -66,6 +66,8 @@ src/
 ├── config.{c,h}            # `soldut.cfg` key=value parser
 ├── arena.{c,h}             # arena allocator
 ├── pool.{c,h}              # fixed-size pool allocator
+├── prefs.{c,h}             # `soldut-prefs.cfg` key=value persistence (wan-fixes-8)
+├── proc_spawn.{c,h}        # cross-platform child spawn for --dedicated host (wan-fixes-5/9)
 ├── log.{c,h}               # logger (incl. SHOT_LOG())
 ├── math.h                  # math helpers beyond raymath (header-only, mostly inline)
 ├── hash.{c,h}              # PCG, FNV, simple hash table
@@ -79,7 +81,7 @@ src/
 
 That is the entire public structure. Anything we want to add asks: which existing module owns this? If none, it gets a new `name.{c,h}` pair, never a folder.
 
-All modules expected by the design canon now ship — `audio.{c,h}` landed at M5 P14.
+All modules expected by the design canon now ship — `audio.{c,h}` landed at M5 P14. Two additional modules landed off-roadmap with wan-fixes (2026-05-11): `prefs.{c,h}` for per-user loadout/name/team persistence, and `proc_spawn.{c,h}` for the dedicated-child host architecture.
 
 Shipped at M5: `level_io.{c,h}` (P01), `pickup.{c,h}` (P05), `ctf.{c,h}` (P07), `map_cache.{c,h}` + `map_download.{c,h}` (P08), `mech_sprites.{c,h}` (P10), `weapon_sprites.{c,h}` (P11), `map_kit.{c,h}` + `hotreload.{c,h}` (P13), `audio.{c,h}` (P14). P12 grew existing modules (no new module): `render.c` (+~155 LOC for `apply_hit_flash` / `draw_damage_decals` / `draw_stump_caps` / `part_local_to_world`), `mech.c` (+~85 LOC for `hit_flash_timer` decay + per-limb decal-ring writes + smoke-threshold check), `mech_sprites.c` (+~55 LOC for `mech_part_to_sprite_id` + `mech_sprite_part_endpoints` helpers), and added `FX_STUMP` to the particle path. P13 also grew `render.c` (parallax + halftone post + decoration draw + tile sprites + free-poly extraction), `decal.c` (chunked layer for >4096 px maps), `hud.c` (atlas-aware bars + crosshair + kill-feed icons + `DrawTextEx` migration), and `platform.c` (TTF font globals + `LoadFontEx`).
 
@@ -393,6 +395,8 @@ We do **not** integrate Tracy or Optick at v1. If we need deep traces, we add th
 | config.c | 178 | `soldut.cfg` parser |
 | arena.c | 51 | |
 | pool.c | 65 | |
+| prefs.c | 192 | wan-fixes-8 — soldut-prefs.cfg load/save (atomic write via `<path>.tmp` + rename) |
+| proc_spawn.c | 269 | wan-fixes-5/9 — POSIX + Win32 child spawn / wait / kill + monotonic time helpers |
 | log.c | 91 | |
 | hash.c | 49 | |
 | ds.c | 20 | one #define |

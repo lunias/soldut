@@ -114,7 +114,7 @@ This is the order that keeps things shippable and minimizes "block on a dependen
 
 **Week 1 — format + skeleton**
 - Land [01-lvl-format.md](01-lvl-format.md). New module `src/level_io.{c,h}`. Loader + saver round-trip a hard-coded test fixture.
-- (Deferred to P17.) Convert the three M4 code-built maps (Foundry / Slipstream / Reactor) to `.lvl` files via the `tools/cook_maps/` cooker, or re-author them in the editor. Until then `map_build` tries `assets/maps/<short>.lvl` first and falls back to the code-built path.
+- (Deferred to P17.) Re-author the three M4 code-built maps (Foundry / Slipstream / Reactor) as `.lvl` files in the P04 editor. The originally-planned `tools/cook_maps/` cooker was dropped — `tools/editor/` is the authoring path. Until P17 lands, `map_build` tries `assets/maps/<short>.lvl` first and falls back to the code-built path.
 - Begin [03-collision-polygons.md](03-collision-polygons.md). Free polygons in the world struct, broadphase grid, closest-point collision. Slopes drop in as polygons.
 
 **Week 2 — editor + first new content**

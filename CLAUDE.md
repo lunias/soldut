@@ -29,14 +29,31 @@ Note: `cross-windows.sh` wipes and re-builds `third_party/raylib` and `third_par
 
 ## Tests
 
-There is one regression harness:
+Multiple regression harnesses (all via `make`):
 
 ```bash
-make test-physics            # builds + runs the headless physics tester
-./build/headless_sim         # re-run without rebuilding
+make test-physics            # tests/headless_sim.c — humans read; does NOT assert
+make test-level-io           # .lvl round-trip + CRC32 (asserts)
+make test-pickups            # pickup state machine (asserts)
+make test-ctf                # CTF rules — pickup/return/capture (52 asserts)
+make test-snapshot           # snapshot encode/decode round-trip
+make test-spawn              # spawn placement
+make test-prefs              # soldut-prefs.cfg round-trip
+make test-map-chunks         # chunk reassembly + bit-flip CRC fail (21 asserts)
+make test-map-registry       # MapRegistry scan + lobby-rotation surfacing
+make test-map-share          # end-to-end host → client .lvl stream
+make test-editor             # editor binary smoke
+make test-spawn-e2e          # editor → host → client spawn flow
+make test-meet-named         # editor → host → client custom-map join
+make test-meet-custom        # same, untitled-map path
+make test-ctf-editor-flow    # editor-authored CTF map round-trip
+make test-grapple-ceiling    # grapple against angled-ceiling polys
+make test-frag-grenade       # paired-dedi grenade sync (tests/shots/net/run_frag_grenade.sh)
 ```
 
-`tests/headless_sim.c` builds a real `World`, runs `simulate()` over five scripted phases (Spawn / Idle 2 s / Hold RIGHT 1 s / Release / Hold JET 0.5 s) and dumps particle positions. **It does not assert or return a non-zero exit code on regression** — humans read the output. CI builds on Linux/Windows-cross/macOS but does not run this test (see TRADE_OFFS.md → "No CI for physics correctness").
+`tests/headless_sim.c` is the **outlier**: it dumps particle positions for human inspection and does *not* exit non-zero on regression. Every other target above asserts and returns a non-zero exit on failure. Paired-process flows (`tests/net/run.sh`, `tests/shots/net/run.sh`) spawn a real host + client over loopback and assert on log lines or paired screenshots.
+
+CI builds on Linux/Windows-cross/macOS but does not run any of these (see TRADE_OFFS.md → "No CI for physics correctness").
 
 ## Visual debugging — shot mode
 
