@@ -99,6 +99,14 @@ void lobby_ui_init(LobbyUIState *L);
  * main.c. */
 void lobby_ui_reset_session(LobbyUIState *L);
 
+/* wan-fixes-8 — write the current UI draft (player_name + loadout +
+ * team + connect_addr) to soldut-prefs.cfg. Idempotent; safe to call
+ * from any commit point (title screen transitions, lobby cycle
+ * clicks, direct-connect commit). The lobby UI calls this internally
+ * after loadout/team changes; main.c calls it on title-screen
+ * transitions to capture name edits. */
+void lobby_ui_save_prefs(const LobbyUIState *L);
+
 /* Sample input + render the relevant screen. Caller handles raylib
  * Begin/EndDrawing wrapping. */
 void title_screen_run     (LobbyUIState *L, struct Game *g, int sw, int sh);

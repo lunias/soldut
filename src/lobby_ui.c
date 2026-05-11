@@ -1,5 +1,7 @@
 #include "lobby_ui.h"
 
+#include "prefs.h"
+
 #include "config.h"
 #include "game.h"
 #include "log.h"
@@ -639,6 +641,11 @@ void connect_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     }
 
     if (committed || clicked) {
+        /* wan-fixes-8 — persist the address as part of the saved
+         * prefs so the next launch's Direct Connect screen pre-fills
+         * what the user typed. Also captures player_name in case the
+         * user edited it on the title screen this session. */
+        lobby_ui_save_prefs(L);
         uint32_t hh = 0; uint16_t pp = SOLDUT_DEFAULT_PORT;
         if (net_parse_addr(L->connect_addr, &hh, &pp, SOLDUT_DEFAULT_PORT)) {
             const char *colon = strrchr(L->connect_addr, ':');
@@ -805,6 +812,28 @@ static MechLoadout build_local_loadout(const LobbyUIState *L) {
     };
 }
 
+/* wan-fixes-8 — persist the UI draft to soldut-prefs.cfg. Called from
+ * every cycle-button click handler so the user's picks survive
+ * client-process restarts (not just disconnect / re-host, which
+ * wan-fixes-7 already handled via the in-memory cache). Exported
+ * via `lobby_ui_save_prefs` so main.c can also call it on title-
+ * screen transitions to capture player_name edits. */
+void lobby_ui_save_prefs(const LobbyUIState *L) {
+    if (!L) return;
+    UserPrefs p;
+    prefs_defaults(&p);
+    snprintf(p.name, sizeof p.name, "%s", L->player_name);
+    p.loadout.chassis_id   = L->lobby_chassis;
+    p.loadout.primary_id   = L->lobby_primary;
+    p.loadout.secondary_id = L->lobby_secondary;
+    p.loadout.armor_id     = L->lobby_armor;
+    p.loadout.jetpack_id   = L->lobby_jet;
+    p.team                 = L->lobby_team;
+    snprintf(p.connect_addr, sizeof p.connect_addr, "%s", L->connect_addr);
+    prefs_save(&p, PREFS_PATH);
+}
+
+
 static void apply_loadout_change(LobbyUIState *L, Game *g) {
     if (g->local_slot_id < 0) return;
     MechLoadout lo = build_local_loadout(L);
@@ -813,6 +842,7 @@ static void apply_loadout_change(LobbyUIState *L, Game *g) {
     } else {
         lobby_set_loadout(&g->lobby, g->local_slot_id, lo);
     }
+    lobby_ui_save_prefs(L);
 }
 
 static void apply_team_change(LobbyUIState *L, Game *g, int new_team) {
@@ -823,6 +853,7 @@ static void apply_team_change(LobbyUIState *L, Game *g, int new_team) {
     } else {
         lobby_set_team(&g->lobby, g->local_slot_id, new_team);
     }
+    lobby_ui_save_prefs(L);
 }
 
 static void apply_ready_toggle(Game *g, bool ready) {
