@@ -1171,6 +1171,12 @@ static void dedicated_signal(int sig) {
  * --dedicated still uses s_dedicated_quit for SIGINT/SIGTERM). */
 static volatile sig_atomic_t s_in_proc_server_quit = 0;
 
+/* wan-fixes-16 (round 6) — set to 1 by the server thread after
+ * net_server_start binds the UDP port. The main thread waits on
+ * this before calling net_client_connect so the first CONNECT
+ * packet doesn't go to an unbound port and get dropped. */
+static volatile sig_atomic_t s_in_proc_server_ready = 0;
+
 /* Monotonic time + sleep live in proc_spawn.c (cross-platform; the
  * dedicated child can't pull <windows.h> in this TU without colliding
  * with raylib's Rectangle / CloseWindow typedefs). */
@@ -1269,12 +1275,12 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
         if (opts->standalone) log_shutdown();
         return EXIT_FAILURE;
     }
-    /* In-process server doesn't need the raw UDP diagnostic
-     * scaffolding — that was for diagnosing the cross-process
-     * filter, which we're now bypassing entirely by running the
-     * server in the same process as the UI. */
+    /* Open the raw_diag listener in BOTH paths so the client's
+     * pre-connect raw probes have somewhere to land. The
+     * self-loopback probe stays standalone-only (it's a diagnostic
+     * for the dedi's own socket from inside the dedi process). */
+    net_raw_diag_listener_open((uint16_t)(game.config.port + 7));
     if (opts->standalone) {
-        net_raw_diag_listener_open((uint16_t)(game.config.port + 7));
         net_raw_send_probe("127.0.0.1", (uint16_t)(game.config.port + 7),
                            "dedi-self-loopback");
     }
@@ -1317,8 +1323,15 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
      * crc/descriptor. start_round rebuilds for whatever map_rotation /
      * vote picks for round 1. */
     map_build((MapId)game.match.map_id, &game.world, &game.level_arena);
-    decal_init((int)level_width_px(&game.world.level),
-               (int)level_height_px(&game.world.level));
+    /* decal_init creates a RenderTexture — only safe to call on the
+     * main thread, where raylib's GL context lives. In-proc-server
+     * runs on a separate thread; the server doesn't render anyway
+     * (no graphics output), so just skip it. The host UI's main
+     * thread has its own decal init. */
+    if (opts->standalone) {
+        decal_init((int)level_width_px(&game.world.level),
+                   (int)level_height_px(&game.world.level));
+    }
     maps_refresh_serve_info(map_def(game.match.map_id)->short_name,
                             NULL, &game.server_map_desc,
                             game.server_map_serve_path,
@@ -1329,6 +1342,14 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
           opts->log_prefix, (unsigned)game.config.port,
           map_def(game.match.map_id)->short_name,
           match_mode_name((MatchModeId)game.match.mode));
+
+    /* wan-fixes-16 (round 6) — signal the main thread that we're
+     * bound and ready to accept connections. The main thread is
+     * blocked waiting for this; once set, it kicks off the
+     * net_client_connect handshake. */
+    if (!opts->standalone) {
+        s_in_proc_server_ready = 1;
+    }
 
     /* Main tick loop. We don't have raylib's `GetTime`, so monotonic
      * clock + sleep. Net polling drives snapshot broadcast at the
@@ -1366,12 +1387,11 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
                   opts->log_prefix, (unsigned long long)iters,
                   match_phase_name(game.match.phase),
                   game.net.peer_count);
-            /* Raw diag drain only applies when we opened a raw
-             * listener (standalone --dedicated). */
-            if (opts->standalone) {
-                net_socket_diag_log(opts->log_prefix, &game.net);
-                net_raw_diag_listener_drain(opts->log_prefix);
-            }
+            /* Raw diag listener is open in both standalone and
+             * in-proc paths now, so drain it in both. The socket-
+             * diag log is also informative in both. */
+            net_socket_diag_log(opts->log_prefix, &game.net);
+            net_raw_diag_listener_drain(opts->log_prefix);
             next_heartbeat_at = now + 1.0;
         }
 
@@ -1385,9 +1405,7 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
     LOG_I("%s: shutting down (iters=%llu, last_signal=%d)",
           opts->log_prefix, (unsigned long long)iters,
           (int)s_dedicated_last_signal);
-    if (opts->standalone) {
-        net_raw_diag_listener_close();
-    }
+    net_raw_diag_listener_close();
     net_close(&game.net);
     /* net_shutdown() is process-global ENet teardown — only call it
      * from the standalone path so the host UI's main-thread client
@@ -1447,9 +1465,12 @@ static pthread_t s_in_proc_thread_id = 0;
 static bool      s_in_proc_thread_started = false;
 #endif
 
+static void in_process_server_stop(void);  /* forward */
+
 static bool in_process_server_start(const LaunchArgs *args) {
     s_in_proc_args = *args;
-    s_in_proc_server_quit = 0;
+    s_in_proc_server_quit  = 0;
+    s_in_proc_server_ready = 0;
 #if defined(_WIN32)
     s_in_proc_thread_handle = win32_create_thread_compat(
         in_process_server_thread);
@@ -1465,7 +1486,27 @@ static bool in_process_server_start(const LaunchArgs *args) {
     }
     s_in_proc_thread_started = true;
 #endif
-    LOG_I("in_process_server_start: server thread started");
+    LOG_I("in_process_server_start: server thread started, waiting for bind...");
+
+    /* wan-fixes-16 (round 6) — block until the server thread has
+     * bound its UDP socket. Without this, the client's first CONNECT
+     * packet would race against the server's net_server_start —
+     * arriving at an unbound port, getting dropped, with ENet's
+     * retransmit timer slow enough that the 5 s connect window
+     * expires before the retry lands. */
+    int waited_ms = 0;
+    const int READY_TIMEOUT_MS = 3000;
+    while (!s_in_proc_server_ready && waited_ms < READY_TIMEOUT_MS) {
+        time_sleep_ms(10);
+        waited_ms += 10;
+    }
+    if (!s_in_proc_server_ready) {
+        LOG_E("in_process_server_start: server thread didn't reach "
+              "net_server_start within %d ms — aborting", READY_TIMEOUT_MS);
+        in_process_server_stop();
+        return false;
+    }
+    LOG_I("in_process_server_start: server ready (waited %d ms)", waited_ms);
     return true;
 }
 
