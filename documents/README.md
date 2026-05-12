@@ -28,6 +28,7 @@ Read in order. Each document is short enough to finish in one sitting. Cross-ref
 | 09 | [Codebase Architecture](09-codebase-architecture.md) | Folders, modules, allocation, single-header style |
 | 10 | [Performance Budget](10-performance-budget.md) | Frame, memory, network — concrete numbers |
 | 11 | [Roadmap](11-roadmap.md) | Milestones M0..M7, what "done" means at each |
+| 13 | [Bot AI](13-bot-ai.md) | Bake-test + in-game bots: layered architecture, difficulty tiers, optional PPO self-play |
 
 Reference material:
 
