@@ -127,7 +127,20 @@ Vec2 renderer_screen_to_world(const Renderer *r, Vec2 screen) {
 static void update_camera(Renderer *r, World *w, int sw, int sh, float dt) {
     Vec2 focus;
     if (w->local_mech_id >= 0) {
-        focus = mech_chest_pos(w, w->local_mech_id);
+        /* M6 — follow the PELVIS, not the chest. Pelvis is the
+         * authoritative anchor for the procedural pose; chest is a
+         * pose-output that shifts when the player crouches (chest
+         * pulls in toward pelvis) or goes prone (chest extends
+         * forward along the ground). Following the chest in those
+         * poses makes the camera appear to drift backward / sideways
+         * even though the mech's physical position hasn't changed —
+         * pelvis is the right reference. */
+        const Mech *lm = &w->mechs[w->local_mech_id];
+        int p_idx = lm->particle_base + PART_PELVIS;
+        focus = (Vec2){
+            w->particles.pos_x[p_idx],
+            w->particles.pos_y[p_idx],
+        };
     } else {
         focus = (Vec2){0, 0};
     }

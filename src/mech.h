@@ -116,6 +116,8 @@ typedef enum {
     ANIM_JET,
     ANIM_FALL,
     ANIM_FIRE,
+    ANIM_CROUCH,    /* M6 — body lowered, knees bent, feet planted */
+    ANIM_PRONE,     /* M6 — body horizontal along the ground */
     ANIM_DEATH,
     ANIM_COUNT_M1
 } AnimId;

@@ -9,6 +9,18 @@ This document specifies how mechs are constructed, animated, and torn apart. The
 > [TRADE_OFFS.md](../TRADE_OFFS.md) for the actual state and the
 > "revisit when" triggers.
 
+> **M6 update (2026-05-12).** Live-mech bone positions are now
+> produced by a deterministic procedural pose function
+> (`src/mech_ik.c::pose_compute`) that runs after the physics pass
+> each tick. The Verlet constraint solver still runs but its output
+> is overwritten by `pose_write_to_particles` for live skeletons.
+> Verlet's load-bearing roles for live mechs: pelvis motion
+> (gravity / run / jet / contact), projectile-vs-bone-capsule
+> collision queries, and grapple anchor. For dead mechs and
+> dismembered free-flying limbs, Verlet is still the authoritative
+> driver — pose is skipped per-mech (alive guard) and per-particle
+> (dismember mask). See [m6/01-ik-and-pose-sync.md](m6/01-ik-and-pose-sync.md).
+
 ## Pillars
 
 1. **One physics model.** Alive players, dead bodies, gibs, projectiles — all run through the same Verlet particle/constraint solver. Death is a state change in animation, not a switch to a different physics engine. (This is what Soldat does, and it's why ragdolls feel right.)

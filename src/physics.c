@@ -113,6 +113,16 @@ void physics_integrate(World *w, float dt) {
 
 /* ---- Constraint relaxation ---------------------------------------- */
 
+/* M6 audit — stiffness factor applied per iteration to the grappling
+ * hook's constraints (CSTR_FIXED_ANCHOR for tile anchors,
+ * CSTR_DISTANCE_LIMIT for mech-bone anchors). With 12 iters per tick
+ * and k = 0.10, the per-tick correction is 1 - (1-0.10)^12 ≈ 72%, so
+ * a freshly-attached rope visibly stretches and recoils over a couple
+ * of frames instead of snapping to length on tick 1. Skeleton bones
+ * use solve_distance (not gated by this factor) so the body stays at
+ * rest length. */
+#define GRAPPLE_ROPE_STIFFNESS  0.10f
+
 static void solve_distance(ParticlePool *p, const Constraint *c) {
     float ax = p->pos_x[c->a], ay = p->pos_y[c->a];
     float bx = p->pos_x[c->b], by = p->pos_y[c->b];
@@ -136,6 +146,12 @@ static void solve_distance(ParticlePool *p, const Constraint *c) {
     p->pos_y[c->b] -= dy * diff * kb;
 }
 
+/* M6 audit: CSTR_DISTANCE_LIMIT is only used for the grappling hook's
+ * mech-to-mech case (skeleton bones use CSTR_DISTANCE / solve_distance
+ * with the 0.5 per-side factor, which is fine for rest-length
+ * maintenance). Applying the same `GRAPPLE_ROPE_STIFFNESS` factor here
+ * gives the mech-bone grapple the same stretchy feel as the
+ * tile-anchor case. */
 static void solve_distance_limit(ParticlePool *p, const Constraint *c) {
     float ax = p->pos_x[c->a], ay = p->pos_y[c->a];
     float bx = p->pos_x[c->b], by = p->pos_y[c->b];
@@ -148,7 +164,7 @@ static void solve_distance_limit(ParticlePool *p, const Constraint *c) {
     else if (d > c->max_len) target = c->max_len;
     else return;
 
-    float diff = (d - target) / d;
+    float diff = (d - target) / d * GRAPPLE_ROPE_STIFFNESS;
 
     float wa = p->inv_mass[c->a];
     float wb = p->inv_mass[c->b];
@@ -218,14 +234,22 @@ static void solve_angle(ParticlePool *p, const Constraint *c) {
 /* CSTR_FIXED_ANCHOR (P06): one-sided distance limit toward the
  * constraint's inline `fixed_pos`. When the particle is farther than
  * `rest`, pull it in. When closer, the rope is slack — no force.
- * End b has effective inv_mass = 0 (it's a fixed world point), so the
- * particle takes the full correction.
+ * End b has effective inv_mass = 0 (it's a fixed world point).
  *
  * Used by the grappling hook when anchored to a tile. The one-sided
  * behaviour gives the firer the "Tarzan swing" feel: the body hangs
  * at rope length, swings as a pendulum, and can drift closer to the
- * anchor (slack) without being shoved away. */
-static void solve_fixed_anchor(ParticlePool *p, const Constraint *c) {
+ * anchor (slack) without being shoved away.
+ *
+ * M6 audit: stretchy via GRAPPLE_ROPE_STIFFNESS (~10% per iter so the
+ * rope visibly extends and recoils on attach instead of snapping to
+ * length). ALSO swept-test the constraint move against solid tiles —
+ * if the correction would pull the particle through a wall, clamp
+ * the move so the particle stops at the wall surface. Without this,
+ * holding-retract or grappling across a wall can drag the firer's
+ * pelvis straight through solid tiles. */
+static void solve_fixed_anchor(ParticlePool *p, const Level *L,
+                               const Constraint *c) {
     int ai = c->a;
     if (p->inv_mass[ai] <= 0.0f) return;
     float dx = c->fixed_pos.x - p->pos_x[ai];
@@ -234,14 +258,39 @@ static void solve_fixed_anchor(ParticlePool *p, const Constraint *c) {
     if (d2 < 1e-6f) return;
     float d = sqrtf(d2);
     if (d <= c->rest) return;            /* slack — no force */
-    float diff = (d - c->rest) / d;
-    p->pos_x[ai] += dx * diff;
-    p->pos_y[ai] += dy * diff;
+    float diff = (d - c->rest) / d * GRAPPLE_ROPE_STIFFNESS;
+
+    float mx = dx * diff;
+    float my = dy * diff;
+
+    /* Swept-test against solid tiles. If the segment from current pos
+     * to target crosses a solid tile, stop the move just shy of the
+     * tile so the constraint never drags the particle into geometry.
+     * level_ray_hits returns t ∈ [0, 1] for the first hit; we leave
+     * the particle r+0.5 px shy of the hit point on the side it came
+     * from (matches the integrate sweep's clamp). */
+    float seg2 = mx * mx + my * my;
+    if (L && seg2 > 1.0f) {
+        float t = 1.0f;
+        Vec2 from = { p->pos_x[ai], p->pos_y[ai] };
+        Vec2 to   = { from.x + mx, from.y + my };
+        if (level_ray_hits(L, from, to, &t)) {
+            float seg_len = sqrtf(seg2);
+            const float r = PHYSICS_PARTICLE_RADIUS;
+            float t_clamped = t - (r + 0.5f) / seg_len;
+            if (t_clamped < 0.0f) t_clamped = 0.0f;
+            mx *= t_clamped;
+            my *= t_clamped;
+        }
+    }
+    p->pos_x[ai] += mx;
+    p->pos_y[ai] += my;
 }
 
 static void solve_constraints_one_pass(World *w) {
     ConstraintPool *cp = &w->constraints;
     ParticlePool   *pp = &w->particles;
+    const Level    *L  = &w->level;
     for (int i = 0; i < cp->count; ++i) {
         const Constraint *c = &cp->items[i];
         if (!c->active) continue;
@@ -249,7 +298,7 @@ static void solve_constraints_one_pass(World *w) {
             case CSTR_DISTANCE:        solve_distance(pp, c);       break;
             case CSTR_DISTANCE_LIMIT:  solve_distance_limit(pp, c); break;
             case CSTR_ANGLE:           solve_angle(pp, c);          break;
-            case CSTR_FIXED_ANCHOR:    solve_fixed_anchor(pp, c);   break;
+            case CSTR_FIXED_ANCHOR:    solve_fixed_anchor(pp, L, c); break;
         }
     }
 }
@@ -760,4 +809,187 @@ void physics_apply_impulse(ParticlePool *p, int idx, Vec2 imp) {
     if (idx < 0 || idx >= p->count) return;
     p->pos_x[idx] += imp.x;
     p->pos_y[idx] += imp.y;
+}
+
+/* ---- M6 post-pose terrain push-out -------------------------------- */
+
+/* Push one particle out of any overlapping solid tile. Kinematic
+ * translate (pos AND prev shifted by the same delta) so the move
+ * doesn't inject velocity. Mirrors the tile-push logic in
+ * collide_map_one_pass minus the per-particle inv_mass gate and the
+ * prev-tracked "exit direction" heuristic — the latter assumes
+ * particles are moving INTO the tile, which isn't always true here
+ * (pose-derived positions can be statically inside). Instead we use
+ * the simple shortest-axis escape. */
+static void push_out_of_solid_tiles_kinematic(ParticlePool *p,
+                                              const Level *L, int i)
+{
+    const float ts = (float)L->tile_size;
+    const float r  = PHYSICS_PARTICLE_RADIUS;
+    float px = p->pos_x[i];
+    float py = p->pos_y[i];
+    int   tx = (int)(px / ts);
+    int   ty = (int)(py / ts);
+
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            int cx = tx + dx, cy = ty + dy;
+            uint16_t tflags = level_flags_at(L, cx, cy);
+            if (!(tflags & TILE_F_SOLID)) continue;
+
+            float minx = (float)cx * ts, miny = (float)cy * ts;
+            float maxx = minx + ts,      maxy = miny + ts;
+
+            float qx = (px < minx) ? minx : (px > maxx ? maxx : px);
+            float qy = (py < miny) ? miny : (py > maxy ? maxy : py);
+            float ddx = px - qx, ddy = py - qy;
+            float d2  = ddx * ddx + ddy * ddy;
+            if (d2 >= r * r) continue;
+
+            float nx, ny, amount;
+            if (d2 > 1e-4f) {
+                float d = sqrtf(d2);
+                nx = ddx / d; ny = ddy / d;
+                amount = r - d;
+            } else {
+                /* Deep inside the tile — pick the shortest-axis exit. */
+                float d_top = py - miny, d_bot = maxy - py;
+                float d_lft = px - minx, d_rgt = maxx - px;
+                float min_d = d_top; int axis = 2;
+                if (d_lft < min_d) { min_d = d_lft; axis = 0; }
+                if (d_rgt < min_d) { min_d = d_rgt; axis = 1; }
+                if (d_bot < min_d) { min_d = d_bot; axis = 3; }
+                switch (axis) {
+                    case 0: nx = -1; ny =  0; amount = d_lft + r; break;
+                    case 1: nx =  1; ny =  0; amount = d_rgt + r; break;
+                    case 2: nx =  0; ny = -1; amount = d_top + r; break;
+                    default: nx = 0; ny =  1; amount = d_bot + r; break;
+                }
+            }
+            float push_x = nx * amount, push_y = ny * amount;
+            p->pos_x [i] += push_x; p->pos_y [i] += push_y;
+            p->prev_x[i] += push_x; p->prev_y[i] += push_y;
+            /* Refresh local cache so subsequent neighbours see the push. */
+            px = p->pos_x[i]; py = p->pos_y[i];
+        }
+    }
+}
+
+/* Push one particle out of any overlapping solid polygon (slopes etc.).
+ * Same kinematic-translate pattern as above. Mirrors the geometry in
+ * collide_polys_one_pass — uses closest_point_on_tri to find the
+ * pushout direction, falls back to pre-baked edge normals when the
+ * point is exactly on an edge/vertex. */
+static void push_out_of_solid_polys_kinematic(ParticlePool *p,
+                                              const Level *L, int i)
+{
+    if (L->poly_count == 0 || !L->poly_grid_off) return;
+    const float ts = (float)L->tile_size;
+    const float r  = PHYSICS_PARTICLE_RADIUS;
+    const int   W  = L->width;
+    const int   H  = L->height;
+
+    float px = p->pos_x[i];
+    float py = p->pos_y[i];
+    int   tx = (int)(px / ts);
+    int   ty = (int)(py / ts);
+    if (tx < 0 || tx >= W || ty < 0 || ty >= H) return;
+
+    int cell = ty * W + tx;
+    int s    = L->poly_grid_off[cell];
+    int e    = L->poly_grid_off[cell + 1];
+    for (int k = s; k < e; ++k) {
+        int pi = L->poly_grid[k];
+        const LvlPoly *poly = &L->polys[pi];
+        if ((PolyKind)poly->kind == POLY_KIND_BACKGROUND) continue;
+
+        Vec2 a = { (float)poly->v_x[0], (float)poly->v_y[0] };
+        Vec2 b = { (float)poly->v_x[1], (float)poly->v_y[1] };
+        Vec2 c = { (float)poly->v_x[2], (float)poly->v_y[2] };
+
+        int edge = -2;
+        Vec2 cpt = closest_point_on_tri((Vec2){px, py}, a, b, c, &edge);
+        float ddx = px - cpt.x;
+        float ddy = py - cpt.y;
+        float d2  = ddx * ddx + ddy * ddy;
+
+        /* edge != -2 means the particle's center is OUTSIDE the
+         * triangle — only contact if within the radius. */
+        if (edge != -2 && d2 >= r * r) continue;
+
+        float nx, ny, amount;
+        if (edge >= 0) {
+            nx = poly->normal_x[edge] / 32767.0f;
+            ny = poly->normal_y[edge] / 32767.0f;
+            amount = (d2 > 1e-4f) ? (r - sqrtf(d2)) : r;
+        } else if (edge == -1) {
+            int e1, e2;
+            if      (cpt.x == a.x && cpt.y == a.y) { e1 = 0; e2 = 2; }
+            else if (cpt.x == b.x && cpt.y == b.y) { e1 = 0; e2 = 1; }
+            else                                   { e1 = 1; e2 = 2; }
+            nx = (poly->normal_x[e1] + poly->normal_x[e2]) / (2.0f * 32767.0f);
+            ny = (poly->normal_y[e1] + poly->normal_y[e2]) / (2.0f * 32767.0f);
+            float nlen = sqrtf(nx * nx + ny * ny);
+            if (nlen > 1e-4f) { nx /= nlen; ny /= nlen; }
+            else              { nx = 0.0f; ny = -1.0f; }
+            amount = (d2 > 1e-4f) ? (r - sqrtf(d2)) : r;
+        } else {
+            /* Inside the triangle. Pick nearest edge. */
+            Vec2 verts[3] = { a, b, c };
+            float best_d2 = 1e30f;
+            int   best_e  = 0;
+            for (int eg = 0; eg < 3; ++eg) {
+                Vec2 v0 = verts[eg];
+                Vec2 v1 = verts[(eg + 1) % 3];
+                float ex = v1.x - v0.x, ey = v1.y - v0.y;
+                float ll = ex*ex + ey*ey;
+                float t  = (ll > 1e-6f) ? ((px - v0.x)*ex + (py - v0.y)*ey) / ll : 0.0f;
+                if (t < 0.0f) t = 0.0f;
+                if (t > 1.0f) t = 1.0f;
+                float qx2 = v0.x + ex * t, qy2 = v0.y + ey * t;
+                float ddx2 = px - qx2, ddy2 = py - qy2;
+                float dd2  = ddx2*ddx2 + ddy2*ddy2;
+                if (dd2 < best_d2) { best_d2 = dd2; best_e = eg; }
+            }
+            nx = poly->normal_x[best_e] / 32767.0f;
+            ny = poly->normal_y[best_e] / 32767.0f;
+            amount = r + sqrtf(best_d2);
+        }
+        float push_x = nx * amount, push_y = ny * amount;
+        p->pos_x [i] += push_x; p->pos_y [i] += push_y;
+        p->prev_x[i] += push_x; p->prev_y[i] += push_y;
+        px = p->pos_x[i]; py = p->pos_y[i];
+    }
+}
+
+/* Map PART_* → LIMB_* bit. Mirrors mech_ik.c's helper; we keep a
+ * local copy so physics.c stays standalone from mech_ik. */
+static uint8_t physics_part_to_limb_bit(int part) {
+    switch (part) {
+        case PART_HEAD:      return LIMB_HEAD;
+        case PART_L_SHOULDER: case PART_L_ELBOW: case PART_L_HAND: return LIMB_L_ARM;
+        case PART_R_SHOULDER: case PART_R_ELBOW: case PART_R_HAND: return LIMB_R_ARM;
+        case PART_L_HIP: case PART_L_KNEE: case PART_L_FOOT:       return LIMB_L_LEG;
+        case PART_R_HIP: case PART_R_KNEE: case PART_R_FOOT:       return LIMB_R_LEG;
+        default: return 0;
+    }
+}
+
+void physics_push_mech_out_of_terrain(World *w, int mech_id) {
+    if (mech_id < 0 || mech_id >= w->mech_count) return;
+    Mech *m = &w->mechs[mech_id];
+    if (!m->alive) return;
+
+    ParticlePool *p = &w->particles;
+    const Level *L = &w->level;
+    uint8_t mask = m->dismember_mask;
+
+    for (int i = 0; i < PART_COUNT; ++i) {
+        uint8_t bit = physics_part_to_limb_bit(i);
+        if (bit && (mask & bit)) continue;     /* dismembered → free Verlet */
+        int idx = m->particle_base + i;
+        if (!(p->flags[idx] & PARTICLE_FLAG_ACTIVE)) continue;
+        push_out_of_solid_tiles_kinematic(p, L, idx);
+        push_out_of_solid_polys_kinematic(p, L, idx);
+    }
 }

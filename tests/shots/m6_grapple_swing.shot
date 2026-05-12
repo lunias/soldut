@@ -1,0 +1,68 @@
+# M6 P01 audit — Tarzan swing test.
+#
+# Spec the user asked for: "shoot a platform above your head,
+# disconnect, and shoot it again." This drives:
+#   - rope catches → mech hangs as a pendulum below the anchor
+#     (stretchy, not snapping to length);
+#   - retract while held → mech climbs up the rope toward the anchor
+#     WITHOUT clipping through walls;
+#   - disconnect → mech falls cleanly;
+#   - re-fire → second attach, second swing.
+#
+# Map: reactor. Has a tall central pillar at world x=1632..1888,
+# y=832..1216 (256 px wide × 384 px tall). The pillar's LEFT WALL
+# (x=1632) is a clean vertical anchor surface accessible from the
+# bowl. Spawning the mech in mid-air to the LEFT of the pillar puts
+# the anchor in the "platform above your head" geometry the user
+# described — the mech then hangs from the pillar's side and swings
+# below the attach point.
+
+window 1280 720
+seed   77 42
+out    build/shots/m6_grapple_swing
+map    reactor
+
+loadout Trooper "Pulse Rifle" "Grappling Hook" Light Standard
+
+# Spawn mid-air, well above the bowl floor (~1216 ish). The mech
+# falls under gravity until the grapple catches.
+spawn_at 1400 700
+# Aim at the pillar's left wall. A point clearly inside the pillar
+# (x=1700, y=900) is on the OTHER side of the wall, so the head
+# fires up-right and embeds in the wall surface at x=1632.
+aim      1700 900
+
+# Beat 1 — fire grapple + observe attach + free swing.
+at  3 tap swap                 # → grappling hook active
+at  5 shot t005_falling_pre_fire
+at  8 press fire
+at 10 release fire
+at 18 shot t018_head_in_flight
+at 28 shot t028_just_attached
+at 50 shot t050_first_swing_apex
+at 80 shot t080_pendulum_back
+at 115 shot t115_settled_under_anchor
+
+# Beat 2 — retract via jet, verify no wall clip.
+at 130 press jet
+at 165 shot t165_retracting_short
+at 195 release jet
+at 210 shot t210_retract_done
+
+# Beat 3 — disconnect, fall.
+at 230 tap use                 # BTN_USE → release
+at 250 shot t250_falling_after_release
+at 285 shot t285_falling_more
+
+# Beat 4 — re-fire (after fire_rate cooldown 1.2s = 72 ticks).
+# First fire was at tick 8, so eligible at tick 80+. We waited.
+at 300 aim 1700 900
+at 305 tap fire                # second grapple
+at 320 shot t320_second_in_flight
+at 340 shot t340_second_attached
+at 380 shot t380_second_swing
+
+at 410 tap use                 # final release
+at 430 shot t430_final
+contact_sheet swing_sheet cols 4
+at 460 end

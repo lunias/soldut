@@ -3,24 +3,28 @@
 #include "hash.h"
 #include "log.h"
 #include "mech.h"
+#include "mech_ik.h"
 #include "particle.h"
 #include "physics.h"
 #include "pickup.h"
 #include "projectile.h"
 #include "snapshot.h"
+#include "weapon_sprites.h"
 #include "weapons.h"
 
 #include <math.h>
 
 static const char *anim_name(int a) {
     switch (a) {
-        case ANIM_STAND: return "STAND";
-        case ANIM_RUN:   return "RUN";
-        case ANIM_JET:   return "JET";
-        case ANIM_FALL:  return "FALL";
-        case ANIM_FIRE:  return "FIRE";
-        case ANIM_DEATH: return "DEATH";
-        default:         return "?";
+        case ANIM_STAND:  return "STAND";
+        case ANIM_RUN:    return "RUN";
+        case ANIM_JET:    return "JET";
+        case ANIM_FALL:   return "FALL";
+        case ANIM_FIRE:   return "FIRE";
+        case ANIM_CROUCH: return "CROUCH";
+        case ANIM_PRONE:  return "PRONE";
+        case ANIM_DEATH:  return "DEATH";
+        default:          return "?";
     }
 }
 
@@ -294,6 +298,104 @@ void simulate_step(World *w, float dt) {
     for (int i = 0; i < w->mech_count; ++i) {
         if (!w->authoritative && i != w->local_mech_id) continue;
         mech_post_physics_anchor(w, i);
+    }
+
+    /* M6 — procedural pose. For every alive mech: compute bone
+     * positions as a pure function of (pelvis, aim, anim_id,
+     * gait_phase, facing, chassis, active_slot, dismember_mask,
+     * grapple), and write them kinematically to the particle pool.
+     * Runs AFTER physics and post_physics_anchor so the pose has the
+     * final say on bone positions for the tick — Verlet's per-tick
+     * output is discarded for live skeletons.
+     *
+     * Dead and dismembered limbs are still driven by free-flying
+     * Verlet (pose_write_to_particles skips dismembered parts
+     * per-limb, and the alive-guard above skips dead mechs entirely).
+     *
+     * On the client, snapshot_interp_remotes runs AFTER simulate_step
+     * to shift remote mech particles toward the interpolated pelvis.
+     * Since pose_write_to_particles puts every bone at a deterministic
+     * offset from pelvis, the rigid translate keeps the body shape
+     * correct — the bones move with the pelvis as one rigid frame. */
+    {
+        Vec2 lhand_for_foregrip = {0};
+        for (int i = 0; i < w->mech_count; ++i) {
+            Mech *m = &w->mechs[i];
+            if (!m->alive) continue;
+
+            int b = m->particle_base;
+            Vec2 pelvis = (Vec2){
+                w->particles.pos_x[b + PART_PELVIS],
+                w->particles.pos_y[b + PART_PELVIS],
+            };
+            Vec2 aim_dir = mech_aim_dir(w, m->id);
+
+            PoseInputs in = (PoseInputs){
+                .pelvis         = pelvis,
+                .aim_dir        = aim_dir,
+                .facing_left    = m->facing_left,
+                .is_dummy       = m->is_dummy,
+                .anim_id        = m->anim_id,
+                .gait_phase     = m->gait_phase_l,
+                .grounded       = m->grounded,
+                .chassis_id     = m->chassis_id,
+                .active_slot    = m->active_slot,
+                .dismember_mask = m->dismember_mask,
+                .foregrip_world = NULL,
+                .grapple_state  = m->grapple.state,
+                .grapple_anchor = m->grapple.anchor_pos,
+            };
+
+            /* Two-handed foregrip IK target: derived from the visible
+             * weapon's sprite-def at R_HAND (after pose places it on
+             * the aim line). Disabled for Engineer-secondary,
+             * dismembered L_ARM, and grappling (the L_ARM dangles in
+             * those cases — handled inside pose_compute). The
+             * foregrip world helper returns false for one-handed
+             * weapons; we leave foregrip_world NULL so the L_ARM
+             * dangles instead. */
+            const WeaponSpriteDef *wsp = weapon_sprite_def(m->weapon_id);
+            if (wsp) {
+                /* Compute the R_HAND ray endpoint the same way
+                 * pose_compute does internally — this is just for the
+                 * foregrip helper's inputs. */
+                const Chassis *ch = mech_chassis((ChassisId)m->chassis_id);
+                float arm_reach = ch->bone_arm + ch->bone_forearm;
+                Vec2 r_sho = (Vec2){
+                    pelvis.x + 10.0f,
+                    pelvis.y - ch->torso_h + 4.0f,
+                };
+                Vec2 r_hand_aim = (Vec2){
+                    r_sho.x + aim_dir.x * arm_reach,
+                    r_sho.y + aim_dir.y * arm_reach,
+                };
+                if (weapon_foregrip_world(r_hand_aim, aim_dir, wsp,
+                                          &lhand_for_foregrip)) {
+                    in.foregrip_world = &lhand_for_foregrip;
+                }
+            }
+
+            PoseBones bones;
+            pose_compute(&in, bones);
+            pose_write_to_particles(w, i, bones);
+            /* M6 — post-pose terrain push-out. pose_compute writes
+             * deterministic bone offsets from pelvis; on a slope or
+             * against a wall, the straight-down feet (or other bones)
+             * can land inside a poly/tile. The pre-pose collision pass
+             * inside physics_constrain_and_collide gates on inv_mass>0
+             * so REMOTE mechs on the client (which run kinematically)
+             * never push their bones out of terrain. The result was a
+             * desync visible to the user: their own mech rendered with
+             * feet on the slope surface (because physics had pushed
+             * them out, then pose translated with swept-test, then the
+             * 12-iter collision in the same tick pushed them again),
+             * while OTHER players viewed the same mech in a rigid
+             * straight-legged pose with feet dangling inside the
+             * slope. push_mech_out_of_terrain ignores inv_mass so it
+             * works for both local and remote mechs, kinematically
+             * (pos AND prev shifted) so velocity is preserved. */
+            physics_push_mech_out_of_terrain(w, i);
+        }
     }
 
     /* P02: environmental damage tick — DEADLY tiles, DEADLY polygons,

@@ -1,0 +1,29 @@
+# 2p_crouch_prone — host. Verifies ANIM_CROUCH and ANIM_PRONE sync
+# correctly across the network. Host stands still; client cycles
+# stand → crouch → stand → prone → stand. Both windows should render
+# matching poses for the client mech at each timestamp.
+#
+# Map: aurora — west hill peak has open sky with clear visibility
+# (no parallax cloud overlay). Spawn both mechs on the flat valley
+# floor between the two hills, far enough apart that the camera shows
+# both clearly.
+
+window 1280 720
+out build/shots/net/2p_crouch_prone_host
+network host 24201
+name HostA
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+map aurora
+
+# Host stands on the valley floor. Client to the right.
+spawn_at 1500 2700
+peer_spawn 1 1700 2700
+aim 1700 2700
+
+# Take screenshots at each pose state. Times match client script.
+at 200 shot t200_both_standing
+at 280 shot t280_client_crouching
+at 360 shot t360_client_standing
+at 440 shot t440_client_prone
+at 520 shot t520_client_standing
+at 580 end

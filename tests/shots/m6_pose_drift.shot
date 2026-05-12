@@ -1,0 +1,34 @@
+# M6 — pose drift test. Crouch/prone the mech and watch for any
+# horizontal pelvis drift. The mech should NOT slide backwards while
+# crouching or prone. We log pelvis position via SHOT_LOG each beat
+# and capture screenshots so we can verify visually.
+
+window 1280 720
+seed   88 33
+out    build/shots/m6_pose_drift
+
+loadout Trooper "Pulse Rifle" Sidearm Light Standard
+spawn_at 640 920
+mouse    1100 360
+
+# Beat 0 — let the mech settle.
+at  30 shot t030_settled
+
+# Beat 1 — long crouch hold.
+at  60 press crouch
+at 120 shot t120_crouching
+at 180 shot t180_crouching_still
+at 240 shot t240_crouching_more
+at 280 release crouch
+
+# Beat 2 — long prone hold.
+at 320 shot t320_pre_prone
+at 360 press prone
+at 420 shot t420_prone
+at 480 shot t480_prone_still
+at 540 shot t540_prone_more
+at 580 release prone
+
+at 620 shot t620_back_to_stand
+contact_sheet drift_sheet cols 4
+at 650 end

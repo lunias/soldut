@@ -61,6 +61,29 @@ static inline void physics_translate_kinematic(ParticlePool *p, int i, float dx,
 void physics_translate_kinematic_swept(ParticlePool *p, const Level *L,
                                        int i, float dx, float dy);
 
+/* M6 — Post-pose terrain push-out for one mech's bones.
+ *
+ * After `pose_compute` + `pose_write_to_particles` finishes a tick,
+ * the deterministic bone offsets may land inside solid tiles or
+ * polygons (slopes). For LOCAL/AUTH mechs the pre-pose collision
+ * pass handles this — but it gates on `inv_mass > 0`, so REMOTE
+ * mechs on the client (which run kinematically) skip it. Result:
+ * a remote mech's bones can dangle inside a slope while the same
+ * mech's local view shows the bones clipped to the surface.
+ *
+ * This function does a single pass: for each of the mech's
+ * PART_COUNT skeleton particles, check tile + poly overlaps and
+ * push the particle out along the contact normal, kinematically
+ * (pos AND prev shifted by the same delta — velocity preserved).
+ * Ignores `inv_mass`, so it works for remote-on-client mechs.
+ *
+ * Pelvis is included; the constraint solver (grapple) and physics
+ * already operate on pelvis, but a redundant push-out is cheap and
+ * idempotent. Dismembered particles (per `m->dismember_mask`) are
+ * skipped — those are free-flying Verlet bodies and the regular
+ * collision passes handle them. */
+void physics_push_mech_out_of_terrain(World *w, int mech_id);
+
 /* Set the per-tick velocity directly via prev. Useful for input-driven
  * movement: pressing right should *be* a horizontal velocity, not an
  * accumulating force. (Vertical velocity is preserved by setting only

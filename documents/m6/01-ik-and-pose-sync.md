@@ -1074,4 +1074,68 @@ The work is done when:
 
 ## 16. Status footnote (append when work lands)
 
-- (none yet — Phase 0: design document drafted 2026-05-12)
+- Phase 0 — design document drafted 2026-05-12.
+- **Phase 1 (2026-05-12) — SFX bug fix shipped.** Split
+  `client_handle_fire_event`'s `predict_drew` gate into `_sparks`
+  (active-slot self regardless of fire kind) and `_sfx` (additionally
+  requires `WFIRE_HITSCAN`). Non-hitscan self-fire SFX now lands on
+  the firer's window. New test `tests/shots/net/run_riot_cannon_sfx.sh`
+  (3 assertions). Make target `test-riot-cannon-sfx`.
+- **Phase 2 (2026-05-12) — `mech_ik.{c,h}` skeleton shipped.** New
+  module with `mech_ik_2bone` analytic IK + `pose_compute` stub +
+  `pose_write_to_particles`. Unit test `tests/mech_ik_test.c` covers
+  the 7 cases from §10.1 (all PASS at 0.01 px tolerance). Sign
+  convention noted: doc table §6 had `bend_sign` inverted relative to
+  the math comment; the prose underneath was correct. Code follows
+  the prose (`facing_left ? -1 : +1` for aim arm).
+- **Phase 3 (2026-05-12) — Procedural pose function shipped.**
+  `pose_compute` implements §7.1–7.10 fully: pelvis anchor, chassis
+  quirks (Scout chest lean / Sniper head bias / Engineer secondary
+  arm dangle), R_ARM aim IK, optional L_ARM foregrip IK, RUN gait
+  via gait_phase, JET swept legs, STAND/FALL/FIRE straight-down legs,
+  grapple ATTACHED hand-at-anchor override. Unit test
+  `tests/pose_compute_test.c` covers determinism (600-iter bit-identical
+  output), per-anim shape sanity, gait continuity, foregrip
+  reachable / out-of-reach, grapple, dummy quirk, and all 5 chassis.
+  Gait continuity threshold loosened from 1 px to 5 px to accept the
+  sqrt-of-Δd boundary jump at IK reach limit; bounded ~3 px in
+  practice, well within frame visual budget.
+- **Phase 4 (2026-05-12) — Wire format extension shipped.**
+  `EntitySnapshot.gait_phase_q` u16 between `ammo_secondary` and the
+  optional grapple suffix. `ENTITY_SNAPSHOT_WIRE_BYTES` 29 → 31.
+  Quantization helpers `quant_phase` / `dequant_phase` (Q0.16,
+  1/65536 resolution). Protocol id `SOLDUT_PROTOCOL_ID` bumped
+  `S0LI` (0x53304C49) → `S0LJ` (0x53304C4A). Snapshot test extended
+  with 5 round-trip assertions across [0.0, 0.999].
+- **Phase 5 (2026-05-12) — Switch every mech to procedural pose
+  shipped.** `mech.c::build_pose` stripped to `mech_update_gait`
+  (anim_time + gait_phase_l/r + footstep SFX wrap). `mech_step_drive`
+  gates it on `w->authoritative || mid == w->local_mech_id` —
+  remote mechs on the client use the snapshot's gait_phase_l.
+  `apply_pose_to_particles` deleted; the `inv_mass=0` kinematic gate
+  for remote mechs on the client stays (wan-fixes-3 trade-off retired
+  for a different reason now). `simulate.c::simulate_step` runs a new
+  pass AFTER `mech_post_physics_anchor`: builds `PoseInputs` per
+  alive mech, calls `pose_compute` + `pose_write_to_particles`.
+  Foregrip world is computed from `weapon_sprite_def(weapon_id)` +
+  the R_HAND aim ray. Footstep SFX for remote mechs on the client
+  fires from `snapshot_apply`'s gait_phase mirror. All baseline
+  paired-shot tests pass (`tests/net/run.sh` 13/13,
+  `tests/net/run_3p.sh` 10/10, all `tests/shots/net/run_*.sh` green
+  including anim_stability, slope_aurora, rmb_hitscan, secondary_fire,
+  kill_feed, grapple_lag_comp, riot_cannon_sfx, frag_grenade).
+- **Phase 6 (2026-05-12) — Cleanups + TRADE_OFFS update.** Added
+  `is_dummy` to `PoseInputs` so dummies dangle the right arm instead
+  of aiming at default state. Mech.h `pose_target`/`pose_strength`
+  fields retained (memory-only — no readers, but cheap and reserved
+  for future dismember-pose work per design doc §12). `mech_kill`'s
+  `clear_pose` call removed (the alive guard in simulate's pose pass
+  is now what stops pose drive on death). TRADE_OFFS.md retired the
+  two entries from §12 (remote mechs in rest pose, no L_HAND IK) and
+  added the two new ones (live-mech procedural; footstep SFX two
+  paths).
+- **Phase 7 (2026-05-12) — Documentation.** CURRENT_STATE.md +
+  CLAUDE.md status line updated. This footnote appended.
+  `documents/03-physics-and-mechs.md` now notes that live-mech bones
+  are procedural; the Verlet constraint solver is for ragdoll +
+  projectile collision against bone capsules only.

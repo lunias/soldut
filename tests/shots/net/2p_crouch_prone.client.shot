@@ -1,0 +1,33 @@
+# 2p_crouch_prone — client. Pairs with 2p_crouch_prone.host.shot.
+# Cycles through pose states well after round-start so the client
+# is firmly in MATCH mode.
+
+window 1280 720
+out build/shots/net/2p_crouch_prone_client
+network connect 127.0.0.1:24201
+name ClientB
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+map aurora
+
+spawn_at 1700 2700
+aim 1500 2700
+
+# Beat 1 — both standing (no input).
+at 200 shot t200_both_standing
+
+# Beat 2 — crouch (S held for 60 ticks).
+at 240 press crouch
+at 280 shot t280_crouching
+at 320 release crouch
+
+# Beat 3 — back to standing.
+at 360 shot t360_standing
+
+# Beat 4 — prone (X held for 60 ticks).
+at 400 press prone
+at 440 shot t440_prone
+at 480 release prone
+
+# Beat 5 — back to standing.
+at 520 shot t520_standing
+at 580 end
