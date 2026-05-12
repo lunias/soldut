@@ -990,9 +990,10 @@ static void server_handle_lobby_loadout(NetPeer *p, const uint8_t *body,
     lo.secondary_id = (int)r_u8(&r);
     lo.armor_id     = (int)r_u8(&r);
     lo.jetpack_id   = (int)r_u8(&r);
-    LOG_I("server_handle_lobby_loadout: slot %d chassis=%d primary=%d secondary=%d armor=%d jet=%d phase=%d",
-          slot, lo.chassis_id, lo.primary_id, lo.secondary_id, lo.armor_id, lo.jetpack_id,
-          (int)g->match.phase);
+    LOG_I("DIAG-sync: server_handle_lobby_loadout slot=%d "
+          "loadout{chassis=%d primary=%d secondary=%d armor=%d jet=%d} phase=%d",
+          slot, lo.chassis_id, lo.primary_id, lo.secondary_id, lo.armor_id,
+          lo.jetpack_id, (int)g->match.phase);
     /* Clamp ids so a malicious or stale client can't crash us. */
     if (lo.chassis_id < 0 || lo.chassis_id >= CHASSIS_COUNT) lo.chassis_id = CHASSIS_TROOPER;
     if (lo.primary_id < 0 || lo.primary_id >= WEAPON_COUNT)  lo.primary_id = WEAPON_PULSE_RIFLE;
@@ -1492,6 +1493,19 @@ static void client_handle_initial_state(NetState *ns, const uint8_t *body,
     LOG_I("client: INITIAL_STATE applied — in lobby (local_slot=%d, "
           "match_phase=%s map=%d)",
           g->local_slot_id, match_phase_name(g->match.phase), g->match.map_id);
+    /* DIAG-sync: dump the slot table the server just shipped, so we can
+     * see each peer's name + team + mech_id + loadout at INITIAL_STATE
+     * time. mech_ids are -1 here (mechs spawn at round_start). */
+    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+        const LobbySlot *s = &g->lobby.slots[i];
+        if (!s->in_use) continue;
+        LOG_I("DIAG-sync: INITIAL_STATE slot=%d name='%s' team=%d mech_id=%d "
+              "loadout{chassis=%d primary=%d secondary=%d armor=%d jet=%d}",
+              i, s->name, s->team, s->mech_id,
+              s->loadout.chassis_id, s->loadout.primary_id,
+              s->loadout.secondary_id, s->loadout.armor_id,
+              s->loadout.jetpack_id);
+    }
 
     /* P08 — kick off the resolve-or-download decision now that we know
      * what map the host is running. For a code-built descriptor

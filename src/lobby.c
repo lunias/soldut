@@ -42,6 +42,12 @@ int lobby_add_slot(LobbyState *L, int peer_id, const char *name, bool is_host) {
         s->name[sizeof s->name - 1] = '\0';
         L->slot_count++;
         L->dirty = true;
+        LOG_I("DIAG-sync: lobby_add_slot peer=%d slot=%d name='%s' "
+              "default_loadout{chassis=%d primary=%d secondary=%d armor=%d jet=%d}",
+              peer_id, i, s->name,
+              s->loadout.chassis_id, s->loadout.primary_id,
+              s->loadout.secondary_id, s->loadout.armor_id,
+              s->loadout.jetpack_id);
         return i;
     }
     return -1;
@@ -562,6 +568,15 @@ void lobby_spawn_round_mechs(LobbyState *L, World *world,
          * SHOT_LOG is a no-op in production play. */
         SHOT_LOG("lobby: slot %d team %d -> spawn (%.1f, %.1f)",
                  i, (int)s->team, (double)spawn.x, (double)spawn.y);
+        /* DIAG-sync: log the slot's loadout immediately before spawn so
+         * we can compare server-side authoritative values against the
+         * client-side ensure_mech_slot output for the same mech_id. */
+        LOG_I("DIAG-sync: lobby_spawn_round_mechs slot=%d name='%s' team=%d "
+              "loadout{chassis=%d primary=%d secondary=%d armor=%d jet=%d}",
+              i, s->name, (int)s->team,
+              s->loadout.chassis_id, s->loadout.primary_id,
+              s->loadout.secondary_id, s->loadout.armor_id,
+              s->loadout.jetpack_id);
         int mid = mech_create_loadout(world, s->loadout, spawn,
                                       s->team, /*is_dummy*/false);
         if (mid < 0) {

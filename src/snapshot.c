@@ -335,8 +335,14 @@ static int ensure_mech_slot(World *w, int desired_id, Vec2 spawn,
         MechLoadout lo = mech_default_loadout();
         if (e) {
             lo.chassis_id   = e->chassis_id   < CHASSIS_COUNT ? e->chassis_id   : CHASSIS_TROOPER;
-            lo.armor_id     = e->armor_id     < ARMOR_COUNT   ? e->armor_id     : ARMOR_NONE;
-            lo.jetpack_id   = e->jetpack_id   < JET_COUNT     ? e->jetpack_id   : JET_NONE;
+            /* Out-of-range fallbacks match server_handle_lobby_loadout's
+             * clamps in src/net.c: an unknown-on-the-wire armor/jet
+             * surfaces as ARMOR_LIGHT / JET_STANDARD (working defaults),
+             * not ARMOR_NONE / JET_NONE (no armor + Baseline thrust).
+             * Pre-fix the client and server defaulted differently on
+             * out-of-range bytes, producing silent loadout divergence. */
+            lo.armor_id     = e->armor_id     < ARMOR_COUNT   ? e->armor_id     : ARMOR_LIGHT;
+            lo.jetpack_id   = e->jetpack_id   < JET_COUNT     ? e->jetpack_id   : JET_STANDARD;
             /* P10-followup — `primary_id` rides the wire directly so we
              * use it as-is. Pre-fix this used `e->weapon_id` (the active
              * slot's weapon), which broke when a mid-round-join client
@@ -348,6 +354,26 @@ static int ensure_mech_slot(World *w, int desired_id, Vec2 spawn,
             lo.primary_id   = e->primary_id   < WEAPON_COUNT  ? e->primary_id   : WEAPON_PULSE_RIFLE;
             lo.secondary_id = e->secondary_id < WEAPON_COUNT  ? e->secondary_id : WEAPON_SIDEARM;
         }
+        /* DIAG-sync: log the entity values vs the clamped loadout used to
+         * spawn this mech. Compares to the server's
+         * `DIAG-sync: lobby_spawn_round_mechs` line for the same mech_id —
+         * any mismatch reveals where the loadout went wrong on the way
+         * across the wire. desired_id is the index ensure_mech_slot was
+         * asked for; the actual created mech_count grows by 1 per loop
+         * iteration so multiple mechs share an `e` only when the loop
+         * runs more than once (which would itself be a bug — see while
+         * condition above). */
+        LOG_I("DIAG-sync: ensure_mech_slot desired_id=%d mech_count=%d "
+              "entity{chassis=%d armor=%d jet=%d primary=%d secondary=%d} "
+              "clamped{chassis=%d armor=%d jet=%d primary=%d secondary=%d}",
+              desired_id, w->mech_count,
+              e ? (int)e->chassis_id : -1,
+              e ? (int)e->armor_id   : -1,
+              e ? (int)e->jetpack_id : -1,
+              e ? (int)e->primary_id : -1,
+              e ? (int)e->secondary_id : -1,
+              lo.chassis_id, lo.armor_id, lo.jetpack_id,
+              lo.primary_id, lo.secondary_id);
         int got = mech_create_loadout(w, lo, spawn, team, /*is_dummy*/false);
         if (got < 0) return -1;
     }
@@ -477,6 +503,66 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
         m->ammo_secondary= e->ammo_secondary;
         /* Active slot: derived from which weapon_id matches. */
         m->active_slot   = (e->weapon_id == m->primary_id) ? 0 : 1;
+
+        /* DIAG-sync fix: also re-sync armor_id + jetpack_id + their
+         * derived caps (armor_hp_max, fuel_max) from the snapshot.
+         * Pre-fix these were set ONLY at spawn (in ensure_mech_slot's
+         * mech_create_loadout call), so any state where the
+         * spawn-time loadout disagreed with the server's authoritative
+         * value — a race in the slot's loadout being stale when
+         * lobby_spawn_round_mechs ran, an out-of-range byte falling
+         * to JET_NONE in the old clamp default, or a first-snapshot
+         * encoding glitch — stuck the client's mech with the wrong
+         * caps for the entire round (empty jet meter, wrong armor
+         * capacity). The wire ships the authoritative values every
+         * snapshot; consuming them is cheap and idempotent in the
+         * common case (values match → no-op).
+         *
+         * chassis_id we do NOT re-sync mid-round: changing it would
+         * orphan the existing skeleton's particle positions against
+         * the new chassis's bone-length table. We log a WARN if a
+         * mismatch is ever detected so future debugging has a clear
+         * signal, but we hold the spawn-time chassis. (In practice
+         * chassis doesn't change mid-round; if it ever does we'd
+         * rebuild the mech entirely.) */
+        int new_jet   = e->jetpack_id < JET_COUNT   ? e->jetpack_id : JET_STANDARD;
+        int new_armor = e->armor_id   < ARMOR_COUNT ? e->armor_id   : ARMOR_LIGHT;
+        if (m->jetpack_id != new_jet || m->armor_id != new_armor) {
+            const Chassis *cur_ch = mech_chassis((ChassisId)m->chassis_id);
+            const Jetpack *new_jp = jetpack_def(new_jet);
+            const Armor   *new_ar = armor_def(new_armor);
+            float old_fuel_max = m->fuel_max;
+            float fuel_frac    = (old_fuel_max > 0.0f) ? (m->fuel / old_fuel_max) : 1.0f;
+            m->jetpack_id   = new_jet;
+            m->armor_id     = new_armor;
+            m->fuel_max     = cur_ch->fuel_max * new_jp->fuel_mult;
+            m->fuel         = m->fuel_max * fuel_frac;
+            if (m->fuel > m->fuel_max) m->fuel = m->fuel_max;
+            if (new_ar->hp > 0.0f) {
+                /* If the new armor's cap is non-zero, scale current
+                 * armor_hp into the new range. If old armor_hp_max
+                 * was 0 (no armor) and new is non-zero, start at the
+                 * new max. */
+                float armor_frac = (m->armor_hp_max > 0.0f)
+                                       ? (m->armor_hp / m->armor_hp_max) : 1.0f;
+                m->armor_hp_max = new_ar->hp;
+                m->armor_hp     = m->armor_hp_max * armor_frac;
+                m->armor_charges = new_ar->reactive_charges;
+            } else {
+                m->armor_hp_max = 0.0f;
+                m->armor_hp     = 0.0f;
+                m->armor_charges = 0;
+            }
+            LOG_I("DIAG-sync: snapshot_apply re-synced mid=%d "
+                  "jet=%s(%d) armor=%s(%d) fuel_max=%.3f armor_hp_max=%.1f",
+                  mid, new_jp->name, new_jet, new_ar->name, new_armor,
+                  (double)m->fuel_max, (double)m->armor_hp_max);
+        }
+        if (e->chassis_id < CHASSIS_COUNT && (int)e->chassis_id != m->chassis_id) {
+            LOG_W("DIAG-sync: chassis mismatch mid=%d local=%d snapshot=%d "
+                  "(not re-synced mid-round)",
+                  mid, m->chassis_id, (int)e->chassis_id);
+        }
         bool was_alive = m->alive;
         m->alive       = (e->state_bits & SNAP_STATE_ALIVE) != 0;
         m->grounded    = (e->state_bits & SNAP_STATE_GROUNDED) != 0;
