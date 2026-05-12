@@ -1296,6 +1296,11 @@ static int dedicated_main(const LaunchArgs *args) {
                   (unsigned long long)iters,
                   match_phase_name(game.match.phase),
                   game.net.peer_count);
+            /* wan-fixes-16 — pair every heartbeat with a socket diag
+             * line so a paired host/client log shows whether the UDP
+             * recv buffer is filling (ENet not draining) or empty
+             * (OS not delivering packets). */
+            net_socket_diag_log("dedicated:", &game.net);
             next_heartbeat_at = now + 1.0;
         }
 

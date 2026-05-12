@@ -370,6 +370,14 @@ bool net_client_connect(NetState *ns, const char *host, uint16_t port,
 
 void net_close(NetState *ns);
 
+/* wan-fixes-16 — diagnostic. Logs the underlying socket's actual
+ * bound IP:port (via getsockname) and the number of bytes pending in
+ * the kernel recv buffer (via FIONREAD / ioctlsocket). Used to
+ * differentiate "Windows isn't delivering packets" (FIONREAD always
+ * 0 even when peer is sending) from "ENet isn't draining" (FIONREAD
+ * grows while no events fire). No-op when ns has no enet_host. */
+void net_socket_diag_log(const char *prefix, NetState *ns);
+
 /* ---- Per-frame pump ----------------------------------------------- */
 
 /* Drain ENet events. On the server: receives inputs, completes

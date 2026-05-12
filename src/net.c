@@ -47,6 +47,13 @@
 
 #include "../third_party/enet/include/enet/enet.h"
 
+#if !defined(_WIN32)
+  /* For getsockname / FIONREAD on POSIX. ENet already brings in
+   * <sys/socket.h> + <netinet/in.h> on Linux via its unix.h, but
+   * sys/ioctl.h is missing from that path. */
+  #include <sys/ioctl.h>
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -327,6 +334,13 @@ bool net_client_connect(NetState *ns, const char *host, uint16_t port,
         return false;
     }
 
+    /* wan-fixes-16 — log our outgoing socket's bound port (which the
+     * dedi will see as the source port in CONNECT packets). If the
+     * dedi's diag shows FIONREAD>0 but no events, ENet's parser is
+     * dropping these packets; if FIONREAD stays 0, the OS isn't
+     * delivering them. */
+    net_socket_diag_log("client (pre-wait):", ns);
+
     ns->server.enet_peer = peer;
     ns->server.state     = NET_PEER_CONNECTING;
     ns->server.remote_addr_host = addr.host;
@@ -374,6 +388,10 @@ bool net_client_connect(NetState *ns, const char *host, uint16_t port,
             LOG_E("net_client_connect: enet handshake gave up after %d "
                   "event(s) without a CONNECT to %s", events_seen, abuf);
         }
+        /* wan-fixes-16 — log socket diag once more on failure. If
+         * FIONREAD > 0 the dedi DID reply but ENet's parser dropped
+         * the reply (range-coder mismatch? protocol header skew?). */
+        net_socket_diag_log("client (post-fail):", ns);
         enet_peer_reset(peer);
         enet_host_destroy(eh);
         memset(ns, 0, sizeof *ns);
@@ -465,6 +483,68 @@ void net_close(NetState *ns) {
         enet_socket_destroy((ENetSocket)ns->discovery_socket);
     }
     memset(ns, 0, sizeof *ns);
+}
+
+/* wan-fixes-16 — socket-level diagnostic. ENet's host owns the
+ * underlying UDP socket on host->socket (an int on POSIX, SOCKET on
+ * Windows). We reach in to:
+ *
+ *   1. getsockname — log the actual bound IP:port. ENet's "listening
+ *      on port N" line echoes what we passed in; if Windows silently
+ *      rebound elsewhere, this would show it.
+ *   2. FIONREAD — bytes pending in the kernel recv buffer. If this
+ *      stays at 0 while the peer is sending CONNECT packets, Windows
+ *      isn't delivering — OS-level issue, ENet is innocent. If it
+ *      grows but no ENet events fire, ENet's parser is dropping the
+ *      packets.
+ *
+ * Cheap enough to call once per second from the dedi heartbeat. */
+void net_socket_diag_log(const char *prefix, NetState *ns) {
+    if (!ns || !ns->enet_host) return;
+    ENetHost *eh = (ENetHost *)ns->enet_host;
+
+    struct sockaddr_storage sa;
+    memset(&sa, 0, sizeof sa);
+#if defined(_WIN32)
+    int sl = (int)sizeof sa;
+    if (getsockname((SOCKET)eh->socket, (struct sockaddr *)&sa, &sl) == 0) {
+#else
+    socklen_t sl = (socklen_t)sizeof sa;
+    if (getsockname((int)eh->socket, (struct sockaddr *)&sa, &sl) == 0) {
+#endif
+        if (sa.ss_family == AF_INET) {
+            struct sockaddr_in *sin = (struct sockaddr_in *)&sa;
+            unsigned addr = (unsigned)ntohl(sin->sin_addr.s_addr);
+            LOG_I("%s socket diag: bound %u.%u.%u.%u:%u (family=IPv4)",
+                  prefix,
+                  (addr >> 24) & 0xff, (addr >> 16) & 0xff,
+                  (addr >>  8) & 0xff,  addr        & 0xff,
+                  (unsigned)ntohs(sin->sin_port));
+        } else {
+            LOG_I("%s socket diag: bound (family=%d, not IPv4)",
+                  prefix, (int)sa.ss_family);
+        }
+    } else {
+        LOG_I("%s socket diag: getsockname failed", prefix);
+    }
+
+#if defined(_WIN32)
+    u_long pending = 0;
+    if (ioctlsocket((SOCKET)eh->socket, FIONREAD, &pending) == 0) {
+        LOG_I("%s socket diag: FIONREAD=%lu bytes pending in recv buf",
+              prefix, (unsigned long)pending);
+    } else {
+        LOG_I("%s socket diag: ioctlsocket(FIONREAD) failed (WSAerr=%d)",
+              prefix, WSAGetLastError());
+    }
+#else
+    /* POSIX: FIONREAD via ioctl. Same answer, different API. */
+    int pending = 0;
+    if (ioctl((int)eh->socket, FIONREAD, &pending) == 0) {
+        LOG_I("%s socket diag: FIONREAD=%d bytes pending in recv buf",
+              prefix, pending);
+    }
+#endif
 }
 
 /* ---- Server: peer table ------------------------------------------- */
