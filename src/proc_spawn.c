@@ -16,6 +16,9 @@
   #define NOGDI
   #define NOUSER
   #include <windows.h>
+  /* Process enumeration for parent-process spoofing (find Explorer
+   * by name in our session). _stricmp lives in <string.h> already. */
+  #include <tlhelp32.h>
 #else
   #include <errno.h>
   #include <signal.h>
@@ -151,6 +154,131 @@ void time_sleep_ms(int ms) {
 
 /* ---- Win32 implementation ----------------------------------------- */
 
+/* Find Explorer.exe in the calling process's session. Used for the
+ * parent-process spoofing path in proc_spawn — see the rationale in
+ * spawn_with_parent_handle() below. Returns 0 if not found. */
+static DWORD find_explorer_pid_in_session(void) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+
+    DWORD my_session = 0;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &my_session)) {
+        my_session = 0;  /* fall through to a session-agnostic match */
+    }
+
+    DWORD found = 0;
+    PROCESSENTRY32 pe;
+    pe.dwSize = sizeof pe;
+    if (Process32First(snap, &pe)) {
+        do {
+            if (_stricmp(pe.szExeFile, "explorer.exe") == 0) {
+                DWORD their_session = 0;
+                if (ProcessIdToSessionId(pe.th32ProcessID, &their_session) &&
+                    their_session == my_session) {
+                    found = pe.th32ProcessID;
+                    break;
+                }
+                /* Fallback: if we couldn't query our own session, take
+                 * the first Explorer.exe. */
+                if (my_session == 0 && found == 0) {
+                    found = pe.th32ProcessID;
+                }
+            }
+        } while (Process32Next(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+/* Call CreateProcessA with PROC_THREAD_ATTRIBUTE_PARENT_PROCESS set to
+ * `parent_h`. The kernel records `parent_h`'s PID as the new process's
+ * PPID instead of the calling process's PID.
+ *
+ * Why we need this: on Windows, UDP packets from a process to any
+ * descendant in its spawn tree are silently dropped. Same-process,
+ * same-spawn-tree, ANY destination IP — all blocked. Diagnostics
+ * confirmed this on two machines. The launcher pattern (dedi has dead
+ * parent) didn't help — the filter still applies to the whole tree.
+ *
+ * By spawning with parent=Explorer, the dedi becomes a child of
+ * Explorer (a sibling of the UI in the process tree). The UI and dedi
+ * are no longer in a descendant relationship, so the filter doesn't
+ * apply. This mirrors how a manual "PowerShell launches Soldut.exe
+ * --dedicated" + "PowerShell launches Soldut.exe --connect" pair
+ * works: they're both children of (different) PowerShell instances
+ * which are both children of Explorer.
+ *
+ * Returns PROC_HANDLE_NULL on any failure. */
+static ProcHandle spawn_with_parent_handle(const char *cmd, HANDLE parent_h) {
+    STARTUPINFOEXA six;
+    PROCESS_INFORMATION pi;
+    memset(&six, 0, sizeof six);
+    memset(&pi, 0, sizeof pi);
+    six.StartupInfo.cb = sizeof six;
+
+    SIZE_T list_size = 0;
+    /* First call returns FALSE with ERROR_INSUFFICIENT_BUFFER and
+     * fills in list_size — that's the API contract, NOT a failure. */
+    InitializeProcThreadAttributeList(NULL, 1, 0, &list_size);
+    if (list_size == 0) {
+        LOG_W("proc_spawn (parent-spoof): "
+              "InitializeProcThreadAttributeList(NULL) returned size=0");
+        return PROC_HANDLE_NULL;
+    }
+
+    LPPROC_THREAD_ATTRIBUTE_LIST attr =
+        (LPPROC_THREAD_ATTRIBUTE_LIST)HeapAlloc(GetProcessHeap(), 0, list_size);
+    if (!attr) {
+        LOG_E("proc_spawn (parent-spoof): HeapAlloc failed");
+        return PROC_HANDLE_NULL;
+    }
+
+    if (!InitializeProcThreadAttributeList(attr, 1, 0, &list_size)) {
+        LOG_W("proc_spawn (parent-spoof): "
+              "InitializeProcThreadAttributeList failed (code=%lu)",
+              (unsigned long)GetLastError());
+        HeapFree(GetProcessHeap(), 0, attr);
+        return PROC_HANDLE_NULL;
+    }
+
+    if (!UpdateProcThreadAttribute(
+            attr, 0, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS,
+            &parent_h, sizeof parent_h, NULL, NULL))
+    {
+        LOG_W("proc_spawn (parent-spoof): "
+              "UpdateProcThreadAttribute failed (code=%lu)",
+              (unsigned long)GetLastError());
+        DeleteProcThreadAttributeList(attr);
+        HeapFree(GetProcessHeap(), 0, attr);
+        return PROC_HANDLE_NULL;
+    }
+
+    six.lpAttributeList = attr;
+
+    DWORD flags = CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
+    BOOL ok = CreateProcessA(
+        NULL, (LPSTR)cmd, NULL, NULL, FALSE, flags,
+        NULL, NULL, (LPSTARTUPINFOA)&six, &pi);
+
+    DeleteProcThreadAttributeList(attr);
+    HeapFree(GetProcessHeap(), 0, attr);
+
+    if (!ok) {
+        LOG_W("proc_spawn (parent-spoof): CreateProcessA failed (code=%lu)",
+              (unsigned long)GetLastError());
+        return PROC_HANDLE_NULL;
+    }
+
+    CloseHandle(pi.hThread);
+    LOG_I("proc_spawn: spawned with Explorer-as-parent (pid=%lu, ppid set to "
+          "Explorer.exe — escapes the parent-spawn-child UDP filter)",
+          (unsigned long)pi.dwProcessId);
+    return (ProcHandle){
+        .native = (int64_t)(uintptr_t)pi.hProcess,
+        .pid    = (int)pi.dwProcessId,
+    };
+}
+
 ProcHandle proc_spawn(const char *const *argv) {
     if (!argv || !argv[0]) return PROC_HANDLE_NULL;
 
@@ -173,6 +301,41 @@ ProcHandle proc_spawn(const char *const *argv) {
         if (off < sizeof(cmd) - 1) cmd[off++] = '"';
     }
     cmd[off] = '\0';
+
+    /* wan-fixes-16 (round 4) — try parent-process spoofing first. If
+     * Explorer.exe is reachable in our session and we can open it with
+     * PROCESS_CREATE_PROCESS rights, spawn the child with Explorer as
+     * the kernel-recorded parent. This makes the child a sibling of
+     * the UI (both children of Explorer) instead of a descendant,
+     * which is what unblocks UDP loopback between them. */
+    {
+        DWORD exp_pid = find_explorer_pid_in_session();
+        if (exp_pid != 0) {
+            HANDLE exp = OpenProcess(PROCESS_CREATE_PROCESS, FALSE, exp_pid);
+            if (exp) {
+                ProcHandle h = spawn_with_parent_handle(cmd, exp);
+                CloseHandle(exp);
+                if (proc_handle_valid(h)) {
+                    LOG_I("proc_spawn: launched '%s' as pid %lu "
+                          "(via Explorer parent pid=%lu)",
+                          argv[0], (unsigned long)h.pid,
+                          (unsigned long)exp_pid);
+                    return h;
+                }
+                LOG_W("proc_spawn: parent-spoof failed, falling back to "
+                      "plain CreateProcess");
+            } else {
+                LOG_W("proc_spawn: OpenProcess(Explorer pid=%lu, "
+                      "PROCESS_CREATE_PROCESS) failed code=%lu — falling "
+                      "back to plain CreateProcess",
+                      (unsigned long)exp_pid,
+                      (unsigned long)GetLastError());
+            }
+        } else {
+            LOG_W("proc_spawn: Explorer.exe not found in our session — "
+                  "falling back to plain CreateProcess");
+        }
+    }
 
     STARTUPINFOA si = {0};
     PROCESS_INFORMATION pi = {0};
