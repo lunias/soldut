@@ -47,12 +47,17 @@
 
 #include "../third_party/enet/include/enet/enet.h"
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+  /* inet_pton is declared in <ws2tcpip.h>, NOT <winsock2.h> — ENet
+   * only includes the latter via its win32.h, so without this we
+   * trip -Wimplicit-function-declaration in the raw probe path. */
+  #include <ws2tcpip.h>
+#else
   /* For getsockname / FIONREAD on POSIX. ENet already brings in
    * <sys/socket.h> + <netinet/in.h> on Linux via its unix.h, but
    * sys/ioctl.h is missing from that path. */
   #include <sys/ioctl.h>
-  /* Raw UDP probe path: O_NONBLOCK / fcntl / close / errno / inet_addr. */
+  /* Raw UDP probe path: O_NONBLOCK / fcntl / close / errno / inet_pton. */
   #include <arpa/inet.h>
   #include <errno.h>
   #include <fcntl.h>
