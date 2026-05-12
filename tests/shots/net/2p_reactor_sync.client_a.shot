@@ -1,0 +1,15 @@
+# 2p_reactor_sync — verify P17 reactor.lvl loads identically on both
+# clients. Reactor has no parallax kit so the geometry is visible.
+# Spawn point for slot 0 is far-left at (192, 1304); we move the
+# camera to the map center (1760, 600) so the same world region is
+# in frame on both clients regardless of mech position.
+
+window 1280 720
+out build/shots/net/dedi/2p_reactor_sync.client_a
+network connect 127.0.0.1:{{PORT}}
+name ClientA
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+
+at 90  shot t090_post_spawn
+at 200 shot t200_settled
+at 600 end

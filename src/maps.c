@@ -607,6 +607,14 @@ void map_build(MapId id, World *world, Arena *arena) {
     snprintf(path, sizeof path, "assets/maps/%s.lvl", def->short_name);
 
     LvlResult r = level_load(world, arena, path);
+    /* DIAG-sync: tag the resolution outcome so paired host/client logs
+     * make it obvious which side loaded the .lvl vs which fell back.
+     * The "first round maps not synced" bug typically shows up as one
+     * side logging `.lvl LOADED` while the other logs `code-built
+     * fallback` for the same map_id. */
+    LOG_I("DIAG-sync: map_build id=%d short='%s' path='%s' result=%s%s",
+          (int)id, def->short_name, path, level_io_result_str(r),
+          (r == LVL_OK) ? " (.lvl LOADED)" : " (will fall back to code-built)");
     if (r == LVL_OK) {
         /* P13 — load per-map parallax + tile atlas. Missing files are
          * the expected case until P15/P16 ships authored art; the kit
@@ -748,9 +756,16 @@ void map_build_for_descriptor(World *world, Arena *arena,
 {
     if (!world || !arena) return;
     if (!desc || (desc->crc32 == 0 && desc->size_bytes == 0)) {
+        LOG_I("DIAG-sync: map_build_for_descriptor: empty descriptor "
+              "(crc=0 size=0) — falling back to map_build(MapId=%d)",
+              (int)fallback_id);
         map_build(fallback_id, world, arena);
         return;
     }
+    LOG_I("DIAG-sync: map_build_for_descriptor: desc{crc=%08x size=%u short='%s'} "
+          "fallback_id=%d — probing shipped + cache",
+          (unsigned)desc->crc32, (unsigned)desc->size_bytes,
+          desc->short_name, (int)fallback_id);
     /* 1. shipped */
     char shipped[256];
     if (map_cache_assets_path(desc->short_name, shipped, sizeof(shipped))) {

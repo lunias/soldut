@@ -1,0 +1,9 @@
+window 1280 720
+out build/shots/net/dedi/2p_reactor_sync.client_b
+network connect 127.0.0.1:{{PORT}}
+name ClientB
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+
+at 90  shot t090_post_spawn
+at 200 shot t200_settled
+at 600 end
