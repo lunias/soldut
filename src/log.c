@@ -58,6 +58,13 @@ void log_vmsg(LogLevel level, const char *fmt, va_list ap) {
     fprintf(stream, "[%s %s] ", timestamp, level_tag(level));
     vfprintf(stream, fmt, ap);
     fputc('\n', stream);
+    /* Flush stdout/stderr too — Windows pipes (used when the parent
+     * inherits the child's stdout via STARTF_USESTDHANDLES) buffer
+     * line-by-line at best and dump on exit at worst. Without this,
+     * a child that exits within a few ms of its last log line can
+     * lose those lines from the parent's console view, which makes
+     * paired-process debugging needlessly hard. */
+    fflush(stream);
 
     if (g_log_file) {
         fprintf(g_log_file, "[%s %s] ", timestamp, level_tag(level));
