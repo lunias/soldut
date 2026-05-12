@@ -69,6 +69,14 @@ ProcHandle proc_spawn_self(const char *argv0_self, const char *const *extra_argv
     return proc_spawn(argv);
 }
 
+ProcHandle proc_spawn_via_launcher(const char *argv0_self,
+                                    const char *const *extra_argv,
+                                    int timeout_ms) {
+    /* POSIX path: no launcher pattern needed. Direct spawn works. */
+    (void)timeout_ms;
+    return proc_spawn_self(argv0_self, extra_argv);
+}
+
 bool proc_alive(ProcHandle h) {
     if (!proc_handle_valid(h)) return false;
     pid_t pid = (pid_t)h.native;
@@ -279,6 +287,97 @@ ProcHandle proc_spawn_self(const char *argv0_self, const char *const *extra_argv
     }
     argv[n] = NULL;
     return proc_spawn(argv);
+}
+
+ProcHandle proc_spawn_via_launcher(const char *argv0_self,
+                                    const char *const *extra_argv,
+                                    int timeout_ms) {
+    /* Windows: substitute the first "--dedicated" token with
+     * "--launch-dedicated" and spawn that. The launcher (Soldut.exe
+     * in --launch-dedicated mode) re-spawns with "--dedicated", gets
+     * the dedi's PID, exits with that PID as exit code. We then read
+     * the exit code and OpenProcess() the dedi by PID. */
+    if (!argv0_self) return PROC_HANDLE_NULL;
+
+    enum { MAX_ARGS = 16 };
+    const char *argv[MAX_ARGS + 2];
+    int n = 0;
+    argv[n++] = argv0_self;
+
+    bool replaced = false;
+    if (extra_argv) {
+        while (extra_argv[0] && n < MAX_ARGS) {
+            if (!replaced && strcmp(extra_argv[0], "--dedicated") == 0) {
+                argv[n++] = "--launch-dedicated";
+                replaced = true;
+            } else {
+                argv[n++] = extra_argv[0];
+            }
+            ++extra_argv;
+        }
+    }
+    argv[n] = NULL;
+
+    if (!replaced) {
+        LOG_W("proc_spawn_via_launcher: no --dedicated token to "
+              "rewrite — falling back to direct spawn");
+        return proc_spawn(argv);
+    }
+
+    LOG_I("proc_spawn_via_launcher: starting launcher mode");
+    ProcHandle launcher = proc_spawn(argv);
+    if (!proc_handle_valid(launcher)) {
+        LOG_E("proc_spawn_via_launcher: launcher spawn failed");
+        return PROC_HANDLE_NULL;
+    }
+
+    int wait_ms = (timeout_ms > 0) ? timeout_ms : 2000;
+    if (!proc_wait(launcher, wait_ms)) {
+        LOG_E("proc_spawn_via_launcher: launcher did not exit within %d ms",
+              wait_ms);
+        proc_kill(launcher);
+        proc_close(launcher);
+        return PROC_HANDLE_NULL;
+    }
+
+    HANDLE launcher_h = (HANDLE)(uintptr_t)launcher.native;
+    DWORD launcher_exit = 0;
+    BOOL got_exit = GetExitCodeProcess(launcher_h, &launcher_exit);
+    proc_close(launcher);
+    if (!got_exit) {
+        LOG_E("proc_spawn_via_launcher: GetExitCodeProcess failed: code=%lu",
+              (unsigned long)GetLastError());
+        return PROC_HANDLE_NULL;
+    }
+
+    /* Sentinel: launcher uses 0xFFFFFFFF when its own CreateProcess
+     * fails; 0 if it never wrote a PID. Anything else is a real PID. */
+    if (launcher_exit == 0 || launcher_exit == 0xFFFFFFFF) {
+        LOG_E("proc_spawn_via_launcher: launcher reported invalid "
+              "dedi PID (exit=%lu)", (unsigned long)launcher_exit);
+        return PROC_HANDLE_NULL;
+    }
+
+    /* Open the dedi process by PID. We need TERMINATE + SYNCHRONIZE
+     * + QUERY for proc_alive/wait/kill on the returned handle. */
+    HANDLE dedi = OpenProcess(
+        PROCESS_TERMINATE | SYNCHRONIZE | PROCESS_QUERY_INFORMATION,
+        FALSE, launcher_exit);
+    if (!dedi) {
+        LOG_E("proc_spawn_via_launcher: OpenProcess(pid=%lu) failed: "
+              "code=%lu (dedi exited already?)",
+              (unsigned long)launcher_exit,
+              (unsigned long)GetLastError());
+        return PROC_HANDLE_NULL;
+    }
+
+    LOG_I("proc_spawn_via_launcher: dedi pid=%lu opened OK "
+          "(launcher exited)", (unsigned long)launcher_exit);
+
+    return (ProcHandle){
+        .native = (int64_t)(uintptr_t)dedi,
+        .pid    = (int)launcher_exit,
+    };
 }
 
 bool proc_alive(ProcHandle h) {

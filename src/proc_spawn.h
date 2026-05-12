@@ -47,6 +47,33 @@ ProcHandle proc_spawn(const char *const *argv);
  * include port, mode flags, etc. */
 ProcHandle proc_spawn_self(const char *argv0_self, const char *const *extra_argv);
 
+/* wan-fixes-16 — "launcher pattern" indirect spawn for Windows.
+ *
+ * Windows silently drops UDP packets between a parent process and
+ * its direct CreateProcess-spawned child, even with bInheritHandles=
+ * FALSE + CREATE_NO_WINDOW + CREATE_BREAKAWAY_FROM_JOB. The filter
+ * appears to be PPID-based at packet time. Workaround: spawn an
+ * intermediate Soldut.exe in `--launch-dedicated PORT [args]` mode.
+ * The launcher immediately CreateProcess's the real dedi with
+ * `--dedicated PORT [args]` and exits with the dedi's PID as its
+ * exit code. The dedi's PPID then points at a dead launcher process,
+ * breaking the direct parent-child relationship between the UI and
+ * the dedi.
+ *
+ * This function:
+ *   1. Substitutes the first `--dedicated` token in extra_argv with
+ *      `--launch-dedicated` and proc_spawn's the launcher.
+ *   2. WaitForSingleObject's the launcher for up to `timeout_ms`.
+ *   3. GetExitCodeProcess to read the dedi PID.
+ *   4. OpenProcess on the dedi PID with TERMINATE | SYNCHRONIZE rights.
+ *   5. Returns a ProcHandle wrapping the dedi handle for kill-on-exit.
+ *
+ * On POSIX this is just a passthrough to proc_spawn_self — the bug
+ * doesn't exist there and direct spawn works fine. */
+ProcHandle proc_spawn_via_launcher(const char *argv0_self,
+                                    const char *const *extra_argv,
+                                    int timeout_ms);
+
 /* Returns true if the child is still running. Non-blocking. */
 bool proc_alive(ProcHandle h);
 

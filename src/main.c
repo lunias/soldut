@@ -71,6 +71,17 @@ typedef enum {
      * flow. The default `--host` path goes through the spawn-child
      * route. */
     LAUNCH_LISTEN_HOST,
+    /* wan-fixes-16 — `--launch-dedicated PORT [args]`. Windows-only
+     * launcher pattern. Spawns the real `--dedicated PORT [args]` as
+     * its own immediate child and exits with the dedi's PID as its
+     * exit code. The host UI uses the exit code to OpenProcess the
+     * orphaned dedi for kill-on-exit. Breaks the direct parent-child
+     * relationship between the UI and the dedi — necessary on Windows
+     * because Windows silently drops UDP between processes in that
+     * relationship even with bInheritHandles=FALSE + CREATE_NO_WINDOW
+     * + CREATE_BREAKAWAY_FROM_JOB. See proc_spawn_via_launcher() in
+     * proc_spawn.c. */
+    LAUNCH_LAUNCHER,
 } LaunchMode;
 
 typedef struct {
@@ -128,6 +139,18 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
         }
         else if (strcmp(argv[i], "--dedicated") == 0) {
             out->mode = LAUNCH_DEDICATED;
+            out->skip_title = true;
+            if (i + 1 < argc && argv[i+1][0] != '-') {
+                out->port = (uint16_t)atoi(argv[++i]);
+                if (out->port == 0) out->port = SOLDUT_DEFAULT_PORT;
+            }
+        }
+        else if (strcmp(argv[i], "--launch-dedicated") == 0) {
+            /* wan-fixes-16 — launcher pattern entry. We don't parse
+             * the remaining args here; the launcher handler in main()
+             * passes argv through almost verbatim (substituting
+             * --launch-dedicated with --dedicated) and re-spawns. */
+            out->mode = LAUNCH_LAUNCHER;
             out->skip_title = true;
             if (i + 1 < argc && argv[i+1][0] != '-') {
                 out->port = (uint16_t)atoi(argv[++i]);
@@ -1456,9 +1479,16 @@ static bool host_start_begin(Game *g, const LaunchArgs *args,
           (int)g->config.time_limit, (int)g->config.friendly_fire,
           (unsigned)port);
 
-    ProcHandle child = proc_spawn_self(argv0_self, child_argv);
+    /* wan-fixes-16 — proc_spawn_via_launcher on Windows uses the
+     * launcher pattern (intermediate process that spawns the dedi and
+     * exits) so the parent UI doesn't have a direct parent-child
+     * relationship with the dedi at packet time; Windows otherwise
+     * silently drops UDP between such pairs. POSIX path is a
+     * passthrough to proc_spawn_self. */
+    ProcHandle child = proc_spawn_via_launcher(argv0_self, child_argv,
+                                                /*timeout_ms*/2000);
     if (!proc_handle_valid(child)) {
-        LOG_E("host_start: proc_spawn_self failed");
+        LOG_E("host_start: proc_spawn_via_launcher failed");
         return false;
     }
     LOG_I("host_start: launched dedicated child pid=%d on port %u",
@@ -1650,6 +1680,37 @@ static void reload_halftone_shader(const char *path) {
 /* ---- Main --------------------------------------------------------- */
 
 int main(int argc, char **argv) {
+    /* wan-fixes-16 — `--launch-dedicated PORT [args]` early-exit.
+     * Detected BEFORE log_init so the launcher leaves no trace in
+     * soldut.log (its job is just to spawn the real dedi and exit).
+     * Re-spawn ourselves with the same argv except --launch-dedicated
+     * substituted with --dedicated, then exit with the dedi's PID as
+     * our exit code. The parent UI reads that exit code and opens
+     * the dedi by PID. */
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--launch-dedicated") == 0) {
+            enum { LAUNCH_MAX = 32 };
+            const char *new_argv[LAUNCH_MAX + 4];
+            int n = 0;
+            new_argv[n++] = argv[0];
+            new_argv[n++] = "--dedicated";
+            for (int j = 1; j < argc && n < LAUNCH_MAX; ++j) {
+                if (j == i) continue;        /* skip the --launch-dedicated arg */
+                new_argv[n++] = argv[j];
+            }
+            new_argv[n] = NULL;
+            ProcHandle dedi = proc_spawn(new_argv);
+            if (!proc_handle_valid(dedi)) {
+                /* Sentinel for spawn failure — proc_spawn_via_launcher
+                 * checks for this exact value. */
+                return (int)0xFFFFFFFF;
+            }
+            int dedi_pid = dedi.pid;
+            proc_close(dedi);
+            return dedi_pid;
+        }
+    }
+
     /* wan-fixes-5 — `--dedicated PORT` early-exit. Detected BEFORE
      * log_init / game_init so the dedicated server has its own log
      * file (`soldut-server.log`) and doesn't fight the parent client's
