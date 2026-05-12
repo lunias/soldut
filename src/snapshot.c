@@ -1,5 +1,6 @@
 #include "snapshot.h"
 
+#include "audio.h"
 #include "log.h"
 #include "mech.h"
 #include "particle.h"
@@ -65,6 +66,23 @@ static uint8_t quant_health(float h, float h_max) {
     return (uint8_t)(r * 255.0f + 0.5f);
 }
 
+/* M6 — gait phase quantization. Maps [0, 1) → u16. Phase is wrapped
+ * into [0, 1) before quantization so the encoder is robust to a stale
+ * `gait_phase_l > 1` (which build_pose's `floorf` subtract should
+ * already prevent, but defense in depth). */
+static uint16_t quant_phase(float phase) {
+    if (!(phase == phase)) phase = 0.0f;   /* NaN guard */
+    if (phase < 0.0f)  phase -= floorf(phase);
+    if (phase >= 1.0f) phase -= floorf(phase);
+    int v = (int)(phase * 65536.0f);
+    if (v < 0) v = 0;
+    if (v > 65535) v = 65535;
+    return (uint16_t)v;
+}
+static float dequant_phase(uint16_t q) {
+    return (float)q * (1.0f / 65536.0f);
+}
+
 /* ---- Capture (server-side): live World → SnapshotFrame ------------ */
 
 void snapshot_capture(const World *w, SnapshotFrame *out, uint16_t ack_input_seq) {
@@ -104,9 +122,14 @@ void snapshot_capture(const World *w, SnapshotFrame *out, uint16_t ack_input_seq
         if (m->alive)              bits |= SNAP_STATE_ALIVE;
         if (m->grounded)           bits |= SNAP_STATE_GROUNDED;
         if (m->facing_left)        bits |= SNAP_STATE_FACING_LEFT;
-        if (m->anim_id == ANIM_JET)  bits |= SNAP_STATE_JET;
-        if (m->anim_id == ANIM_FIRE) bits |= SNAP_STATE_FIRE;
-        if (m->anim_id == ANIM_RUN)  bits |= SNAP_STATE_RUNNING;
+        if (m->anim_id == ANIM_JET)    bits |= SNAP_STATE_JET;
+        if (m->anim_id == ANIM_FIRE)   bits |= SNAP_STATE_FIRE;
+        if (m->anim_id == ANIM_RUN)    bits |= SNAP_STATE_RUNNING;
+        /* M6 — crouch / prone share the existing wire bits set aside
+         * at M2. anim_id is the authoritative driver; the bits are
+         * just the wire representation. */
+        if (m->anim_id == ANIM_CROUCH) bits |= SNAP_STATE_CROUCH;
+        if (m->anim_id == ANIM_PRONE)  bits |= SNAP_STATE_PRONE;
         if (m->reload_timer > 0.0f)  bits |= SNAP_STATE_RELOAD;
         if (m->is_dummy)           bits |= SNAP_STATE_IS_DUMMY;
         /* P05 — powerup state. Timers tick down server-side; the bit is
@@ -142,6 +165,12 @@ void snapshot_capture(const World *w, SnapshotFrame *out, uint16_t ack_input_seq
         e->secondary_id   = (uint8_t)m->secondary_id;
         e->ammo_secondary = (uint8_t)(m->ammo_secondary > 255 ? 255
                                 : (m->ammo_secondary < 0 ? 0 : m->ammo_secondary));
+        /* M6 — gait phase. Source is `gait_phase_l` which build_pose
+         * updates each tick in the ANIM_RUN case (clamped to [0, 1)).
+         * Outside ANIM_RUN it stays at 0 — non-RUN mechs ship a 0 here
+         * which the client's pose function correctly treats as
+         * "no gait motion." */
+        e->gait_phase_q = quant_phase(m->gait_phase_l);
     }
     out->ent_count = n;
     out->valid = true;
@@ -223,6 +252,10 @@ int snapshot_encode(const SnapshotFrame *cur,
         *p++ = e->primary_id;
         *p++ = e->secondary_id;
         *p++ = e->ammo_secondary;
+        /* M6 — gait_phase_q(2). Rides every entity record (not gated
+         * on RUN-anim) so the decoder layout stays fixed-width. */
+        *p++ = (uint8_t)e->gait_phase_q;
+        *p++ = (uint8_t)(e->gait_phase_q >> 8);
         /* P06 — Optional grapple suffix (8 bytes when SNAP_STATE_GRAPPLING). */
         if (has_grapple) {
             *p++ = e->grapple_state;
@@ -303,6 +336,8 @@ bool snapshot_decode(const uint8_t *buf, int len,
         e->primary_id     = *p++;
         e->secondary_id   = *p++;
         e->ammo_secondary = *p++;
+        /* M6 — gait_phase_q. */
+        e->gait_phase_q   = (uint16_t)(p[0] | (p[1] << 8)); p += 2;
         /* P06 — Optional grapple suffix. */
         if (e->state_bits & SNAP_STATE_GRAPPLING) {
             if (end - p < ENTITY_SNAPSHOT_GRAPPLE_BYTES) {
@@ -596,6 +631,43 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
             m->grapple.anchor_mech    = -1;
             m->grapple.constraint_idx = -1;
         }
+        /* M6 — gait phase. Authoritative side updates `gait_phase_l`
+         * each tick in `mech_update_gait`'s ANIM_RUN case; the
+         * snapshot mirrors it here so the procedural pose function
+         * reads the same value the server saw. Outside RUN the field
+         * is 0 (suppresses spurious gait drive).
+         *
+         * For REMOTE mechs on the client we ALSO fire the swing→stance
+         * footstep SFX here — `mech_update_gait` is gated to
+         * auth+local on the client, so the snapshot path is the only
+         * place that observes the wrap for remote players. The
+         * trigger condition + plant location mirror what
+         * `mech_update_gait` does on the auth side, so audio cues are
+         * symmetric across all viewers. */
+        float new_phase_l = dequant_phase(e->gait_phase_q);
+        float new_phase_r = new_phase_l + 0.5f;
+        if (new_phase_r >= 1.0f) new_phase_r -= 1.0f;
+        if (!w->authoritative && !is_local && m->grounded
+            && m->anim_id == ANIM_RUN)
+        {
+            const Chassis *ch = mech_chassis((ChassisId)m->chassis_id);
+            float pelvis_x = pp->pos_x[m->particle_base + PART_PELVIS];
+            float pelvis_y = pp->pos_y[m->particle_base + PART_PELVIS];
+            float foot_y   = pelvis_y + ch->bone_thigh + ch->bone_shin;
+            float dir      = m->facing_left ? -1.0f : 1.0f;
+            float front    = 14.0f * dir;   /* STRIDE/2 = 14 */
+            if (m->gait_phase_l > 0.5f && new_phase_l < 0.5f) {
+                audio_play_at(SFX_FOOTSTEP_CONCRETE,
+                              (Vec2){ (pelvis_x - 7.0f) + front, foot_y });
+            }
+            if (m->gait_phase_r > 0.5f && new_phase_r < 0.5f) {
+                audio_play_at(SFX_FOOTSTEP_CONCRETE,
+                              (Vec2){ (pelvis_x + 7.0f) + front, foot_y });
+            }
+        }
+        m->gait_phase_l = new_phase_l;
+        m->gait_phase_r = new_phase_r;
+
         /* wan-fixes-3 followup — anim_id mirrors the server's
          * authoritative classification (SNAP_STATE_JET / RUNNING) so
          * the client doesn't have to guess from velocity (which
@@ -606,8 +678,15 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
          * Hysteresis for FALL lives on the server in mech_step_drive's
          * air_ticks counter and only affects the snapshot's RUNNING
          * bit indirectly via the server's anim_id. */
+        /* Priority mirrors mech_step_drive's authoritative branch:
+         * JET overrides everything (airborne); PRONE outranks CROUCH;
+         * RUN outranks STAND. */
         if (e->state_bits & SNAP_STATE_JET) {
             m->anim_id = ANIM_JET;
+        } else if (e->state_bits & SNAP_STATE_PRONE) {
+            m->anim_id = ANIM_PRONE;
+        } else if (e->state_bits & SNAP_STATE_CROUCH) {
+            m->anim_id = ANIM_CROUCH;
         } else if (e->state_bits & SNAP_STATE_RUNNING) {
             m->anim_id = ANIM_RUN;
         } else {
@@ -619,10 +698,11 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
          * the long comment above where prev_health is captured) */
 
         if (was_alive && !m->alive) {
-            /* Local cosmetic kill — drop the pose drive so render
-             * shows ragdoll. Also spawn the death blood fountain so
-             * the client matches the host's visual on kill. */
-            for (int s = 0; s < PART_COUNT; ++s) m->pose_strength[s] = 0.0f;
+            /* Local cosmetic kill — once `m->alive` flips off the
+             * procedural pose step in simulate skips the mech (alive
+             * guard), so Verlet free-runs the ragdoll body. Spawn the
+             * death blood fountain so the client matches the host's
+             * visual on kill. */
             int chest = m->particle_base + PART_CHEST;
             Vec2 at = { pp->pos_x[chest], pp->pos_y[chest] };
             Vec2 base_dir = { (m->facing_left ? 100.0f : -100.0f), -120.0f };

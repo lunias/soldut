@@ -20,6 +20,12 @@
  * because NET_MSG_INPUT widened from a single record to a count-prefixed
  * batch of up to NET_INPUT_REDUNDANCY=4 inputs per datagram (server
  * dedupes by seq so packet loss doesn't desync prediction).
+ *
+ * M6: protocol id bumped S0LI → S0LJ (0x53304C49 → 0x53304C4A) because
+ * EntitySnapshot gained a `gait_phase_q` u16 between `ammo_secondary`
+ * and the optional grapple suffix. ENTITY_SNAPSHOT_WIRE_BYTES 29 → 31.
+ * The new field carries gait cycle position so the M6 procedural pose
+ * function renders the same foot frame on every client.
  */
 
 #include "../src/log.h"
@@ -46,13 +52,13 @@ static int g_failed = 0;
 int main(void) {
     log_init("/tmp/snapshot_test.log");
 
-    /* ---- Test 1: protocol id bumped to S0LI (Phase 3) ------------ */
-    ASSERT_EQ("SOLDUT_PROTOCOL_ID == 'S0LI'", SOLDUT_PROTOCOL_ID,
-              0x53304C49u);
+    /* ---- Test 1: protocol id bumped to S0LJ (M6) ----------------- */
+    ASSERT_EQ("SOLDUT_PROTOCOL_ID == 'S0LJ'", SOLDUT_PROTOCOL_ID,
+              0x53304C4Au);
 
-    /* ---- Test 2: ENTITY_SNAPSHOT_WIRE_BYTES grew to 29 ----------- */
-    ASSERT_EQ("ENTITY_SNAPSHOT_WIRE_BYTES == 29",
-              ENTITY_SNAPSHOT_WIRE_BYTES, 29);
+    /* ---- Test 2: ENTITY_SNAPSHOT_WIRE_BYTES grew to 31 ----------- */
+    ASSERT_EQ("ENTITY_SNAPSHOT_WIRE_BYTES == 31",
+              ENTITY_SNAPSHOT_WIRE_BYTES, 31);
 
     /* ---- Test 3: round-trip with primary_id != weapon_id --------- *
      * This is the bug scenario: the host's mech has its secondary
@@ -166,6 +172,50 @@ int main(void) {
         snapshot_decode(buf, n2, NULL, &out2);
         ASSERT_EQ("snapshot 2: primary_id == 6 (Mass Driver)",
                   out2.ents[0].primary_id, 6);
+    }
+
+    /* ---- Test 6 (M6): gait_phase_q round-trips with ~16-bit precision.
+     * The wire ships gait position as a u16 (1/65536 resolution). After
+     * round-tripping a few representative phase values, the decoded
+     * field's float value should match within 1/65536 = ~1.5e-5. */
+    {
+        const float phases[] = {0.0f, 0.25f, 0.5f, 0.749f, 0.999f};
+        for (size_t i = 0; i < sizeof(phases) / sizeof(phases[0]); ++i) {
+            SnapshotFrame in = {0};
+            in.valid               = true;
+            in.ent_count           = 1;
+            in.header.entity_count = 1;
+            in.ents[0].state_bits  = SNAP_STATE_ALIVE;
+            in.ents[0].weapon_id   = 1;
+            in.ents[0].primary_id  = 1;
+            /* Encode phase via the public helper would be cleaner but
+             * the helper's static; use the same arithmetic the encoder
+             * applies. */
+            float p = phases[i];
+            int v = (int)(p * 65536.0f);
+            if (v < 0) v = 0;
+            if (v > 65535) v = 65535;
+            in.ents[0].gait_phase_q = (uint16_t)v;
+
+            uint8_t buf[256];
+            int n = snapshot_encode(&in, NULL, buf, sizeof buf);
+            SnapshotFrame out = {0};
+            bool ok = snapshot_decode(buf, n, NULL, &out);
+            char label[96];
+            snprintf(label, sizeof label,
+                     "gait_phase_q round-trip at %.4f", (double)p);
+            int passed = ok && out.ents[0].gait_phase_q == in.ents[0].gait_phase_q;
+            if (!passed) {
+                fprintf(stderr,
+                        "FAIL: %s: encoded=%u decoded=%u ok=%d\n", label,
+                        (unsigned)in.ents[0].gait_phase_q,
+                        (unsigned)out.ents[0].gait_phase_q, (int)ok);
+                ++g_failed;
+            } else {
+                fprintf(stdout, "ok:   %s: %u\n", label,
+                        (unsigned)in.ents[0].gait_phase_q);
+            }
+        }
     }
 
     if (g_failed > 0) {

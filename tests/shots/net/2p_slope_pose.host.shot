@@ -1,0 +1,46 @@
+# 2p_slope_pose — host. Pairs with 2p_slope_pose.client.shot.
+#
+# Verifies the fix for the user-reported pose desync between own
+# window and other-client window when a mech stands on a slope:
+# pre-fix the LOCAL mech's bones got pushed out of the slope poly
+# by physics_constrain_and_collide (which gates on inv_mass>0), then
+# pose_compute wrote straight-down targets that the swept-test
+# clipped to the slope surface — feet visibly on the slope. The
+# REMOTE mech on the OTHER client has inv_mass=0, so the collide
+# pass skipped it; pose_compute wrote the same straight-down targets
+# but they landed inside the slope poly with no push-out — body
+# rendered in a static straight-legged pose, feet inside the slope.
+#
+# Fix: physics_push_mech_out_of_terrain runs AFTER pose_write for
+# every alive mech (ignoring inv_mass). Both views now show the
+# same bone-on-slope-surface pose.
+#
+# Map: aurora has a 30° west hill that rises eastward from world
+# (640, 2752) at the floor up to (1024, 2528) at the peak. Both
+# mechs spawn on the rising slope so the pose desync (if any)
+# shows up clearly against the black sky.
+
+window 1280 720
+out build/shots/net/2p_slope_pose_host
+network host 24197
+name HostA
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+map aurora
+
+# Host stands part-way up the west hill, client further up — far
+# enough apart that BOTH mechs are clearly visible in each client's
+# window (the camera follows the local mech, with ~150-200 px of
+# horizontal gap between the two). Pelvis y values are above the
+# slope surface so each mech falls into place during the first few
+# ticks (slope surface at host's x=750 is y≈2688; at client's
+# x=900 it's y≈2600).
+spawn_at 750 2620
+peer_spawn 1 900 2540
+aim 900 2540
+
+# Let physics settle.
+at  60 shot t060_settled
+at 120 shot t120_settled
+at 200 shot t200_settled
+
+at 280 end

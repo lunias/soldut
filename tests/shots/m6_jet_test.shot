@@ -1,0 +1,30 @@
+# M6 P01 audit — jetpack thrust test.
+#
+# Pre-fix (Phase 5 bug): pose_write_to_particles zeroed velocity every
+# tick, so jet impulse couldn't accumulate. Mech only got 1 tick of
+# upward thrust per gravity tick → ~36 px/sec instead of the design
+# thrust of -16 m/s² ≈ -480 px/s² acceleration.
+#
+# Post-fix: mech climbs rapidly while jet held, then falls under
+# gravity when released.
+
+window 1280 720
+seed   77 34
+out    build/shots/m6_jet_test
+
+loadout Trooper "Pulse Rifle" Sidearm Light Standard
+spawn_at 640 920
+mouse    1000 360
+
+# Hold jet for ~1.5 seconds (90 ticks) then release.
+at  10 press jet
+at  10 shot t010_jet_start
+at  30 shot t030_climbing
+at  60 shot t060_higher
+at  90 shot t090_one_and_a_half_sec
+at  90 release jet
+at 110 shot t110_release_then_fall
+at 150 shot t150_falling_back
+at 200 shot t200_landed
+contact_sheet jet_sheet cols 4
+at 220 end

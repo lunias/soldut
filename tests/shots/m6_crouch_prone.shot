@@ -1,0 +1,43 @@
+# M6 — visual verification of ANIM_CROUCH and ANIM_PRONE poses.
+#
+# Pre-implementation: BTN_CROUCH (S/Down) and BTN_PRONE (X) were
+# detected at the platform layer but no gameplay code consumed them
+# (no ANIM_CROUCH / ANIM_PRONE, no anim_id transition in
+# mech_step_drive, no pose rules in pose_compute).
+#
+# Implementation:
+#   - mech.h: added ANIM_CROUCH and ANIM_PRONE.
+#   - mech_step_drive: prone_held / crouch_held set anim_id with
+#     priority PRONE > CROUCH > RUN > STAND (JET / FALL still
+#     override).
+#   - mech_post_physics_anchor: pelvis_y_target = foot_y - chain*0.55
+#     for CROUCH; foot_y - 14 for PRONE.
+#   - snapshot_capture / snapshot_apply: SNAP_STATE_CROUCH /
+#     SNAP_STATE_PRONE bits ride the wire.
+#   - pose_compute: torso shortened in CROUCH; body laid horizontal
+#     in PRONE; knees bent forward in CROUCH; legs swept backward
+#     in PRONE.
+#
+# This single-mech test just walks through the four states for a
+# visual sanity check (STAND, CROUCH, PRONE, back to STAND).
+
+window 1280 720
+seed   88 22
+out    build/shots/m6_crouch_prone
+
+loadout Trooper "Pulse Rifle" Sidearm Light Standard
+spawn_at 640 920
+mouse    1100 360
+
+at  20 shot t020_standing
+at  60 press crouch
+at  90 shot t090_crouching
+at 130 release crouch
+at 140 shot t140_back_to_standing
+at 160 press prone
+at 200 shot t200_prone
+at 240 release prone
+at 260 shot t260_back_to_standing_again
+
+contact_sheet pose_sheet cols 4
+at 300 end

@@ -202,6 +202,15 @@ WAN polish. Net effect on the trade-off ledger:
   mention wan-fixes-4's `SNAP_STATE_RUNNING` wire bit + gait-lift
   hysteresis (the anim_id still rides the wire; bone-state remains
   rest pose with kinematic rigid-translate per wan-fixes-3).
+  **M6** then retired this entry entirely: the procedural pose
+  function in `src/mech_ik.c` now drives bones for every mech on
+  every client, replacing it with the new "Live-mech bones are
+  procedural; Verlet is for ragdoll only" entry below.
+- **Deleted** (M6) "Left hand has no pose target (no IK)" — the
+  procedural pose function solves a 2-bone analytic IK for the
+  off-hand toward the weapon's `WeaponSpriteDef.pivot_foregrip`
+  when present, with no constraint-solver feedback into PELVIS
+  because the pose is the LAST writer per tick.
 - **New entries** added below for: AOE explosion ~RTT/2 visual gap,
   kill-feed 16-byte name truncation, host architecture forces a
   dedicated child even for offline-solo, host-setup overlay can't be
@@ -211,65 +220,186 @@ WAN polish. Net effect on the trade-off ledger:
 
 ## Physics
 
-### Remote mechs render in rest pose on the client (wan-fixes-3)
+### PRONE drifts ~0.7 px/tick along facing (M6)
 
-- **What we did** — On the client (`!w->authoritative`), `simulate_step`
-  zeroes `inv_mass` for every non-local mech particle at the top of
-  each tick. Verlet integrate, gravity, the constraint solver
-  (`solve_distance` / `solve_distance_limit` / `solve_fixed_anchor`),
-  and the tile / polygon collision passes all early-return on
-  `inv_mass <= 0`, so remote mech particles only move via the
-  rigid-translate inside `snapshot_interp_remotes`. Also skips
-  `mech_post_physics_anchor` for non-local non-authoritative mechs.
-- **Why** — Pre-fix, remote mechs ran the full physics stack on the
-  client (gravity, Verlet, constraint, tile collision) every tick.
-  Their `latched_input` is stale (only `aim_world` / `facing` / state
-  bits flow through snapshots — buttons stay zeroed), so the pose
-  drive produced erratic targets that the 12-iter constraint solver
-  couldn't fully converge against. Bone offsets relative to pelvis
-  drifted tick-to-tick. `snapshot_interp_remotes` then rigid-translated
-  the body to put pelvis on a smooth lerp path, but the *shape* (bone
-  offsets) was whatever the physics pass left it — so the per-frame
-  render lerp showed limbs wobbling around the smooth pelvis path.
-  User-reported as "jittery / shaking" on WAN. Making remote mech
-  particles kinematic eliminates the drift; the body holds whatever
-  pose `mech_create` initialized it to (chassis rest pose), pelvis
-  path stays smooth, bones rigid-translate with it.
-- **Cost** — Remote mechs on the client don't visually animate beyond
-  rest pose: no walk cycle, no arm-aim tracking, no aim-arm direction.
-  Death ragdolls also won't tumble freely (severed limbs stick to the
-  body rather than falling under gravity). At LAN we don't notice
-  much; at WAN the user prefers stable poses to jittering ones.
-  **wan-fixes-4 follow-up**: new `SNAP_STATE_RUNNING` wire bit +
-  gait-lift hysteresis on the server side stabilizes the
-  RUN/STAND classification (previously the client guessed from
-  velocity, which flickered RUN ↔ STAND mid-stride; now the server
-  ships the authoritative anim_id classification). The
-  rest-pose-on-the-client cost is still real — pose drive still
-  runs but its results don't survive the constraint solver because
-  inv_mass=0 — but the visible flicker on remote walk is gone.
-  **wan-fixes-10 follow-up**: the rest-pose remote bones also drive
-  the new `NET_MSG_EXPLOSION` work-around — AOE projectile visuals
-  now ride server events instead of client-local detonations against
-  rest-pose bones (see "AOE explosion has a ~RTT/2 visual gap" entry
-  in the Networking section).
+- **What we did** — `ANIM_PRONE` rotates the entire standing skeleton
+  90° around the pelvis so every inter-bone offset preserves its
+  rest-length. Cross-brace constraints (`PELVIS-L_SHOULDER`,
+  `PELVIS-R_SHOULDER`, etc.) stay at rest, so the solver doesn't
+  fight the rotation the way a literal "lower torso" pose did.
+- **Why** — The skeleton's distance constraints were authored for a
+  standing body. A rotated pose preserves them perfectly. A
+  "compressed-but-upright" prone pose (low pelvis, shoulders pulled
+  in) violated several rest lengths and produced multi-px-per-tick
+  drift. The 90° rotation is the geometric trick that lets us
+  reuse the standing constraint graph for a different orientation.
+- **Cost** — There is still a residual ~0.7 px/tick (~42 px/sec)
+  forward drift while the player holds PRONE. Cause: friction +
+  iterative constraint solve interact asymmetrically with the
+  rotated foot-on-ground contact. Single-tick correction errors
+  accumulate. Magnitude is small enough that a quick prone is
+  effectively stationary, but a held prone visibly creeps forward.
 - **Revisit when** —
-  - The lack of walk / aim animation on remote mechs reads as broken
-    to playtesters (it almost certainly will once we have proper
-    sprites + animation curves).
-  - We ship a procedural pose pass driven by snapshot state — compute
-    desired bone positions per tick from `aim_world` + `anim_id` +
-    `facing_left` + `grounded` and write them DIRECTLY (no physics).
-    The kinematic gate stays, the body animates from data instead of
-    a frozen reference pose.
-  - Dismemberment ragdoll on remote-viewed kills feels static. The
-    fix probably ships per-limb position data in `EntitySnapshot` for
-    detached limbs, or spawns the ragdoll as a per-tick projectile-
-    style entity the server already simulates and clients interpolate.
-  - A future netcode revisit (e.g. delta encoding for bone offsets, or
-    full bone-state in snapshots) makes the kinematic-only path
-    unnecessary because the snapshot stream is authoritative for full
-    pose, not just pelvis position.
+  - A player wants to hold prone for long stretches (e.g. a sniper
+    overwatch role). The drift becomes more obvious.
+  - We add proper skeletal animation (M3 expansion). A baked prone
+    frame doesn't drift.
+  - We rewrite the constraint solver to use position-only PBD (no
+    velocity injection through constraint corrections), which would
+    eliminate the friction-vs-constraint asymmetry that produces
+    the drift.
+
+### Remote-mech bones need a post-pose terrain push (M6)
+
+- **What we did** — Added `physics_push_mech_out_of_terrain` which
+  runs AFTER `pose_write_to_particles` for every alive mech. Unlike
+  `physics_constrain_and_collide`'s tile / poly collision passes
+  (which gate on `inv_mass > 0` per the wan-fixes-3 kinematic-remote
+  trade-off), this one-pass push ignores `inv_mass` so remote mechs
+  on the client get the same surface clipping the local mech does.
+  Kinematic translate (pos AND prev shifted by the same delta)
+  preserves velocity.
+- **Why** — The procedural pose function writes deterministic bone
+  offsets from the pelvis. On a slope, the straight-down feet
+  target lands INSIDE the slope poly. For the LOCAL mech, physics
+  had already pushed bones out of the slope earlier in the tick,
+  and `pose_write`'s swept-test clipped the move at the slope
+  surface. For the REMOTE mech viewed from another client (where
+  `inv_mass=0`), physics did nothing, and `pose_write`'s swept-test
+  saw both endpoints inside the slope (so `level_ray_hits` returned
+  false — ray-cast convention is "starting inside doesn't count").
+  The bones ended up inside the slope, rendering as a rigid
+  straight-legged pose vs. the local view's slope-adapted pose.
+- **Cost** — Per-mech, per-tick. For every alive mech (auth and
+  client side) we redo a 16-particle × ~3×3-tile-neighborhood
+  collision check. Negligible. The function is idempotent on
+  already-outside-terrain particles (the inside checks return
+  immediately).
+- **Revisit when** —
+  - A new constraint kind imparts pos changes outside the regular
+    `physics_constrain_and_collide` loop and that need a terrain
+    safety net. Today it's the grapple+pose pair; we can keep
+    adding callers without a real refactor.
+  - We move to a single-pass simulation where pose and constraint
+    relaxation interleave; then the post-pose push becomes
+    redundant.
+
+### Grapple rope is soft (10% stiffness per relaxation iter) (M6)
+
+- **What we did** — `solve_fixed_anchor` (tile anchor) and
+  `solve_distance_limit` (mech-bone anchor) apply only
+  `GRAPPLE_ROPE_STIFFNESS = 0.10` of the overshoot per iteration.
+  With the 12-iter relaxation loop that yields ~72% per-tick
+  correction (1 - 0.9^12), and the constraint move is ALSO
+  swept-tested against solid tiles — if pulling the firer toward
+  the anchor would drag them through a wall, the move clamps at the
+  wall surface.
+- **Why** — Pre-fix the rope applied 100% of the overshoot per iter
+  AND skipped the swept-test, which meant: (a) the firer snapped to
+  rope length on the first relaxation iter (no stretchy feel — felt
+  like a steel cable, not a rope); (b) during retract (rope length
+  shrinking 13 px/tick at the old 800 px/s rate) the firer's pelvis
+  was dragged straight through any geometry between it and the
+  anchor. User play-test repro on the first M6 P01 build. Halving
+  the retract rate to 400 px/s + adding stiffness + adding the
+  swept-test together produced the "Tarzan rope" feel: visible
+  stretch on attach, smooth pendulum swing, retract pulls firer up
+  AROUND obstacles instead of through them.
+- **Revisit when** —
+  - A skill weapon (e.g. a tow-cable or harpoon) wants a HARDER
+    rope. Add a `stiffness` field to `Constraint` so the same solver
+    can serve both.
+  - Cross-platform play introduces float-reorder drift in the
+    constraint pull such that two clients see the firer at noticeably
+    different rope positions. Currently both sides run the same
+    PBD-relaxation deterministic math so they converge to the same
+    pose; if that breaks, we'd need either a fixed-point constraint
+    solver or a snapshot bone broadcast on every fire.
+  - The constraint-solver's "swept-test stops at the wall" produces
+    a visible hitch when the firer should swing AROUND a corner
+    (true rope wrapping). True wrap-around requires tracking the
+    rope's path through corners — complex; deferred.
+
+### Live-mech bones are procedural; Verlet is for ragdoll only (M6)
+
+- **What we did** — Live (alive=true) mech bone positions are produced
+  each tick by `pose_compute` in `src/mech_ik.c`, run after physics
+  and `mech_post_physics_anchor` inside `simulate_step`.
+  `pose_write_to_particles` writes both `pos` AND `prev` for every
+  non-dismembered particle, so Verlet sees zero injected velocity.
+  Bone shape is a pure function of `(pelvis, aim, facing, anim_id,
+  gait_phase, grounded, chassis, active_slot, dismember_mask,
+  foregrip_world, grapple_state)`. The 12-iter constraint solver
+  still RUNS each tick, but its output is overwritten by pose for
+  live skeletons — the solver's only meaningful work is for dead
+  ragdolls (alive=false; pose skips them) and dismembered free-flying
+  limbs (per-particle skip in `pose_write_to_particles`).
+- **Why** — Replaces M5's `build_pose` + `apply_pose_to_particles`
+  driver, which was history-dependent (each tick's bone positions
+  were a function of the previous tick's bones + nudge factor +
+  12 relaxation iterations). Two clients running the same input
+  stream could drift over time; remote mechs froze in rest pose
+  (wan-fixes-3) to avoid drift on kinematic particles. Procedural
+  pose retires both problems: bones are pure-function output of
+  synced state, so every client renders the same skeleton. Gait
+  phase rides the wire (`gait_phase_q` u16, +2 bytes/mech/snapshot)
+  so every viewer renders the same foot frame. The `inv_mass=0`
+  remote-mech kinematic gate from wan-fixes-3 stays — physics-driven
+  motion on remote mechs would just be discarded by pose anyway, and
+  the gate prevents Verlet feedback into bones the snapshot stream
+  is responsible for.
+- **Cost** —
+  - Design doc 03-physics-and-mechs.md describes Verlet as the
+    authoritative driver. The reality is that pose overrides physics
+    for live skeletons every tick — Verlet contributes only the
+    pelvis motion (gravity, run, jet) for the local mech, and the
+    constraint solver is effectively dead code for live mechs.
+  - Each live mech writes the full 16-particle skeleton kinematically
+    each tick, even though physics already moved some of them — the
+    physics work is wasted for non-pelvis bones. ~16 mechs × 15
+    redundant writes/tick ≈ 240 writes/tick. Negligible.
+  - SHOT_LOG `inside_tile` events fire each tick where the
+    deterministic foot placement lands on the floor surface. Floor
+    surface y == foot_pose_y exactly, so the discrete-iteration
+    constraint solver flags it as inside before the per-tick pose
+    write resets the bones. Diagnostic spam only; production play
+    (no SHOT_LOG) is unaffected.
+- **Revisit when** —
+  - A bone position read needs to be physics-accurate (e.g. a damage
+    decal hit-test that compares against the live constraint-solver
+    state). Currently decals read post-pose bones, which match what
+    render draws.
+  - Cross-platform play introduces float-reorder drift past the
+    1 px tolerance (current target). Would force a fixed-point pose
+    function or a "bone broadcast every N seconds" sync.
+  - Authored skeletal animation lands (M3 expansion). Procedural
+    rules give way to per-anim Frame[].Pos[] tables like Soldat's
+    `.poa` files; the dispatcher stays in `mech_ik.c`.
+
+### Footstep SFX fires from two paths (M6)
+
+- **What we did** — Authoritative side (server + offline + client's
+  local mech) fires `SFX_FOOTSTEP_CONCRETE` from
+  `mech_update_gait` in `src/mech.c` when `gait_phase_l` wraps
+  from >0.5 → <0.5. For REMOTE mechs on the client,
+  `mech_update_gait` is gated off (snapshot ships the
+  authoritative gait_phase), so the wrap detection lives in
+  `snapshot_apply` in `src/snapshot.c` and fires the same SFX
+  using the same plant-location math.
+- **Why** — The pose function is pure (no side effects) — it
+  computes bones from inputs. Footstep SFX is a side effect of
+  the gait phase advancing past a threshold, which is a fact
+  the receiver of the gait_phase update has to observe, not the
+  pose function itself. Splitting between the two update paths
+  keeps `pose_compute` testable in isolation and lets the SFX
+  fire on the client without a separate wire message.
+- **Revisit when** —
+  - The duplicated wrap-detect logic drifts (e.g. one path fires
+    on the wrong threshold). Today the two implementations match
+    by construction; a unified helper would centralize it.
+  - We add per-surface footstep variants (metal / ice / wood).
+    The surface lookup would live in one helper called from both
+    paths.
 
 ### Post-physics kinematic anchor for standing pose
 
@@ -363,43 +493,6 @@ WAN polish. Net effect on the trade-off ledger:
 ---
 
 ## Animation / pose
-
-### Left hand has no pose target (no IK) — incl. two-handed weapons (P11)
-
-- **What we did** — Right hand is driven by the aim vector each tick.
-  Left hand has no target — the upper arm and forearm just hang from
-  the shoulder. Applies to BOTH one-handed and two-handed weapons.
-  (The `WeaponSpriteDef.pivot_foregrip` field still ships on the
-  sprite-def table; it's just not consumed by the pose driver yet.)
-- **Why** — A two-handed rifle pose needs IK: solve for the elbow
-  position given hand and shoulder. The pose system runs once per
-  tick BEFORE the constraint solver; constraint corrections from
-  the R_ARM aim drive then shift PELVIS each tick (small but real).
-  Posing L_ELBOW + L_HAND on rest-length positions in the pose pass
-  fixes the chain at start-of-tick but DECOUPLES from L_SHOULDER
-  during the constraint-solve iterations: as PELVIS drifts under
-  the R_ARM correction, L_SHOULDER follows via cross-brace; the
-  L_ARM chain de-rests; the solver corrects again, propagating
-  *additional* force back to PELVIS — the body drifts visibly
-  in the aim direction. P11 attempted this fix at strength 0.6
-  (yanked L_HAND past chain reach), then a clamped variant, then a
-  snap-pose-IK at strength 1.0 — all three exhibited the drift.
-  The clean fix is a 2-bone IK constraint that runs INSIDE the
-  constraint solver loop (so the L_ARM tracks L_SHOULDER per
-  iteration instead of once per tick). That's a real addition to
-  the constraint pool — out of scope for P11. Deferred.
-- **Revisit when** —
-  - We add weapons or finishing moves that look obviously wrong
-    without a left-hand grip (most rifles, every two-handed weapon).
-  - A 2-bone IK constraint kind (`CSTR_IK_2BONE`) lands in the
-    constraint pool — could be a P12 or M6 polish item. The
-    `WeaponSpriteDef.pivot_foregrip` field is already on the wire
-    so the IK constraint can plug in without sprite-def churn.
-  - Players complain that the mech looks broken (post-P16 art
-    might make the dangle more noticeable than the current capsule
-    fallback).
-  - We add a proper animation system (M3 expansion). A real skeletal
-    animation runtime would subsume this trade-off entirely.
 
 ### Dummies skip arm pose entirely
 

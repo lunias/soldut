@@ -1,0 +1,32 @@
+# M6 P01 audit — gravity free-fall test.
+#
+# Pre-fix (Phase 5 bug): pose_write_to_particles set prev=pos every
+# tick, zeroing Verlet velocity. Gravity acted like terminal velocity
+# of ~80 px/sec (linear) instead of accelerating g = 2400 px/s². Drop
+# from 100 px above floor was a slow drift instead of an impact.
+#
+# Post-fix: pose_write_to_particles uses kinematic translate (move pos
+# AND prev by the same delta), preserving velocity. Gravity
+# accelerates as expected.
+#
+# Manual visual check: at t=30 (0.5 s) the mech should have fallen
+# ~300 px (s = 0.5 * 2400 * 0.5² = 300). At t=60 (1 s) it should be on
+# the floor (started at 200 px above, fell 1200 px capped by floor).
+
+window 1280 720
+seed   77 33
+out    build/shots/m6_fall_test
+
+loadout Trooper "Pulse Rifle" Sidearm Light Standard
+spawn_at 640 480
+mouse    1100 360
+
+at  5 shot t005_drop_start
+at 15 shot t015_quarter_sec
+at 30 shot t030_half_sec
+at 45 shot t045_three_quarter
+at 60 shot t060_one_sec
+at 90 shot t090_settled
+at 120 shot t120_settled
+contact_sheet fall_sheet cols 4
+at 121 end

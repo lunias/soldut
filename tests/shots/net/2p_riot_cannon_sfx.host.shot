@@ -1,0 +1,39 @@
+# 2p_riot_cannon_sfx — host. Verifies that a non-hitscan self-fire
+# (Riot Cannon, WFIRE_SPREAD) plays its SFX on the firer's window.
+#
+# Pre-fix bug (M6 Bug B): client_handle_fire_event used to gate ALL
+# self-fire SFX behind `is_self && from_active_slot`. But the predict
+# path (weapons_predict_local_fire) plays SFX only for WFIRE_HITSCAN.
+# Result: silent fire on the firer's window for every non-hitscan
+# weapon (Riot Cannon / Plasma SMG / Mass Driver / Auto-Cannon /
+# Frag Grenades / Micro-Rockets / Burst SMG / Sidearm).
+#
+# Fix: split the gate into `_sparks` (gate on active-slot for all
+# fire kinds — predict drew the sparks) and `_sfx` (additionally
+# require WFIRE_HITSCAN — predict drew the SFX only for that case).
+#
+# Host side: the host is authoritative, so its own fire goes through
+# weapons_spawn_projectiles which has always played the SFX. We just
+# need a remote shot to land on the host's audio path, AND a remote
+# Riot Cannon LMB to land on the client's FIRE_EVENT handler. This
+# script focuses on the client window — host stays passive.
+
+window 1280 720
+out build/shots/net/2p_riot_cannon_sfx_host
+network host 24112
+name HostA
+
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+
+spawn_at 2240 984
+peer_spawn 1 2540 984
+
+aim 2540 956
+
+at 130 shot t130_pre_match
+
+# Client LMB-fires Riot Cannon at t=200; host should see the fire
+# event come in.
+at 215 shot t215_client_riot_cannon_fired
+
+at 280 end

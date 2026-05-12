@@ -100,6 +100,13 @@ typedef struct {
                                  * time, AND on mid-round PICKUP_WEAPON swaps. */
     uint8_t  secondary_id;
     uint8_t  ammo_secondary;
+    /* M6 — Gait cycle position in [0, 1). 0 = stride start. Quantized
+     * to u16 with quant_phase / dequant_phase (1/65536 px resolution).
+     * The procedural pose function in mech_ik.c reads this directly to
+     * drive the RUN gait so every client renders the same foot frame
+     * at the same tick. Outside ANIM_RUN, the field is 0 (so non-RUN
+     * mechs don't accidentally trigger gait motion via stale data). */
+    uint16_t gait_phase_q;
     /* P06 — Grapple suffix (only present on the wire when state_bits
      * has SNAP_STATE_GRAPPLING set). When the bit is clear, these
      * fields are zero. Idle (state == GRAPPLE_IDLE) keeps the suffix
@@ -117,8 +124,11 @@ typedef struct {
  *   P06 adds an OPTIONAL 8-byte grapple suffix gated by
  *     SNAP_STATE_GRAPPLING; the fixed-width minimum stays 28.
  *   P10-followup adds primary_id u8 = 29 bytes; protocol id bumps
- *     S0LG → S0LH (see version.h). */
-#define ENTITY_SNAPSHOT_WIRE_BYTES         29
+ *     S0LG → S0LH (see version.h).
+ *   M6 adds gait_phase_q u16 = 31 bytes; protocol id bumps S0LI →
+ *     S0LJ. Phase rides every entity record (not just RUN-anim
+ *     mechs) so the decoder layout stays fixed-width. */
+#define ENTITY_SNAPSHOT_WIRE_BYTES         31
 #define ENTITY_SNAPSHOT_GRAPPLE_BYTES       8
 
 enum {

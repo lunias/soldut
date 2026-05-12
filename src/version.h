@@ -4,8 +4,8 @@
 
 #define SOLDUT_VERSION_MAJOR  0
 #define SOLDUT_VERSION_MINOR  0
-#define SOLDUT_VERSION_PATCH  7
-#define SOLDUT_VERSION_STRING "0.0.7-m5p11"
+#define SOLDUT_VERSION_PATCH  8
+#define SOLDUT_VERSION_STRING "0.0.8-m6p01"
 
 /* 'S0LD' — stamped on every connection handshake. Bump on netcode
  * changes. Lineage:
@@ -27,8 +27,13 @@
  *                                  carries the last N=4 client inputs
  *                                  so a single dropped UDP packet
  *                                  doesn't desync prediction;
- *                                  server dedupes by seq). */
-#define SOLDUT_PROTOCOL_ID    ((uint32_t)0x53304C49u)   /* 'S0LI' */
+ *                                  server dedupes by seq).
+ *   M6/P01 = 0x53304C4A ('S0LJ')   (EntitySnapshot adds gait_phase_q
+ *                                  u16 — gait cycle position so the
+ *                                  M6 procedural pose function renders
+ *                                  the same foot frame on every
+ *                                  client. Wire size 29 → 31 bytes). */
+#define SOLDUT_PROTOCOL_ID    ((uint32_t)0x53304C4Au)   /* 'S0LJ' */
 
 /* Default UDP port for the listen socket. 23073 is a Soldat homage
  * (the original used the same port). */

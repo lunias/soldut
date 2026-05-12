@@ -1,0 +1,18 @@
+# 2p_slope_pose — client. Pairs with 2p_slope_pose.host.shot.
+# See host script for the test description.
+
+window 1280 720
+out build/shots/net/2p_slope_pose_client
+network connect 127.0.0.1:24197
+name ClientB
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+map aurora
+
+spawn_at 900 2540
+aim 750 2620
+
+at  60 shot t060_settled
+at 120 shot t120_settled
+at 200 shot t200_settled
+
+at 280 end

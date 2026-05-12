@@ -1831,28 +1831,45 @@ static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen
                                                 : me->secondary_id;
         from_active_slot = (active_wid == (int)weapon);
     }
-    /* Muzzle sparks — only for remote shooters or self RMB-on-inactive;
-     * the predict path already spawned them for self LMB-on-active. */
-    bool predict_drew = is_self && from_active_slot;
-    if (!predict_drew) {
+    /* Split sparks vs SFX gates. The predict path
+     * (`weapons_predict_local_fire`) spawns muzzle sparks for ALL fire
+     * kinds, but plays the fire SFX only for WFIRE_HITSCAN. So:
+     *
+     *   - Sparks: drawn by predict for self+active regardless of fire
+     *     kind → suppress here under the same condition.
+     *   - SFX: played by predict only for self+active+HITSCAN. For
+     *     self+active+non-HITSCAN the predict path stayed quiet AND
+     *     this branch used to stay quiet too — silent fire on the
+     *     firer's window for Riot Cannon / Plasma SMG / etc. (M6 Bug B.)
+     *     Tighten the SFX gate to require the predict path actually
+     *     played one. */
+    bool predict_drew_sparks = is_self && from_active_slot;
+    bool predict_drew_sfx    = predict_drew_sparks && wpn->fire == WFIRE_HITSCAN;
+    if (!predict_drew_sparks) {
         for (int k = 0; k < 3; ++k) {
             fx_spawn_spark(&g->world.fx, origin,
                 (Vec2){ dir.x * 350.0f, dir.y * 350.0f }, g->world.rng);
         }
+    }
+    if (!predict_drew_sfx) {
         /* P14 — fire SFX. The predict path plays its own cue for self
          * LMB-active hitscan; for everything else (remote shooters,
          * self RMB-on-inactive, self projectile / melee / grapple)
-         * we play here. Same gate as the muzzle sparks above. */
+         * we play here. */
         SfxId fsfx = audio_sfx_for_weapon((int)weapon);
         if (wpn->fire == WFIRE_GRAPPLE) fsfx = SFX_GRAPPLE_FIRE;
         audio_play_at(fsfx, origin);
+        SHOT_LOG("t=%llu client_fire_event sfx shooter=%d weapon=%d self=%d active=%d fire_kind=%d",
+                 (unsigned long long)g->world.tick, (int)shooter,
+                 (int)weapon, (int)is_self, (int)from_active_slot,
+                 (int)wpn->fire);
     }
 
     if (wpn->fire == WFIRE_HITSCAN) {
         /* Predict drew the tracer only for active-slot LMB hitscan;
          * for RMB-on-inactive (Sidearm via RMB, etc.) the firer's
          * predict didn't run at all — we need to draw it here. */
-        if (predict_drew) return;
+        if (predict_drew_sparks) return;
         /* Tracer to the wall (or full range if open air). The actual
          * hit point lands via HIT_EVENT (blood/sparks at target);
          * the tracer just needs to look like the bullet's flight
@@ -1904,7 +1921,7 @@ static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen
          * already drew the muzzle visual (self LMB on the active
          * slot). For self RMB-on-inactive, predict didn't run, so we
          * draw it. */
-        if (!predict_drew) {
+        if (!predict_drew_sparks) {
             Vec2 spark_end = { origin.x + dir.x * 80.0f,
                                origin.y + dir.y * 80.0f };
             fx_spawn_tracer(&g->world.fx, origin, spark_end);

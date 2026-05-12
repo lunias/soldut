@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade host-overlay-preview lobby-overlay-preview cook-maps bake bake-all shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade test-riot-cannon-sfx test-mech-ik test-pose-compute host-overlay-preview lobby-overlay-preview cook-maps bake bake-all shot \
         debug gdb gdb-host gdb-client valgrind editor \
         assets-palettes assets-process \
         audio-inventory audio-normalize audio-credits test-audio-smoke
@@ -163,6 +163,21 @@ $(BUILD_DIR)/snapshot_test: tests/snapshot_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) 
 test-snapshot: $(BUILD_DIR)/snapshot_test
 	./$(BUILD_DIR)/snapshot_test
 
+# M6 — 2-bone analytic IK unit tests + procedural-pose tests. mech_ik
+# is a pure-function module on top of math + world, so it compiles
+# headless via HEADLESS_OBJ and asserts on numeric tolerances.
+$(BUILD_DIR)/mech_ik_test: tests/mech_ik_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/mech_ik_test.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+test-mech-ik: $(BUILD_DIR)/mech_ik_test
+	./$(BUILD_DIR)/mech_ik_test
+
+$(BUILD_DIR)/pose_compute_test: tests/pose_compute_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/pose_compute_test.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+test-pose-compute: $(BUILD_DIR)/pose_compute_test
+	./$(BUILD_DIR)/pose_compute_test
+
 # wan-fixes-8 — user-prefs persistence (soldut-prefs.cfg). Round-trips
 # a UserPrefs, exercises hand-edited cfg parsing + comment stripping +
 # unknown-name fallbacks + atomic-save tmp cleanup.
@@ -183,6 +198,16 @@ test-prefs: $(BUILD_DIR)/prefs_test
 test-frag-grenade: $(BIN)
 	bash tests/shots/net/run_frag_grenade.sh
 	bash tests/shots/net/run_frag_grenade.sh -b
+
+# M6 Bug B — non-hitscan self-fire SFX suppressed on the firer's
+# window. Client fires Riot Cannon (WFIRE_SPREAD) and asserts the
+# fire-event sfx log line lands in its own log. Pre-fix: silent fire
+# on every non-hitscan weapon for the firer because the FIRE_EVENT
+# handler suppressed audio under the same `is_self && from_active_slot`
+# gate that suppressed the muzzle sparks — but the predict path only
+# played audio for HITSCAN.
+test-riot-cannon-sfx: $(BIN)
+	bash tests/shots/net/run_riot_cannon_sfx.sh
 
 # wan-fixes-9 — visual preview for the "Starting server..." overlay.
 # Opens a real raylib window (needs DISPLAY); saves three PNGs to

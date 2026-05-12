@@ -464,51 +464,27 @@ void mech_apply_bink(Mech *m, float bink_amount, float proximity_t,
     if (m->aim_bink < -BINK_MAX) m->aim_bink = -BINK_MAX;
 }
 
-/* ---- Pose drive (animation) --------------------------------------- */
-
-static void clear_pose(Mech *m) {
-    for (int i = 0; i < PART_COUNT; ++i) m->pose_strength[i] = 0.0f;
-}
-
-static void pose_set(Mech *m, int part, Vec2 target, float strength) {
-    m->pose_target  [part] = target;
-    m->pose_strength[part] = strength;
-}
-
-static void apply_pose_to_particles(World *w, Mech *m) {
-    /* Skip the pose drive entirely for remote mechs on the client.
-     * Per wan-fixes-3, remote mech particles have inv_mass=0 — the
-     * physics constraint solver short-circuits on those, so the
-     * normal stabilizer that keeps bones at rest length does nothing.
-     * `physics_translate_kinematic_swept` below moves particles
-     * DIRECTLY (bypassing inv_mass), and build_pose's
-     * `pelvis_y_pose = foot_y_avg - chain_len` override turns the
-     * ANIM_RUN gait swing into a feedback loop on the client: the
-     * gait lifts feet → foot_y_avg moves up → pose pelvis_y target
-     * moves up → chest target moves up → apply_pose lifts the chest
-     * → next tick's gait recomputes against a moved body → bones
-     * inflate. The host doesn't show this because its constraint
-     * solver pulls bones back to rest length each tick. By skipping
-     * pose drive on kinematic remote mechs, the body stays in
-     * whatever pose `mech_create_loadout` initialized it to (chassis
-     * rest pose) and `snapshot_interp_remotes` rigid-translates the
-     * whole thing with the pelvis. Matches the existing trade-off
-     * "Remote mechs render in rest pose on the client". */
-    if (!w->authoritative && m->id != w->local_mech_id) return;
-
-    ParticlePool *p = &w->particles;
-    for (int i = 0; i < PART_COUNT; ++i) {
-        float s = m->pose_strength[i];
-        if (s <= 0.0f) continue;
-        int idx = m->particle_base + i;
-        float dx = (m->pose_target[i].x - p->pos_x[idx]) * s;
-        float dy = (m->pose_target[i].y - p->pos_y[idx]) * s;
-        physics_translate_kinematic_swept(p, &w->level, idx, dx, dy);
-    }
-}
-
-static void build_pose(const Chassis *ch, World *w, Mech *m, float dt) {
-    clear_pose(m);
+/* ---- Pose drive (gait phase + footstep SFX) -----------------------
+ *
+ * M6 retired the old `build_pose` / `apply_pose_to_particles` pair —
+ * bone positions for live mechs are now produced by `pose_compute`
+ * (see `mech_ik.c`) run after the physics pass. What remains here is
+ * the side-effectful state every owner of a mech still needs to
+ * advance:
+ *   - `anim_time` increments while running (drives gait_phase from a
+ *     speed-derived cycle frequency).
+ *   - `gait_phase_l / _r` track the cycle position used by both
+ *     pose_compute and the footstep SFX swing→stance trigger.
+ *   - `m->facing_left` is set from the aim direction.
+ *
+ * Gate: this runs only on the side that OWNS the mech's prediction —
+ * authoritative (server / offline) for every mech, plus the local
+ * mech on a client. For remote mechs on the client, the snapshot
+ * stream carries gait_phase_l + facing_left + anim_id; snapshot_apply
+ * writes them, and the footstep wrap SFX fires from that path
+ * (see `snapshot_apply` in src/snapshot.c).
+ */
+static void mech_update_gait(const Chassis *ch, World *w, Mech *m, float dt) {
     if (!m->alive) return;
 
     int b = m->particle_base;
@@ -516,234 +492,49 @@ static void build_pose(const Chassis *ch, World *w, Mech *m, float dt) {
     Vec2 aim_dir = mech_aim_dir(w, m->id);
     m->facing_left = aim_dir.x < 0.0f;
 
-    float pelvis_x = p->pos_x[b + PART_PELVIS];
-    float pelvis_y = p->pos_y[b + PART_PELVIS];
-    float chain_len = ch->bone_thigh + ch->bone_shin;
+    if ((AnimId)m->anim_id != ANIM_RUN) {
+        /* Outside the run cycle keep the gait phases at 0 so a
+         * subsequent ANIM_RUN starts on a fresh stride. anim_time can
+         * stay where it is (it'll reset effectively on the next RUN
+         * start because we don't multiply by an absolute timestamp). */
+        m->gait_phase_l = 0.0f;
+        m->gait_phase_r = 0.0f;
+        return;
+    }
+
+    m->anim_time += dt;
+    const float stride     = 28.0f;
+    const float run_v      = RUN_SPEED_PXS * ch->run_mult;
+    const float cycle_freq = run_v / (2.0f * stride);
+
+    float p_l = m->anim_time * cycle_freq;
+    p_l -= floorf(p_l);
+    float p_r = p_l + 0.5f;
+    if (p_r >= 1.0f) p_r -= 1.0f;
+
+    /* P14 — footstep SFX on swing→stance wrap. The plant location
+     * uses the pelvis particle's current x (post-physics on the local
+     * mech; one tick stale on remote interpolated mechs — close
+     * enough for spatialization at 200–1500 px attenuation range). */
     if (m->grounded) {
-        float foot_y_avg = (p->pos_y[b + PART_L_FOOT] +
-                            p->pos_y[b + PART_R_FOOT]) * 0.5f;
-        pelvis_y = foot_y_avg - chain_len;
-    }
-    Vec2 pelvis = { pelvis_x, pelvis_y };
-
-    /* Chassis-specific posture quirks (P10) — small per-chassis biases
-     * applied to chest/head/r-hand pose targets. Spec:
-     * documents/m5/12-rigging-and-damage.md §"Posture differences per
-     * chassis". Scout leans forward, Heavy locks chest upright (higher
-     * pose strength), Sniper hunches the head, Engineer skips the
-     * right-arm aim drive when holding the secondary slot (tool, not
-     * rifle). */
-    float chest_strength    = 0.7f;
-    bool  skip_right_arm_aim = m->is_dummy;
-    float face_dir          = m->facing_left ? -1.0f : 1.0f;
-    Vec2  chest_target = { pelvis.x, pelvis.y - ch->torso_h };
-    Vec2  head_target  = { pelvis.x, pelvis.y - ch->torso_h - ch->neck_h - 8.0f };
-    switch ((ChassisId)m->chassis_id) {
-        case CHASSIS_SCOUT:
-            chest_target.x += face_dir * 2.0f;
-            break;
-        case CHASSIS_HEAVY:
-            chest_strength = 0.85f;
-            break;
-        case CHASSIS_SNIPER:
-            head_target.x += face_dir * 2.0f;
-            head_target.y += 3.0f;
-            break;
-        case CHASSIS_ENGINEER:
-            if (m->active_slot == 1) skip_right_arm_aim = true;
-            break;
-        case CHASSIS_TROOPER:
-        default: break;
-    }
-
-    pose_set(m, PART_CHEST, chest_target, chest_strength);
-    pose_set(m, PART_NECK,
-        (Vec2){ pelvis.x, pelvis.y - ch->torso_h - ch->neck_h * 0.5f }, 0.7f);
-    pose_set(m, PART_HEAD, head_target, 0.7f);
-
-    pose_set(m, PART_L_HIP, (Vec2){ pelvis.x - 7, pelvis.y }, 0.7f);
-    pose_set(m, PART_R_HIP, (Vec2){ pelvis.x + 7, pelvis.y }, 0.7f);
-
-    pose_set(m, PART_L_SHOULDER,
-        (Vec2){ pelvis.x - 10, pelvis.y - ch->torso_h + 4 }, 0.7f);
-    pose_set(m, PART_R_SHOULDER,
-        (Vec2){ pelvis.x + 10, pelvis.y - ch->torso_h + 4 }, 0.7f);
-
-    float arm_reach = ch->bone_arm + ch->bone_forearm;
-    if (!skip_right_arm_aim) {
-        Vec2 r_sho = (Vec2){ pelvis.x + 10, pelvis.y - ch->torso_h + 4 };
-        Vec2 r_hand_target = (Vec2){ r_sho.x + aim_dir.x * arm_reach,
-                                     r_sho.y + aim_dir.y * arm_reach };
-        pose_set(m, PART_R_HAND, r_hand_target, 0.7f);
-
-        /* P11 — two-handed foregrip pose. Drive both L_ELBOW and
-         * L_HAND so the L_ARM chain sits at rest length pointing from
-         * L_SHOULDER toward the weapon's foregrip pixel. One-handed
-         * weapons return false from `weapon_foregrip_world` and the
-         * L_ARM keeps no pose target — the off-hand dangles from the
-         * constraint chain (the M1 "no IK" default). Spec:
-         * documents/m5/12-rigging-and-damage.md
-         * §"Two-handed weapons and the off-hand foregrip".
-         *
-         * Why pose BOTH elbow and hand instead of just the hand:
-         * the raw foregrip is typically UNREACHABLE for the L_ARM
-         * chain (Pulse Rifle on Trooper: foregrip is ~74 px from
-         * L_SHOULDER, but the chain `bone_arm + bone_forearm` only
-         * reaches ~30 px). Posing only L_HAND yanks the hand toward
-         * an out-of-reach target each tick; the constraint solver
-         * corrects the over-stretched chain by pulling L_ELBOW and
-         * L_SHOULDER forward; that propagates through CHEST →
-         * PELVIS and drags the whole body in the aim direction —
-         * the "mech moves on its own" bug. Posing BOTH elbow and
-         * hand at chain-rest-length positions on the L_SHOULDER →
-         * foregrip line forces the chain straight from the start;
-         * the constraint solver has nothing to correct, no force
-         * propagates back to the body, no drift. Visually the L_ARM
-         * extends straight toward the foregrip — a "reaching for the
-         * rifle" pose; once held-weapon art lands at P16 the L_HAND
-         * sits roughly on the rifle's foregrip pixel. */
-        /* P11 — two-handed foregrip pose: DEFERRED.
-         *
-         * The original implementation drove L_HAND toward the weapon
-         * sprite's foregrip pixel (with strength 0.6 at first, then a
-         * snap-pose IK variant that posed both L_ELBOW and L_HAND at
-         * chain-rest positions). Both versions visibly drifted the
-         * mech body in the aim direction — the "mech moves on its
-         * own" bug.
-         *
-         * Root cause: the rifle's grip-to-foregrip span (~24 px on a
-         * Pulse Rifle) plus the body's shoulder-to-shoulder span
-         * (~20 px) plus the aim-extended R_ARM (~30 px) puts the
-         * rifle's foregrip ~70+ px from L_SHOULDER, far past the
-         * L_ARM chain's max reach (`bone_arm + bone_forearm` ≈
-         * 30 px). Even a strength-1.0 snap-IK that places L_ELBOW +
-         * L_HAND on rest-length positions decouples from L_SHOULDER
-         * during the constraint-solve iterations: as PELVIS shifts
-         * (driven by the R_ARM aim drive's chain-pull each tick),
-         * L_SHOULDER follows via cross-brace; the L_ARM chain is no
-         * longer at rest relative to the moved L_SHOULDER; constraint
-         * corrections fire, propagating back to PELVIS — net
-         * additive drift in the aim direction. Pose strength <1 just
-         * moves the chain into a compressed state per-tick which
-         * also generates corrections.
-         *
-         * Real fix: an IK constraint that runs INSIDE the constraint-
-         * solve loop (instead of before it as a one-shot pose), so
-         * the L_ARM tracks L_SHOULDER per iteration. That's a real
-         * 2-bone analytic IK addition to the constraint pool — out
-         * of scope for P11. Deferred to M6 polish; tracked under
-         * TRADE_OFFS.md "Left hand has no pose target". One-handed
-         * weapons (which were never going to drive the foregrip)
-         * dangle as before; two-handed weapons also dangle now —
-         * resolved when the IK lands. */
-        (void)r_hand_target;
-    }
-    (void)arm_reach;
-
-    Vec2 lhip = { pelvis.x - 7, pelvis.y };
-    Vec2 rhip = { pelvis.x + 7, pelvis.y };
-    float leg_strength = 0.5f;
-
-    switch ((AnimId)m->anim_id) {
-        case ANIM_RUN: {
-            m->anim_time += dt;
-            const float stride     = 28.0f;
-            const float lift_h     = 9.0f;
-            const float run_v      = RUN_SPEED_PXS * ch->run_mult;
-            float       cycle_freq = run_v / (2.0f * stride);
-
-            float dir   = m->facing_left ? -1.0f : 1.0f;
-            float front = stride * 0.5f * dir;
-            float back  = -stride * 0.5f * dir;
-            float foot_y_ground = lhip.y + ch->bone_thigh + ch->bone_shin;
-
-            float p_l = m->anim_time * cycle_freq;
-            p_l -= floorf(p_l);
-            float p_r = p_l + 0.5f;
-            if (p_r >= 1.0f) p_r -= 1.0f;
-
-            /* P14 — footstep SFX on swing→stance transitions. The
-             * gait phase wraps from >0.5 (swing) back to <0.5 (stance
-             * start) at the moment the foot plants. We compare the
-             * current phase against the previous tick's stored value;
-             * the wrap test is robust to the cycle_freq jitter that
-             * comes from per-chassis run_mult. The SFX fires only
-             * when grounded so a mid-air ANIM_RUN (rare; typically
-             * the build switches to ANIM_FALL) doesn't ping. */
-            if (m->grounded) {
-                if (m->gait_phase_l > 0.5f && p_l < 0.5f) {
-                    float plant_x = lhip.x + front;
-                    audio_play_at(SFX_FOOTSTEP_CONCRETE,
-                                  (Vec2){ plant_x, foot_y_ground });
-                }
-                if (m->gait_phase_r > 0.5f && p_r < 0.5f) {
-                    float plant_x = rhip.x + front;
-                    audio_play_at(SFX_FOOTSTEP_CONCRETE,
-                                  (Vec2){ plant_x, foot_y_ground });
-                }
-            }
-            m->gait_phase_l = p_l;
-            m->gait_phase_r = p_r;
-
-            float l_fx, l_fy, r_fx, r_fy;
-            if (p_l < 0.5f) {
-                float u = p_l * 2.0f;
-                l_fx = lhip.x + front + (back - front) * u;
-                l_fy = foot_y_ground;
-            } else {
-                float u = (p_l - 0.5f) * 2.0f;
-                l_fx = lhip.x + back + (front - back) * u;
-                l_fy = foot_y_ground - lift_h * sinf(u * PI);
-            }
-            if (p_r < 0.5f) {
-                float u = p_r * 2.0f;
-                r_fx = rhip.x + front + (back - front) * u;
-                r_fy = foot_y_ground;
-            } else {
-                float u = (p_r - 0.5f) * 2.0f;
-                r_fx = rhip.x + back + (front - back) * u;
-                r_fy = foot_y_ground - lift_h * sinf(u * PI);
-            }
-
-            float l_knee_y = lhip.y + ch->bone_thigh - 2;
-            float r_knee_y = rhip.y + ch->bone_thigh - 2;
-            pose_set(m, PART_L_KNEE,
-                     (Vec2){ (lhip.x + l_fx) * 0.5f, l_knee_y }, 0.4f);
-            pose_set(m, PART_R_KNEE,
-                     (Vec2){ (rhip.x + r_fx) * 0.5f, r_knee_y }, 0.4f);
-            pose_set(m, PART_L_FOOT, (Vec2){ l_fx, l_fy }, leg_strength);
-            pose_set(m, PART_R_FOOT, (Vec2){ r_fx, r_fy }, leg_strength);
-            break;
+        float pelvis_x = p->pos_x[b + PART_PELVIS];
+        float foot_y_ground = p->pos_y[b + PART_PELVIS] +
+                              ch->bone_thigh + ch->bone_shin;
+        float dir   = m->facing_left ? -1.0f : 1.0f;
+        float front = stride * 0.5f * dir;
+        if (m->gait_phase_l > 0.5f && p_l < 0.5f) {
+            float plant_x = (pelvis_x - 7.0f) + front;
+            audio_play_at(SFX_FOOTSTEP_CONCRETE,
+                          (Vec2){ plant_x, foot_y_ground });
         }
-        case ANIM_JET: {
-            float dir = m->facing_left ? 1.0f : -1.0f;
-            pose_set(m, PART_L_KNEE,
-                (Vec2){ lhip.x + dir * 4, lhip.y + ch->bone_thigh - 2 }, 0.4f);
-            pose_set(m, PART_R_KNEE,
-                (Vec2){ rhip.x + dir * 4, rhip.y + ch->bone_thigh - 2 }, 0.4f);
-            pose_set(m, PART_L_FOOT,
-                (Vec2){ lhip.x + dir * 12, lhip.y + ch->bone_thigh + ch->bone_shin - 4 }, leg_strength);
-            pose_set(m, PART_R_FOOT,
-                (Vec2){ rhip.x + dir * 12, rhip.y + ch->bone_thigh + ch->bone_shin - 4 }, leg_strength);
-            break;
-        }
-        case ANIM_FALL:
-        case ANIM_FIRE:
-        case ANIM_STAND:
-        default: {
-            pose_set(m, PART_L_KNEE,
-                (Vec2){ lhip.x - 1, lhip.y + ch->bone_thigh }, 0.4f);
-            pose_set(m, PART_R_KNEE,
-                (Vec2){ rhip.x + 1, rhip.y + ch->bone_thigh }, 0.4f);
-            pose_set(m, PART_L_FOOT,
-                (Vec2){ lhip.x - 1, lhip.y + ch->bone_thigh + ch->bone_shin },
-                leg_strength);
-            pose_set(m, PART_R_FOOT,
-                (Vec2){ rhip.x + 1, rhip.y + ch->bone_thigh + ch->bone_shin },
-                leg_strength);
-            break;
+        if (m->gait_phase_r > 0.5f && p_r < 0.5f) {
+            float plant_x = (pelvis_x + 7.0f) + front;
+            audio_play_at(SFX_FOOTSTEP_CONCRETE,
+                          (Vec2){ plant_x, foot_y_ground });
         }
     }
+    m->gait_phase_l = p_l;
+    m->gait_phase_r = p_r;
 }
 
 /* ---- Step: input → forces → pose ---------------------------------- */
@@ -1168,12 +959,23 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
         else if (m->air_ticks < 255u) m->air_ticks++;
         bool really_airborne = (m->air_ticks > (uint8_t)GAIT_LIFT_MAX);
 
+        /* M6 — BTN_PRONE (X) and BTN_CROUCH (S/Down) drive new anim
+         * states. Priority: a held-down state OVERRIDES walk/stand
+         * but airborne states (JET / FALL) still take precedence.
+         * Prone is more committed than crouch (a player who taps
+         * crouch then prone ends up on the ground regardless of
+         * which key they hold longest). */
+        bool prone_held  = (in.buttons & BTN_PRONE)  != 0;
+        bool crouch_held = (in.buttons & BTN_CROUCH) != 0;
+
         bool input_drives_anim = w->authoritative || mid == w->local_mech_id;
         if (input_drives_anim) {
-            if (jetting)            m->anim_id = ANIM_JET;
+            if (jetting)              m->anim_id = ANIM_JET;
             else if (really_airborne) m->anim_id = ANIM_FALL;
-            else if (moving)        m->anim_id = ANIM_RUN;
-            else                    m->anim_id = ANIM_STAND;
+            else if (prone_held)      m->anim_id = ANIM_PRONE;
+            else if (crouch_held)     m->anim_id = ANIM_CROUCH;
+            else if (moving)          m->anim_id = ANIM_RUN;
+            else                      m->anim_id = ANIM_STAND;
         }
 
     } else if (m->alive && m->is_dummy) {
@@ -1211,7 +1013,15 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
                      m->grapple.rest_length);
         }
         if (jet_held) {
-            const float GRAPPLE_RETRACT_PXS  = 800.0f;
+            /* M6 audit — was 800 px/s, dropped to 400. At the old rate
+             * the rope shrank ~13 px/tick: combined with the hard
+             * (non-stretchy) constraint solver the firer's pelvis was
+             * yanked through any geometry between it and the anchor.
+             * 400 px/s (~6.7 px/tick) is slow enough that the swept-
+             * test inside solve_fixed_anchor + the stretchy constraint
+             * keep the firer on the correct side of solid walls and
+             * platforms. */
+            const float GRAPPLE_RETRACT_PXS  = 400.0f;
             /* MIN must clear the body height: head sits ~48 px above
              * pelvis with a ~8 px head radius, so a min of 60 px puts
              * the head crown right at the anchor's tile surface and
@@ -1307,8 +1117,13 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
      * mech_step_drive saw above. Otherwise BTN_FIRE on its first tick
      * would be eaten here and the fire path would never see it. */
 
-    build_pose(ch, w, m, dt);
-    apply_pose_to_particles(w, m);
+    /* M6 — gait phase + footstep SFX runs only on the side that owns
+     * prediction for this mech. Remote mechs on the client get their
+     * gait_phase from snapshot_apply, and the wrap SFX fires there. */
+    bool owns_mech = w->authoritative || mid == w->local_mech_id;
+    if (owns_mech) {
+        mech_update_gait(ch, w, m, dt);
+    }
 }
 
 /* Latch this tick's input into prev_buttons. Called by simulate AFTER
@@ -1329,7 +1144,16 @@ void mech_post_physics_anchor(World *w, int mid) {
         (p->flags[b + PART_R_FOOT] & PARTICLE_FLAG_GROUNDED);
     m->grounded = grounded;
     if (!grounded) return;
-    if (m->anim_id != ANIM_STAND && m->anim_id != ANIM_RUN) return;
+    /* M6 — also anchor CROUCH so the pelvis sits at the right height
+     * for the new pose rules (crouching mech is half-height above
+     * ground). PRONE is NOT anchored: in prone the legs rotate to
+     * lie horizontally next to the pelvis, so `foot_y_avg` becomes
+     * `pelvis.y` and a target of `foot_y - 14` would track the pelvis
+     * itself and drag it ever-lower. Gravity + tile collision place
+     * the pelvis at the ground surface naturally — the post-pose
+     * terrain push then keeps it there. */
+    if (m->anim_id != ANIM_STAND && m->anim_id != ANIM_RUN &&
+        m->anim_id != ANIM_CROUCH) return;
 
     /* P02: slope-aware gating. If either foot's contact normal is
      * tilted more than ~22° off straight-up, the mech is on a slope —
@@ -1347,11 +1171,30 @@ void mech_post_physics_anchor(World *w, int mid) {
     const Chassis *ch = mech_chassis((ChassisId)m->chassis_id);
     float foot_y = (p->pos_y[b + PART_L_FOOT] + p->pos_y[b + PART_R_FOOT]) * 0.5f;
 
-    float pelvis_y_target = foot_y - ch->bone_thigh - ch->bone_shin;
-    float knee_y_target   = foot_y - ch->bone_shin;
+    /* M6 — anchor height depends on anim_id. Standing: pelvis at full
+     * leg-chain above ground. Crouching: pelvis at ~60% chain above
+     * ground (knees bent). Prone: pelvis essentially at ground level
+     * (body lying flat). */
+    float chain_len = ch->bone_thigh + ch->bone_shin;
+    float pelvis_y_target;
+    if (m->anim_id == ANIM_CROUCH) {
+        pelvis_y_target = foot_y - chain_len * 0.55f;
+    } else {
+        pelvis_y_target = foot_y - chain_len;
+    }
+    float knee_y_target = foot_y - ch->bone_shin;
     float dy_pelvis = pelvis_y_target - p->pos_y[b + PART_PELVIS];
 
-    if (dy_pelvis >= -0.1f) return;
+    /* For STAND / RUN the anchor only pulls UP (counteracts gravity
+     * sag). Pushing pelvis DOWN there would fight a falling mech.
+     * For CROUCH the target is LOWER than standing height, so we need
+     * to allow the anchor to push pelvis DOWN as well. */
+    bool allow_downward = (m->anim_id == ANIM_CROUCH);
+    if (allow_downward) {
+        if (fabsf(dy_pelvis) < 0.1f) return;
+    } else {
+        if (dy_pelvis >= -0.1f) return;
+    }
 
     if (dy_pelvis < -1.5f) {
         SHOT_LOG("t=%llu mech=%d anchor anim=%d dy_pelvis=%.2f",
@@ -2006,7 +1849,9 @@ void mech_kill(World *w, int mid, int killshot_part, Vec2 dir,
     Mech *m = &w->mechs[mid];
     if (!m->alive) return;
     m->alive = false;
-    clear_pose(m);
+    /* (M6) — `clear_pose` removed along with `build_pose`. Once dead,
+     * `pose_compute` is skipped (alive guard in simulate.c), and the
+     * Verlet body free-falls per the ragdoll path. */
     (void)killshot_part;
 
     /* P06 — release any active grapple so the corpse doesn't keep

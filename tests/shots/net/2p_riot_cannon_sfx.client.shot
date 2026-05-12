@@ -1,0 +1,30 @@
+# 2p_riot_cannon_sfx — client. Fires Riot Cannon (WFIRE_SPREAD,
+# weapon id 2) on LMB; asserts its FIRE_EVENT handler plays the SFX.
+#
+# Pre-fix: client's `client_fire_event sfx ...` log line was absent
+# for self LMB-on-active non-hitscan, because the `predict_drew` gate
+# suppressed both sparks AND audio under one condition.
+#
+# Post-fix: `predict_drew_sfx` requires WFIRE_HITSCAN, so a
+# self-active Riot Cannon shot fires the SFX through the FIRE_EVENT
+# path and emits the `client_fire_event sfx` log line.
+
+window 1280 720
+out build/shots/net/2p_riot_cannon_sfx_client
+network connect 127.0.0.1:24112
+name ClientB
+
+loadout - "Riot Cannon" "Sidearm" Light Standard
+
+spawn_at 2540 984
+aim 2240 956
+
+at 130 shot t130_pre_match
+
+# T=200-215: client LMB-fires Riot Cannon. The fix makes the
+# `client_fire_event sfx` log line appear in the firer's window.
+at 200 press fire
+at 215 release fire
+at 220 shot t220_client_riot_cannon_fired
+
+at 280 end
