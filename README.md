@@ -2,7 +2,7 @@
 
 A 2D side-scrolling multiplayer mech shooter in C, in the lineage of Soldat.
 
-The project is in **M5 — Maps & content** (in progress; P01–P17 in).
+**M5 — Maps & content** complete (2026-05-12). P01–P19 in, plus off-roadmap wan-fixes 1–16, plus seven post-P19 follow-up rounds that retired bugs surfaced by paired-window LAN playtests (audio loudnorm wrecking short transients, jetpack/servo masking footsteps, the wan-fixes-3 inv_mass race that broke joining-client physics, the slope-tangent stretch that inflated mechs uphill, the pose-drive feedback loop that stretched remote-mech bones).
 M4 shipped the lobby & matches layer: full game flow
 (title → server browser → lobby → countdown → match → summary →
 next round), FFA + TDM + CTF modes, per-slot loadout picker,
@@ -96,8 +96,25 @@ reload registers the full SFX manifest + servo path via
 64-entry watcher cap)). Asset generation (chassis + weapons + HUD + Foundry
 parallax) shipped at P15–P16; **P17** ships the first batch of 4
 authored `.lvl` maps (Foundry / Slipstream / Reactor / Concourse) via
-a new `tools/cook_maps/` exporter (`make cook-maps`); 4 more maps +
-bake-test land at P18; SFX + music + ambient land at P19.
+a new `tools/cook_maps/` exporter (`make cook-maps`); **P18** adds
+4 more maps (Catwalk / Aurora / Crossfire / Citadel) plus a headless
+bake-test harness; **P19** fills the P14 audio runtime with 62 CC0
+assets (47 SFX + 1 servo + 7 music + 7 ambient) from Kenney + opengameart
+via `tools/audio_inventory/source_map.sh`, with peak normalization
+for short transients (LUFS loudnorm pulled brief impacts down to
+-25 dB peak — bad). F2 toggles a global mute for paired-window
+LAN tests. Multiple **post-P19 fixes** followed: pause/resume music
+on mute (raylib's SetMusicVolume(0) is unreliable), `apply_audio_for_level`
+moved to the audio module so the client's `client_handle_round_start`
+calls it (was host-only), remote-mech `grounded` flag preserved from
+snapshot (was clobbered by `any_foot_grounded` returning false on
+kinematic bodies), wan-fixes-3 inv_mass loop set both sides every
+tick (was zero-only — joining client's mech got permanently zeroed
+during the local_mech_id resolution race), slope-tangent Y-velocity
+applied uniformly to every particle (was lower-chain only — inflated
+the body on uphill runs), `apply_pose_to_particles` skipped for
+kinematic remote mechs (was driving a build_pose feedback loop that
+inflated bones).
 See [documents/11-roadmap.md](documents/11-roadmap.md) and
 [documents/m5/](documents/m5/).
 

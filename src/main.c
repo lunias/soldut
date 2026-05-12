@@ -409,38 +409,11 @@ static void apply_new_kills(Game *g) {
  * non-rooted entries (so a META string of "music/foundry.ogg" lands at
  * "assets/music/foundry.ogg" on disk). Returns NULL when no string is
  * present so the caller can skip the load. */
-static const char *resolve_meta_path(const Level *L, uint16_t idx,
-                                     char *buf, size_t cap)
-{
-    if (idx == 0) return NULL;
-    if (!L->string_table) return NULL;
-    if ((int)idx >= L->string_table_size) return NULL;
-    const char *s = L->string_table + idx;
-    if (!*s) return NULL;
-    if (s[0] == '/' || strncmp(s, "assets/", 7) == 0) return s;
-    snprintf(buf, cap, "assets/%s", s);
-    return buf;
-}
-
-/* P14 — apply per-map audio (music + ambient). Hard-cut between map
- * tracks; the audio module's own dedup keeps a same-map round-loop
- * from re-loading the streaming buffer. Called from start_round once
- * the level is built. */
-static void apply_audio_for_map(Game *g) {
-    char music_buf[256];
-    char ambient_buf[256];
-    const Level *L = &g->world.level;
-    const char *music_path = resolve_meta_path(L, L->meta.music_str_idx,
-                                               music_buf, sizeof music_buf);
-    audio_set_music_for_map(music_path);
-    if (music_path) audio_music_play();
-
-    const char *ambient_path = resolve_meta_path(L,
-                                                  L->meta.ambient_loop_str_idx,
-                                                  ambient_buf,
-                                                  sizeof ambient_buf);
-    audio_set_ambient_loop(ambient_path);
-}
+/* `apply_audio_for_map` was moved to src/audio.c as
+ * `audio_apply_for_level(&g->world.level)` so the client's
+ * `client_handle_round_start` (in net.c) can call it too — pre-fix,
+ * only the host's start_round invoked it, which meant clients heard
+ * no per-map music. */
 
 static void start_round(Game *g) {
     /* For the FIRST round, derive map+mode from the rotation table
@@ -640,10 +613,10 @@ static void start_round(Game *g) {
     g->world.flag_state_dirty = false;
 
     /* P14 — per-map audio. Hard-cut to the round's music + ambient
-     * track; missing-asset paths log INFO and silence. Currently no
-     * shipped maps populate music_str_idx — P17/P18 authored maps
-     * + the ComfyUI music pipeline fill those in. */
-    apply_audio_for_map(g);
+     * track; missing-asset paths log INFO and silence. The same call
+     * runs on each client from client_handle_round_start so every
+     * peer's music + ambient loads, not just the host's. */
+    audio_apply_for_level(&g->world.level);
 
     match_begin_round(&g->match);
     g->mode = MODE_MATCH;
@@ -2096,6 +2069,16 @@ int main(int argc, char **argv) {
 
         platform_begin_frame(&pf);
 
+        /* F2 toggles a global mute (P19 follow-up). Used during
+         * paired-process LAN net tests where two soldut windows on
+         * the same machine would otherwise stack their audio. The
+         * key is sampled by raylib's input layer, so this works in
+         * every mode (title / lobby / browser / match / summary).
+         * audio_toggle_mute logs the new state. */
+        if (IsKeyPressed(KEY_F2)) {
+            audio_toggle_mute();
+        }
+
         /* M5 P14 — advance the audio mixer state: decay duck
          * envelopes, feed UpdateMusicStream (must be every frame to
          * avoid streaming-buffer underrun), retrigger ambient loop,
@@ -2152,6 +2135,7 @@ int main(int argc, char **argv) {
         case MODE_TITLE: {
             BeginDrawing();
             title_screen_run(&ui, &game, pf.render_w, pf.render_h);
+            audio_draw_mute_overlay(pf.render_w, pf.render_h);
             EndDrawing();
             if (ui.request_quit)             { game.mode = MODE_QUIT; }
             else if (ui.request_single_player) {
@@ -2205,6 +2189,7 @@ int main(int argc, char **argv) {
             if (ui.host_starting) {
                 host_setup_screen_draw_overlay(&ui, pf.render_w, pf.render_h);
             }
+            audio_draw_mute_overlay(pf.render_w, pf.render_h);
             EndDrawing();
 
             if (ui.request_start_host && !ui.host_starting) {
@@ -2299,6 +2284,7 @@ int main(int argc, char **argv) {
         case MODE_BROWSER: {
             BeginDrawing();
             browser_screen_run(&ui, &game, pf.render_w, pf.render_h);
+            audio_draw_mute_overlay(pf.render_w, pf.render_h);
             EndDrawing();
             net_poll(&game.net, &game, dt);   /* drain discovery replies */
             if (ui.request_connect) {
@@ -2318,6 +2304,7 @@ int main(int argc, char **argv) {
         case MODE_CONNECT: {
             BeginDrawing();
             connect_screen_run(&ui, &game, pf.render_w, pf.render_h);
+            audio_draw_mute_overlay(pf.render_w, pf.render_h);
             EndDrawing();
             if (ui.request_connect) {
                 ui.request_connect = false;
@@ -2373,6 +2360,7 @@ int main(int argc, char **argv) {
             if (ui.match_loading) {
                 match_loading_overlay_draw(&ui, &game, pf.render_w, pf.render_h);
             }
+            audio_draw_mute_overlay(pf.render_w, pf.render_h);
             EndDrawing();
 
             /* Honor the lobby UI's "Leave" button. */
@@ -2645,6 +2633,7 @@ int main(int argc, char **argv) {
         default:
             BeginDrawing();
             ClearBackground(BLACK);
+            audio_draw_mute_overlay(pf.render_w, pf.render_h);
             EndDrawing();
             break;
         }

@@ -13,7 +13,24 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-12** (P18 — maps 5-8 + bake harness). P18
+Last updated: **2026-05-12** (P19 — audio assets fill). **Deleted**
+"SFX manifest assets aren't on disk yet (post-P14)" — the 47-entry
+SFX manifest + servo loop + 7 per-map music tracks + 7 ambient loops
+are all on disk under `assets/sfx/` and `assets/music/`. Sources:
+Kenney CC0 audio packs (sci-fi-sounds / impact-sounds / digital-audio
+/ ui-audio / interface-sounds / music-jingles) for SFX + servo +
+ambient; opengameart.org CC0 for the 7 music tracks. Sourcing
+mapping is `tools/audio_inventory/source_map.sh`; format pass is
+`tools/audio_normalize/normalize.sh` (22050 Hz mono PCM16 WAV /
+mono Vorbis q2-q4 OGG with -16/-23/-28 LUFS loudnorm). Total
+shipped: 7.9 MB (well under the 30 MB budget). New Makefile
+targets: `audio-inventory` / `audio-normalize` / `audio-credits` /
+`test-audio-smoke`. P19 ships **no new TRADE_OFFS entries** — the
+multi-variant footstep gap noted in the P14 spec was never wired into
+the runtime manifest (single slot per surface with 5-alias rotation),
+so P19 ships exactly what the runtime asks for.
+
+Previously: **2026-05-12** (P18 — maps 5-8 + bake harness). P18
 extended `tools/cook_maps/cook_maps.c` with builders for Catwalk /
 Aurora / Crossfire / Citadel and renamed the existing
 "Concourse is synthesized programmatically" entry to cover all 8 M5
@@ -1601,44 +1618,6 @@ WAN polish. Net effect on the trade-off ledger:
 ---
 
 ## Audio (P14)
-
-### SFX manifest assets aren't on disk yet (post-P14)
-
-- **What we did** — P14 ships the audio runtime: 47-entry SFX manifest
-  in `src/audio.c` + servo loop path, each loaded by `audio_init` via
-  `LoadSound` + `LoadSoundAlias`. None of the underlying `.wav`
-  files exist at P14 ship — every entry hits the missing-file path,
-  logs INFO ("audio: assets/sfx/X.wav missing — playback for this id
-  will no-op"), and leaves `alias_count = 0`. `audio_play_at` /
-  `_global` early-return for those ids, so the build runs without
-  audio while the asset-generation pipeline catches up. raylib also
-  emits its own `WARNING: FILEIO: [...] Failed to open file` per
-  missing file at startup; tolerated as one-time noise.
-- **Why** — Same staging as P10 / P11 / P12 / P13: ship the runtime
-  first as a focused review surface, fill the assets at P15-P18.
-  Splitting means the SFX pipeline can iterate against a working
-  module without engineering churn between renders. Audio assets are
-  CC0-sourced (freesound.org / opengameart.org) plus Soldut-original
-  recordings per `documents/m5/09-audio.md` §"Where to source samples".
-- **Revisit when** —
-  - **P19 ships `assets/sfx/*.wav` + per-map music/ambient** for at
-    least one cue. P19 is the scheduled audio-asset prompt (added
-    2026-05-10 after the P14 entry's original "P15-P18 ships the
-    audio assets" plan didn't survive contact with the P15 chassis-art
-    pivot — P15 → Trooper chassis, P16 → remaining chassis + weapon
-    atlas + HUD icons + per-map parallax kits, P17–P18 → 8 authored
-    `.lvl` maps, P19 → audio). The audio module's
-    `audio_register_hotreload` already plumbs the manifest into the
-    P13 mtime watcher, so designers iterating on samples get the
-    per-file reload without further wiring. Until P19 lands audio is
-    silent in real play but the runtime is exercised by `tests/net/`
-    + shot mode without issue (every `audio_play_*` no-ops for the
-    47 missing ids).
-  - The startup INFO + raylib WARNING noise becomes a real concern
-    (e.g., users seeing 50 lines per launch in `soldut.log`). Bump
-    raylib's `SetTraceLogLevel` to `LOG_ERROR` around `audio_init` to
-    suppress just the loop's warnings, and condense our INFOs to a
-    single summary "audio_init: 0/47 samples loaded".
 
 ### No crossfade between map tracks (P14)
 

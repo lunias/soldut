@@ -140,6 +140,23 @@ void audio_play_global(SfxId id);
  * gains multiply through `bus_resolved` on every play call. */
 void audio_set_bus_volume(AudioBusId bus, float v);
 
+/* F2 mute toggle — gates every `bus_resolved()` call to return 0
+ * when set, instantly silencing the application (SFX + UI + music +
+ * ambient + servo) without disturbing the per-bus gain knobs.
+ * Un-muting restores the exact prior mix. Used for paired-process
+ * local network tests where two soldut windows on the same machine
+ * would otherwise stack their audio. State is process-local; not
+ * persisted across launches. */
+void audio_toggle_mute(void);
+bool audio_is_muted(void);
+
+/* Paint a small "F2 MUTED" indicator at the top-center of the
+ * screen when audio_is_muted() is true; no-op when unmuted. Must be
+ * called inside a Begin/EndDrawing pair. Callers pass it
+ * unconditionally — the mute-state check happens inside, so every
+ * mode's draw path can call it without first checking is_muted. */
+void audio_draw_mute_overlay(int screen_w, int screen_h);
+
 /* Ducking. `factor` ∈ [0, 1] is the temporary multiplier applied to
  * music + ambient buses; `seconds` is how long it takes to recover to
  * 1.0. Stacks across simultaneous calls by taking the lower (more
@@ -152,6 +169,14 @@ void audio_request_duck(float factor, float seconds);
 void audio_set_music_for_map(const char *path);
 void audio_music_play(void);
 void audio_music_stop(void);
+
+/* Apply the per-map audio (music + ambient) from a freshly-built
+ * level's STRT lump. Hard-cuts to the round's music + ambient track.
+ * Called by both the host's start_round and the client's
+ * client_handle_round_start so music plays on every peer, not just
+ * the authoritative one. Idempotent on same-map round loops. */
+struct Level;
+void audio_apply_for_level(const struct Level *L);
 
 /* Ambient loops. Small samples that retrigger when their playback
  * ends (raylib's Sound has no built-in looping). */
@@ -179,3 +204,14 @@ void audio_reload_path(const char *path);
  * — those reload via the per-map switch (cheap stop+load), which is
  * good enough for M5 iteration. */
 void audio_register_hotreload(void);
+
+/* Tooling enumeration — used by tools/audio_inventory to walk the
+ * manifest without duplicating the path table. The manifest in
+ * audio.c is the source of truth; new entries land there and these
+ * accessors surface them automatically. Music + ambient paths are
+ * derived per-map (cook_maps' kit short_names), not in the manifest;
+ * the inventory tool builds those from its own kit list. */
+int         audio_manifest_count(void);
+const char *audio_manifest_path(int idx);
+const char *audio_manifest_kind(int idx);   /* "SFX_WPN" / "SFX_HIT" / ... */
+const char *audio_servo_path(void);

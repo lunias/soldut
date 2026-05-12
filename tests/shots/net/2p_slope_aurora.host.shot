@@ -1,0 +1,29 @@
+# Aurora slope-stretch repro (host side). Spawn the host mech at the
+# base of Aurora's west hill (~x=20 tiles = 640 px world; floor is at
+# ~y=H-4 = ~2752 px). Walk right (uphill) for several seconds. The
+# stretch bug should manifest visibly in the screenshots.
+#
+# Aurora is 160 tiles wide × 90 tall; t2w(x) = x*32. floor_y = (90-4)*32 = 2752.
+# West hill rises from t2w(20)=640 to peak at t2w(32)=1024 with
+# hill_peak_y = t2w(H-11) = t2w(79) = 2528.
+
+window 1280 720
+out build/shots/net/2p_slope_aurora.host
+network host 24073
+name HostA
+map aurora
+spawn_at 600 2700
+
+mouse 1100 360
+
+at 60   shot lobby_full
+at 200  shot match_t200_pre
+at 240  press right
+at 260  shot match_t260_climb1
+at 290  shot match_t290_climb2
+at 320  shot match_t320_climb3
+at 360  shot match_t360_climb4
+at 400  release right
+at 420  shot match_t420_stopped
+at 540  shot summary
+at 600  end

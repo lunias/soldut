@@ -50,7 +50,8 @@ ENET_LIB   := third_party/enet/libenet.a
 
 .PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade host-overlay-preview lobby-overlay-preview cook-maps bake bake-all shot \
         debug gdb gdb-host gdb-client valgrind editor \
-        assets-palettes assets-process
+        assets-palettes assets-process \
+        audio-inventory audio-normalize audio-credits test-audio-smoke
 
 all: $(BIN)
 
@@ -399,6 +400,40 @@ editor: $(RAYLIB_LIB)
 EDITOR_SHOT_SCRIPT ?= tools/editor/shots/smoke.shot
 editor-shot: editor
 	./build/soldut_editor --shot $(EDITOR_SHOT_SCRIPT)
+
+# M5 P19 — audio asset inventory + normalize + credits + smoke.
+#
+# audio-inventory walks src/audio.c::g_sfx_manifest + SERVO_PATH +
+# the per-map music/ambient paths (kit short_names mirror cook_maps)
+# and prints a CSV of (path, kind, size_bytes, status) plus writes
+# tools/audio_inventory/missing.txt with one missing path per line.
+# Source of truth is audio.c — the tool exposes nothing of its own;
+# new manifest entries surface automatically.
+$(BUILD_DIR)/audio_inventory: tools/audio_inventory/run_inventory.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) -Isrc tools/audio_inventory/run_inventory.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+audio-inventory: $(BUILD_DIR)/audio_inventory
+	./$(BUILD_DIR)/audio_inventory
+
+# audio-normalize re-encodes every sample under assets/sfx/ +
+# assets/music/ to the spec format (22050 Hz mono PCM16 WAV /
+# Vorbis q3-q5 mono OGG). Idempotent: a second run skips files
+# already in the right shape. Pass ARGS=--loudness to also run the
+# loudnorm pass (-16 LUFS SFX / -23 LUFS music / -28 LUFS ambient).
+audio-normalize:
+	bash tools/audio_normalize/normalize.sh $(ARGS)
+
+# audio-credits diffs assets/sfx/ + assets/music/ + the servo path
+# against assets/credits.txt. Fails non-zero if any shipped audio
+# file is missing a credits row. Protects CC0 compliance.
+audio-credits:
+	bash tools/audio_inventory/check_credits.sh
+
+# Smoke: boot a 10-tick scripted run; FAIL if soldut.log contains
+# any "audio:.*missing" line. Confirms the inventory matches what
+# the runtime actually loads (manifest paths vs disk).
+test-audio-smoke: $(BIN)
+	bash tests/audio_smoke.sh
 
 # M5 P16 — ImageMagick post-process for non-chassis assets.
 #

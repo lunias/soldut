@@ -191,10 +191,27 @@ void simulate_step(World *w, float dt) {
         ParticlePool *pp = &w->particles;
         int local_id = w->local_mech_id;
         for (int i = 0; i < w->mech_count; ++i) {
-            if (i == local_id) continue;
             const Mech *m = &w->mechs[i];
+            /* Set every tick, not only the zero side. The original
+             * loop just zero'd remotes — but `local_mech_id` resolves
+             * a tick or three AFTER the local mech is spawned by the
+             * snapshot stream (the lobby's slot→mech mapping arrives
+             * separately). During that window `local_id == -1`, so
+             * the `i != local_id` test is true for every i and the
+             * local mech's particles get zeroed too. Once
+             * local_mech_id finally resolves, the old loop would
+             * stop zeroing the local mech but never restore it to
+             * 1.0 — leaving prediction physics permanently dead on
+             * the client's own mech. Symptom: gunshots still work
+             * (they don't use inv_mass) but the local mech's
+             * footsteps fall silent because PARTICLE_FLAG_GROUNDED
+             * is never set, so any_foot_grounded returns false and
+             * the build_pose gait wrap is skipped. Setting both
+             * sides explicitly every tick is idempotent and
+             * self-heals. */
+            float target_inv_mass = (i == local_id) ? 1.0f : 0.0f;
             for (int part = 0; part < PART_COUNT; ++part) {
-                pp->inv_mass[m->particle_base + part] = 0.0f;
+                pp->inv_mass[m->particle_base + part] = target_inv_mass;
             }
         }
     }

@@ -1,0 +1,19 @@
+# tests/shots/audio_smoke.shot — P19 audio smoke.
+#
+# Boots the game on Foundry, fires once, takes a frame, exits.
+# tests/audio_smoke.sh greps the log for `audio:.*missing` lines —
+# any miss is a manifest path that the source pass forgot.
+#
+# Doesn't need to assert anything audible — raylib's audio runs on
+# its own thread; we only care that audio_init loaded every entry.
+
+window 320 180
+out build/shots/audio_smoke
+map foundry
+seed 1 1
+
+mouse 200 100
+at 2 press fire
+at 8 release fire
+at 10 shot t010_after_fire
+at 12 end

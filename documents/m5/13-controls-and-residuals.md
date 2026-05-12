@@ -170,7 +170,7 @@ A keybinds config file (`soldut_controls.cfg`) is M6 polish; M5 ships hard-coded
 |---|---|---|
 | Mechs rendered as raw capsules | [08-rendering.md](08-rendering.md), [12-rigging-and-damage.md](12-rigging-and-damage.md) | Sprite atlas runtime lands at P10; capsule fallback intentionally kept until P12 (damage feedback) makes the sprite path canonical. **P12 shipped damage feedback in BOTH render paths (hit-flash + decals + spray + emitter + smoke), but no `assets/sprites/<chassis>.png` files exist on disk until P15/P16 — so capsule fallback is what fires in real play through P14 development. Per the post-P12 audit in `TRADE_OFFS.md`, the entry-deletion gate moved from P12 to P15/P16 (asset generation).** |
 | Only a tile grid; no per-tile polygons | [03-collision-polygons.md](03-collision-polygons.md) | Free-poly broadphase + slope physics. |
-| Hard-coded tutorial map | [01-lvl-format.md](01-lvl-format.md), [07-maps.md](07-maps.md) | `.lvl` loader + 8 authored maps. |
+| Hard-coded tutorial map | [01-lvl-format.md](01-lvl-format.md), [07-maps.md](07-maps.md) | `.lvl` loader + 8 authored maps shipped (P17/P18 via `tools/cook_maps`). **Entry stays open** — `shotmode.c` + `tests/headless_sim.c` still call `level_build_tutorial` directly. Deletion gate is migrating those callsites to `level_load` against a checked-in `.lvl` fixture. |
 | Grappling Hook is a stub | [05-grapple.md](05-grapple.md) | Full anchor + retract + release. |
 | Engineer ability heals self instead of dropping a deployable | [04-pickups.md](04-pickups.md) | `BTN_USE` drops `PICKUP_REPAIR_PACK`. |
 | Burst SMG fires all rounds on the same tick | [04-pickups.md](04-pickups.md) §"Residual fixes" | `burst_pending_*` queued cadence. |

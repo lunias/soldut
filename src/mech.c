@@ -476,6 +476,26 @@ static void pose_set(Mech *m, int part, Vec2 target, float strength) {
 }
 
 static void apply_pose_to_particles(World *w, Mech *m) {
+    /* Skip the pose drive entirely for remote mechs on the client.
+     * Per wan-fixes-3, remote mech particles have inv_mass=0 — the
+     * physics constraint solver short-circuits on those, so the
+     * normal stabilizer that keeps bones at rest length does nothing.
+     * `physics_translate_kinematic_swept` below moves particles
+     * DIRECTLY (bypassing inv_mass), and build_pose's
+     * `pelvis_y_pose = foot_y_avg - chain_len` override turns the
+     * ANIM_RUN gait swing into a feedback loop on the client: the
+     * gait lifts feet → foot_y_avg moves up → pose pelvis_y target
+     * moves up → chest target moves up → apply_pose lifts the chest
+     * → next tick's gait recomputes against a moved body → bones
+     * inflate. The host doesn't show this because its constraint
+     * solver pulls bones back to rest length each tick. By skipping
+     * pose drive on kinematic remote mechs, the body stays in
+     * whatever pose `mech_create_loadout` initialized it to (chassis
+     * rest pose) and `snapshot_interp_remotes` rigid-translates the
+     * whole thing with the pelvis. Matches the existing trade-off
+     * "Remote mechs render in rest pose on the client". */
+    if (!w->authoritative && m->id != w->local_mech_id) return;
+
     ParticlePool *p = &w->particles;
     for (int i = 0; i < PART_COUNT; ++i) {
         float s = m->pose_strength[i];
@@ -794,13 +814,25 @@ static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, 
     for (int part = 0; part < PART_COUNT; ++part) {
         int idx = m->particle_base + part;
         physics_set_velocity_x(p, idx, vt_per_tick_x);
-        /* Y is set on the lower chain only — upper body keeps its
-         * gravity component so the body leans naturally into a slope
-         * instead of being dragged tilted. */
-        if (part == PART_L_FOOT || part == PART_R_FOOT ||
-            part == PART_L_KNEE || part == PART_R_KNEE) {
-            physics_set_velocity_y(p, idx, vt_per_tick_y);
-        }
+        /* Apply the slope-tangent Y-velocity to every particle, not
+         * just the lower chain. The original code split this — only
+         * the knees + feet got the Y push, on the theory that the
+         * upper body would "lean naturally" into the slope under
+         * gravity. In practice that asymmetry stretches the body:
+         * while running uphill, the feet + knees climb each tick
+         * (vt_per_tick_y < 0) but the pelvis / chest / head get only
+         * the X component, so the constraint solver has to recover
+         * 2-3 px of vertical separation per tick. 12 relaxation
+         * iterations don't fully converge against a per-tick velocity
+         * injection on a long chain (feet → knees → thighs → pelvis
+         * → chest → head/arms), so the stretch accumulates over a
+         * held-run climb and renders as a visibly growing mech. Going
+         * downhill doesn't show the bug because gravity naturally
+         * pulls the upper body down at the same rate as the climb
+         * tangent. Translating the whole body rigidly along the
+         * tangent solves it; the slight loss of "lean" on a slope is
+         * far less noticeable than the body inflating. */
+        physics_set_velocity_y(p, idx, vt_per_tick_y);
     }
 }
 
@@ -978,8 +1010,27 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
     uint16_t pressed = (uint16_t)((~m->prev_buttons) & in.buttons);
 
     if (m->alive && !m->is_dummy) {
-        bool grounded = any_foot_grounded(w, m);
-        m->grounded = grounded;
+        /* `grounded` for the rest of this block + footstep firing in
+         * build_pose. Source depends on who owns physics for this mech:
+         *   - Authoritative (server, offline-solo): all mechs run real
+         *     physics, so `PARTICLE_FLAG_GROUNDED` is current.
+         *   - Client local mech: prediction runs real physics, ditto.
+         *   - Client remote mech: wan-fixes-3 sets inv_mass=0 on every
+         *     remote particle, so the physics collision pass skips
+         *     them and never sets PARTICLE_FLAG_GROUNDED. We must
+         *     trust the snapshot-supplied `m->grounded` (decoded from
+         *     SNAP_STATE_GROUNDED). Without this gate,
+         *     any_foot_grounded() returns false for every remote mech,
+         *     which silently breaks remote footstep audio (the
+         *     swing→stance trigger in build_pose's ANIM_RUN case is
+         *     gated on `m->grounded`). */
+        bool grounded;
+        if (w->authoritative || mid == w->local_mech_id) {
+            grounded = any_foot_grounded(w, m);
+            m->grounded = grounded;
+        } else {
+            grounded = m->grounded;
+        }
 
         if (pressed & BTN_SWAP) swap_weapon(m);
 

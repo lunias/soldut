@@ -1626,6 +1626,14 @@ static void client_handle_round_start(const uint8_t *body, int blen, Game *g) {
      * World so mech.c (which doesn't see Game) can branch in mech_kill. */
     g->world.match_mode_cached = (int)g->match.mode;
     ctf_init_round(&g->world, g->match.mode);
+
+    /* P14 + post-P19 follow-up — apply per-map music + ambient on the
+     * CLIENT too. Pre-fix, only the host's start_round called this,
+     * so paired-window LAN tests heard music in one window only.
+     * Idempotent on same-map round loops (audio_set_music_for_map
+     * dedups by path). */
+    audio_apply_for_level(&g->world.level);
+
     g->mode = MODE_MATCH;
     LOG_I("client: ROUND_START map=%d mode=%s",
           g->match.map_id, match_mode_name(g->match.mode));

@@ -230,6 +230,7 @@ void title_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
             { "E",                     "Use / interact (Engineer pack)" },
             { "Shift",                 "Dash / burst-jet boost" },
             { "Esc",                   "Leave to title (in lobby/match)" },
+            { "F2",                    "Mute audio (paired-process tests)" },
         };
         int n_rows = (int)(sizeof(rows) / sizeof(rows[0]));
         int row_y = dy + S(60);
