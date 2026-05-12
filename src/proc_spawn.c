@@ -170,18 +170,41 @@ ProcHandle proc_spawn(const char *const *argv) {
     PROCESS_INFORMATION pi = {0};
     si.cb = sizeof(si);
     /* Inherit stdout/stderr/stdin so console launches show the
-     * dedicated server's log in the same terminal. */
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-    si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
+     * dedicated server's log in the same terminal — but ONLY if
+     * we actually have a console attached. If the user launches
+     * Soldut.exe from Explorer (no terminal), GetStdHandle returns
+     * NULL / INVALID_HANDLE_VALUE for the standard streams, and
+     * passing those to STARTF_USESTDHANDLES makes CreateProcess
+     * fail (the child can't open NUL stdin/stdout) or silently
+     * stall (sometimes the kernel quietly drops the child). Detect
+     * the no-console case and let the child use its default
+     * handles instead. */
+    HANDLE hin  = GetStdHandle(STD_INPUT_HANDLE);
+    HANDLE hout = GetStdHandle(STD_OUTPUT_HANDLE);
+    HANDLE herr = GetStdHandle(STD_ERROR_HANDLE);
+    BOOL handles_ok = (hin  != NULL && hin  != INVALID_HANDLE_VALUE &&
+                       hout != NULL && hout != INVALID_HANDLE_VALUE &&
+                       herr != NULL && herr != INVALID_HANDLE_VALUE);
+    if (handles_ok) {
+        si.dwFlags    = STARTF_USESTDHANDLES;
+        si.hStdInput  = hin;
+        si.hStdOutput = hout;
+        si.hStdError  = herr;
+    }
+
+    /* CREATE_NO_WINDOW prevents a transient console flash on
+     * Explorer launches (the dedicated child is headless — no
+     * raylib, no audio, just sim + net). When the parent already
+     * has a console, the child shares it via STARTF_USESTDHANDLES
+     * above; CREATE_NO_WINDOW is harmless in that case. */
+    DWORD flags = handles_ok ? 0 : CREATE_NO_WINDOW;
 
     BOOL ok = CreateProcessA(
         /*lpApplicationName*/ NULL,
         /*lpCommandLine*/     cmd,
         NULL, NULL,
-        /*bInheritHandles*/   TRUE,
-        /*dwCreationFlags*/   0,
+        /*bInheritHandles*/   handles_ok ? TRUE : FALSE,
+        /*dwCreationFlags*/   flags,
         NULL, NULL,
         &si, &pi);
     if (!ok) {
@@ -233,6 +256,17 @@ void proc_terminate(ProcHandle h) {
 void proc_kill(ProcHandle h) {
     if (!proc_handle_valid(h)) return;
     HANDLE p = (HANDLE)(uintptr_t)h.native;
+    /* If the child has already exited, TerminateProcess returns
+     * ERROR_ACCESS_DENIED (5) on Windows — which we'd otherwise log
+     * as a WARN and confuse the user into thinking something is
+     * broken. Check the exit code first so an already-exited child
+     * is a silent no-op. */
+    DWORD exit_code = 0;
+    if (GetExitCodeProcess(p, &exit_code) && exit_code != STILL_ACTIVE) {
+        LOG_I("proc_kill(pid=%d): already exited (code=%lu) — no-op",
+              h.pid, (unsigned long)exit_code);
+        return;
+    }
     if (!TerminateProcess(p, 0)) {
         LOG_W("proc_kill(pid=%d): TerminateProcess failed: code=%lu",
               h.pid, (unsigned long)GetLastError());

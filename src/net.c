@@ -337,7 +337,10 @@ bool net_client_connect(NetState *ns, const char *host, uint16_t port,
     ENetEvent ev;
     int got_connect = 0;
     enet_uint32 deadline = 5000;
-    while (enet_host_service(eh, &ev, deadline) > 0) {
+    int events_seen = 0;
+    int service_rc = 0;
+    while ((service_rc = enet_host_service(eh, &ev, deadline)) > 0) {
+        ++events_seen;
         if (ev.type == ENET_EVENT_TYPE_CONNECT) {
             got_connect = 1;
             break;
@@ -349,6 +352,28 @@ bool net_client_connect(NetState *ns, const char *host, uint16_t port,
         deadline = 1000;
     }
     if (!got_connect) {
+        /* Diagnose what happened. service_rc 0 = clean timeout (no
+         * events received during the wait — usually packets are being
+         * dropped between client and server; on Windows this is most
+         * commonly Windows Defender Firewall blocking the dedicated
+         * child's UDP port). service_rc < 0 = ENet internal error
+         * (rare; bad socket state). */
+        if (service_rc == 0 && events_seen == 0) {
+            LOG_E("net_client_connect: no ENet events received during "
+                  "5 s wait — client never got a CONNECT or DISCONNECT "
+                  "from %s. ENet sent CONNECT command(s) but the server "
+                  "never responded. Either packets aren't reaching the "
+                  "server (firewall / NAT / OS routing) OR the server "
+                  "isn't seeing them (check the dedicated child's log "
+                  "for `server: peer connected` — its absence confirms "
+                  "the packets never arrived).", abuf);
+        } else if (service_rc < 0) {
+            LOG_E("net_client_connect: enet_host_service returned %d "
+                  "(internal error) after %d event(s)", service_rc, events_seen);
+        } else {
+            LOG_E("net_client_connect: enet handshake gave up after %d "
+                  "event(s) without a CONNECT to %s", events_seen, abuf);
+        }
         enet_peer_reset(peer);
         enet_host_destroy(eh);
         memset(ns, 0, sizeof *ns);
