@@ -66,6 +66,19 @@ tools/comfy/output/
 tools/comfy/state/
 tools/comfy/stumps/
 
+# P19 audio sourcing scratch. Tracked: the shipped audio under
+# assets/sfx/ + assets/music/, the sourcing scripts under
+# tools/audio_inventory/ + tools/audio_normalize/. Not tracked:
+# the source-pack ZIPs (~6 MB each Kenney pack) and their
+# extracted file trees + the opengameart mp3/ogg downloads —
+# all CC0 and re-derivable from the URLs in assets/credits.txt
+# + tools/audio_inventory/SHOPPING.md.
+assets/raw/audio/
+
+# P19 tooling output — regenerated per run.
+tools/audio_inventory/missing.txt
+tools/audio_normalize/normalized.txt
+
 # Local pipeline state files
 /tmp/canonical_*.log
 /tmp/canonical_*.exit

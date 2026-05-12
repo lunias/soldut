@@ -119,7 +119,7 @@ This is the order that keeps things shippable and minimizes "block on a dependen
 
 **Week 2 — editor + first new content**
 - [02-level-editor.md](02-level-editor.md). `tools/editor/soldut_editor`. Tile paint, polygon draw, spawn/pickup placement, F5 test play. Save/load round-trip the format.
-- Build map #4 (Concourse) in the editor as the editor's own bake-test.
+- ~~Build map #4 (Concourse) in the editor as the editor's own bake-test.~~ (Shipped at P17 as a programmatic `cook_maps` scaffold instead; editor-authoring of Concourse deferred — tracked as a TRADE_OFFS entry.)
 - Land [04-pickups.md](04-pickups.md). Spawner pool, item state machine, respawn timers, network event protocol. No audio yet (that lands in week 3).
 
 **Week 3 — gameplay systems + audio plumbing**

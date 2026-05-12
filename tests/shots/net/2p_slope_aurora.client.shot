@@ -1,0 +1,25 @@
+# Aurora slope-stretch repro (client side). Connect, sit still on the
+# east side, observe the host climbing the west hill. Confirms whether
+# the stretch is in the client's render of the remote host mech, the
+# host's render of itself, both, or neither.
+
+window 1280 720
+out build/shots/net/2p_slope_aurora.client
+network connect 127.0.0.1:24073
+name ClientB
+map aurora
+spawn_at 4100 2700
+
+mouse 200 360
+
+at 60   shot lobby_full
+at 200  shot match_t200_pre
+at 260  shot match_t260_obs1
+at 290  shot match_t290_obs2
+at 320  shot match_t320_obs3
+at 360  shot match_t360_obs4
+at 420  shot match_t420_stopped
+at 540  shot summary
+at 600  end
+
+contact_sheet sheet cols 3 cell 320 180

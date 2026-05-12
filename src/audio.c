@@ -26,10 +26,26 @@
 
 /* Servo loop: target = clamp(vel/RUN_SPEED) * MAX. Lerp current
  * toward target by SERVO_LERP each call (which the audio_step path
- * runs once per render frame). */
+ * runs once per render frame).
+ *
+ * SERVO_MAX_VOL is 0.0 at post-P19 round 4 — the servo is
+ * intentionally silent. User feedback across three rounds: the
+ * continuous mech-presence hum masked the per-plant footstep cues
+ * and read as "the walking sound" regardless of source sample
+ * (spaceEngine_000 / forceField_002 / computerNoise_001 were all
+ * tried). Footsteps carry the player's gait cue; servo is
+ * unnecessary. The sample stays on disk + the runtime path stays
+ * wired so re-enabling is a one-line change: raise MAX_VOL to e.g.
+ * 0.10 to bring a subtle hum back.
+ *
+ * For the competitive-listening use case (hearing enemy footsteps
+ * approach), the SFX bus distance attenuation (200 px full → 1500
+ * px silent in `audio_play_at`) does the spatial work; bumping the
+ * footstep volume in g_sfx_manifest is what controls intelligibility
+ * at mid-range, not the servo cap. */
 #define SERVO_RUN_SPEED 280.0f
-#define SERVO_MAX_VOL   0.7f
-#define SERVO_LERP      0.15f
+#define SERVO_MAX_VOL   0.00f
+#define SERVO_LERP      0.30f
 
 /* Per-tick → per-second conversion. Sim is fixed at 60 Hz; the
  * physics step takes the per-tick displacement (`pos - prev`) and we
@@ -50,11 +66,56 @@ typedef struct {
 
 static AudioBus g_buses[AUDIO_BUS_COUNT];
 
+/* F2 mute — process-local flag that short-circuits bus_resolved to
+ * silence all output without disturbing the per-bus gains. The
+ * underlying samples + music streams continue to play (raylib's
+ * mixer runs regardless); only the volume read at PlaySound /
+ * SetMusicVolume / SetSoundVolume reads zero. */
+static bool g_muted = false;
+
 static float bus_resolved(AudioBusId bus) {
+    if (g_muted) return 0.0f;
     if (bus < 0 || bus >= AUDIO_BUS_COUNT) bus = AUDIO_BUS_SFX;
     return g_buses[AUDIO_BUS_MASTER].gain *
            g_buses[bus].gain *
            g_buses[bus].duck_target;
+}
+
+/* audio_toggle_mute is defined further down, after the music /
+ * ambient / servo file-statics it operates on. Forward declared
+ * here so anything in this translation unit can call it (and so
+ * the header order matches the public API order). */
+bool audio_is_muted(void) {
+    return g_muted;
+}
+
+void audio_draw_mute_overlay(int sw, int sh) {
+    if (!g_muted) return;
+    /* Small top-center pill: dark scrim + white "F2 MUTED" label.
+     * Sized for the 1920×1080 default (scaled down at smaller
+     * resolutions). raylib's Vector2 / Color types are already in
+     * scope via the raylib.h include above. */
+    (void)sh;
+    float sc = (float)sw / 1920.0f;
+    if (sc < 0.5f) sc = 0.5f;
+    if (sc > 2.0f) sc = 2.0f;
+
+    const char *label = "F2  MUTED";
+    int font_px = (int)(18.0f * sc);
+    if (font_px < 12) font_px = 12;
+
+    int text_w = MeasureText(label, font_px);
+    int pad_x  = (int)(12.0f * sc);
+    int pad_y  = (int)(6.0f  * sc);
+    int box_w  = text_w + 2 * pad_x;
+    int box_h  = font_px + 2 * pad_y;
+    int x      = (sw - box_w) / 2;
+    int y      = (int)(8.0f * sc);
+
+    DrawRectangle(x, y, box_w, box_h, (Color){ 12, 14, 18, 220 });
+    DrawRectangleLines(x, y, box_w, box_h, (Color){ 220, 64, 64, 255 });
+    DrawText(label, x + pad_x, y + pad_y, font_px,
+             (Color){ 240, 240, 240, 255 });
 }
 
 void audio_set_bus_volume(AudioBusId bus, float v) {
@@ -121,9 +182,17 @@ static const SfxManifestEntry g_sfx_manifest[] = {
     { SFX_EXPLOSION_SMALL,   "assets/sfx/explosion_small.wav",  3, 0.80f, AUDIO_BUS_SFX },
 
     /* --- Movement --- */
-    { SFX_FOOTSTEP_METAL,    "assets/sfx/footstep_metal.wav",    5, 0.55f, AUDIO_BUS_SFX },
-    { SFX_FOOTSTEP_CONCRETE, "assets/sfx/footstep_concrete.wav", 5, 0.55f, AUDIO_BUS_SFX },
-    { SFX_FOOTSTEP_ICE,      "assets/sfx/footstep_ice.wav",      5, 0.55f, AUDIO_BUS_SFX },
+    /* Footsteps at 0.70 (iterations: 0.55 → 0.25 → 0.40 → 0.70).
+     * The servo loop is now silent (SERVO_MAX_VOL=0), so the
+     * footstep is the entire walking cue. 0.70 puts it on par with
+     * other gameplay-critical SFX (pulse_rifle is 0.85, hit_flesh
+     * 0.90) — loud enough that enemy footsteps at mid-range
+     * (~500–800 px) are clearly audible for competitive listening.
+     * Sources are trimmed to ~120 ms in source_map.sh so per-foot
+     * plants don't overlap. */
+    { SFX_FOOTSTEP_METAL,    "assets/sfx/footstep_metal.wav",    5, 0.70f, AUDIO_BUS_SFX },
+    { SFX_FOOTSTEP_CONCRETE, "assets/sfx/footstep_concrete.wav", 5, 0.70f, AUDIO_BUS_SFX },
+    { SFX_FOOTSTEP_ICE,      "assets/sfx/footstep_ice.wav",      5, 0.70f, AUDIO_BUS_SFX },
     { SFX_JET_PULSE,         "assets/sfx/jet_pulse.wav",         5, 0.55f, AUDIO_BUS_SFX },
     { SFX_JET_BOOST,         "assets/sfx/jet_boost.wav",         3, 0.80f, AUDIO_BUS_SFX },
     { SFX_LANDING_HARD,      "assets/sfx/landing_hard.wav",      3, 0.85f, AUDIO_BUS_SFX },
@@ -346,12 +415,21 @@ static void duck_step(float dt) {
 
 static void music_step(void) {
     if (!g_music_loaded) return;
+    /* Skip UpdateMusicStream while muted — the stream is paused by
+     * audio_toggle_mute so there's nothing to advance. SetMusicVolume
+     * is still safe to call on a paused stream, but is also
+     * unnecessary. */
+    if (g_muted) return;
     UpdateMusicStream(g_music);
     SetMusicVolume(g_music, bus_resolved(AUDIO_BUS_MUSIC));
 }
 
 static void ambient_step(void) {
     if (!g_ambient_loaded) return;
+    /* Don't retrigger the ambient loop while muted. audio_toggle_mute
+     * calls StopSound on mute; this gate keeps us from re-firing it
+     * at volume 0 every tick (wasteful but otherwise harmless). */
+    if (g_muted) return;
     if (!IsSoundPlaying(g_ambient)) PlaySound(g_ambient);
     SetSoundVolume(g_ambient, bus_resolved(AUDIO_BUS_AMBIENT));
 }
@@ -451,19 +529,67 @@ void audio_request_duck(float factor, float seconds) {
 
 void audio_servo_update(float velocity_pxs) {
     if (!g_servo_loaded) return;
+    /* Stop tracking velocity → volume while muted; audio_toggle_mute
+     * already stopped the underlying Sound and zeroed current_vol.
+     * The next unmute frame picks back up from a clean state. */
+    if (g_muted) return;
     float t = clampf(velocity_pxs / SERVO_RUN_SPEED, 0.0f, 1.0f);
     g_servo_target_vol = t * SERVO_MAX_VOL;
     g_servo_current_vol += (g_servo_target_vol - g_servo_current_vol) * SERVO_LERP;
 
-    /* Below the audible-floor, keep volume at zero so we don't fight
-     * the SFX bus floor. */
-    if (g_servo_current_vol < 0.005f) g_servo_current_vol = 0.0f;
+    /* Hard cutoff when motion has stopped — the user reported the
+     * lerp tail was still audible after a round ended. Bumped the
+     * threshold from 0.005 → 0.04 (eight× higher) so the snap-to-
+     * zero fires earlier in the decay curve when target_vol is 0.
+     * Above the cutoff the lerp still gives a smooth ramp-down feel;
+     * below it we shut up immediately and the underlying Sound (at
+     * volume 0) finishes its current play without retrigger. */
+    if (g_servo_target_vol == 0.0f && g_servo_current_vol < 0.04f) {
+        g_servo_current_vol = 0.0f;
+        StopSound(g_servo);
+    } else if (g_servo_current_vol < 0.005f) {
+        g_servo_current_vol = 0.0f;
+    }
 
     SetSoundVolume(g_servo, g_servo_current_vol * bus_resolved(AUDIO_BUS_SFX));
     if (!IsSoundPlaying(g_servo) && g_servo_current_vol > 0.0f) PlaySound(g_servo);
 }
 
 /* ---- Music --------------------------------------------------------- */
+
+/* Resolve a STRT-indexed asset path into an absolute / assets/-prefixed
+ * path. Used by audio_apply_for_level for music + ambient. Mirrors
+ * main.c's previously-static resolve_meta_path; moved here so both
+ * the host and the client round-start paths can apply per-map audio
+ * without duplicating the logic. */
+static const char *resolve_level_string_path(const Level *L, uint16_t idx,
+                                             char *buf, size_t cap)
+{
+    if (idx == 0) return NULL;
+    if (!L->string_table) return NULL;
+    if ((int)idx >= L->string_table_size) return NULL;
+    const char *s = L->string_table + idx;
+    if (!*s) return NULL;
+    if (s[0] == '/' || strncmp(s, "assets/", 7) == 0) return s;
+    snprintf(buf, cap, "assets/%s", s);
+    return buf;
+}
+
+void audio_apply_for_level(const Level *L) {
+    if (!L) return;
+    char music_buf[256];
+    char ambient_buf[256];
+    const char *music_path = resolve_level_string_path(L, L->meta.music_str_idx,
+                                                       music_buf, sizeof music_buf);
+    audio_set_music_for_map(music_path);
+    if (music_path) audio_music_play();
+
+    const char *ambient_path = resolve_level_string_path(L,
+                                                          L->meta.ambient_loop_str_idx,
+                                                          ambient_buf,
+                                                          sizeof ambient_buf);
+    audio_set_ambient_loop(ambient_path);
+}
 
 void audio_set_music_for_map(const char *path) {
     /* No-op when nothing changed (cheap guard for round-loop reuse on
@@ -529,6 +655,38 @@ void audio_set_ambient_loop(const char *path) {
     snprintf(g_ambient_path, sizeof g_ambient_path, "%s", path);
     SetSoundVolume(g_ambient, bus_resolved(AUDIO_BUS_AMBIENT));
     PlaySound(g_ambient);
+}
+
+/* ---- F2 mute toggle ----------------------------------------------- */
+/* Defined here (vs. up by `bus_resolved`) because we need to touch
+ * the music / ambient / servo file-statics declared in the sections
+ * above. `audio_is_muted` lives next to `bus_resolved` for callers
+ * that just want to read the flag. */
+
+void audio_toggle_mute(void) {
+    g_muted = !g_muted;
+    /* Pause/Resume the music stream explicitly. SetMusicVolume(0) is
+     * not reliable across raylib versions — some leave the stream
+     * playing-but-silent (correct), some halt decoding entirely
+     * (which is what bit us: unmuting restored volume but the
+     * stream was no longer advancing, so music stayed silent until
+     * the next map-switch reloaded the stream). Pause is the only
+     * unambiguous signal.
+     *
+     * For ambient + servo (raylib `Sound` instances driven by
+     * per-frame retrigger), call StopSound on mute so the
+     * retrigger logic in ambient_step + audio_servo_update doesn't
+     * re-fire them at volume 0 every tick. Unmute lets the next
+     * frame retrigger them fresh. */
+    if (g_music_loaded) {
+        if (g_muted) PauseMusicStream(g_music);
+        else         ResumeMusicStream(g_music);
+    }
+    if (g_muted) {
+        if (g_ambient_loaded) StopSound(g_ambient);
+        if (g_servo_loaded)   { StopSound(g_servo); g_servo_current_vol = 0.0f; }
+    }
+    LOG_I("audio: %s", g_muted ? "muted (F2)" : "unmuted (F2)");
 }
 
 /* ---- Weapon → SFX mapping ----------------------------------------- */
@@ -622,6 +780,37 @@ void audio_reload_path(const char *path) {
     }
 
     LOG_I("audio: hot-reload path %s not registered as a sample", path);
+}
+
+/* ---- Tooling enumeration ------------------------------------------ */
+
+int audio_manifest_count(void) {
+    return SFX_MANIFEST_COUNT;
+}
+
+const char *audio_manifest_path(int idx) {
+    if (idx < 0 || idx >= SFX_MANIFEST_COUNT) return NULL;
+    return g_sfx_manifest[idx].path;
+}
+
+const char *audio_manifest_kind(int idx) {
+    if (idx < 0 || idx >= SFX_MANIFEST_COUNT) return NULL;
+    SfxId id = g_sfx_manifest[idx].id;
+    if (id <= SFX_WPN_KNIFE_THROW)    return "SFX_WPN";
+    if (id <= SFX_HIT_CONCRETE)       return "SFX_HIT";
+    if (id <= SFX_EXPLOSION_SMALL)    return "SFX_EXPLOSION";
+    if (id <= SFX_FOOTSTEP_ICE)       return "SFX_FOOT";
+    if (id <= SFX_JET_BOOST)          return "SFX_JET";
+    if (id <= SFX_LANDING_SOFT)       return "SFX_LANDING";
+    if (id <= SFX_PICKUP_RESPAWN)     return "SFX_PICKUP";
+    if (id <= SFX_GRAPPLE_PULL_LOOP)  return "SFX_GRAPPLE";
+    if (id <= SFX_FLAG_CAPTURE)       return "SFX_FLAG";
+    if (id <= SFX_UI_TOGGLE)          return "SFX_UI";
+    return "SFX_KILL";
+}
+
+const char *audio_servo_path(void) {
+    return SERVO_PATH;
 }
 
 void audio_register_hotreload(void) {

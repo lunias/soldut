@@ -105,10 +105,29 @@ P18 ─ Author maps 5-8 (Catwalk/Aurora/Crossfire/Citadel) + bake-test harness
        per-map acceptance criteria from `documents/m5/07-maps.md`
        are designer guidance, not automated thresholds.
 P19 ─ Audio assets (~47 SFX + per-map music + ambient loops)
-       — sourcing against the P14 runtime manifest. CC0 from
-       freesound.org / opengameart.org / Kenney + Soldut-original
-       recordings per `documents/m5/09-audio.md`. Prompt brief
-       pending; see scheduling note above.
+       — shipped 2026-05-12. Sourcing pass against the P14 runtime
+       manifest using Kenney CC0 audio packs (sci-fi-sounds /
+       impact-sounds / digital-audio / ui-audio / interface-sounds /
+       music-jingles) for the 47 SFX + 1 servo loop + 7 ambient
+       beds, and opengameart.org CC0 (ruskerdax / Joth / Nicole
+       Marie T / et al.) for the 7 per-map music tracks. New
+       Makefile targets: `audio-inventory` (CSV walk of the
+       manifest via new `audio_manifest_*` accessors I added to
+       `src/audio.{c,h}`), `audio-normalize` (idempotent ffmpeg
+       pass — pass `ARGS=--loudness` for the -16/-23/-28 LUFS
+       loudnorm), `audio-credits` (CC0 hygiene gate against
+       `assets/credits.txt`), `test-audio-smoke` (boots Foundry +
+       FAILs on `audio:.*missing` log lines). Canonical mapping
+       lives in `tools/audio_inventory/source_map.sh` —
+       re-pinning a slot = edit the row + re-run. Total shipped:
+       7.9 MB across `assets/sfx/` + `assets/music/`, well under
+       the 30 MB budget. `TRADE_OFFS.md` → "SFX manifest assets
+       aren't on disk yet (post-P14)" **deleted**. No new P19
+       trade-off entries — the multi-variant footstep slots
+       sketched in `documents/m5/09-audio.md` were never wired
+       into the runtime manifest (5-alias rotation handles
+       per-fire variation), so P19 ships what the runtime asks
+       for. With P19 in, M5 is complete.
 ```
 
 The runtime work (P01–P14) can be done before any asset work. The asset work (P15–P19) needs the runtime in place to verify against. **Don't generate art before the renderer can use it.**

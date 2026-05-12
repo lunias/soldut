@@ -366,3 +366,182 @@ assets/maps/foundry/parallax_near.png  (P16 — Foundry parallax kit, near layer
   human_direction:  Drawn at 0.95x scroll AFTER the world in renderer_draw_frame.
                     Alpha-keying is CRITICAL here — without it the near layer
                     covers the chassis entirely.
+
+
+----------------------------------------------------------------------
+AUDIO — SFX, music, ambient (P19)
+----------------------------------------------------------------------
+
+(P19, 2026-05-12. 62 audio assets shipped: 47 SFX one-shots + 1 servo
+loop + 7 per-map music tracks + 7 per-map ambient loops. All sources
+are CC0; the SFX one-shots come from Kenney's public-domain audio
+packs and the music tracks from opengameart.org. Each Kenney source
+file was re-encoded through `tools/audio_inventory/source_map.sh`
+(ffmpeg → 22050 Hz mono PCM16 WAV for SFX, mono Vorbis q3 for ambient,
+mono Vorbis q4 for music) and run through `tools/audio_normalize/
+normalize.sh --loudness` for the -16 LUFS / -23 LUFS / -28 LUFS pass.
+The slot mapping (which source file maps to which manifest entry) is
+the canonical record of provenance and lives in the source_map.sh
+script — re-pinning a sound means editing the row and re-running.)
+
+----- Source packs (CC0) -----
+
+Kenney.nl audio packs — Kenney Vleugels (asset@kenney.nl)
+  license:  Creative Commons Zero (CC0). All files in
+            kenney_*.zip ship with a License.txt confirming public
+            domain dedication ("Stocks are also a means of cosumption" —
+            joke aside, the License.txt is a plain CC0 grant).
+  fetched:  2026-05-12 from https://kenney.nl/assets/<slug>
+  packs:
+    - sci-fi-sounds       https://kenney.nl/assets/sci-fi-sounds
+    - impact-sounds       https://kenney.nl/assets/impact-sounds
+    - digital-audio       https://kenney.nl/assets/digital-audio
+    - ui-audio            https://kenney.nl/assets/ui-audio
+    - interface-sounds    https://kenney.nl/assets/interface-sounds
+    - music-jingles       https://kenney.nl/assets/music-jingles
+
+opengameart.org music tracks — CC0 filter (license id 4 on OGA's
+search). Each linked page carries an explicit
+"Creative Commons Zero (CC0)" license tag.
+
+----- Servo loop -----
+
+sfx/mech_servo_loop.wav
+  source:           kenney_sci-fi-sounds/Audio/computerNoise_001.ogg
+                    (iteration: spaceEngine_000 → forceField_002 →
+                    computerNoise_001. spaceEngine was pitch-modulated
+                    "whwoo whwoo" engine drone; forceField was only
+                    0.95 s and retriggered ~1 Hz creating its own
+                    pulse rhythm; computerNoise_001 is a 5 s steady
+                    electronic hum without internal modulation.)
+  license:          CC0 (Kenney)
+  pipeline:         ffmpeg → trim 3.0 s with 50 ms fade-in +
+                    fade-out at both seams (silent-loop boundary) →
+                    22050 Hz mono PCM16 → -16 LUFS loudnorm
+
+----- SFX one-shots (47) — kenney_sci-fi-sounds / impact-sounds / digital-audio / ui-audio / interface-sounds / music-jingles -----
+
+sfx/pulse_rifle.wav        ← kenney_sci-fi-sounds/Audio/laserLarge_000.ogg
+sfx/plasma_smg.wav         ← kenney_sci-fi-sounds/Audio/laserSmall_000.ogg
+sfx/riot_cannon.wav        ← kenney_sci-fi-sounds/Audio/laserRetro_000.ogg
+sfx/rail_cannon.wav        ← kenney_sci-fi-sounds/Audio/laserLarge_001.ogg
+sfx/auto_cannon.wav        ← kenney_sci-fi-sounds/Audio/laserLarge_002.ogg
+sfx/mass_driver.wav        ← kenney_sci-fi-sounds/Audio/thrusterFire_000.ogg
+sfx/plasma_cannon.wav      ← kenney_sci-fi-sounds/Audio/laserLarge_003.ogg
+sfx/microgun.wav           ← kenney_sci-fi-sounds/Audio/laserRetro_002.ogg
+sfx/sidearm.wav            ← kenney_sci-fi-sounds/Audio/laserSmall_001.ogg
+sfx/burst_smg.wav          ← kenney_sci-fi-sounds/Audio/laserRetro_003.ogg
+sfx/frag_throw.wav         ← kenney_sci-fi-sounds/Audio/impactMetal_001.ogg
+sfx/micro_rockets.wav      ← kenney_sci-fi-sounds/Audio/thrusterFire_001.ogg
+sfx/knife_melee.wav        ← kenney_impact-sounds/Audio/impactMetal_heavy_000.ogg
+sfx/knife_throw.wav        ← kenney_impact-sounds/Audio/impactMetal_medium_000.ogg
+sfx/hit_flesh.wav          ← kenney_sci-fi-sounds/Audio/slime_000.ogg
+sfx/hit_metal.wav          ← kenney_sci-fi-sounds/Audio/impactMetal_000.ogg
+sfx/hit_concrete.wav       ← kenney_impact-sounds/Audio/impactGeneric_light_000.ogg
+sfx/explosion_large.wav    ← kenney_sci-fi-sounds/Audio/lowFrequency_explosion_000.ogg
+sfx/explosion_medium.wav   ← kenney_sci-fi-sounds/Audio/explosionCrunch_000.ogg
+sfx/explosion_small.wav    ← kenney_sci-fi-sounds/Audio/explosionCrunch_002.ogg
+sfx/footstep_metal.wav     ← kenney_impact-sounds/Audio/impactMetal_light_000.ogg
+sfx/footstep_concrete.wav  ← kenney_impact-sounds/Audio/footstep_concrete_000.ogg
+sfx/footstep_ice.wav       ← kenney_impact-sounds/Audio/footstep_snow_000.ogg
+sfx/jet_pulse.wav          ← kenney_sci-fi-sounds/Audio/thrusterFire_002.ogg
+sfx/jet_boost.wav          ← kenney_sci-fi-sounds/Audio/spaceEngineLarge_000.ogg
+sfx/landing_hard.wav       ← kenney_impact-sounds/Audio/impactPlate_heavy_000.ogg
+sfx/landing_soft.wav       ← kenney_impact-sounds/Audio/impactSoft_medium_000.ogg
+sfx/pickup_health.wav      ← kenney_digital-audio/Audio/powerUp1.ogg
+sfx/pickup_ammo.wav        ← kenney_digital-audio/Audio/twoTone1.ogg
+sfx/pickup_armor.wav       ← kenney_digital-audio/Audio/powerUp4.ogg
+sfx/pickup_weapon.wav      ← kenney_digital-audio/Audio/threeTone1.ogg
+sfx/pickup_powerup.wav     ← kenney_digital-audio/Audio/powerUp7.ogg
+sfx/pickup_jet_fuel.wav    ← kenney_digital-audio/Audio/zap1.ogg
+sfx/pickup_respawn.wav     ← kenney_digital-audio/Audio/twoTone2.ogg
+sfx/grapple_fire.wav       ← kenney_sci-fi-sounds/Audio/laserSmall_003.ogg
+sfx/grapple_hit.wav        ← kenney_impact-sounds/Audio/impactMetal_medium_001.ogg
+sfx/grapple_release.wav    ← kenney_sci-fi-sounds/Audio/doorClose_000.ogg
+sfx/grapple_pull_loop.wav  ← kenney_sci-fi-sounds/Audio/forceField_000.ogg
+sfx/flag_pickup.wav        ← kenney_digital-audio/Audio/phaseJump1.ogg
+sfx/flag_drop.wav          ← kenney_digital-audio/Audio/phaserDown1.ogg
+sfx/flag_return.wav        ← kenney_digital-audio/Audio/phaserUp1.ogg
+sfx/flag_capture.wav       ← kenney_music-jingles/Audio/Hit jingles/jingles_HIT07.ogg
+sfx/ui_hover.wav           ← kenney_ui-audio/Audio/rollover1.ogg
+sfx/ui_click.wav           ← kenney_ui-audio/Audio/click1.ogg
+sfx/ui_toggle.wav          ← kenney_interface-sounds/Audio/toggle_002.ogg
+sfx/kill_fanfare.wav       ← kenney_music-jingles/Audio/Hit jingles/jingles_HIT15.ogg
+sfx/death_grunt.wav        ← kenney_sci-fi-sounds/Audio/lowFrequency_explosion_001.ogg
+
+  All 47 are re-encoded via ffmpeg to 22050 Hz mono 16-bit PCM WAV and
+  run through `loudnorm I=-16:TP=-1.5:LRA=11` for consistent fire-cue
+  loudness. License: CC0 (Kenney). The mapping is the canonical
+  record; to re-pin a slot, edit tools/audio_inventory/source_map.sh.
+
+----- Ambient loops (7) — kenney_sci-fi-sounds, 30 s looped beds -----
+
+sfx/ambient_foundry.ogg      ← kenney_sci-fi-sounds/Audio/engineCircular_000.ogg
+sfx/ambient_maintenance.ogg  ← kenney_sci-fi-sounds/Audio/spaceEngine_001.ogg
+sfx/ambient_reactor.ogg      ← kenney_sci-fi-sounds/Audio/computerNoise_000.ogg
+sfx/ambient_atrium.ogg       ← kenney_sci-fi-sounds/Audio/forceField_001.ogg
+sfx/ambient_exterior.ogg     ← kenney_sci-fi-sounds/Audio/spaceEngineLow_000.ogg
+sfx/ambient_aurora.ogg       ← kenney_sci-fi-sounds/Audio/forceField_002.ogg
+sfx/ambient_citadel.ogg      ← kenney_sci-fi-sounds/Audio/spaceEngineLow_002.ogg
+
+  All 7 are ffmpeg stream_loop'd to ~30 s, 50 ms fade at the seam,
+  encoded mono Vorbis q2 22050 Hz (-28 LUFS loudnorm). License: CC0
+  (Kenney). Crossfire shares Foundry's ambient (no ambient_crossfire
+  slot — the map's META kit short_name is "foundry").
+
+----- Music (7) — opengameart.org CC0 -----
+
+music/foundry.ogg
+  source:   ruskerdax — "Bleak Terminal Theme"
+            https://opengameart.org/content/bleak-terminal
+  license:  CC0
+  pipeline: ffmpeg mono Vorbis q4 22050 Hz, -23 LUFS loudnorm
+  role:     Foundry + Crossfire (kit shared per cook_maps)
+
+music/maintenance.ogg
+  source:   ruskerdax — "Approach"
+            https://opengameart.org/content/approach
+  license:  CC0
+  pipeline: ffmpeg mono Vorbis q4 22050 Hz, -23 LUFS loudnorm
+  role:     Slipstream — vertical map, dread/approach
+
+music/reactor.ogg
+  source:   Nicole Marie T — "Infiltration"
+            https://opengameart.org/content/infiltration
+  license:  CC0
+  pipeline: ffmpeg mono Vorbis q4 22050 Hz, -23 LUFS loudnorm
+  role:     Reactor — contained tension
+
+music/atrium.ogg
+  source:   "Atmospheric Puzzles" (montage music)
+            https://opengameart.org/content/atmospheric-puzzles
+  license:  CC0
+  pipeline: ffmpeg mono Vorbis q4 22050 Hz, -23 LUFS loudnorm
+  role:     Concourse — atrium / public space
+
+music/exterior.ogg
+  source:   "Last Stand in Space (looped)"
+            https://opengameart.org/content/last-stand-in-space-looped
+  license:  CC0
+  pipeline: ffmpeg mono Vorbis q4 22050 Hz, -23 LUFS loudnorm
+  role:     Catwalk — exposed exterior
+
+music/aurora.ogg
+  source:   Joth — "Cyberpunk Moonlight Sonata (v2)"
+            https://opengameart.org/content/cyberpunk-moonlight-sonata
+  license:  CC0
+  pipeline: ffmpeg mono Vorbis q4 22050 Hz, -23 LUFS loudnorm
+  role:     Aurora — atmospheric / sky-themed (Blue Ants was the
+            P19 first pick but only 17 s on disk; swapped to
+            Cyberpunk Moonlight Sonata at 1:57 so the music doesn't
+            fully loop inside a sub-2-minute round)
+
+music/citadel.ogg
+  source:   "Dungeon Ambience" (dungeon002.ogg)
+            https://opengameart.org/content/dungeon-ambience
+  license:  CC0
+  pipeline: ffmpeg mono Vorbis q4 22050 Hz, -23 LUFS loudnorm
+  role:     Citadel — castle dungeon, brooding
+
+(End P19 audio rows. Total ~8 MB across 62 files — well inside the
+30 MB budget from documents/m5/09-audio.md §"Performance budget".)

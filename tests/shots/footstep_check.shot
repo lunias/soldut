@@ -1,0 +1,12 @@
+# Verify footsteps actually fire during run.
+window 320 180
+out build/shots/footstep_check
+map foundry
+seed 1 1
+
+# Walk right for ~2 seconds (120 ticks), then stop.
+mouse 300 100
+at 5   press right
+at 125 release right
+at 130 shot t130_after_walk
+at 132 end

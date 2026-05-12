@@ -1,5 +1,6 @@
 #include "render.h"
 
+#include "audio.h"
 #include "decal.h"
 #include "hud.h"
 #include "level.h"
@@ -1327,6 +1328,7 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
             EndShaderMode();
             hud_draw(w, sw, sh, cursor_screen, r->camera);
             if (overlay_cb) overlay_cb(overlay_user, sw, sh);
+            audio_draw_mute_overlay(sw, sh);
         EndDrawing();
     } else {
         /* Fallback: M4 shape, no post pass. Fires on a fresh checkout
@@ -1337,6 +1339,7 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
             draw_world_pass(r, w, alpha, local_visual_offset, sw, sh);
             hud_draw(w, sw, sh, cursor_screen, r->camera);
             if (overlay_cb) overlay_cb(overlay_user, sw, sh);
+            audio_draw_mute_overlay(sw, sh);
         EndDrawing();
     }
 }
