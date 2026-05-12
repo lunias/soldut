@@ -69,6 +69,26 @@ P16 ─ Remaining chassis + weapon atlas + HUD icons (asset generation)
        parallax_near doesn't cover the world). 7 other maps' parallax
        remains pending in P16-followup. See CURRENT_STATE.md top entry.
 P17 ─ Author maps 1-4 (Foundry/Slipstream/Reactor as .lvl + Concourse)
+       — shipped 2026-05-11. New `tools/cook_maps/cook_maps.c`
+       (`make cook-maps`) replaces the P01 stub: programmatic
+       exporter that synthesizes 4 maps with slope polygons + spawn
+       lanes + pickup arrays + ambient zones + META + STRT, then
+       round-trips each through `level_load` + poly broadphase
+       inside the cooker. `.gitignore` narrowed so the four authored
+       `.lvl` files (foundry / slipstream / reactor / concourse)
+       track while scratch/editor fixtures stay ignored. Concourse
+       is a programmatic scaffold rather than editor-authored — see
+       TRADE_OFFS "Concourse is synthesized programmatically...".
+       Two cross-build sync fixes landed under the same prompt:
+       (a) `map_alloc_tiles` + `level_build_tutorial` now memset the
+       Level struct to zero before populating, fixing a ghost-polygon
+       / ghost-pickup leak when code-built fallbacks ran after a
+       `.lvl` load with non-empty section counts; (b) `snapshot_apply`
+       re-syncs armor / jet / fuel_max / armor_hp_max every tick so
+       the client's mech can self-heal from a bad first-snapshot
+       loadout. `DIAG-sync:` LOG_I lines tag every loadout-sync +
+       map-build seam for paired-log debugging. `tests/net/run_3p.sh`
+       switched from Foundry to Reactor per spec (10/10 PASS).
 P18 ─ Author maps 5-8 (Catwalk/Aurora/Crossfire/Citadel) + bake-test harness
 P19 ─ Audio assets (~47 SFX + per-map music + ambient loops)
        — sourcing against the P14 runtime manifest. CC0 from

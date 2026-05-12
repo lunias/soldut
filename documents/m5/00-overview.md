@@ -114,7 +114,7 @@ This is the order that keeps things shippable and minimizes "block on a dependen
 
 **Week 1 — format + skeleton**
 - Land [01-lvl-format.md](01-lvl-format.md). New module `src/level_io.{c,h}`. Loader + saver round-trip a hard-coded test fixture.
-- (Deferred to P17.) Re-author the three M4 code-built maps (Foundry / Slipstream / Reactor) as `.lvl` files in the P04 editor. The originally-planned `tools/cook_maps/` cooker was dropped — `tools/editor/` is the authoring path. Until P17 lands, `map_build` tries `assets/maps/<short>.lvl` first and falls back to the code-built path.
+- (Shipped at P17.) The four maps in batch 1 (Foundry / Slipstream / Reactor / Concourse) ship as `.lvl` via `tools/cook_maps/cook_maps.c` — a one-shot exporter that builds each map programmatically, calls `level_save`, and round-trips each emitted file through `level_load` + the polygon broadphase inside the cooker itself. The originally-planned editor-authoring path for Concourse was deferred; cook_maps ships a programmatic scaffold (tracked as a TRADE_OFFS entry). The `tools/editor/` path remains available for designers to iterate; running `make cook-maps` again would overwrite the editor-saved file unless the concourse builder is dropped from cook_maps. Runtime `map_build` loads `assets/maps/<short>.lvl` and falls back to the code-built path only if the file is missing or fails CRC.
 - Begin [03-collision-polygons.md](03-collision-polygons.md). Free polygons in the world struct, broadphase grid, closest-point collision. Slopes drop in as polygons.
 
 **Week 2 — editor + first new content**
