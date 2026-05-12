@@ -1118,10 +1118,18 @@ static bool bootstrap_client(Game *g, const LaunchArgs *args) {
  * can ask it to shut down cleanly via proc_terminate; if that fails
  * we fall through to proc_kill. */
 
-static volatile sig_atomic_t s_dedicated_quit = 0;
+static volatile sig_atomic_t s_dedicated_quit       = 0;
+static volatile sig_atomic_t s_dedicated_last_signal = 0;
 static void dedicated_signal(int sig) {
-    (void)sig;
-    s_dedicated_quit = 1;
+    /* Capture which signal fired so the main loop can log it once
+     * we're back on the main thread (calling log_msg from a signal
+     * handler is not async-signal-safe). On Windows, signal(SIGINT)
+     * fires for CTRL_C_EVENT delivered via the console; SIGTERM is
+     * mostly a no-op (Windows doesn't natively raise it, though
+     * some C runtimes route Ctrl+Break that way). On POSIX, both
+     * fire on the obvious kill paths. */
+    s_dedicated_last_signal = (sig_atomic_t)sig;
+    s_dedicated_quit        = 1;
 }
 
 /* Monotonic time + sleep live in proc_spawn.c (cross-platform; the
@@ -1255,8 +1263,10 @@ static int dedicated_main(const LaunchArgs *args) {
     /* Main tick loop. We don't have raylib's `GetTime`, so monotonic
      * clock + sleep. Net polling drives snapshot broadcast at the
      * configured Hz; simulate_step runs during MATCH_PHASE_ACTIVE. */
-    double last_time = mono_seconds();
-    double sim_accum = 0.0;
+    double last_time          = mono_seconds();
+    double sim_accum          = 0.0;
+    double next_heartbeat_at  = last_time + 1.0;   /* +1 s (mono_seconds returns seconds) */
+    uint64_t iters            = 0;
     while (!s_dedicated_quit) {
         double now = mono_seconds();
         double dt  = now - last_time;
@@ -1276,6 +1286,19 @@ static int dedicated_main(const LaunchArgs *args) {
             sim_accum = 0.0;
         }
 
+        /* Heartbeat once per wall-clock second so a paired log shows
+         * exactly when the dedi stopped iterating (vs. the listening
+         * line being its actual last activity). The dedi is otherwise
+         * silent on the no-peers path. */
+        ++iters;
+        if (now >= next_heartbeat_at) {
+            LOG_I("dedicated: alive (iters=%llu, phase=%s, peers=%d)",
+                  (unsigned long long)iters,
+                  match_phase_name(game.match.phase),
+                  game.net.peer_count);
+            next_heartbeat_at = now + 1.0;
+        }
+
         /* Sleep ~2 ms between iterations to avoid burning a core in
          * the lobby. 2 ms is comfortably below the 16.7 ms tick budget
          * at 60 Hz; the next iteration's net_poll handles snapshot
@@ -1283,7 +1306,8 @@ static int dedicated_main(const LaunchArgs *args) {
         sleep_ms_portable(2);
     }
 
-    LOG_I("dedicated: shutting down");
+    LOG_I("dedicated: shutting down (iters=%llu, last_signal=%d)",
+          (unsigned long long)iters, (int)s_dedicated_last_signal);
     net_close(&game.net);
     net_shutdown();
     game_shutdown(&game);
