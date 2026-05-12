@@ -692,11 +692,12 @@ void net_raw_send_probe(const char *host, uint16_t port, const char *tag) {
     memset(&to, 0, sizeof to);
     to.sin_family = AF_INET;
     to.sin_port = htons(port);
-    /* inet_addr is deprecated on POSIX but works fine for "127.0.0.1".
-     * inet_pton is the modern one but we don't need its IPv6 path. */
-    to.sin_addr.s_addr = inet_addr(host);
-    if (to.sin_addr.s_addr == INADDR_NONE) {
-        LOG_E("raw probe '%s': inet_addr('%s') failed",
+    /* inet_pton returns 1 on success, 0 on invalid string, -1 on
+     * error. Portable across Linux / macOS / Windows. (INADDR_NONE
+     * isn't defined on macOS, which sank the previous inet_addr path
+     * in CI.) */
+    if (inet_pton(AF_INET, host, &to.sin_addr) != 1) {
+        LOG_E("raw probe '%s': inet_pton('%s') failed",
               tag ? tag : "(null)", host);
 #if defined(_WIN32)
         closesocket(s);
