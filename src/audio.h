@@ -140,6 +140,28 @@ void audio_play_global(SfxId id);
  * gains multiply through `bus_resolved` on every play call. */
 void audio_set_bus_volume(AudioBusId bus, float v);
 
+/* Read current per-bus gain (post-clamp). Returns 0 for invalid bus.
+ * Does NOT factor in mute — callers needing the audible mix should
+ * branch on audio_is_muted() themselves. Used by prefs save + the
+ * on-screen volume overlay. */
+float audio_get_bus_volume(AudioBusId bus);
+
+/* Nudge master volume by `delta` (typically +/- 0.05). Clamps the
+ * result to [0, 1] and arms the on-screen volume overlay for ~2 s.
+ * Special-cases F2 mute interaction:
+ *   - if muted and delta > 0: un-mute (does NOT change the gain),
+ *   - if muted and delta < 0: no-op (overlay does NOT arm).
+ * Returns true when audible state changed (either the gain moved or
+ * mute flipped) so callers can persist + skip redundant disk writes. */
+bool audio_master_volume_nudge(float delta);
+
+/* Paint the volume indicator at the top-center of the screen when its
+ * timer is armed (most recent audio_master_volume_nudge within the
+ * last ~2 s); no-op otherwise. Last ~0.5 s linearly fades out. Drawn
+ * below the F2 MUTED pill when both are visible. Must be called
+ * inside a Begin/EndDrawing pair. */
+void audio_draw_volume_overlay(int screen_w, int screen_h);
+
 /* F2 mute toggle — gates every `bus_resolved()` call to return 0
  * when set, instantly silencing the application (SFX + UI + music +
  * ambient + servo) without disturbing the per-bus gain knobs.

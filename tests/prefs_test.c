@@ -69,6 +69,11 @@ int main(void) {
         ASSERT_STR("missing file: name = 'player'", p.name, "player");
         /* Defaults for chassis are CHASSIS_TROOPER (0). */
         ASSERT_EQ("missing file: chassis = TROOPER", p.loadout.chassis_id, 0);
+        /* Volume default is PREFS_DEFAULT_VOLUME = 0.80 (compares
+         * with a small epsilon since float printf round-trips through
+         * %.2f). */
+        ASSERT_TRUE("missing file: master_volume defaults to 0.80",
+                    p.master_volume > 0.79f && p.master_volume < 0.81f);
     }
 
     /* ---- 2. Round-trip a custom prefs file ------------------------ */
@@ -86,6 +91,7 @@ int main(void) {
         w.team                 = 2;   /* BLUE */
         snprintf(w.connect_addr, sizeof w.connect_addr,
                  "soldut.example.org:23073");
+        w.master_volume        = 0.55f;
 
         bool saved = prefs_save(&w, path);
         ASSERT_TRUE("save: returns true", saved);
@@ -100,6 +106,8 @@ int main(void) {
         ASSERT_EQ ("round-trip: team",    r.team,               2);
         ASSERT_STR("round-trip: addr",    r.connect_addr,
                    "soldut.example.org:23073");
+        ASSERT_TRUE("round-trip: master_volume = 0.55",
+                    r.master_volume > 0.545f && r.master_volume < 0.555f);
 
         remove(path);
     }

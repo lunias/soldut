@@ -35,6 +35,7 @@
  *     jetpack=Heavy
  *     team=1
  *     connect_addr=127.0.0.1:23073
+ *     master_volume=0.80
  *
  * Names are matched case-insensitively against the chassis / weapon /
  * armor / jetpack tables. Missing keys keep their compile-time
@@ -42,9 +43,10 @@
  * default for that field.
  */
 
-#define PREFS_PATH        "soldut-prefs.cfg"
-#define PREFS_NAME_BYTES   24
-#define PREFS_ADDR_BYTES   64
+#define PREFS_PATH         "soldut-prefs.cfg"
+#define PREFS_NAME_BYTES    24
+#define PREFS_ADDR_BYTES    64
+#define PREFS_DEFAULT_VOLUME 0.80f
 
 typedef struct {
     char        name[PREFS_NAME_BYTES];
@@ -52,6 +54,8 @@ typedef struct {
                                        armor_id / jetpack_id */
     int         team;               /* MATCH_TEAM_*: 0=spectator, 1=ffa/red, 2=blue */
     char        connect_addr[PREFS_ADDR_BYTES];
+    float       master_volume;      /* [0.0, 1.0] linear gain; +/- keys at
+                                       runtime nudge by 5% and persist. */
 } UserPrefs;
 
 /* Fill `out` with the compile-time defaults. Always succeeds. */

@@ -65,6 +65,7 @@ void prefs_defaults(UserPrefs *out) {
     out->loadout = mech_default_loadout();
     out->team    = MATCH_TEAM_FFA;
     snprintf(out->connect_addr, sizeof out->connect_addr, "127.0.0.1:23073");
+    out->master_volume = PREFS_DEFAULT_VOLUME;
 }
 
 /* ---- key=value parser (lifted from config.c's apply_kv pattern,
@@ -105,6 +106,15 @@ static void apply_kv(UserPrefs *p, const char *key, char *val) {
     else if (strcasecmp(key, "connect_addr") == 0) {
         snprintf(p->connect_addr, sizeof p->connect_addr, "%s", val);
     }
+    else if (strcasecmp(key, "master_volume") == 0) {
+        char *endp = NULL;
+        float v = (float)strtod(val, &endp);
+        if (endp == val || !(v >= 0.0f && v <= 1.0f)) {
+            LOG_W("prefs: master_volume '%s' out of [0,1] — keeping default", val);
+        } else {
+            p->master_volume = v;
+        }
+    }
     else {
         LOG_W("prefs: unknown key '%s'", key);
     }
@@ -139,11 +149,11 @@ bool prefs_load(UserPrefs *out, const char *path) {
         apply_kv(out, key, val);
     }
     fclose(f);
-    LOG_I("prefs: loaded %s (name=%s chassis=%d weapons=%d/%d armor=%d jet=%d team=%d)",
+    LOG_I("prefs: loaded %s (name=%s chassis=%d weapons=%d/%d armor=%d jet=%d team=%d vol=%.2f)",
           path, out->name,
           out->loadout.chassis_id, out->loadout.primary_id,
           out->loadout.secondary_id, out->loadout.armor_id,
-          out->loadout.jetpack_id, out->team);
+          out->loadout.jetpack_id, out->team, out->master_volume);
     return true;
 }
 
@@ -176,6 +186,7 @@ bool prefs_save(const UserPrefs *p, const char *path) {
     fprintf(f, "jetpack=%s\n",       j ? j->name : "Standard");
     fprintf(f, "team=%d\n",          p->team);
     fprintf(f, "connect_addr=%s\n",  p->connect_addr);
+    fprintf(f, "master_volume=%.2f\n", p->master_volume);
 
     if (fflush(f) != 0 || fclose(f) != 0) {
         LOG_W("prefs: failed to flush %s", tmp);

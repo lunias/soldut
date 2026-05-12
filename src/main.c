@@ -1992,7 +1992,13 @@ int main(int argc, char **argv) {
      * cycle-button click via prefs_save_from_ui. */
     {
         UserPrefs prefs;
-        if (prefs_load(&prefs, PREFS_PATH)) {
+        bool had_prefs = prefs_load(&prefs, PREFS_PATH);
+        /* Apply persisted master volume regardless — prefs_load fills
+         * the struct with defaults (PREFS_DEFAULT_VOLUME = 0.80) even
+         * when the file is missing, so a fresh install lands at 80%
+         * without a separate code path. */
+        audio_set_bus_volume(AUDIO_BUS_MASTER, prefs.master_volume);
+        if (had_prefs) {
             snprintf(ui.player_name, sizeof ui.player_name, "%s", prefs.name);
             ui.lobby_chassis   = prefs.loadout.chassis_id;
             ui.lobby_primary   = prefs.loadout.primary_id;
@@ -2079,6 +2085,20 @@ int main(int argc, char **argv) {
             audio_toggle_mute();
         }
 
+        /* +/- nudge master volume in 5% steps. Held keys auto-repeat
+         * via IsKeyPressedRepeat. Special cases handled inside
+         * audio_master_volume_nudge: '+' while muted un-mutes (and
+         * keeps the prior gain); '-' while muted is a no-op. Volume
+         * persists across launches via soldut-prefs.cfg. */
+        {
+            bool up = IsKeyPressed(KEY_EQUAL)   || IsKeyPressedRepeat(KEY_EQUAL)
+                   || IsKeyPressed(KEY_KP_ADD)  || IsKeyPressedRepeat(KEY_KP_ADD);
+            bool dn = IsKeyPressed(KEY_MINUS)         || IsKeyPressedRepeat(KEY_MINUS)
+                   || IsKeyPressed(KEY_KP_SUBTRACT)   || IsKeyPressedRepeat(KEY_KP_SUBTRACT);
+            if (up && audio_master_volume_nudge(+0.05f)) lobby_ui_save_prefs(&ui);
+            if (dn && audio_master_volume_nudge(-0.05f)) lobby_ui_save_prefs(&ui);
+        }
+
         /* M5 P14 — advance the audio mixer state: decay duck
          * envelopes, feed UpdateMusicStream (must be every frame to
          * avoid streaming-buffer underrun), retrigger ambient loop,
@@ -2136,6 +2156,7 @@ int main(int argc, char **argv) {
             BeginDrawing();
             title_screen_run(&ui, &game, pf.render_w, pf.render_h);
             audio_draw_mute_overlay(pf.render_w, pf.render_h);
+            audio_draw_volume_overlay(pf.render_w, pf.render_h);
             EndDrawing();
             if (ui.request_quit)             { game.mode = MODE_QUIT; }
             else if (ui.request_single_player) {
@@ -2190,6 +2211,7 @@ int main(int argc, char **argv) {
                 host_setup_screen_draw_overlay(&ui, pf.render_w, pf.render_h);
             }
             audio_draw_mute_overlay(pf.render_w, pf.render_h);
+            audio_draw_volume_overlay(pf.render_w, pf.render_h);
             EndDrawing();
 
             if (ui.request_start_host && !ui.host_starting) {
@@ -2285,6 +2307,7 @@ int main(int argc, char **argv) {
             BeginDrawing();
             browser_screen_run(&ui, &game, pf.render_w, pf.render_h);
             audio_draw_mute_overlay(pf.render_w, pf.render_h);
+            audio_draw_volume_overlay(pf.render_w, pf.render_h);
             EndDrawing();
             net_poll(&game.net, &game, dt);   /* drain discovery replies */
             if (ui.request_connect) {
@@ -2305,6 +2328,7 @@ int main(int argc, char **argv) {
             BeginDrawing();
             connect_screen_run(&ui, &game, pf.render_w, pf.render_h);
             audio_draw_mute_overlay(pf.render_w, pf.render_h);
+            audio_draw_volume_overlay(pf.render_w, pf.render_h);
             EndDrawing();
             if (ui.request_connect) {
                 ui.request_connect = false;
@@ -2361,6 +2385,7 @@ int main(int argc, char **argv) {
                 match_loading_overlay_draw(&ui, &game, pf.render_w, pf.render_h);
             }
             audio_draw_mute_overlay(pf.render_w, pf.render_h);
+            audio_draw_volume_overlay(pf.render_w, pf.render_h);
             EndDrawing();
 
             /* Honor the lobby UI's "Leave" button. */
@@ -2634,6 +2659,7 @@ int main(int argc, char **argv) {
             BeginDrawing();
             ClearBackground(BLACK);
             audio_draw_mute_overlay(pf.render_w, pf.render_h);
+            audio_draw_volume_overlay(pf.render_w, pf.render_h);
             EndDrawing();
             break;
         }

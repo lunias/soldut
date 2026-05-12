@@ -2,6 +2,7 @@
 
 #include "prefs.h"
 
+#include "audio.h"
 #include "config.h"
 #include "game.h"
 #include "log.h"
@@ -1084,6 +1085,10 @@ void lobby_ui_save_prefs(const LobbyUIState *L) {
     p.loadout.jetpack_id   = L->lobby_jet;
     p.team                 = L->lobby_team;
     snprintf(p.connect_addr, sizeof p.connect_addr, "%s", L->connect_addr);
+    /* Master volume lives in the audio module — pull the current
+     * value so +/- nudges + lobby-cycle saves both persist the same
+     * field without needing a parallel copy on LobbyUIState. */
+    p.master_volume = audio_get_bus_volume(AUDIO_BUS_MASTER);
     prefs_save(&p, PREFS_PATH);
 }
 
