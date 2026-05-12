@@ -13,7 +13,23 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-10** (P15 revised — chassis art now comes
+Last updated: **2026-05-11** (P17 + wan-fixes-16 follow-ups). P17
+shipped the first four authored `.lvl` maps via
+`tools/cook_maps/cook_maps.c` and added the new entry
+"Concourse is synthesized programmatically, not editor-authored
+(P17)" plus the amended "Hard-coded tutorial map" + "Slope test bed
+is hardcoded in level_build_tutorial" entries (their deletion gate
+is the migration of `shotmode` + `headless_sim` callsites off
+`level_build_tutorial`, not the existence of authored `.lvl`
+files). wan-fixes-16 superseded the wan-fixes-5/-9 dedicated-child
+spawn pattern with an in-process server thread after a Windows
+spawn-tree UDP bug; the entry at "Host UI's dedicated server runs
+in a thread, not a child process" carries the amended history.
+See the "2026-05-11 — wan-fixes 1–15" rollup below for the prior
+ledger churn (it now covers 1–16 in spirit; the bullet list there
+predates the wan-fixes-16 amendment).
+
+Previously: **2026-05-10** (P15 revised — chassis art now comes
 from a Soldat-style **gostek part sheet** sliced by
 `tools/comfy/extract_gostek.py`, not the AI-diffusion-canonical
 pipeline. The diffusion path (skeleton + style anchor → SDXL +

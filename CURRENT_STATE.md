@@ -2409,11 +2409,20 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
 
 ### Pending
 
-- **P16** — Generate the remaining 4 chassis (Scout, Heavy, Sniper,
-  Engineer) + weapon atlas + HUD icons + per-map parallax kits via
-  the same pipeline. Same trade-off (8 GB hardware: T2I-Adapter
-  substitute path).
-- **P17–P18** — Author 8 `.lvl` maps + bake-test harness.
+- **P18** — Author the remaining 4 `.lvl` maps (Catwalk / Aurora /
+  Crossfire / Citadel) plus the bake-test harness
+  (`tests/bake/run_bake.c`). P17 shipped Foundry / Slipstream /
+  Reactor / Concourse via `tools/cook_maps/cook_maps.c`.
+- **P19** — Audio assets (~47 SFX + per-map music + ambient loops)
+  filling the P14 runtime manifest. CC0 sourcing per
+  `documents/m5/09-audio.md`; tracked as the
+  "SFX manifest assets aren't on disk yet (post-P14)" trade-off.
+- **Parallax kits for the 7 not-yet-Foundry maps** (Slipstream /
+  Concourse / Reactor / Catwalk / Aurora / Crossfire / Citadel).
+  P16 shipped Foundry only; runtime falls back to M4 flat-color for
+  the other seven. Tracked as the
+  "Per-map kit textures: Foundry only ships parallax (P16-partial)"
+  trade-off.
 
 ## Headless test
 
