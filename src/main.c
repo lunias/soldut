@@ -1414,24 +1414,17 @@ static int dedicated_main(const LaunchArgs *args) {
 
 /* wan-fixes-16 (round 5) — in-process server thread.
  *
- * Called as the entry point of the thread spawned by
- * host_start_begin when the user clicks "Host Server". Runs
- * dedicated_run with skip-log + skip-signal options. The thread
- * exits when the main thread sets s_in_proc_server_quit. */
-#if defined(_WIN32)
-  /* Windows DWORD return + WINAPI for CreateThread compatibility.
-   * The function still takes one void* / pointer arg. */
-  #define IN_PROC_THREAD_RETURN DWORD WINAPI
-  #define IN_PROC_THREAD_RETURN_VAL 0
-#else
+ * The entry function is POSIX-style (void *(*)(void *)) on BOTH
+ * platforms. On Windows, proc_spawn.c's helper adapts it to
+ * CreateThread's WINAPI DWORD signature internally. This keeps
+ * main.c free of <windows.h> (which collides with raylib types). */
+#if !defined(_WIN32)
   #include <pthread.h>
-  #define IN_PROC_THREAD_RETURN void *
-  #define IN_PROC_THREAD_RETURN_VAL NULL
 #endif
 
 static LaunchArgs s_in_proc_args;
 
-static IN_PROC_THREAD_RETURN in_process_server_thread(void *arg) {
+static void *in_process_server_thread(void *arg) {
     (void)arg;
     DedicatedRunOptions opts = {
         .standalone   = false,
@@ -1439,11 +1432,16 @@ static IN_PROC_THREAD_RETURN in_process_server_thread(void *arg) {
         .log_prefix   = "in-proc-server",
     };
     dedicated_run(&s_in_proc_args, &opts);
-    return IN_PROC_THREAD_RETURN_VAL;
+    return NULL;
 }
 
 #if defined(_WIN32)
-static HANDLE s_in_proc_thread_handle = NULL;
+/* Opaque HANDLE — kept as a void* so we don't pull windows.h here. */
+static void *s_in_proc_thread_handle = NULL;
+/* proc_spawn.c implements these and casts to HANDLE / LPTHREAD_START_ROUTINE
+ * inside its own TU which DOES include <windows.h>. */
+extern void *win32_create_thread_compat(void *(*entry)(void *));
+extern void  win32_wait_close_thread_compat(void *handle);
 #else
 static pthread_t s_in_proc_thread_id = 0;
 static bool      s_in_proc_thread_started = false;
@@ -1453,15 +1451,8 @@ static bool in_process_server_start(const LaunchArgs *args) {
     s_in_proc_args = *args;
     s_in_proc_server_quit = 0;
 #if defined(_WIN32)
-    /* Forward-declare the Win32 type without pulling in <windows.h>
-     * (which collides with raylib in this TU). Using the Win32 API
-     * directly here would conflict with raylib's typedefs. Pass the
-     * call through proc_spawn.c's already-set-up wrapper. */
-    extern void *win32_create_thread_compat(unsigned long (*)(void *));
-    /* The cast wraps in_process_server_thread to the WINAPI calling
-     * convention indirectly via a helper. */
-    s_in_proc_thread_handle = (HANDLE)win32_create_thread_compat(
-        (unsigned long (*)(void *))in_process_server_thread);
+    s_in_proc_thread_handle = win32_create_thread_compat(
+        in_process_server_thread);
     if (!s_in_proc_thread_handle) {
         LOG_E("in_process_server_start: CreateThread failed");
         return false;
@@ -1482,7 +1473,6 @@ static void in_process_server_stop(void) {
     s_in_proc_server_quit = 1;
 #if defined(_WIN32)
     if (s_in_proc_thread_handle) {
-        extern void win32_wait_close_thread_compat(void *);
         win32_wait_close_thread_compat(s_in_proc_thread_handle);
         s_in_proc_thread_handle = NULL;
     }

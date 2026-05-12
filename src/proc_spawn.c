@@ -610,15 +610,28 @@ void time_sleep_ms(int ms) {
 /* wan-fixes-16 (round 5) — Windows thread helpers used by main.c's
  * in-process server. Implemented here so main.c doesn't need to pull
  * in <windows.h> (which conflicts with raylib's typedefs for
- * Rectangle / CloseWindow). Both helpers are tiny wrappers; the
- * extern declarations in main.c reference these. */
-void *win32_create_thread_compat(unsigned long (*entry)(void *)) {
-    /* DWORD WINAPI thread entry. The caller's function pointer
-     * matches DWORD WINAPI signature for an unsigned-long return. */
+ * Rectangle / CloseWindow).
+ *
+ * main.c provides a POSIX-style entry function (void *(*)(void *))
+ * so the same signature works on both POSIX and Windows. We adapt
+ * it to CreateThread's WINAPI DWORD signature here. Single-shot:
+ * the entry pointer is stashed in a static so the WINAPI trampoline
+ * can find it — we only ever start ONE in-process server thread at
+ * a time, so this is fine. */
+static void *(*s_in_proc_entry)(void *) = NULL;
+
+static DWORD WINAPI in_proc_trampoline(LPVOID arg) {
+    if (s_in_proc_entry) {
+        s_in_proc_entry(arg);
+    }
+    return 0;
+}
+
+void *win32_create_thread_compat(void *(*entry)(void *)) {
+    if (!entry) return NULL;
+    s_in_proc_entry = entry;
     DWORD tid = 0;
-    HANDLE h = CreateThread(NULL, 0,
-        (LPTHREAD_START_ROUTINE)entry,
-        NULL, 0, &tid);
+    HANDLE h = CreateThread(NULL, 0, in_proc_trampoline, NULL, 0, &tid);
     return (void *)h;
 }
 
