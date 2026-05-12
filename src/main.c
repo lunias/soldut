@@ -2202,6 +2202,37 @@ int main(int argc, char **argv) {
                           mid, game.local_slot_id);
                 }
             }
+            /* DIAG-sync: detect prolonged failure to resolve local_mech_id.
+             * If 2 s into the match we still don't have a local mech,
+             * the HUD is blank and input goes nowhere — a sure-fire
+             * sign of a sync bug. Fire once per stuck state with the
+             * triple that gates resolution so the log makes the cause
+             * obvious. */
+            {
+                static double s_match_start_t = 0.0;
+                static bool   s_warned_stuck   = false;
+                if (game.world.local_mech_id < 0 && game.local_slot_id >= 0 &&
+                    game.match.phase == MATCH_PHASE_ACTIVE)
+                {
+                    if (s_match_start_t == 0.0) s_match_start_t = GetTime();
+                    if (!s_warned_stuck &&
+                        GetTime() - s_match_start_t > 2.0)
+                    {
+                        int slot = game.local_slot_id;
+                        int slot_mech_id = (slot >= 0 && slot < MAX_LOBBY_SLOTS)
+                                             ? game.lobby.slots[slot].mech_id : -2;
+                        LOG_W("DIAG-sync: local_mech_id stuck at -1 after 2 s "
+                              "(local_slot_id=%d slot.mech_id=%d world.mech_count=%d "
+                              "match.phase=%d). HUD will be blank; input dropped.",
+                              slot, slot_mech_id,
+                              game.world.mech_count, (int)game.match.phase);
+                        s_warned_stuck = true;
+                    }
+                } else {
+                    s_match_start_t = 0.0;
+                    s_warned_stuck   = false;
+                }
+            }
 
             /* Client: locally decay match.time_remaining so the match
              * overlay's countdown ticks smoothly. The host doesn't

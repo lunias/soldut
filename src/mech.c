@@ -351,9 +351,10 @@ int mech_create_loadout(World *w, MechLoadout lo, Vec2 spawn,
     m->last_fired_slot = -1;
     m->last_fired_tick = 0;
 
-    LOG_I("mech_create: id=%d chassis=%s%s armor=%s jet=%s primary=%s secondary=%s",
+    LOG_I("mech_create: id=%d chassis=%s%s armor=%s jet=%s(id=%d) "
+          "fuel_max=%.3f primary=%s secondary=%s",
           mid, ch->name, is_dummy ? " (dummy)" : "",
-          ar->name, jp->name,
+          ar->name, jp->name, (int)m->jetpack_id, (double)m->fuel_max,
           pw ? pw->name : "?", sw ? sw->name : "?");
     return mid;
 }

@@ -374,6 +374,32 @@ static void add_pickup_to_map(Level *L, Arena *arena, int wx, int wy,
 }
 
 static void map_alloc_tiles(Level *level, Arena *arena, int w, int h) {
+    /* Zero the whole Level struct first. This matches what level_load
+     * does after parsing the .lvl header; without it, code-built
+     * fallbacks inherit stale poly_count / pickup_count / spawn_count /
+     * flag_count / *_pointers from whatever map was last loaded into
+     * this World. The pointers themselves point into the arena that
+     * was JUST reset by the caller, so they're aliased with whatever
+     * tiles / spawns / flags get allocated next — i.e., garbage
+     * geometry rendered as polygons, ghost pickups at random
+     * positions, etc.
+     *
+     * Repro that surfaced this: host UI cycles foundry→slipstream→
+     * reactor in the lobby UI (each .lvl load sets L->poly_count to
+     * 4/5/6), then picks crossfire (code-built, no .lvl). build_crossfire
+     * doesn't touch L->polys / L->poly_count, so L->poly_count stays
+     * at 6 with L->polys pointing into the freshly-reset arena. The
+     * renderer paints 6 garbage triangles. The joiner client (which
+     * didn't cycle through the lobby) lands on crossfire with
+     * poly_count=0 — same map_id, different rendered geometry.
+     *
+     * Also fixes the pickup append-without-reset bug: add_pickup_to_map
+     * checks `if (!L->pickups)` to allocate. Pre-fix the pointer
+     * survived across builds even after arena_reset; the next build
+     * appended to a stale count instead of starting fresh, so a series
+     * of map cycles produced 5 → 10 → 15 → 16 (capped) pickups for
+     * the SAME crossfire map. */
+    memset(level, 0, sizeof *level);
     level->width     = w;
     level->height    = h;
     level->tile_size = TILE_PX;
@@ -607,6 +633,14 @@ void map_build(MapId id, World *world, Arena *arena) {
     snprintf(path, sizeof path, "assets/maps/%s.lvl", def->short_name);
 
     LvlResult r = level_load(world, arena, path);
+    /* DIAG-sync: tag the resolution outcome so paired host/client logs
+     * make it obvious which side loaded the .lvl vs which fell back.
+     * The "first round maps not synced" bug typically shows up as one
+     * side logging `.lvl LOADED` while the other logs `code-built
+     * fallback` for the same map_id. */
+    LOG_I("DIAG-sync: map_build id=%d short='%s' path='%s' result=%s%s",
+          (int)id, def->short_name, path, level_io_result_str(r),
+          (r == LVL_OK) ? " (.lvl LOADED)" : " (will fall back to code-built)");
     if (r == LVL_OK) {
         /* P13 — load per-map parallax + tile atlas. Missing files are
          * the expected case until P15/P16 ships authored art; the kit
@@ -748,9 +782,16 @@ void map_build_for_descriptor(World *world, Arena *arena,
 {
     if (!world || !arena) return;
     if (!desc || (desc->crc32 == 0 && desc->size_bytes == 0)) {
+        LOG_I("DIAG-sync: map_build_for_descriptor: empty descriptor "
+              "(crc=0 size=0) — falling back to map_build(MapId=%d)",
+              (int)fallback_id);
         map_build(fallback_id, world, arena);
         return;
     }
+    LOG_I("DIAG-sync: map_build_for_descriptor: desc{crc=%08x size=%u short='%s'} "
+          "fallback_id=%d — probing shipped + cache",
+          (unsigned)desc->crc32, (unsigned)desc->size_bytes,
+          desc->short_name, (int)fallback_id);
     /* 1. shipped */
     char shipped[256];
     if (map_cache_assets_path(desc->short_name, shipped, sizeof(shipped))) {

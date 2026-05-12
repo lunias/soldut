@@ -37,12 +37,20 @@ __pycache__/
 # Logs
 *.log
 
-# Generated .lvl files (editor shots + cook_maps write here; authored
-# .lvl files for shipped maps land at P17/P18 and will be tracked
-# then). Per-map kit textures (parallax_*.png + tiles.png) shipped
-# at P16 stay tracked because we narrow the ignore to .lvl only.
+# Generated .lvl files (editor shots + cook_maps write here for
+# transient test fixtures). Per-map kit textures (parallax_*.png +
+# tiles.png) shipped at P16 stay tracked because we narrow the ignore
+# to .lvl only.
 assets/maps/*.lvl
 assets/maps/**/*.lvl
+
+# Authored .lvl files for shipped maps — exempt from the ignore above.
+# P17 added foundry / slipstream / reactor / concourse via
+# tools/cook_maps; P18 adds catwalk / aurora / crossfire / citadel.
+!assets/maps/foundry.lvl
+!assets/maps/slipstream.lvl
+!assets/maps/reactor.lvl
+!assets/maps/concourse.lvl
 
 # ComfyUI iteration scratch (P15+). Tracked inputs: workflow JSONs,
 # skeletons, style anchors, crop tables, and the gostek part sheets

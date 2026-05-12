@@ -844,11 +844,14 @@ WAN polish. Net effect on the trade-off ledger:
 
 ## World / level
 
-### Hard-coded tutorial map
+### Hard-coded tutorial map (still called by shotmode + headless harness)
 
-- **What we did** — `level_build_tutorial()` builds the M1 map in code. P01 shipped the `.lvl` loader; the runtime `map_build` path tries `assets/maps/<short>.lvl` first and falls back to the code-built map if loading fails. Shot mode + the headless harness still use `level_build_tutorial` directly.
-- **Why** — P01 shipped the loader/saver but no authored `.lvl` files exist yet (those land at P17/P18) and the editor (P04) hasn't shipped, so there's no way to author a real tutorial map.
-- **Revisit when** — P17/P18 ship authored `.lvl` maps. At that point shot tests and the headless harness can load real maps and `level_build_tutorial` can be retired (along with its hardcoded slope test bed — see separate entry).
+- **What we did** — `level_build_tutorial()` builds the M1 map in code. P01 shipped the `.lvl` loader; the runtime `map_build` path loads `assets/maps/<short>.lvl` (P17 shipped `foundry.lvl`, `slipstream.lvl`, `reactor.lvl`, `concourse.lvl` via `tools/cook_maps`). Shot mode + the headless harness still call `level_build_tutorial` directly because their fixture predates the loader.
+- **Why** — Real-match `map_build` loads the authored `.lvl` files; the in-process test harnesses didn't get migrated as part of P17 (out of scope). Migration is a focused refactor: replace `level_build_tutorial(...)` calls in `tests/headless_sim.c` + `src/shotmode.c` with `level_load(...)` against a checked-in test fixture, then delete `level_build_tutorial` from `src/level.c`.
+- **Revisit when** —
+  - P18 ships the remaining 4 maps + bake-test harness. The harness has its own setup pattern that may pin the tutorial path; tackle migration alongside that work.
+  - A regression slips because the shot fixture diverges from `cook_maps`-authored Foundry (e.g., shot tests assume the old M4 cover-wall layout, real play has the P17 hill geometry).
+  - The hardcoded slope test bed inside `level_build_tutorial` (separate entry below) is being deleted anyway — fold the retirement of `level_build_tutorial` into that work.
 
 ### Slope-physics tuning numbers are starting values
 
@@ -877,12 +880,53 @@ WAN polish. Net effect on the trade-off ledger:
 - **What we did** — `level.c::level_build_tutorial` allocates 3 SOLID
   polys (45° / 60° / 5° slopes at floor-row mid-map) for shot mode +
   the headless harness to land on. The runtime `map_build` path used
-  by real matches doesn't carry these.
-- **Why** — Without authored `.lvl` maps (P17), there's no other way
-  to get polygons in front of the physics for testing.
-- **Revisit when** — P17 / P18 ship authored maps. At that point the
-  test bed is removed from `level_build_tutorial` and shot tests use
-  the authored `.lvl` files directly.
+  by real matches doesn't carry these. P17 shipped four authored `.lvl`
+  maps with their own slope vocabulary (30° / 45° / 60° per the per-map
+  briefs), but the shot/headless callsites still go through
+  `level_build_tutorial`.
+- **Why** — Migrating shot tests + the headless harness from
+  `level_build_tutorial` to authored `.lvl` files is the same focused
+  refactor noted in the "Hard-coded tutorial map" entry above. The
+  test bed lives in `level_build_tutorial`, so the two entries delete
+  together.
+- **Revisit when** — Shot tests + headless harness load `.lvl` fixtures
+  directly via `level_load`. At that point both this entry and the
+  "Hard-coded tutorial map" entry delete simultaneously.
+
+### Concourse is synthesized programmatically, not editor-authored (P17)
+
+- **What we did** — `tools/cook_maps/cook_maps.c` emits `concourse.lvl`
+  via the same programmatic builder pattern as Foundry / Slipstream /
+  Reactor. The per-map brief in `documents/m5/07-maps.md` §"Concourse"
+  expects the layout to be hand-authored in the P04 editor (~2-4 hours
+  of design work); the cook_maps scaffold matches the brief's intent
+  (two 30° hills, wing-floor valleys, 4 alcoves, 16 spawns, 2 FOG
+  zones, 18 pickups) but skips the iterative layout-pass discipline
+  the editor enables. Concourse's wing-floor "valleys" are
+  POLY_KIND_BACKGROUND (purely visual), not physics, because dig-in
+  geometry below the floor row needs editor-driven polygon authoring.
+- **Why** — P17 ran in a single session without interactive access to
+  the editor. Shipping a programmatic scaffold gets the map into the
+  rotation immediately and lets the bake-test pass run against it; a
+  designer refines the layout in the editor afterward, saving over
+  `concourse.lvl`. The cook_maps source is the canonical record of the
+  starting layout if the editor-authored version goes wrong.
+- **Revisit when** —
+  - A designer iterates Concourse in the editor; the saved `.lvl`
+    overwrites cook_maps' output. At that point cook_maps still
+    rebuilds Foundry/Slipstream/Reactor cleanly, but **rerunning
+    `make cook-maps` would clobber the editor-authored Concourse** —
+    either drop the concourse builder from cook_maps once a designer
+    takes ownership, or have cook_maps refuse to overwrite a newer
+    `.lvl` (mtime check, ~10 LOC).
+  - The bake-test reveals Concourse-specific dead zones the
+    programmatic layout couldn't anticipate (gallery alcoves uncontested,
+    central Rail Cannon not contested enough, wing alcoves never
+    grabbed, etc.). Editor iteration is the natural fix.
+  - Wing-floor valleys' visual-only status reads weird at gameplay
+    distance (the player expects to drop into a basin). Either replace
+    them with SOLID polys (might require a deeper floor row) or remove
+    them entirely from the brief.
 
 ### Editor undo is whole-tile-grid snapshot for big strokes
 

@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade host-overlay-preview lobby-overlay-preview shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade host-overlay-preview lobby-overlay-preview cook-maps shot \
         debug gdb gdb-host gdb-client valgrind editor \
         assets-palettes assets-process
 
@@ -119,6 +119,15 @@ $(BUILD_DIR)/level_io_test: tests/level_io_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) 
 
 test-level-io: $(BUILD_DIR)/level_io_test
 	./$(BUILD_DIR)/level_io_test
+
+# M5 P17 — cook_maps: one-shot exporter that emits the four authored
+# .lvl files (Foundry / Slipstream / Reactor / Concourse) under
+# assets/maps/. Run once after pulling, or whenever the layout changes.
+$(BUILD_DIR)/cook_maps: tools/cook_maps/cook_maps.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tools/cook_maps/cook_maps.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+cook-maps: $(BUILD_DIR)/cook_maps
+	./$(BUILD_DIR)/cook_maps
 
 # M5 P05 — pickup runtime + powerup wire mirror + Burst SMG cadence.
 # Asserts and returns non-zero on failure; CI-runnable.

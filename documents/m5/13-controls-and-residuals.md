@@ -156,12 +156,15 @@ A keybinds config file (`soldut_controls.cfg`) is M6 polish; M5 ships hard-coded
 
 ### Resolved by M5 — these entries get deleted on land
 
-> **One exception**: the "Mechs rendered as raw capsules" entry's
-> deletion gate slipped from P12 → P15/P16 because no
-> `assets/sprites/<chassis>.png` files ship until asset generation
-> lands. The runtime work is done (P10 + P12); the entry stays in
-> `TRADE_OFFS.md` until the first chassis atlas drops in. Every other
-> row in the table below has been deleted as of P14.
+> **Status as of P16 + wan-fixes**: every row below has been deleted
+> from `TRADE_OFFS.md` as the implementing prompt landed — *except*
+> "Hard-coded tutorial map". P01 shipped the `.lvl` loader but the
+> entry's deletion gate is the authored maps themselves (P17/P18); the
+> entry stays open until the first authored `.lvl` retires
+> `level_build_tutorial`. The "Mechs rendered as raw capsules" entry's
+> own gate slipped from P12 → P15/P16 (waiting on chassis PNGs); it
+> was finally deleted at P16 when all 5 chassis atlases shipped via
+> the gostek extraction path.
 
 | Trade-off entry | Resolved by | Notes |
 |---|---|---|
