@@ -169,41 +169,38 @@ ProcHandle proc_spawn(const char *const *argv) {
     STARTUPINFOA si = {0};
     PROCESS_INFORMATION pi = {0};
     si.cb = sizeof(si);
-    /* Inherit stdout/stderr/stdin so console launches show the
-     * dedicated server's log in the same terminal — but ONLY if
-     * we actually have a console attached. If the user launches
-     * Soldut.exe from Explorer (no terminal), GetStdHandle returns
-     * NULL / INVALID_HANDLE_VALUE for the standard streams, and
-     * passing those to STARTF_USESTDHANDLES makes CreateProcess
-     * fail (the child can't open NUL stdin/stdout) or silently
-     * stall (sometimes the kernel quietly drops the child). Detect
-     * the no-console case and let the child use its default
-     * handles instead. */
-    HANDLE hin  = GetStdHandle(STD_INPUT_HANDLE);
-    HANDLE hout = GetStdHandle(STD_OUTPUT_HANDLE);
-    HANDLE herr = GetStdHandle(STD_ERROR_HANDLE);
-    BOOL handles_ok = (hin  != NULL && hin  != INVALID_HANDLE_VALUE &&
-                       hout != NULL && hout != INVALID_HANDLE_VALUE &&
-                       herr != NULL && herr != INVALID_HANDLE_VALUE);
-    if (handles_ok) {
-        si.dwFlags    = STARTF_USESTDHANDLES;
-        si.hStdInput  = hin;
-        si.hStdOutput = hout;
-        si.hStdError  = herr;
-    }
-
-    /* CREATE_NO_WINDOW prevents a transient console flash on
-     * Explorer launches (the dedicated child is headless — no
-     * raylib, no audio, just sim + net). When the parent already
-     * has a console, the child shares it via STARTF_USESTDHANDLES
-     * above; CREATE_NO_WINDOW is harmless in that case. */
-    DWORD flags = handles_ok ? 0 : CREATE_NO_WINDOW;
+    /* wan-fixes-16 — DO NOT inherit handles from the parent.
+     *
+     * Earlier revisions of this file passed bInheritHandles=TRUE +
+     * STARTF_USESTDHANDLES so the dedicated child's stdout would
+     * mux into the parent's console. That works fine when the
+     * parent is PowerShell or cmd.exe (manual `Soldut.exe --dedicated`
+     * from a shell), but on Windows it breaks the parent↔child UDP
+     * path in the Host Server flow: the parent UI's enet_host_connect
+     * to 127.0.0.1:<port> sends CONNECT packets that never reach
+     * the dedicated child's enet_host_service. Both sides log
+     * "listening" / "connecting" successfully, both report peers=0
+     * after a 5 s timeout, yet two INDEPENDENT Soldut.exe processes
+     * (one started in PowerShell with --dedicated, one Explorer-
+     * launched with --connect to the manual dedi) talk fine, and
+     * the Explorer-launched UI can connect to a manually-started
+     * dedi from a Server Browser entry. The only difference between
+     * the working case and the failing case is bInheritHandles=TRUE
+     * + STARTF_USESTDHANDLES on the spawn. The dedicated child
+     * already writes everything to soldut-server.log, so losing
+     * the muxed-console-output is a small price for the Host Server
+     * button actually working from a double-click launch.
+     *
+     * CREATE_NO_WINDOW keeps the child headless (no visible
+     * console window flashes) — it's still a console-subsystem
+     * binary, just with the console hidden. */
+    DWORD flags = CREATE_NO_WINDOW;
 
     BOOL ok = CreateProcessA(
         /*lpApplicationName*/ NULL,
         /*lpCommandLine*/     cmd,
         NULL, NULL,
-        /*bInheritHandles*/   handles_ok ? TRUE : FALSE,
+        /*bInheritHandles*/   FALSE,
         /*dwCreationFlags*/   flags,
         NULL, NULL,
         &si, &pi);
