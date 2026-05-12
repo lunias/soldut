@@ -2407,12 +2407,70 @@ milestone. Work is sequenced through `documents/m5/prompts/`.
     fresh canonical in ~45 sec; `python3 tools/comfy/crop_canonical.py
     <output> trooper --palette foundry` rebuilds the atlas in ~1 sec.
 
+- **P18 — Maps 5-8 (Catwalk / Aurora / Crossfire / Citadel) + bake-test harness + map thumbnails** (2026-05-12).
+  - `tools/cook_maps/cook_maps.c` extended with four new builders
+    (`build_catwalk`, `build_aurora`, `build_crossfire`,
+    `build_citadel`) plus `push_flag` / `push_deco` helpers for the
+    CTF records and skyline decorations. `make cook-maps` now emits
+    all 8 maps; each round-trips through `level_load` +
+    `level_build_poly_broadphase` inside the cooker. Per-map summary:
+    - **Catwalk** (120×70, TDM, 34651 bytes) — vertical layout, Red
+      spawn alcove bottom-left, Blue alcove top-right, 4 stacked
+      catwalks, 4 × 60° slide slopes between catwalks, 5 × 45° angled
+      overhead struts, 3 jetpack alcoves, 2 WIND zones at the top.
+      9 polys / 16 spawns / 22 pickups / 2 ambis.
+    - **Aurora** (160×90, FFA|TDM, 59975 bytes) — open arena, two big
+      30° hills + 45° central pit valley + 6 floating sky struts +
+      corner mountain peaks with jetpack alcoves + 1 ZERO_G zone at
+      the top + 32 POLY_KIND_BACKGROUND skyline silhouettes for
+      parallax depth. 50 polys (most of them background skyline) /
+      16 spawns / 25 pickups / 1 ambi.
+    - **Crossfire** (180×85, TDM|CTF, 62222 bytes) — first CTF map.
+      Mirror-symmetric: Red base on left, Blue on right, central
+      battleground between them. 30° entry ramps + 45° angled struts
+      above mid + flank tunnels with mid-tunnel alcove rooms +
+      central-high jetpack alcoves with POWERUP_INVISIBILITY ×2.
+      `LvlFlag` records on each flag platform. 5 polys / 16 spawns /
+      32 pickups / 2 flags / 0 ambis.
+    - **Citadel** (200×100, CTF, 81980 bytes) — the largest map. Two
+      castles with carved-out 3-room dungeon interiors (flag room +
+      resupply + defender perch), 30° plaza bowl meeting at a basin
+      holding Mass Driver, 60° castle ramparts, 45° angled castle
+      ceilings, gentle 30° tunnel grades, 2 sky bridges with
+      underside overlook alcoves, 12 small floating struts (grapple
+      anchors), 4 WIND zones at plaza height, 2 ACID zones at tunnel
+      ends, POWERUP_GODMODE in each tunnel choke. 32 polys / 16
+      spawns / 31 pickups / 2 flags / 6 ambis.
+  - **`tools/bake/run_bake.c` — new bake-test harness.** Headless
+    multi-bot run: spawns N bots (cycling chassis Trooper..Engineer,
+    primary weapons round-robin, sidearm/grenades secondary), loads
+    `assets/maps/<short>.lvl` via `map_build_from_path`, sets up
+    `MatchState` for the map's mode (CTF if mode_mask has CTF, else
+    TDM, else FFA), calls `pickup_init_round` + `ctf_init_round`,
+    and runs `simulate_step` for `duration_s` × 60 ticks. Bots
+    wander toward random spawn points, aim at nearest enemy in
+    800 px LOS, and shoot; stuck bots jet to clear cover walls.
+    Each tick records: pelvis traffic to a 384×192 heatmap, kill
+    positions (drained from `world.killfeed`), pickup grabs (from
+    AVAILABLE→COOLDOWN spawner transitions), and flag events.
+    Outputs: `build/bake/<short>.{kills,pickups,flags}.csv`,
+    `build/bake/<short>.heatmap.png` (R=kills, G=traffic, B=pickup
+    grabs), `build/bake/<short>.summary.txt`. Binary at
+    `build/bake_runner`; `make bake` builds; `make bake-all` runs
+    via `tools/bake/run_all.sh` on every map. All 8 maps pass the
+    smoke verdict (sim runs, bots fire, motion recorded). Per-map
+    acceptance criteria from `documents/m5/07-maps.md` are
+    informational rather than gating — see TRADE_OFFS entry
+    "Bake-test verdict is informational, not gating (P18)".
+  - **Map vote thumbnails.** New `render_thumb` in `cook_maps.c`
+    emits a 256×144 PNG per map as `assets/maps/<short>_thumb.png`:
+    tinted blocks for solid tiles, wireframe outlines for polygons
+    (per-kind palette), team-colored spawn dots, brighter flag
+    squares, pickup pixel-marks. Generated for all 8 maps. Quality
+    bar low per the prompt; polish is M6.
+
 ### Pending
 
-- **P18** — Author the remaining 4 `.lvl` maps (Catwalk / Aurora /
-  Crossfire / Citadel) plus the bake-test harness
-  (`tests/bake/run_bake.c`). P17 shipped Foundry / Slipstream /
-  Reactor / Concourse via `tools/cook_maps/cook_maps.c`.
 - **P19** — Audio assets (~47 SFX + per-map music + ambient loops)
   filling the P14 runtime manifest. CC0 sourcing per
   `documents/m5/09-audio.md`; tracked as the

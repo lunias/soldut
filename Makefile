@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade host-overlay-preview lobby-overlay-preview cook-maps shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade host-overlay-preview lobby-overlay-preview cook-maps bake bake-all shot \
         debug gdb gdb-host gdb-client valgrind editor \
         assets-palettes assets-process
 
@@ -128,6 +128,20 @@ $(BUILD_DIR)/cook_maps: tools/cook_maps/cook_maps.c $(HEADLESS_OBJ) $(RAYLIB_LIB
 
 cook-maps: $(BUILD_DIR)/cook_maps
 	./$(BUILD_DIR)/cook_maps
+
+# M5 P18 — bake-test harness: headless multi-bot run that drives
+# simulate() for `duration_s` seconds and dumps per-map heatmap + CSVs
+# + acceptance verdict under build/bake/. Used to validate map layouts
+# end-to-end before shipping. `make bake-all` runs it on every .lvl.
+# Binary lives at build/bake_runner so the output directory build/bake/
+# can share the obvious name.
+$(BUILD_DIR)/bake_runner: tools/bake/run_bake.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tools/bake/run_bake.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+bake: $(BUILD_DIR)/bake_runner
+
+bake-all: $(BUILD_DIR)/bake_runner
+	./tools/bake/run_all.sh
 
 # M5 P05 — pickup runtime + powerup wire mirror + Burst SMG cadence.
 # Asserts and returns non-zero on failure; CI-runnable.

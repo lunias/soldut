@@ -32,6 +32,8 @@
 #include "../../src/weapons.h"
 #include "../../src/world.h"
 
+#include "raylib.h"
+
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -201,6 +203,28 @@ static void push_ambi(int x, int y, int w, int h, AmbiKind kind,
         .rect_w = (int16_t)w, .rect_h = (int16_t)h,
         .kind = (uint16_t)kind, .strength_q = (int16_t)s_q,
         .dir_x_q = (int16_t)dx_q, .dir_y_q = (int16_t)dy_q,
+    };
+}
+
+static void push_flag(int wx, int wy, uint8_t team) {
+    Level *L = &g_cooker.world.level;
+    if (L->flag_count >= MAX_FLAGS) return;
+    L->flags[L->flag_count++] = (LvlFlag){
+        .pos_x = (int16_t)wx, .pos_y = (int16_t)wy,
+        .team = team, .reserved = {0, 0, 0},
+    };
+}
+
+static void push_deco(int wx, int wy, float scale, float rot_turns,
+                      const char *sprite_path, uint8_t layer, uint8_t flags) {
+    Level *L = &g_cooker.world.level;
+    if (L->deco_count >= MAX_DECOS) return;
+    L->decos[L->deco_count++] = (LvlDeco){
+        .pos_x = (int16_t)wx, .pos_y = (int16_t)wy,
+        .scale_q = (int16_t)(scale * 32767.0f),
+        .rot_q   = (int16_t)(rot_turns * 256.0f),
+        .sprite_str_idx = (uint16_t)strt_intern(sprite_path),
+        .layer = layer, .flags = flags,
     };
 }
 
@@ -782,8 +806,780 @@ static void build_concourse(void) {
 }
 
 /* ===================================================================== */
+/* ============================ CATWALK ================================ */
+/* ===================================================================== */
+/* 120×70 TDM. Vertical layout — RED base at the bottom-left, BLUE base
+ * at the top-right, connected by stacked catwalks. 60° external slide
+ * slopes drop between catwalks; 45° angled overhead struts above mid;
+ * 3 mid-catwalk jetpack alcoves; 2 WIND zones at the top. */
+
+static void build_catwalk(void) {
+    cook_reset(120, 70);
+    Level *L = &g_cooker.world.level;
+    const int W = L->width, H = L->height;
+    const uint16_t SOLID = TILE_F_SOLID;
+
+    /* Floor + outer ceiling band. */
+    tile_fill(0, H - 4, W, H, SOLID);
+    tile_fill(0, 0, W, 2, SOLID);
+
+    /* Outer walls. */
+    tile_fill(0,     2, 2,     H - 4, SOLID);
+    tile_fill(W - 2, 2, W,     H - 4, SOLID);
+
+    /* RED spawn alcove (bottom-left, edge archetype). Cavity at floor
+     * level, capped above so jets won't pop the player out the roof. */
+    tile_fill(2, H - 9, 14, H - 4, TILE_F_EMPTY);
+    tile_fill(2, H - 10, 14, H - 9, SOLID);
+
+    /* BLUE spawn alcove (top-right, jetpack archetype). Cavity 6 tiles
+     * tall × 12 wide, with its own platform floor at row 11 + roof at
+     * row 5. */
+    tile_fill(W - 14, 6, W - 2, 11, TILE_F_EMPTY);
+    tile_fill(W - 14, 11, W - 2, 12, SOLID);
+    tile_fill(W - 14,  5, W - 2,  6, SOLID);
+
+    /* Catwalks — 4 layers + bottom floor.
+     *
+     *   row    span
+     *   ─────────────────────────────
+     *   20-21  cw4 — top connector x=40..80
+     *   32-33  cw3 — left x=20..50, right x=70..100 (split)
+     *   44-45  cw2 — left x=15..50, right x=70..105 (split)
+     *   56-57  cw1 — long central x=25..95 */
+    tile_fill(40, H - 50, 80,  H - 49, SOLID);
+    tile_fill(20, H - 38, 50,  H - 37, SOLID);
+    tile_fill(70, H - 38, 100, H - 37, SOLID);
+    tile_fill(15, H - 26, 50,  H - 25, SOLID);
+    tile_fill(70, H - 26, 105, H - 25, SOLID);
+    tile_fill(25, H - 14, 95,  H - 13, SOLID);
+
+    /* Jetpack alcoves above central catwalks (3). 3-wide × 3-deep cavities
+     * cut into the side walls — only reachable by jet from below. */
+    tile_fill(2, H - 43, 8, H - 40, TILE_F_EMPTY);    /* above cw3 left */
+    tile_fill(2, H - 44, 8, H - 43, SOLID);
+    tile_fill(W - 8, H - 43, W - 2, H - 40, TILE_F_EMPTY);     /* above cw3 right */
+    tile_fill(W - 8, H - 44, W - 2, H - 43, SOLID);
+    tile_fill(58, H - 56, 62, H - 53, TILE_F_EMPTY);  /* above cw4 (overhead) */
+    tile_fill(58, H - 57, 62, H - 56, SOLID);
+
+    /* ---- Slope polygons ---- */
+    const int floor_y = t2w(H - 4);
+    const int cw1_top = t2w(H - 13);
+    const int cw3_top = t2w(H - 37);
+    const int cw4_top = t2w(H - 49);
+    const int red_plat_y  = t2w(H - 9);
+    const int blue_plat_y = t2w(11);
+
+    /* 60° slide slopes — drop from cw3 endpoints to cw1 (centre catwalk).
+     * tan(60°) ≈ 1.73 → ~5 tile rise per 3 tile run. */
+    push_tri(POLY_KIND_SOLID,
+             t2w(50), cw3_top, t2w(55), cw1_top, t2w(50), cw1_top);
+    push_tri(POLY_KIND_SOLID,
+             t2w(65), cw1_top, t2w(70), cw3_top, t2w(70), cw1_top);
+    /* 60° drops from cw4 to cw3. */
+    push_tri(POLY_KIND_SOLID,
+             t2w(40), cw4_top, t2w(45), cw3_top, t2w(40), cw3_top);
+    push_tri(POLY_KIND_SOLID,
+             t2w(75), cw3_top, t2w(80), cw4_top, t2w(80), cw3_top);
+
+    /* 45° angled overhead struts — 5 small triangles hanging from the
+     * top ceiling band. Each is a right-triangle with the hypotenuse
+     * acting as a slide-jet redirect surface. */
+    {
+        const int cy = t2w(2);
+        push_tri(POLY_KIND_SOLID, t2w(20), cy, t2w(26), cy, t2w(20), cy + t2w(3));
+        push_tri(POLY_KIND_SOLID, t2w(45), cy, t2w(51), cy, t2w(45), cy + t2w(3));
+        push_tri(POLY_KIND_SOLID, t2w(70), cy, t2w(76), cy, t2w(76), cy + t2w(3));
+        push_tri(POLY_KIND_SOLID, t2w(95), cy, t2w(101),cy, t2w(101),cy + t2w(3));
+        push_tri(POLY_KIND_SOLID, t2w(58), cy, t2w(64), cy, t2w(58), cy + t2w(3));
+    }
+
+    /* WIND ambient zones at top (sideways push on the highest catwalk). */
+    push_ambi(t2w(38), t2w(H - 56), t2w(20), t2w(8),
+              AMBI_WIND, 0.18f, +1.0f, 0.0f);
+    push_ambi(t2w(20), t2w(H - 44), t2w(20), t2w(6),
+              AMBI_WIND, 0.15f, -1.0f, 0.0f);
+
+    /* ---- Spawns — 8 RED on bottom, 8 BLUE on top. ---- */
+    const int red_floor_y = floor_y - 40;
+    const int red_plat    = red_plat_y  - 40;
+    const int blue_plat   = blue_plat_y - 40;
+    push_spawn(t2w(3),  red_floor_y, 1, 1, 0);
+    push_spawn(t2w(6),  red_floor_y, 1, 1, 1);
+    push_spawn(t2w(9),  red_floor_y, 1, 1, 2);
+    push_spawn(t2w(12), red_floor_y, 1, 1, 3);
+    push_spawn(t2w(20), red_floor_y, 1, 1, 4);
+    push_spawn(t2w(28), red_floor_y, 1, 1, 5);
+    push_spawn(t2w(40), red_floor_y, 1, 1, 6);
+    push_spawn(t2w(60), red_floor_y, 1, 1, 7);
+
+    push_spawn(t2w(W -  3), blue_plat, 2, 1, 8);
+    push_spawn(t2w(W -  6), blue_plat, 2, 1, 9);
+    push_spawn(t2w(W -  9), blue_plat, 2, 1, 10);
+    push_spawn(t2w(W - 12), blue_plat, 2, 1, 11);
+    push_spawn(t2w(60),     t2w(H - 49) - 40, 2, 1, 12);    /* cw4 top */
+    push_spawn(t2w(35),     t2w(H - 37) - 40, 2, 1, 13);
+    push_spawn(t2w(85),     t2w(H - 37) - 40, 2, 1, 14);
+    push_spawn(t2w(W - 30), blue_plat, 2, 1, 15);
+
+    /* ---- Pickups (≈20 per brief). ---- */
+    const int floor_pick = floor_y - 16;
+    const int cw1_pick   = cw1_top - 16;
+    const int cw2_pick   = t2w(H - 25) - 16;
+    const int cw3_pick   = cw3_top - 16;
+    const int cw4_pick   = cw4_top - 16;
+    const int red_pick   = red_plat_y  - 16;
+    const int blue_pick  = blue_plat_y - 16;
+
+    /* Red base alcove. */
+    push_pickup(t2w(3),  red_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(6),  red_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(9),  red_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(11), red_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(13), red_pick, PICKUP_AMMO_PRIMARY, 0);
+    /* Blue base alcove. */
+    push_pickup(t2w(W -  3), blue_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W -  6), blue_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W -  9), blue_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W - 11), blue_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(W - 13), blue_pick, PICKUP_AMMO_PRIMARY, 0);
+    /* Mid-catwalk jetpack alcoves: JET_FUEL, ARMOR light, POWERUP berserk. */
+    push_pickup(t2w(5),     t2w(H - 41) - 16, PICKUP_JET_FUEL, 0);
+    push_pickup(t2w(W - 5), t2w(H - 41) - 16, PICKUP_ARMOR, ARMOR_LIGHT);
+    push_pickup(t2w(60),    t2w(H - 54) - 16, PICKUP_POWERUP, POWERUP_BERSERK);
+    /* Open catwalks: HEALTH_SMALL ×4 + JET_FUEL ×3. */
+    push_pickup(t2w(35), cw3_pick, PICKUP_HEALTH, HEALTH_SMALL);
+    push_pickup(t2w(85), cw3_pick, PICKUP_HEALTH, HEALTH_SMALL);
+    push_pickup(t2w(30), cw2_pick, PICKUP_HEALTH, HEALTH_SMALL);
+    push_pickup(t2w(90), cw2_pick, PICKUP_HEALTH, HEALTH_SMALL);
+    push_pickup(t2w(40), cw1_pick, PICKUP_JET_FUEL, 0);
+    push_pickup(t2w(60), cw1_pick, PICKUP_JET_FUEL, 0);
+    push_pickup(t2w(80), cw1_pick, PICKUP_JET_FUEL, 0);
+    /* Highest catwalk: Rail Cannon (exposed). */
+    push_pickup(t2w(60), cw4_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
+    /* Lowest gap mid-floor: Mass Driver (suicide pickup — you have to
+     * jet back up after grabbing). */
+    push_pickup(t2w(60), floor_pick, PICKUP_WEAPON, WEAPON_MASS_DRIVER);
+
+    set_meta("Catwalk",
+             "Vertical TDM. Slide catwalks; grapple-friendly struts.",
+             "exterior",
+             (uint16_t)(1u << MATCH_MODE_TDM));
+
+    (void)red_plat;
+}
+
+/* ===================================================================== */
+/* ============================== AURORA =============================== */
+/* ===================================================================== */
+/* 160×90 open arena, TDM|FFA. Two big 30° hills, 45° central pit valley,
+ * floating sky struts (grapple-only), corner mountain peaks with jetpack
+ * alcoves, 1 ZERO_G zone at the very top, and ~30 POLY_KIND_BACKGROUND
+ * skyline silhouettes for depth. */
+
+static void build_aurora(void) {
+    cook_reset(160, 90);
+    Level *L = &g_cooker.world.level;
+    const int W = L->width, H = L->height;
+    const uint16_t SOLID = TILE_F_SOLID;
+
+    /* Floor. */
+    tile_fill(0, H - 4, W, H, SOLID);
+
+    /* Outer walls — short, capped at mountain-peak height. */
+    tile_fill(0,     H - 35, 2,     H - 4, SOLID);
+    tile_fill(W - 2, H - 35, W,     H - 4, SOLID);
+
+    /* Mountain peaks at the corners — tall pillars from floor to row
+     * H-30, capped with a small 4×3 platform at the top + a hidden
+     * alcove behind them. */
+    tile_fill(2,  H - 35, 10, H - 4, SOLID);            /* west peak body */
+    tile_fill(2,  H - 38, 10, H - 35, SOLID);           /* peak rise */
+    tile_fill(W - 10, H - 35, W - 2, H - 4, SOLID);     /* east peak body */
+    tile_fill(W - 10, H - 38, W - 2, H - 35, SOLID);
+
+    /* Mountain-peak jetpack alcoves — cavity carved into the peak,
+     * mouth facing inward (toward the map). 3 wide × 3 tall × 4 deep. */
+    tile_fill( 6,  H - 38, 10, H - 35, TILE_F_EMPTY);
+    tile_fill( 6,  H - 39, 10, H - 38, SOLID);
+    tile_fill(W - 10, H - 38, W - 6, H - 35, TILE_F_EMPTY);
+    tile_fill(W - 10, H - 39, W - 6, H - 38, SOLID);
+
+    /* Hill-side edge alcoves cut into each mountain at floor level. */
+    tile_fill(10, H - 7, 14, H - 4, TILE_F_EMPTY);
+    tile_fill(10, H - 8, 14, H - 7, SOLID);
+    tile_fill(W - 14, H - 7, W - 10, H - 4, TILE_F_EMPTY);
+    tile_fill(W - 14, H - 8, W - 10, H - 7, SOLID);
+
+    /* ---- Slope polygons ---- */
+    const int floor_y     = t2w(H -  4);
+    const int hill_peak_y = t2w(H - 11);                /* west / east hill tops */
+    const int pit_low_y   = t2w(H -  4 + 2);            /* central pit basin */
+    const int peak_top    = t2w(H - 35);
+
+    /* Two big 30° hills — ~10 tiles wide each. tan(30°) ≈ 0.577 →
+     * 7 tile rise / 12 tile run. */
+    /* West hill — rises eastward from x=20 to x=32. */
+    push_tri(POLY_KIND_SOLID,
+             t2w(20), floor_y,
+             t2w(32), hill_peak_y,
+             t2w(32), floor_y);
+    /* West hill — falls eastward into the central pit. */
+    push_tri(POLY_KIND_SOLID,
+             t2w(32), hill_peak_y,
+             t2w(44), floor_y,
+             t2w(32), floor_y);
+    /* East hill — mirror. */
+    push_tri(POLY_KIND_SOLID,
+             t2w(W - 32), floor_y,
+             t2w(W - 20), hill_peak_y,
+             t2w(W - 20), floor_y);
+    push_tri(POLY_KIND_SOLID,
+             t2w(W - 32), hill_peak_y,
+             t2w(W - 32), floor_y,
+             t2w(W - 44), floor_y);
+    (void)pit_low_y;
+
+    /* 45° central pit valley — 4-tile basin at the bottom with 45°
+     * slopes on each side, ~14 tiles wide each side. */
+    push_tri(POLY_KIND_BACKGROUND,
+             t2w(60), floor_y,
+             t2w(74), floor_y + t2w(4),
+             t2w(74), floor_y);
+    push_tri(POLY_KIND_BACKGROUND,
+             t2w(86), floor_y + t2w(4),
+             t2w(100), floor_y,
+             t2w(86), floor_y);
+
+    /* 6 floating overhead struts (grapple anchors). Small horizontal
+     * platforms in the sky, no surface ramps. */
+    push_quad(POLY_KIND_SOLID, t2w(40), t2w(H - 50),  t2w(46), t2w(H - 49));
+    push_quad(POLY_KIND_SOLID, t2w(58), t2w(H - 55),  t2w(64), t2w(H - 54));
+    push_quad(POLY_KIND_SOLID, t2w(78), t2w(H - 58),  t2w(84), t2w(H - 57));
+    push_quad(POLY_KIND_SOLID, t2w(96), t2w(H - 55),  t2w(102),t2w(H - 54));
+    push_quad(POLY_KIND_SOLID, t2w(114),t2w(H - 50),  t2w(120),t2w(H - 49));
+    push_quad(POLY_KIND_SOLID, t2w(70), t2w(H - 70),  t2w(76), t2w(H - 69));
+
+    /* ZERO_G zone at the very top. */
+    push_ambi(t2w(20), t2w(2), t2w(W - 40), t2w(15),
+              AMBI_ZERO_G, 1.00f, 0.0f, 0.0f);
+
+    /* 30+ POLY_KIND_BACKGROUND skyline silhouettes for parallax depth.
+     * Two rows of small spikes at varied heights. */
+    for (int i = 0; i < 18; ++i) {
+        int x = 14 + i * 8;
+        int top_y = t2w(H - 28 + ((i * 7) % 5));
+        push_tri(POLY_KIND_BACKGROUND,
+                 t2w(x),     floor_y,
+                 t2w(x + 4), top_y,
+                 t2w(x + 4), floor_y);
+    }
+    for (int i = 0; i < 14; ++i) {
+        int x = 28 + i * 10;
+        int top_y = t2w(H - 33 + ((i * 11) % 7));
+        push_tri(POLY_KIND_BACKGROUND,
+                 t2w(x),     top_y,
+                 t2w(x + 6), floor_y,
+                 t2w(x),     floor_y);
+    }
+
+    /* ---- Spawns — TDM split: 8 red on west, 8 blue on east. ---- */
+    const int spawn_floor = floor_y - 40;
+    const int peak_spawn  = peak_top - 40;
+    push_spawn(t2w(12),     spawn_floor, 1, 1, 0);
+    push_spawn(t2w(18),     spawn_floor, 1, 1, 1);
+    push_spawn(t2w(26),     spawn_floor, 1, 1, 2);
+    push_spawn(t2w(34),     spawn_floor, 1, 1, 3);
+    push_spawn(t2w(42),     spawn_floor, 1, 1, 4);
+    push_spawn(t2w(56),     spawn_floor, 1, 1, 5);
+    push_spawn(t2w(4),      peak_spawn,  1, 1, 6);
+    push_spawn(t2w(20),     t2w(H - 11) - 40, 1, 1, 7);    /* west hill summit */
+
+    push_spawn(t2w(W - 12), spawn_floor, 2, 1, 8);
+    push_spawn(t2w(W - 18), spawn_floor, 2, 1, 9);
+    push_spawn(t2w(W - 26), spawn_floor, 2, 1, 10);
+    push_spawn(t2w(W - 34), spawn_floor, 2, 1, 11);
+    push_spawn(t2w(W - 42), spawn_floor, 2, 1, 12);
+    push_spawn(t2w(W - 56), spawn_floor, 2, 1, 13);
+    push_spawn(t2w(W - 4),  peak_spawn,  2, 1, 14);
+    push_spawn(t2w(W - 20), t2w(H - 11) - 40, 2, 1, 15);   /* east hill summit */
+
+    /* ---- Pickups (≈26 per brief). ---- */
+    const int floor_pick = floor_y - 16;
+    const int hill_pick  = hill_peak_y - 16;
+    const int peak_pick  = peak_top - 16;
+    const int strut_pick_a = t2w(H - 50) - 16;
+    const int strut_pick_b = t2w(H - 58) - 16;
+
+    /* Central pit floor: HEALTH small ×3 + JET_FUEL ×2 (encourage jumping in). */
+    push_pickup(t2w(74), floor_pick + 64, PICKUP_HEALTH, HEALTH_SMALL);
+    push_pickup(t2w(80), floor_pick + 64, PICKUP_HEALTH, HEALTH_SMALL);
+    push_pickup(t2w(86), floor_pick + 64, PICKUP_HEALTH, HEALTH_SMALL);
+    push_pickup(t2w(78), floor_pick + 64, PICKUP_JET_FUEL, 0);
+    push_pickup(t2w(82), floor_pick + 64, PICKUP_JET_FUEL, 0);
+    /* Hill summits (exposed): WEAPON Auto-Cannon + ARMOR heavy (west). */
+    push_pickup(t2w(32), hill_pick, PICKUP_WEAPON, WEAPON_AUTO_CANNON);
+    push_pickup(t2w(28), hill_pick, PICKUP_ARMOR, ARMOR_HEAVY);
+    /* East hill: WEAPON Plasma Cannon + ARMOR heavy. */
+    push_pickup(t2w(W - 32), hill_pick, PICKUP_WEAPON, WEAPON_PLASMA_CANNON);
+    push_pickup(t2w(W - 28), hill_pick, PICKUP_ARMOR, ARMOR_HEAVY);
+    /* Hill-side alcoves: AMMO ×4. */
+    push_pickup(t2w(11),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(13),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(W - 13), floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(W - 11), floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    /* Sky struts (grapple-only): WEAPON Mass Driver, HEALTH small ×2. */
+    push_pickup(t2w(80),  strut_pick_b, PICKUP_WEAPON, WEAPON_MASS_DRIVER);
+    push_pickup(t2w(61),  strut_pick_a, PICKUP_HEALTH, HEALTH_SMALL);
+    push_pickup(t2w(117), strut_pick_a, PICKUP_HEALTH, HEALTH_SMALL);
+    /* Mountain peaks (exposed summit): WEAPON Rail Cannon ×2. */
+    push_pickup(t2w(6),     peak_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
+    push_pickup(t2w(W - 6), peak_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
+    /* Mountain-peak alcoves: HEALTH large ×2 + POWERUP berserk ×1. */
+    push_pickup(t2w(8),     t2w(H - 37) - 16, PICKUP_HEALTH, HEALTH_LARGE);
+    push_pickup(t2w(W - 8), t2w(H - 37) - 16, PICKUP_HEALTH, HEALTH_LARGE);
+    push_pickup(t2w(8),     t2w(H - 37) - 16 - 16,
+                PICKUP_POWERUP, POWERUP_BERSERK);
+    /* Extra mid-floor health to bring count up. */
+    push_pickup(t2w(48), floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W - 48), floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(60), floor_pick, PICKUP_AMMO_SECONDARY, 0);
+    push_pickup(t2w(W - 60), floor_pick, PICKUP_AMMO_SECONDARY, 0);
+
+    set_meta("Aurora",
+             "Open arena. Hills + central pit, skyline at distance.",
+             "aurora",
+             (uint16_t)((1u << MATCH_MODE_FFA) | (1u << MATCH_MODE_TDM)));
+
+    (void)strut_pick_a; (void)strut_pick_b;
+}
+
+/* ===================================================================== */
+/* ============================ CROSSFIRE ============================== */
+/* ===================================================================== */
+/* 180×85 — the first CTF map. Mirror-symmetric: RED base on the left,
+ * BLUE base on the right, wide central battleground between them. 30°
+ * entry ramps to each base; 45° angled struts over mid; flank-tunnel
+ * cave segments; central-high jetpack alcoves with POWERUP invisibility. */
+
+static void build_crossfire(void) {
+    cook_reset(180, 85);
+    Level *L = &g_cooker.world.level;
+    const int W = L->width, H = L->height;
+    const uint16_t SOLID = TILE_F_SOLID;
+
+    /* Floor + outer walls. */
+    tile_fill(0, H - 4, W, H, SOLID);
+    tile_fill(0,     0, 2,     H - 4, SOLID);
+    tile_fill(W - 2, 0, W,     H - 4, SOLID);
+
+    /* Top ceiling band (thinner — open sky on the sides). */
+    tile_fill(0, 0, W, 2, SOLID);
+
+    /* Base structures. RED on left x=2..30, BLUE on right x=W-30..W-2.
+     * Each base has:
+     *   - a flag platform at row H-14 (16 tiles up from floor)
+     *   - a resupply alcove cut into the side wall
+     *   - a 30° entry ramp from the central area up to the flag platform */
+    const int base_w = 28;
+    const int flag_plat_top_row = H - 14;
+    /* RED flag platform — extends from x=2 to x=base_w. */
+    tile_fill(2, flag_plat_top_row, base_w, flag_plat_top_row + 1, SOLID);
+    /* RED back wall (cuts the base off from the world edge above). */
+    tile_fill(2, 4, base_w, flag_plat_top_row, TILE_F_EMPTY);
+    /* RED resupply alcove — cavity at floor level, ceiling at row H-7. */
+    tile_fill(2, H - 7, 12, H - 4, TILE_F_EMPTY);
+    tile_fill(2, H - 8, 12, H - 7, SOLID);
+    /* RED base ceiling cap (so jetting up under the flag platform from
+     * floor doesn't escape into the sky). */
+    /* (the flag platform tile itself caps the top of the interior) */
+
+    /* BLUE — mirror. */
+    tile_fill(W - base_w, flag_plat_top_row, W - 2, flag_plat_top_row + 1, SOLID);
+    tile_fill(W - base_w, 4, W - 2, flag_plat_top_row, TILE_F_EMPTY);
+    tile_fill(W - 12, H - 7, W - 2, H - 4, TILE_F_EMPTY);
+    tile_fill(W - 12, H - 8, W - 2, H - 7, SOLID);
+
+    /* Central catwalks above the battleground. Two short platforms at
+     * row H-22 and a higher pair at row H-32 (sky bridge alternatives). */
+    tile_fill(60, H - 22, 80, H - 21, SOLID);
+    tile_fill(W - 80, H - 22, W - 60, H - 21, SOLID);
+    tile_fill(75, H - 32, 105, H - 31, SOLID);          /* sky bridge */
+
+    /* Flank tunnels — covered passages below the battleground. The
+     * ceiling at row H-8 cuts off the bottom 4 rows so the tunnel reads
+     * as enclosed; openings at the base sides + a central exit. */
+    tile_fill(40, H - 8, 60,  H - 7, SOLID);
+    tile_fill(80, H - 8, 100, H - 7, SOLID);
+    tile_fill(120, H - 8, 140, H - 7, SOLID);
+
+    /* Flank-tunnel mid-alcove rooms (one per side, cut into the ceiling
+     * line above the tunnel). */
+    tile_fill(48, H - 11, 54, H - 8, TILE_F_EMPTY);
+    tile_fill(48, H - 12, 54, H - 11, SOLID);
+    tile_fill(W - 54, H - 11, W - 48, H - 8, TILE_F_EMPTY);
+    tile_fill(W - 54, H - 12, W - 48, H - 11, SOLID);
+
+    /* Central-high jetpack alcoves — above the central catwalks at row
+     * H-32, mouth facing center, only reachable by jet from below. */
+    tile_fill(75, H - 36, 80, H - 32, TILE_F_EMPTY);
+    tile_fill(75, H - 37, 80, H - 36, SOLID);
+    tile_fill(W - 80, H - 36, W - 75, H - 32, TILE_F_EMPTY);
+    tile_fill(W - 80, H - 37, W - 75, H - 36, SOLID);
+
+    /* ---- Slope polygons ---- */
+    const int floor_y   = t2w(H - 4);
+    const int flag_y    = t2w(flag_plat_top_row);
+
+    /* 30° entry ramps from central area up to each base's flag platform.
+     * tan(30°) ≈ 0.58 → 7 tile rise / 12 tile run. */
+    push_tri(POLY_KIND_SOLID,
+             t2w(base_w),       flag_y,
+             t2w(base_w + 14),  floor_y,
+             t2w(base_w),       floor_y);
+    push_tri(POLY_KIND_SOLID,
+             t2w(W - base_w - 14), floor_y,
+             t2w(W - base_w),      flag_y,
+             t2w(W - base_w),      floor_y);
+
+    /* 45° angled struts above central mid (3). */
+    push_tri(POLY_KIND_SOLID,
+             t2w(W / 2 - 12), t2w(2),
+             t2w(W / 2 -  6), t2w(2),
+             t2w(W / 2 -  6), t2w(8));
+    push_tri(POLY_KIND_SOLID,
+             t2w(W / 2 +  6), t2w(2),
+             t2w(W / 2 + 12), t2w(2),
+             t2w(W / 2 +  6), t2w(8));
+    push_tri(POLY_KIND_SOLID,
+             t2w(W / 2 -  6), t2w(2),
+             t2w(W / 2 +  6), t2w(2),
+             t2w(W / 2),      t2w(8));
+
+    /* ---- Flag records (2). Place each flag at the center of its team's
+     * flag platform, slightly above the surface (16 px). */
+    push_flag(t2w(15),     flag_y - 16, MATCH_TEAM_RED);
+    push_flag(t2w(W - 15), flag_y - 16, MATCH_TEAM_BLUE);
+
+    /* ---- Spawns — 8 per team, lane_hint variety. ---- */
+    const int red_base_spawn  = floor_y - 40;
+    const int red_flag_spawn  = flag_y - 40;
+    const int blue_base_spawn = floor_y - 40;
+    const int blue_flag_spawn = flag_y - 40;
+    for (int i = 0; i < 4; ++i) {
+        push_spawn(t2w(4 + i * 5), red_base_spawn, 1, 1, (uint8_t)i);
+    }
+    push_spawn(t2w(6),  red_flag_spawn, 1, 1, 4);
+    push_spawn(t2w(12), red_flag_spawn, 1, 1, 5);
+    push_spawn(t2w(18), red_flag_spawn, 1, 1, 6);
+    push_spawn(t2w(24), red_flag_spawn, 1, 1, 7);
+
+    for (int i = 0; i < 4; ++i) {
+        push_spawn(t2w(W - 4 - i * 5), blue_base_spawn, 2, 1, (uint8_t)(8 + i));
+    }
+    push_spawn(t2w(W -  6), blue_flag_spawn, 2, 1, 12);
+    push_spawn(t2w(W - 12), blue_flag_spawn, 2, 1, 13);
+    push_spawn(t2w(W - 18), blue_flag_spawn, 2, 1, 14);
+    push_spawn(t2w(W - 24), blue_flag_spawn, 2, 1, 15);
+
+    /* ---- Pickups (≈30 per brief). ---- */
+    const int floor_pick = floor_y - 16;
+    const int flag_pick  = flag_y - 16;
+    const int cw_pick    = t2w(H - 22) - 16;
+    const int sky_pick   = t2w(H - 32) - 16;
+
+    /* Red base resupply (in alcove): HEALTH medium ×4, AMMO ×4, ARMOR
+     * light, WEAPON Pulse Rifle. */
+    push_pickup(t2w(3),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(5),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(7),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(9),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(4),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(6),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(8),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(10), floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(11), floor_pick, PICKUP_ARMOR, ARMOR_LIGHT);
+    push_pickup(t2w(12), flag_pick,  PICKUP_WEAPON, WEAPON_PULSE_RIFLE);
+    /* Blue base mirror. */
+    push_pickup(t2w(W -  3),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W -  5),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W -  7),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W -  9),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W -  4),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(W -  6),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(W -  8),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(W - 10),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(W - 11),  floor_pick, PICKUP_ARMOR, ARMOR_LIGHT);
+    push_pickup(t2w(W - 12),  flag_pick,  PICKUP_WEAPON, WEAPON_PULSE_RIFLE);
+    /* Flank-tunnel alcoves: HEALTH small ×2, AMMO_SECONDARY ×2 per side. */
+    push_pickup(t2w(51),     t2w(H - 9) - 16, PICKUP_HEALTH, HEALTH_SMALL);
+    push_pickup(t2w(W - 51), t2w(H - 9) - 16, PICKUP_HEALTH, HEALTH_SMALL);
+    push_pickup(t2w(50),     t2w(H - 9) - 16, PICKUP_AMMO_SECONDARY, 0);
+    push_pickup(t2w(W - 50), t2w(H - 9) - 16, PICKUP_AMMO_SECONDARY, 0);
+    /* Central battleground low: HEALTH large + JET_FUEL ×2 (exposed). */
+    push_pickup(t2w(W / 2),     floor_pick, PICKUP_HEALTH, HEALTH_LARGE);
+    push_pickup(t2w(W / 2 - 8), floor_pick, PICKUP_JET_FUEL, 0);
+    push_pickup(t2w(W / 2 + 8), floor_pick, PICKUP_JET_FUEL, 0);
+    /* Central catwalks: Mass Driver + Rail Cannon (heavily contested). */
+    push_pickup(t2w(70),  cw_pick, PICKUP_WEAPON, WEAPON_MASS_DRIVER);
+    push_pickup(t2w(W - 70), cw_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
+    /* Sky bridge: ARMOR heavy. */
+    push_pickup(t2w(W / 2), sky_pick, PICKUP_ARMOR, ARMOR_HEAVY);
+    /* Central-high jetpack alcoves: POWERUP invisibility ×2. */
+    push_pickup(t2w(77),     t2w(H - 33) - 16, PICKUP_POWERUP, POWERUP_INVISIBILITY);
+    push_pickup(t2w(W - 77), t2w(H - 33) - 16, PICKUP_POWERUP, POWERUP_INVISIBILITY);
+
+    set_meta("Crossfire",
+             "Mirror CTF arena. Two bases, central battleground.",
+             "foundry",
+             (uint16_t)((1u << MATCH_MODE_TDM) | (1u << MATCH_MODE_CTF)));
+}
+
+/* ===================================================================== */
+/* ============================== CITADEL ============================== */
+/* ===================================================================== */
+/* 200×100 — the largest map and the CTF-primary closer for M5. Plaza
+ * bowl (30°), steep castle ramparts (60°), angled castle ceilings (45°
+ * overhangs), gentle tunnel grades, 12+ grapple anchors (rendered as
+ * floating struts), 4 WIND zones at plaza height, 2 ACID zones at
+ * tunnel ends, 10 caves/alcoves. */
+
+static void build_citadel(void) {
+    cook_reset(200, 100);
+    Level *L = &g_cooker.world.level;
+    const int W = L->width, H = L->height;
+    const uint16_t SOLID = TILE_F_SOLID;
+
+    /* Floor + ceiling. */
+    tile_fill(0, H - 4, W, H, SOLID);
+    tile_fill(0, 0, W, 2, SOLID);
+
+    /* Outer walls full height. */
+    tile_fill(0,     2, 2,     H - 4, SOLID);
+    tile_fill(W - 2, 2, W,     H - 4, SOLID);
+
+    /* CASTLES — left and right blocks of solid stone with carved-out
+     * dungeon interiors. Each castle is ~30 tiles wide × 24 tall.
+     * The interior dungeon is a 3-room cave network. */
+    const int castle_w = 30;
+    /* RED castle solid envelope. */
+    tile_fill(2,            H - 30, 2 + castle_w, H - 4, SOLID);
+    /* RED castle dungeon interior — carve out 3 connected rooms. */
+    tile_fill(4,  H - 28, 14, H - 4, TILE_F_EMPTY);   /* room 1: flag room (west) */
+    tile_fill(16, H - 28, 24, H - 4, TILE_F_EMPTY);   /* room 2: resupply (center) */
+    tile_fill(26, H - 14, 30, H - 4, TILE_F_EMPTY);   /* room 3: defender perch (east, smaller) */
+    /* Inter-room walls (1-tile partitions with 3-tile passages). */
+    tile_fill(14, H - 10, 16, H - 4, SOLID);          /* partition between rooms 1-2, opening above row H-10 */
+    tile_fill(24, H - 14, 26, H - 4, SOLID);          /* partition rooms 2-3 */
+    /* Castle entrance — opening in east wall at floor level. */
+    /* (the east wall is already solid; cut a passage) */
+    tile_fill(30, H - 8, 32, H - 4, TILE_F_EMPTY);    /* east-facing exit */
+    tile_fill(30, H - 9, 32, H - 8, SOLID);
+
+    /* BLUE castle — mirror. */
+    tile_fill(W - 2 - castle_w, H - 30, W - 2, H - 4, SOLID);
+    tile_fill(W - 14, H - 28, W - 4,  H - 4, TILE_F_EMPTY);
+    tile_fill(W - 24, H - 28, W - 16, H - 4, TILE_F_EMPTY);
+    tile_fill(W - 30, H - 14, W - 26, H - 4, TILE_F_EMPTY);
+    tile_fill(W - 16, H - 10, W - 14, H - 4, SOLID);
+    tile_fill(W - 26, H - 14, W - 24, H - 4, SOLID);
+    tile_fill(W - 32, H - 8, W - 30, H - 4, TILE_F_EMPTY);
+    tile_fill(W - 32, H - 9, W - 30, H - 8, SOLID);
+
+    /* Outer wall catwalks circling each castle (defender vantage). */
+    tile_fill(2,            H - 30, 2 + castle_w, H - 29, SOLID);  /* castle roof */
+    tile_fill(W - 2 - castle_w, H - 30, W - 2, H - 29, SOLID);
+
+    /* Underground tunnels — low-route between bases. Tunnel ceiling at
+     * row H-10 spans the central plaza, with openings at the castle
+     * exits. */
+    tile_fill(2 + castle_w, H - 10, W - 2 - castle_w, H - 9, SOLID);
+
+    /* Tunnel choke alcoves (one per side, mid-tunnel). */
+    tile_fill(60, H - 13, 66, H - 10, TILE_F_EMPTY);
+    tile_fill(60, H - 14, 66, H - 13, SOLID);
+    tile_fill(W - 66, H - 13, W - 60, H - 10, TILE_F_EMPTY);
+    tile_fill(W - 66, H - 14, W - 60, H - 13, SOLID);
+
+    /* Sky bridges — 2 high-altitude crossings above the plaza. */
+    tile_fill(70,     H - 60, 130,    H - 59, SOLID);  /* lower bridge */
+    tile_fill(85,     H - 75, 115,    H - 74, SOLID);  /* upper bridge */
+
+    /* Sky-bridge overlook alcoves on the underside (mouth facing down). */
+    tile_fill(75,     H - 63, 80,     H - 60, TILE_F_EMPTY);
+    tile_fill(75,     H - 64, 80,     H - 63, SOLID);
+    tile_fill(120,    H - 63, 125,    H - 60, TILE_F_EMPTY);
+    tile_fill(120,    H - 64, 125,    H - 63, SOLID);
+
+    /* ---- Slope polygons ---- */
+    const int floor_y    = t2w(H - 4);
+    const int castle_top = t2w(H - 30);
+
+    /* 30° plaza bowl — 60 tiles wide (x=70..130), basin 8 tiles wide at
+     * the bottom (x=96..104). Slopes meet the floor at the castle exits. */
+    push_tri(POLY_KIND_SOLID,
+             t2w(2 + castle_w + 4), floor_y,
+             t2w(96), floor_y + t2w(2),
+             t2w(96), floor_y);
+    push_tri(POLY_KIND_SOLID,
+             t2w(104), floor_y + t2w(2),
+             t2w(W - 2 - castle_w - 4), floor_y,
+             t2w(104), floor_y);
+
+    /* 60° castle ramparts — steep outer slopes on each castle's
+     * approach side (facing the plaza). tan(60°) ≈ 1.73. */
+    push_tri(POLY_KIND_SOLID,
+             t2w(2 + castle_w),     castle_top,
+             t2w(2 + castle_w + 4), floor_y,
+             t2w(2 + castle_w),     floor_y);
+    push_tri(POLY_KIND_SOLID,
+             t2w(W - 2 - castle_w - 4), floor_y,
+             t2w(W - 2 - castle_w),     castle_top,
+             t2w(W - 2 - castle_w),     floor_y);
+
+    /* 45° angled castle ceilings inside each castle's flag room — slope
+     * from the back wall down to the inner partition. */
+    push_tri(POLY_KIND_SOLID,
+             t2w(4),  t2w(H - 28),
+             t2w(4),  t2w(H - 24),
+             t2w(8),  t2w(H - 28));
+    push_tri(POLY_KIND_SOLID,
+             t2w(W - 4), t2w(H - 28),
+             t2w(W - 8), t2w(H - 28),
+             t2w(W - 4), t2w(H - 24));
+
+    /* Slope-roof nooks — formed by each angled castle ceiling above. The
+     * inner triangular space is the alcove. Mark it with a pickup so it
+     * shows up clearly; no extra geometry needed. */
+
+    /* 30° tunnel grades — gentle rise/fall in the tunnel floor between
+     * castle exit and tunnel choke alcove. */
+    push_tri(POLY_KIND_SOLID,
+             t2w(32), floor_y,
+             t2w(40), floor_y - t2w(1),
+             t2w(40), floor_y);
+    push_tri(POLY_KIND_SOLID,
+             t2w(W - 40), floor_y - t2w(1),
+             t2w(W - 32), floor_y,
+             t2w(W - 32), floor_y);
+
+    /* 12+ grapple-anchor struts — small floating platforms across the
+     * plaza at varied heights. */
+    for (int i = 0; i < 12; ++i) {
+        int x   = 70 + i * 5;
+        int y_r = H - 45 - ((i * 7) % 12);
+        push_quad(POLY_KIND_SOLID, t2w(x), t2w(y_r),
+                                   t2w(x + 3), t2w(y_r + 1));
+    }
+
+    /* ---- Ambient zones. ---- */
+    /* 4 WIND zones at plaza height (varied directions, randomize long
+     * shots). */
+    push_ambi(t2w(70),  t2w(H - 50), t2w(15), t2w(8),
+              AMBI_WIND, 0.18f, +1.0f, 0.0f);
+    push_ambi(t2w(85),  t2w(H - 55), t2w(15), t2w(8),
+              AMBI_WIND, 0.18f, -1.0f, 0.0f);
+    push_ambi(t2w(115), t2w(H - 55), t2w(15), t2w(8),
+              AMBI_WIND, 0.18f, +1.0f, 0.0f);
+    push_ambi(t2w(130), t2w(H - 50), t2w(15), t2w(8),
+              AMBI_WIND, 0.18f, -1.0f, 0.0f);
+    /* 2 ACID zones at tunnel ends (5 HP/s — punishment for camping). */
+    push_ambi(t2w(40),     t2w(H - 9), t2w(8), t2w(5),
+              AMBI_ACID, 1.00f, 0.0f, 0.0f);
+    push_ambi(t2w(W - 48), t2w(H - 9), t2w(8), t2w(5),
+              AMBI_ACID, 1.00f, 0.0f, 0.0f);
+
+    /* ---- CTF flags. Place each inside its castle's flag room. ---- */
+    push_flag(t2w(8),     t2w(H - 6),  MATCH_TEAM_RED);
+    push_flag(t2w(W - 8), t2w(H - 6),  MATCH_TEAM_BLUE);
+
+    /* ---- Spawns — 8 per team across multiple lanes. ---- */
+    const int red_castle_floor  = floor_y - 40;
+    const int red_castle_roof   = castle_top - 40;
+    const int blue_castle_floor = floor_y - 40;
+    const int blue_castle_roof  = castle_top - 40;
+    /* RED spawns inside dungeon. */
+    push_spawn(t2w(6),  red_castle_floor, 1, 1, 0);
+    push_spawn(t2w(8),  red_castle_floor, 1, 1, 1);
+    push_spawn(t2w(10), red_castle_floor, 1, 1, 2);
+    push_spawn(t2w(18), red_castle_floor, 1, 1, 3);
+    push_spawn(t2w(20), red_castle_floor, 1, 1, 4);
+    push_spawn(t2w(22), red_castle_floor, 1, 1, 5);
+    push_spawn(t2w(28), red_castle_floor, 1, 1, 6);
+    push_spawn(t2w(15), red_castle_roof,  1, 1, 7);
+    /* BLUE spawns mirror. */
+    push_spawn(t2w(W -  6),  blue_castle_floor, 2, 1, 8);
+    push_spawn(t2w(W -  8),  blue_castle_floor, 2, 1, 9);
+    push_spawn(t2w(W - 10),  blue_castle_floor, 2, 1, 10);
+    push_spawn(t2w(W - 18),  blue_castle_floor, 2, 1, 11);
+    push_spawn(t2w(W - 20),  blue_castle_floor, 2, 1, 12);
+    push_spawn(t2w(W - 22),  blue_castle_floor, 2, 1, 13);
+    push_spawn(t2w(W - 28),  blue_castle_floor, 2, 1, 14);
+    push_spawn(t2w(W - 15),  blue_castle_roof,  2, 1, 15);
+
+    /* ---- Pickups (≈32 per brief). ---- */
+    const int floor_pick = floor_y - 16;
+    const int castle_pick = floor_y - 16;
+    const int rampart_pick = castle_top - 16;
+    const int bridge_pick  = t2w(H - 60) - 16;
+    const int upper_pick   = t2w(H - 75) - 16;
+    const int alcove_pick  = t2w(H - 13) - 16;
+
+    /* Red castle cave network: HEALTH medium ×3 + AMMO ×3 + ARMOR + Pulse Rifle. */
+    push_pickup(t2w(6),  castle_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(8),  castle_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(10), castle_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(18), castle_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(20), castle_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(22), castle_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(20), castle_pick - 16, PICKUP_ARMOR, ARMOR_LIGHT);
+    push_pickup(t2w(28), castle_pick, PICKUP_WEAPON, WEAPON_PULSE_RIFLE);
+    /* Blue castle mirror. */
+    push_pickup(t2w(W -  6), castle_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W -  8), castle_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W - 10), castle_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W - 18), castle_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(W - 20), castle_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(W - 22), castle_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(W - 20), castle_pick - 16, PICKUP_ARMOR, ARMOR_LIGHT);
+    push_pickup(t2w(W - 28), castle_pick, PICKUP_WEAPON, WEAPON_PULSE_RIFLE);
+    /* Castle slope-roof nooks: ARMOR reactive ×2. */
+    push_pickup(t2w(6),     t2w(H - 27) - 16, PICKUP_ARMOR, ARMOR_REACTIVE);
+    push_pickup(t2w(W - 6), t2w(H - 27) - 16, PICKUP_ARMOR, ARMOR_REACTIVE);
+    /* Plaza basin (lowest point of bowl): Mass Driver. */
+    push_pickup(t2w(W / 2), floor_pick + 64, PICKUP_WEAPON, WEAPON_MASS_DRIVER);
+    /* Plaza mid: Rail Cannon + HEALTH large + JET_FUEL ×2. */
+    push_pickup(t2w(W / 2),     bridge_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
+    push_pickup(t2w(W / 2 - 8), floor_pick,  PICKUP_HEALTH, HEALTH_LARGE);
+    push_pickup(t2w(W / 2 - 12),floor_pick,  PICKUP_JET_FUEL, 0);
+    push_pickup(t2w(W / 2 + 12),floor_pick,  PICKUP_JET_FUEL, 0);
+    /* Sky-bridge overlook alcoves: JET_FUEL ×2. */
+    push_pickup(t2w(77),  t2w(H - 62) - 16, PICKUP_JET_FUEL, 0);
+    push_pickup(t2w(122), t2w(H - 62) - 16, PICKUP_JET_FUEL, 0);
+    /* Upper sky bridge: HEALTH small ×2. */
+    push_pickup(t2w(95),  upper_pick, PICKUP_HEALTH, HEALTH_SMALL);
+    push_pickup(t2w(105), upper_pick, PICKUP_HEALTH, HEALTH_SMALL);
+    /* Tunnel choke alcoves: POWERUP godmode ×2 (high-stakes pickup). */
+    push_pickup(t2w(63),     alcove_pick, PICKUP_POWERUP, POWERUP_GODMODE);
+    push_pickup(t2w(W - 63), alcove_pick, PICKUP_POWERUP, POWERUP_GODMODE);
+    /* Rampart catwalks: HEALTH medium ×2. */
+    push_pickup(t2w(15),     rampart_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W - 15), rampart_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+
+    set_meta("Citadel",
+             "XL CTF. Castle keeps, plaza bowl, sky bridges.",
+             "citadel",
+             (uint16_t)(1u << MATCH_MODE_CTF));
+
+    (void)rampart_pick; (void)bridge_pick; (void)upper_pick; (void)alcove_pick;
+}
+
+/* ===================================================================== */
 /* ============================== DRIVER =============================== */
 /* ===================================================================== */
+
+static void render_thumb(const char *short_name, const Level *L);
 
 static int cook_one(Arena *scratch, Arena *verify_arena,
                     const char *short_name, void (*builder)(void)) {
@@ -830,6 +1626,8 @@ static int cook_one(Arena *scratch, Arena *verify_arena,
             g_cooker.world.level.spawn_count,
             g_cooker.world.level.pickup_count,
             g_cooker.world.level.ambi_count);
+
+    render_thumb(short_name, &g_cooker.world.level);
     return 0;
 }
 
@@ -838,6 +1636,100 @@ static void ensure_dir(const char *path) {
     if (mkdir(path, 0755) != 0) {
         /* errno EEXIST is fine. */
     }
+}
+
+/* M5 P18 — generate a 256×144 thumbnail for the lobby vote picker.
+ * Quality bar is low (functional, identifiable per the prompt); polish
+ * pass is M6. Renders the level into the thumb as tinted blocks for
+ * solid tiles + outlined polygons + colored dots for spawns/flags.
+ * raylib's Image API gives us pixel + line + rect + circle — we don't
+ * have a triangle-fill primitive, so polygons render as wireframe
+ * outlines. */
+static void render_thumb(const char *short_name, const Level *L) {
+    const int TW = 256, TH = 144;
+    Image img = GenImageColor(TW, TH, (Color){20, 24, 32, 255});
+
+    float wpx = (float)(L->width  * L->tile_size);
+    float hpx = (float)(L->height * L->tile_size);
+    if (wpx <= 0.0f || hpx <= 0.0f) return;
+    float sx = (float)TW / wpx;
+    float sy = (float)TH / hpx;
+
+    /* Tiles — solid as 90/100/110, ICE as pale blue, DEADLY as red. */
+    for (int ty = 0; ty < L->height; ++ty) {
+        for (int tx = 0; tx < L->width; ++tx) {
+            uint16_t f = L->tiles[ty * L->width + tx].flags;
+            if (!(f & TILE_F_SOLID) && !(f & TILE_F_DEADLY)) continue;
+            Color c = (Color){90, 100, 110, 255};
+            if (f & TILE_F_ICE)    c = (Color){180, 220, 240, 255};
+            if (f & TILE_F_DEADLY) c = (Color){200, 80, 60, 255};
+            int x0 = (int)(tx        * L->tile_size * sx);
+            int y0 = (int)(ty        * L->tile_size * sy);
+            int x1 = (int)((tx + 1)  * L->tile_size * sx);
+            int y1 = (int)((ty + 1)  * L->tile_size * sy);
+            if (x1 - x0 < 1) x1 = x0 + 1;
+            if (y1 - y0 < 1) y1 = y0 + 1;
+            ImageDrawRectangle(&img, x0, y0, x1 - x0, y1 - y0, c);
+        }
+    }
+
+    /* Polygons — wireframe outlines. raylib's Image API doesn't ship a
+     * triangle fill, so designer-readable thumb is outline + label-by-
+     * color. Per-kind palette mirrors the M5 spec colors. */
+    for (int i = 0; i < L->poly_count; ++i) {
+        const LvlPoly *p = &L->polys[i];
+        Color c;
+        switch (p->kind) {
+            case POLY_KIND_SOLID:      c = (Color){120, 130, 140, 255}; break;
+            case POLY_KIND_ICE:        c = (Color){180, 220, 240, 255}; break;
+            case POLY_KIND_DEADLY:     c = (Color){200, 80, 60, 255};   break;
+            case POLY_KIND_ONE_WAY:    c = (Color){120, 120, 160, 255}; break;
+            case POLY_KIND_BACKGROUND: c = (Color){60, 70, 90, 180};    break;
+            default:                   c = (Color){120, 130, 140, 255}; break;
+        }
+        int x0 = (int)(p->v_x[0] * sx), y0 = (int)(p->v_y[0] * sy);
+        int x1 = (int)(p->v_x[1] * sx), y1 = (int)(p->v_y[1] * sy);
+        int x2 = (int)(p->v_x[2] * sx), y2 = (int)(p->v_y[2] * sy);
+        ImageDrawLine(&img, x0, y0, x1, y1, c);
+        ImageDrawLine(&img, x1, y1, x2, y2, c);
+        ImageDrawLine(&img, x2, y2, x0, y0, c);
+    }
+
+    /* Spawns — small team-colored dots. */
+    for (int i = 0; i < L->spawn_count; ++i) {
+        const LvlSpawn *s = &L->spawns[i];
+        Color c = (s->team == 1) ? (Color){220, 80, 80, 255}
+                : (s->team == 2) ? (Color){ 80, 140, 220, 255}
+                                 : (Color){200, 200, 80, 255};
+        int x = (int)(s->pos_x * sx);
+        int y = (int)(s->pos_y * sy);
+        ImageDrawCircle(&img, x, y, 2, c);
+    }
+
+    /* Flags — bigger, brighter team-colored squares. */
+    for (int i = 0; i < L->flag_count; ++i) {
+        const LvlFlag *f = &L->flags[i];
+        Color c = (f->team == 1) ? (Color){240, 50, 50, 255}
+                                 : (Color){ 50, 100, 240, 255};
+        int x = (int)(f->pos_x * sx);
+        int y = (int)(f->pos_y * sy);
+        ImageDrawRectangle(&img, x - 3, y - 3, 7, 7, c);
+    }
+
+    /* Pickups — tiny yellow dots (visual marker only; kind not encoded). */
+    for (int i = 0; i < L->pickup_count; ++i) {
+        const LvlPickup *p = &L->pickups[i];
+        int x = (int)(p->pos_x * sx);
+        int y = (int)(p->pos_y * sy);
+        ImageDrawPixel(&img, x, y,     (Color){200, 200, 80, 255});
+        ImageDrawPixel(&img, x + 1, y, (Color){200, 200, 80, 255});
+        ImageDrawPixel(&img, x, y + 1, (Color){200, 200, 80, 255});
+    }
+
+    char path[256];
+    snprintf(path, sizeof path, "assets/maps/%s_thumb.png", short_name);
+    ExportImage(img, path);
+    UnloadImage(img);
 }
 
 int main(int argc, char **argv) {
@@ -856,11 +1748,15 @@ int main(int argc, char **argv) {
     fail |= cook_one(&scratch, &verify, "slipstream", build_slipstream);
     fail |= cook_one(&scratch, &verify, "reactor",    build_reactor);
     fail |= cook_one(&scratch, &verify, "concourse",  build_concourse);
+    fail |= cook_one(&scratch, &verify, "catwalk",    build_catwalk);
+    fail |= cook_one(&scratch, &verify, "aurora",     build_aurora);
+    fail |= cook_one(&scratch, &verify, "crossfire",  build_crossfire);
+    fail |= cook_one(&scratch, &verify, "citadel",    build_citadel);
 
     if (fail) {
         fprintf(stderr, "cook_maps: one or more maps failed to write\n");
         return 1;
     }
-    fprintf(stdout, "cook_maps: all 4 maps written\n");
+    fprintf(stdout, "cook_maps: all 8 maps written\n");
     return 0;
 }

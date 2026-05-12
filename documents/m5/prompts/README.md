@@ -90,6 +90,20 @@ P17 ─ Author maps 1-4 (Foundry/Slipstream/Reactor as .lvl + Concourse)
        map-build seam for paired-log debugging. `tests/net/run_3p.sh`
        switched from Foundry to Reactor per spec (10/10 PASS).
 P18 ─ Author maps 5-8 (Catwalk/Aurora/Crossfire/Citadel) + bake-test harness
+       — shipped 2026-05-12. Same cook_maps pattern as P17:
+       `build_catwalk` / `build_aurora` / `build_crossfire` /
+       `build_citadel` programmatic builders, plus `push_flag` /
+       `push_deco` / `render_thumb` helpers. New
+       `tools/bake/run_bake.c` headless harness drives N crude
+       wander+shoot bots, dumps per-map heatmap PNG + kills/pickups/
+       flags CSVs + acceptance summary; verdict informational per
+       new TRADE_OFFS entry "Bake-test verdict is informational, not
+       gating (P18)". Map vote thumbnails (256×144 PNGs) auto-emit
+       from cook_maps. Existing "Concourse is synthesized
+       programmatically" trade-off renamed + expanded to cover all
+       8 M5 maps (P17 + P18). All 8 maps pass the smoke bake; the
+       per-map acceptance criteria from `documents/m5/07-maps.md`
+       are designer guidance, not automated thresholds.
 P19 ─ Audio assets (~47 SFX + per-map music + ambient loops)
        — sourcing against the P14 runtime manifest. CC0 from
        freesound.org / opengameart.org / Kenney + Soldut-original
