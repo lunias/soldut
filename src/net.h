@@ -415,6 +415,23 @@ void net_raw_diag_listener_close(void);
 
 void net_raw_send_probe(const char *host, uint16_t port, const char *tag);
 
+/* wan-fixes-16 (diag round 3) — multi-destination raw UDP probe.
+ *
+ * Launcher pattern didn't fix the bug, so the filter isn't about
+ * direct parent-child. Time to test if it's *loopback-address-
+ * specific*: maybe Windows blocks UDP to 127.0.0.1 between related
+ * processes but lets the same packet through if the target address
+ * is the machine's LAN IP (which also routes back to localhost).
+ *
+ * Sends probes from a transient UDP socket to multiple destinations:
+ *   1. 127.0.0.1:port — the standard loopback
+ *   2. 127.0.0.2:port — an alternate loopback address
+ *   3. <primary_lan_ipv4>:port — the machine's external IP (if any)
+ *
+ * Each gets a distinct tag so the dedi's raw_diag drain can identify
+ * which destinations actually got through. */
+void net_raw_send_probe_multi(uint16_t port, const char *base_tag);
+
 /* ---- Per-frame pump ----------------------------------------------- */
 
 /* Drain ENet events. On the server: receives inputs, completes

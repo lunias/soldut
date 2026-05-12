@@ -1106,15 +1106,14 @@ static bool bootstrap_host(Game *g, const LaunchArgs *args, bool offline) {
 /* Pure client: connect, sit in lobby until ROUND_START. */
 static bool bootstrap_client(Game *g, const LaunchArgs *args) {
     if (!net_init()) return false;
-    /* wan-fixes-16 (diag round 2) — send a raw UDP probe to the
-     * dedi's raw-diag listener BEFORE attempting the ENet connect.
-     * If the dedi's raw_diag recvs count goes up after this, raw
-     * UDP works between the two processes and ENet is to blame; if
-     * it stays at 0, Windows is dropping ALL UDP from parent to
-     * spawned child. */
+    /* wan-fixes-16 (diag round 3) — multi-destination raw UDP probe.
+     * Tests whether the filter is loopback-IP-specific by also probing
+     * 127.0.0.2 and the machine's LAN IP. Whichever destinations
+     * arrive in the dedi's raw_diag drain tell us where to redirect
+     * the real connect. */
     if (args->port) {
-        net_raw_send_probe(args->host, (uint16_t)(args->port + 7),
-                           "bootstrap_client-pre-connect");
+        net_raw_send_probe_multi((uint16_t)(args->port + 7),
+                                  "bootstrap_client-pre-connect");
     }
     if (!net_client_connect(&g->net, args->host, args->port,
                             args->name, g))
@@ -1248,6 +1247,13 @@ static int dedicated_main(const LaunchArgs *args) {
      * its ENet connect. Confirms whether raw UDP can cross the
      * parent-spawn-child relationship at all. */
     net_raw_diag_listener_open((uint16_t)(game.config.port + 7));
+    /* wan-fixes-16 (diag round 3) — same-process self-loopback test.
+     * The dedi sends a raw probe to ITSELF on its raw_diag listener.
+     * If THIS arrives, same-process UDP loopback works for the
+     * dedi's socket. If it doesn't, the dedi's own socket setup is
+     * broken (would be wildly surprising). */
+    net_raw_send_probe("127.0.0.1", (uint16_t)(game.config.port + 7),
+                       "dedi-self-loopback");
     if (!net_server_start(&game.net, game.config.port, &game)) {
         LOG_E("dedicated: failed to bind UDP %u", (unsigned)game.config.port);
         net_shutdown();

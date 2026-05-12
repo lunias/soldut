@@ -62,6 +62,8 @@
   #include <errno.h>
   #include <fcntl.h>
   #include <unistd.h>
+  /* getaddrinfo / struct addrinfo for the multi-IP probe path. */
+  #include <netdb.h>
 #endif
 
 #include <stdio.h>
@@ -672,6 +674,46 @@ void net_raw_diag_listener_close(void) {
     g_raw_diag_fd = -1;
     g_raw_diag_recv_count = 0;
     g_raw_diag_recv_bytes = 0;
+}
+
+void net_raw_send_probe_multi(uint16_t port, const char *base_tag) {
+    if (!base_tag) base_tag = "?";
+
+    char loop_tag[80];
+    snprintf(loop_tag, sizeof loop_tag, "%s|127.0.0.1", base_tag);
+    net_raw_send_probe("127.0.0.1", port, loop_tag);
+
+    char alt_tag[80];
+    snprintf(alt_tag, sizeof alt_tag, "%s|127.0.0.2", base_tag);
+    net_raw_send_probe("127.0.0.2", port, alt_tag);
+
+    /* Discover the machine's primary non-loopback IPv4. Skip the
+     * probe if we can't resolve. */
+    char hostname[256] = {0};
+    if (gethostname(hostname, (int)sizeof hostname - 1) == 0) {
+        struct addrinfo hints;
+        memset(&hints, 0, sizeof hints);
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+        struct addrinfo *res = NULL;
+        if (getaddrinfo(hostname, NULL, &hints, &res) == 0 && res) {
+            for (struct addrinfo *p = res; p; p = p->ai_next) {
+                if (p->ai_family != AF_INET) continue;
+                struct sockaddr_in *sin = (struct sockaddr_in *)p->ai_addr;
+                /* Skip loopback ranges. */
+                unsigned addr = (unsigned)ntohl(sin->sin_addr.s_addr);
+                if ((addr & 0xFF000000) == 0x7F000000) continue;
+                char ip[64];
+                if (inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof ip)) {
+                    char lan_tag[80];
+                    snprintf(lan_tag, sizeof lan_tag, "%s|%s", base_tag, ip);
+                    net_raw_send_probe(ip, port, lan_tag);
+                }
+                break;  /* only first non-loopback */
+            }
+            freeaddrinfo(res);
+        }
+    }
 }
 
 void net_raw_send_probe(const char *host, uint16_t port, const char *tag) {
