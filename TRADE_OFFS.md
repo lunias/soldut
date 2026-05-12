@@ -13,7 +13,33 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-10** (P15 revised — chassis art now comes
+Last updated: **2026-05-12** (P18 — maps 5-8 + bake harness). P18
+extended `tools/cook_maps/cook_maps.c` with builders for Catwalk /
+Aurora / Crossfire / Citadel and renamed the existing
+"Concourse is synthesized programmatically" entry to cover all 8 M5
+maps (P17 + P18). Added the new entry
+"Bake-test verdict is informational, not gating (P18)" covering the
+new `tools/bake/run_bake.c` harness. Map vote thumbnails ship via a
+new `render_thumb` in cook_maps; runtime reads
+`assets/maps/<short>_thumb.png` for the vote picker.
+
+Previously: **2026-05-11** (P17 + wan-fixes-16 follow-ups). P17
+shipped the first four authored `.lvl` maps via
+`tools/cook_maps/cook_maps.c` and added the new entry
+"Concourse is synthesized programmatically, not editor-authored
+(P17)" plus the amended "Hard-coded tutorial map" + "Slope test bed
+is hardcoded in level_build_tutorial" entries (their deletion gate
+is the migration of `shotmode` + `headless_sim` callsites off
+`level_build_tutorial`, not the existence of authored `.lvl`
+files). wan-fixes-16 superseded the wan-fixes-5/-9 dedicated-child
+spawn pattern with an in-process server thread after a Windows
+spawn-tree UDP bug; the entry at "Host UI's dedicated server runs
+in a thread, not a child process" carries the amended history.
+See the "2026-05-11 — wan-fixes 1–15" rollup below for the prior
+ledger churn (it now covers 1–16 in spirit; the bullet list there
+predates the wan-fixes-16 amendment).
+
+Previously: **2026-05-10** (P15 revised — chassis art now comes
 from a Soldat-style **gostek part sheet** sliced by
 `tools/comfy/extract_gostek.py`, not the AI-diffusion-canonical
 pipeline. The diffusion path (skeleton + style anchor → SDXL +
@@ -893,36 +919,47 @@ WAN polish. Net effect on the trade-off ledger:
   directly via `level_load`. At that point both this entry and the
   "Hard-coded tutorial map" entry delete simultaneously.
 
-### Concourse is synthesized programmatically, not editor-authored (P17)
+### M5 maps are synthesized programmatically, not editor-authored (P17 + P18)
 
-- **What we did** — `tools/cook_maps/cook_maps.c` emits `concourse.lvl`
-  via the same programmatic builder pattern as Foundry / Slipstream /
-  Reactor. The per-map brief in `documents/m5/07-maps.md` §"Concourse"
-  expects the layout to be hand-authored in the P04 editor (~2-4 hours
-  of design work); the cook_maps scaffold matches the brief's intent
-  (two 30° hills, wing-floor valleys, 4 alcoves, 16 spawns, 2 FOG
-  zones, 18 pickups) but skips the iterative layout-pass discipline
-  the editor enables. Concourse's wing-floor "valleys" are
+- **What we did** — `tools/cook_maps/cook_maps.c` emits ALL eight M5
+  `.lvl` files via the same programmatic builder pattern (the P01
+  one-shot stub became this exporter):
+    - **P17** (2026-05-11): `foundry` / `slipstream` / `reactor` /
+      `concourse`.
+    - **P18** (2026-05-12): `catwalk` / `aurora` / `crossfire` /
+      `citadel`.
+  The per-map briefs in `documents/m5/07-maps.md` expect every layout
+  to be hand-authored in the P04 editor (~2-4 hours of design work per
+  map); the cook_maps scaffolds match each brief's intent (slope
+  vocabulary, alcove counts, pickup density, spawn lanes, ambient
+  zones, CTF flag positions) but skip the iterative layout-pass
+  discipline the editor enables. Concourse's wing-floor "valleys" are
   POLY_KIND_BACKGROUND (purely visual), not physics, because dig-in
   geometry below the floor row needs editor-driven polygon authoring.
-- **Why** — P17 ran in a single session without interactive access to
-  the editor. Shipping a programmatic scaffold gets the map into the
-  rotation immediately and lets the bake-test pass run against it; a
-  designer refines the layout in the editor afterward, saving over
-  `concourse.lvl`. The cook_maps source is the canonical record of the
-  starting layout if the editor-authored version goes wrong.
+  Citadel's tunnel grades are short triangles approximating the spec's
+  "gentle 30° rise/fall" rather than full mesh sculpting. Aurora's
+  "30+ skyline silhouettes" ship as `POLY_KIND_BACKGROUND` triangles
+  rather than parallax-layer art (the deco/parallax atlas hasn't shipped
+  for the new maps — separate trade-off).
+- **Why** — P17/P18 each ran in a single session without interactive
+  access to the editor. Shipping programmatic scaffolds gets all 8
+  maps into the rotation immediately and lets the bake-test pass run
+  against them; a designer refines layouts in the editor afterward,
+  saving over the named `.lvl` files. The cook_maps source is the
+  canonical record of each starting layout if an editor-authored
+  version goes wrong.
 - **Revisit when** —
-  - A designer iterates Concourse in the editor; the saved `.lvl`
-    overwrites cook_maps' output. At that point cook_maps still
-    rebuilds Foundry/Slipstream/Reactor cleanly, but **rerunning
-    `make cook-maps` would clobber the editor-authored Concourse** —
-    either drop the concourse builder from cook_maps once a designer
-    takes ownership, or have cook_maps refuse to overwrite a newer
-    `.lvl` (mtime check, ~10 LOC).
-  - The bake-test reveals Concourse-specific dead zones the
-    programmatic layout couldn't anticipate (gallery alcoves uncontested,
-    central Rail Cannon not contested enough, wing alcoves never
-    grabbed, etc.). Editor iteration is the natural fix.
+  - A designer iterates any map in the editor; the saved `.lvl`
+    overwrites cook_maps' output. At that point **rerunning
+    `make cook-maps` would clobber editor work** — either drop the
+    relevant builder from cook_maps once a designer takes ownership,
+    or have cook_maps refuse to overwrite a newer `.lvl` (mtime
+    check, ~10 LOC).
+  - The bake-test reveals map-specific dead zones the programmatic
+    layout couldn't anticipate (an alcove never visited, a Rail
+    Cannon spot uncontested, an asymmetric crossfire spawn imbalance,
+    Citadel tunnels under-trafficked, etc.). Editor iteration is the
+    natural fix.
   - Wing-floor valleys' visual-only status reads weird at gameplay
     distance (the player expects to drop into a basin). Either replace
     them with SOLID polys (might require a deeper floor row) or remove
@@ -1775,6 +1812,37 @@ WAN polish. Net effect on the trade-off ledger:
     assertions and an exit code.
   - CI starts caring about physics correctness, not just "does it
     build."
+
+### Bake-test verdict is informational, not gating (P18)
+
+- **What we did** — `tools/bake/run_bake.c` runs `simulate_step` with
+  N crude wandering bots for `duration_s` seconds (default: 60 s ×
+  16 bots) and writes per-map heatmap PNG + CSVs + summary. The
+  verdict passes if the sim ran without crashing AND bots produced
+  motion + fire events. The per-map acceptance criteria in
+  `documents/m5/07-maps.md` ("all 12 pickups grabbed at least once",
+  "Mass Driver grabbed 8+ times over 10-min bake", "no dead zones",
+  "captures within 30% red/blue") are designer-facing targets, not
+  automated pass/fail rules.
+- **Why** — The bot AI is intentionally crude per the brief: wander
+  toward a random spawn point; aim at the nearest enemy in 800 px
+  line-of-sight; shoot. No flag-running heuristic, no pickup priority,
+  no path planning. 60 s × 16 bots produces sparse pickup-grab data
+  on big maps (Citadel typically grabs 6-7 of its 31 pickups;
+  Crossfire grabs 3-4 of 32). Tighter acceptance would require 10-min
+  runs (per the brief) plus smarter bots — neither is in scope for
+  P18. The heatmap PNG is the actionable artifact: designers eyeball
+  it for dead zones and spawn imbalance.
+- **Revisit when** —
+  - A designer wants the bake to be CI-gating. At that point: smarter
+    bots (per-map A* nav, pickup priority, flag-running for CTF),
+    longer default duration, and per-map acceptance rules in
+    `run_bake.c::compute_verdict`.
+  - Real playtest data invalidates the heatmap-based judgement
+    (players don't go where crude bots go). At that point use
+    playtest CSV/replays as the bake-test input, not bots.
+  - Bot AI improvements arrive (M6 stretch) — promote the verdict
+    from informational to gating with per-map thresholds.
 
 ### No CI for physics correctness
 

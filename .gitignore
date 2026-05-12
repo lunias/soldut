@@ -51,6 +51,10 @@ assets/maps/**/*.lvl
 !assets/maps/slipstream.lvl
 !assets/maps/reactor.lvl
 !assets/maps/concourse.lvl
+!assets/maps/catwalk.lvl
+!assets/maps/aurora.lvl
+!assets/maps/crossfire.lvl
+!assets/maps/citadel.lvl
 
 # ComfyUI iteration scratch (P15+). Tracked inputs: workflow JSONs,
 # skeletons, style anchors, crop tables, and the gostek part sheets

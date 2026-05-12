@@ -360,7 +360,7 @@ We do **not** integrate Tracy or Optick at v1. If we need deep traces, we add th
 
 ## File size targets
 
-| Module | Current LOC (post-M4 + M5 P01–P13) | Notes |
+| Module | Current LOC (post-M4 + M5 P01–P14) | Notes |
 |---|---|---|
 | main.c | 1600 | top-level loop + accumulator + CLI + P03 event broadcast loops + P04 `--test-play` + P05 `broadcast_new_pickups` + P07 CTF mode-mask validation + `broadcast_flag_state_if_dirty` + `ctf_step` hookup + TDM/CTF team auto-balance + P08 host map-ready gate / serve-info refresh + P09 `host_start_map_vote` + summary-screen vote routing + P10 `mech_sprites_load_all` after `platform_init` + P11 `g_weapons_atlas` load |
 | platform.c | 100 | thin raylib wrapper (P09: RMB → `BTN_FIRE_SECONDARY`) |
