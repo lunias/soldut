@@ -143,6 +143,7 @@ void time_sleep_ms(int ms) {
 
 /* ---- Win32 implementation ----------------------------------------- */
 
+
 ProcHandle proc_spawn(const char *const *argv) {
     if (!argv || !argv[0]) return PROC_HANDLE_NULL;
 
@@ -169,41 +170,20 @@ ProcHandle proc_spawn(const char *const *argv) {
     STARTUPINFOA si = {0};
     PROCESS_INFORMATION pi = {0};
     si.cb = sizeof(si);
-    /* Inherit stdout/stderr/stdin so console launches show the
-     * dedicated server's log in the same terminal — but ONLY if
-     * we actually have a console attached. If the user launches
-     * Soldut.exe from Explorer (no terminal), GetStdHandle returns
-     * NULL / INVALID_HANDLE_VALUE for the standard streams, and
-     * passing those to STARTF_USESTDHANDLES makes CreateProcess
-     * fail (the child can't open NUL stdin/stdout) or silently
-     * stall (sometimes the kernel quietly drops the child). Detect
-     * the no-console case and let the child use its default
-     * handles instead. */
-    HANDLE hin  = GetStdHandle(STD_INPUT_HANDLE);
-    HANDLE hout = GetStdHandle(STD_OUTPUT_HANDLE);
-    HANDLE herr = GetStdHandle(STD_ERROR_HANDLE);
-    BOOL handles_ok = (hin  != NULL && hin  != INVALID_HANDLE_VALUE &&
-                       hout != NULL && hout != INVALID_HANDLE_VALUE &&
-                       herr != NULL && herr != INVALID_HANDLE_VALUE);
-    if (handles_ok) {
-        si.dwFlags    = STARTF_USESTDHANDLES;
-        si.hStdInput  = hin;
-        si.hStdOutput = hout;
-        si.hStdError  = herr;
-    }
-
-    /* CREATE_NO_WINDOW prevents a transient console flash on
-     * Explorer launches (the dedicated child is headless — no
-     * raylib, no audio, just sim + net). When the parent already
-     * has a console, the child shares it via STARTF_USESTDHANDLES
-     * above; CREATE_NO_WINDOW is harmless in that case. */
-    DWORD flags = handles_ok ? 0 : CREATE_NO_WINDOW;
+    /* No handle inheritance; child gets its own no-window console
+     * for a headless console-subsystem binary. The host-server flow
+     * uses an in-process server thread instead (see main.c's
+     * in_process_server_start) because Windows silently drops UDP
+     * between any pair of processes in the same spawn tree — proc_spawn
+     * here is for the test-harness paths and any future external
+     * dedicated-server launch. */
+    DWORD flags = CREATE_NO_WINDOW;
 
     BOOL ok = CreateProcessA(
         /*lpApplicationName*/ NULL,
         /*lpCommandLine*/     cmd,
         NULL, NULL,
-        /*bInheritHandles*/   handles_ok ? TRUE : FALSE,
+        /*bInheritHandles*/   FALSE,
         /*dwCreationFlags*/   flags,
         NULL, NULL,
         &si, &pi);
@@ -235,6 +215,7 @@ ProcHandle proc_spawn_self(const char *argv0_self, const char *const *extra_argv
     argv[n] = NULL;
     return proc_spawn(argv);
 }
+
 
 bool proc_alive(ProcHandle h) {
     if (!proc_handle_valid(h)) return false;
@@ -298,6 +279,41 @@ double time_now_ms(void) {
 void time_sleep_ms(int ms) {
     if (ms <= 0) return;
     Sleep((DWORD)ms);
+}
+
+/* wan-fixes-16 (round 5) — Windows thread helpers used by main.c's
+ * in-process server. Implemented here so main.c doesn't need to pull
+ * in <windows.h> (which conflicts with raylib's typedefs for
+ * Rectangle / CloseWindow).
+ *
+ * main.c provides a POSIX-style entry function (void *(*)(void *))
+ * so the same signature works on both POSIX and Windows. We adapt
+ * it to CreateThread's WINAPI DWORD signature here. Single-shot:
+ * the entry pointer is stashed in a static so the WINAPI trampoline
+ * can find it — we only ever start ONE in-process server thread at
+ * a time, so this is fine. */
+static void *(*s_in_proc_entry)(void *) = NULL;
+
+static DWORD WINAPI in_proc_trampoline(LPVOID arg) {
+    if (s_in_proc_entry) {
+        s_in_proc_entry(arg);
+    }
+    return 0;
+}
+
+void *win32_create_thread_compat(void *(*entry)(void *)) {
+    if (!entry) return NULL;
+    s_in_proc_entry = entry;
+    DWORD tid = 0;
+    HANDLE h = CreateThread(NULL, 0, in_proc_trampoline, NULL, 0, &tid);
+    return (void *)h;
+}
+
+void win32_wait_close_thread_compat(void *handle) {
+    if (!handle) return;
+    HANDLE h = (HANDLE)handle;
+    WaitForSingleObject(h, INFINITE);
+    CloseHandle(h);
 }
 
 #endif

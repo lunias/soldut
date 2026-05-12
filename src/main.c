@@ -1132,6 +1132,19 @@ static void dedicated_signal(int sig) {
     s_dedicated_quit        = 1;
 }
 
+/* wan-fixes-16 (round 5) — in-process server thread quit flag. The
+ * main thread's host_stop_in_process sets this when the UI is
+ * leaving the lobby; the server thread polls it instead of
+ * s_dedicated_quit so the two paths can coexist (standalone
+ * --dedicated still uses s_dedicated_quit for SIGINT/SIGTERM). */
+static volatile sig_atomic_t s_in_proc_server_quit = 0;
+
+/* wan-fixes-16 (round 6) — set to 1 by the server thread after
+ * net_server_start binds the UDP port. The main thread waits on
+ * this before calling net_client_connect so the first CONNECT
+ * packet doesn't go to an unbound port and get dropped. */
+static volatile sig_atomic_t s_in_proc_server_ready = 0;
+
 /* Monotonic time + sleep live in proc_spawn.c (cross-platform; the
  * dedicated child can't pull <windows.h> in this TU without colliding
  * with raylib's Rectangle / CloseWindow typedefs). */
@@ -1142,33 +1155,50 @@ static void sleep_ms_portable(int ms) {
     time_sleep_ms(ms);
 }
 
-/* The dedicated-server tick loop. No raylib, no audio, no render. Owns
- * the world + lobby + match-flow controller; broadcasts snapshots on
- * the server's snapshot cadence; runs simulate_step at 60 Hz during
- * MATCH_PHASE_ACTIVE.
+/* wan-fixes-16 (round 5) — shared body of the dedicated-server loop.
  *
- * Returns process exit code. */
-static int dedicated_main(const LaunchArgs *args) {
-    log_init("soldut-server.log");
+ * Two callers:
+ *   - dedicated_main()         (standalone --dedicated CLI):
+ *       owns the log file, signal handlers, and exit code. Uses
+ *       s_dedicated_quit as its loop predicate.
+ *   - in_process_server_thread (host UI's in-process server):
+ *       runs in a separate thread of the host UI process. The UI
+ *       owns log/signals; the thread skips both. Uses
+ *       s_in_proc_server_quit so the UI can stop just the server
+ *       without affecting the standalone-quit path.
+ *
+ * Both call dedicated_run with a per-caller config struct. */
+typedef struct {
+    bool standalone;                       /* call log_init / signals / log_shutdown ourselves */
+    volatile sig_atomic_t *quit_flag;      /* what we poll to know when to exit */
+    const char *log_prefix;                /* "dedicated" or "in-proc-server" — used in log lines */
+} DedicatedRunOptions;
+
+static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts) {
+    if (opts->standalone) {
+        log_init("soldut-server.log");
+    }
     uint16_t port = (args && args->port) ? args->port : SOLDUT_DEFAULT_PORT;
-    LOG_I("soldut " SOLDUT_VERSION_STRING " (dedicated server, port=%u)", port);
+    LOG_I("%s: soldut " SOLDUT_VERSION_STRING " (port=%u%s)",
+          opts->log_prefix, port,
+          opts->standalone ? ", standalone" : ", in-process thread");
 
-    /* The dedicated server is the natural place to emit diagnostic
-     * SHOT_LOG events (fire events, anim transitions, hit reports)
-     * since it owns the authoritative simulation. Production hosts
-     * can silence this with SOLDUT_SHOT_LOG=0; test runners
-     * (tests/shots/net/run_dedi.sh) leave it on so per-fire +
-     * per-hit lines reach soldut-server.log for assertion. */
-    const char *shot_env = getenv("SOLDUT_SHOT_LOG");
-    if (!shot_env || shot_env[0] != '0') g_shot_mode = 1;
+    /* SHOT_LOG diagnostic gating only applies in standalone mode —
+     * the host-UI process's main thread is the client and would
+     * spam soldut.log with server-side SHOT_LOG noise. */
+    if (opts->standalone) {
+        const char *shot_env = getenv("SOLDUT_SHOT_LOG");
+        if (!shot_env || shot_env[0] != '0') g_shot_mode = 1;
 
-    /* Catch Ctrl-C and SIGTERM (from proc_terminate). On Windows the
-     * console handler path also surfaces as SIGINT via the CRT shim. */
-    signal(SIGINT,  dedicated_signal);
-    signal(SIGTERM, dedicated_signal);
+        signal(SIGINT,  dedicated_signal);
+        signal(SIGTERM, dedicated_signal);
+    }
 
     Game game;
-    if (!game_init(&game)) { log_shutdown(); return EXIT_FAILURE; }
+    if (!game_init(&game)) {
+        if (opts->standalone) log_shutdown();
+        return EXIT_FAILURE;
+    }
 
     /* Server config — same soldut.cfg path as the listen-server. CLI
      * --dedicated PORT wins over cfg.port; cfg drives snapshot_hz,
@@ -1208,12 +1238,17 @@ static int dedicated_main(const LaunchArgs *args) {
         LOG_I("dedicated: --ff %d", (int)args->friendly_fire);
     }
 
-    if (!net_init()) { game_shutdown(&game); log_shutdown(); return EXIT_FAILURE; }
+    if (!net_init()) {
+        game_shutdown(&game);
+        if (opts->standalone) log_shutdown();
+        return EXIT_FAILURE;
+    }
     if (!net_server_start(&game.net, game.config.port, &game)) {
-        LOG_E("dedicated: failed to bind UDP %u", (unsigned)game.config.port);
+        LOG_E("%s: failed to bind UDP %u",
+              opts->log_prefix, (unsigned)game.config.port);
         net_shutdown();
         game_shutdown(&game);
-        log_shutdown();
+        if (opts->standalone) log_shutdown();
         return EXIT_FAILURE;
     }
     if (game.config.snapshot_hz > 0) {
@@ -1247,18 +1282,33 @@ static int dedicated_main(const LaunchArgs *args) {
      * crc/descriptor. start_round rebuilds for whatever map_rotation /
      * vote picks for round 1. */
     map_build((MapId)game.match.map_id, &game.world, &game.level_arena);
-    decal_init((int)level_width_px(&game.world.level),
-               (int)level_height_px(&game.world.level));
+    /* decal_init creates a RenderTexture — only safe to call on the
+     * main thread, where raylib's GL context lives. In-proc-server
+     * runs on a separate thread; the server doesn't render anyway
+     * (no graphics output), so just skip it. The host UI's main
+     * thread has its own decal init. */
+    if (opts->standalone) {
+        decal_init((int)level_width_px(&game.world.level),
+                   (int)level_height_px(&game.world.level));
+    }
     maps_refresh_serve_info(map_def(game.match.map_id)->short_name,
                             NULL, &game.server_map_desc,
                             game.server_map_serve_path,
                             sizeof(game.server_map_serve_path));
 
     game.mode = MODE_LOBBY;
-    LOG_I("dedicated: listening on %u, map='%s', mode=%s",
-          (unsigned)game.config.port,
+    LOG_I("%s: listening on %u, map='%s', mode=%s",
+          opts->log_prefix, (unsigned)game.config.port,
           map_def(game.match.map_id)->short_name,
           match_mode_name((MatchModeId)game.match.mode));
+
+    /* wan-fixes-16 (round 6) — signal the main thread that we're
+     * bound and ready to accept connections. The main thread is
+     * blocked waiting for this; once set, it kicks off the
+     * net_client_connect handshake. */
+    if (!opts->standalone) {
+        s_in_proc_server_ready = 1;
+    }
 
     /* Main tick loop. We don't have raylib's `GetTime`, so monotonic
      * clock + sleep. Net polling drives snapshot broadcast at the
@@ -1267,7 +1317,7 @@ static int dedicated_main(const LaunchArgs *args) {
     double sim_accum          = 0.0;
     double next_heartbeat_at  = last_time + 1.0;   /* +1 s (mono_seconds returns seconds) */
     uint64_t iters            = 0;
-    while (!s_dedicated_quit) {
+    while (!*opts->quit_flag) {
         double now = mono_seconds();
         double dt  = now - last_time;
         last_time = now;
@@ -1292,8 +1342,8 @@ static int dedicated_main(const LaunchArgs *args) {
          * silent on the no-peers path. */
         ++iters;
         if (now >= next_heartbeat_at) {
-            LOG_I("dedicated: alive (iters=%llu, phase=%s, peers=%d)",
-                  (unsigned long long)iters,
+            LOG_I("%s: alive (iters=%llu, phase=%s, peers=%d)",
+                  opts->log_prefix, (unsigned long long)iters,
                   match_phase_name(game.match.phase),
                   game.net.peer_count);
             next_heartbeat_at = now + 1.0;
@@ -1306,19 +1356,144 @@ static int dedicated_main(const LaunchArgs *args) {
         sleep_ms_portable(2);
     }
 
-    LOG_I("dedicated: shutting down (iters=%llu, last_signal=%d)",
-          (unsigned long long)iters, (int)s_dedicated_last_signal);
+    LOG_I("%s: shutting down (iters=%llu, last_signal=%d)",
+          opts->log_prefix, (unsigned long long)iters,
+          (int)s_dedicated_last_signal);
     net_close(&game.net);
-    net_shutdown();
+    /* net_shutdown() is process-global ENet teardown — only call it
+     * from the standalone path so the host UI's main-thread client
+     * doesn't lose its ENet state. */
+    if (opts->standalone) {
+        net_shutdown();
+    }
     game_shutdown(&game);
-    log_shutdown();
+    if (opts->standalone) {
+        log_shutdown();
+    }
     return EXIT_SUCCESS;
+}
+
+/* Standalone CLI --dedicated entry. */
+static int dedicated_main(const LaunchArgs *args) {
+    DedicatedRunOptions opts = {
+        .standalone   = true,
+        .quit_flag    = &s_dedicated_quit,
+        .log_prefix   = "dedicated",
+    };
+    return dedicated_run(args, &opts);
+}
+
+/* wan-fixes-16 (round 5) — in-process server thread.
+ *
+ * The entry function is POSIX-style (void *(*)(void *)) on BOTH
+ * platforms. On Windows, proc_spawn.c's helper adapts it to
+ * CreateThread's WINAPI DWORD signature internally. This keeps
+ * main.c free of <windows.h> (which collides with raylib types). */
+#if !defined(_WIN32)
+  #include <pthread.h>
+#endif
+
+static LaunchArgs s_in_proc_args;
+
+static void *in_process_server_thread(void *arg) {
+    (void)arg;
+    DedicatedRunOptions opts = {
+        .standalone   = false,
+        .quit_flag    = &s_in_proc_server_quit,
+        .log_prefix   = "in-proc-server",
+    };
+    dedicated_run(&s_in_proc_args, &opts);
+    return NULL;
+}
+
+#if defined(_WIN32)
+/* Opaque HANDLE — kept as a void* so we don't pull windows.h here. */
+static void *s_in_proc_thread_handle = NULL;
+/* proc_spawn.c implements these and casts to HANDLE / LPTHREAD_START_ROUTINE
+ * inside its own TU which DOES include <windows.h>. */
+extern void *win32_create_thread_compat(void *(*entry)(void *));
+extern void  win32_wait_close_thread_compat(void *handle);
+#else
+static pthread_t s_in_proc_thread_id = 0;
+static bool      s_in_proc_thread_started = false;
+#endif
+
+static void in_process_server_stop(void);  /* forward */
+
+static bool in_process_server_start(const LaunchArgs *args) {
+    s_in_proc_args = *args;
+    s_in_proc_server_quit  = 0;
+    s_in_proc_server_ready = 0;
+#if defined(_WIN32)
+    s_in_proc_thread_handle = win32_create_thread_compat(
+        in_process_server_thread);
+    if (!s_in_proc_thread_handle) {
+        LOG_E("in_process_server_start: CreateThread failed");
+        return false;
+    }
+#else
+    if (pthread_create(&s_in_proc_thread_id, NULL,
+                        in_process_server_thread, NULL) != 0) {
+        LOG_E("in_process_server_start: pthread_create failed");
+        return false;
+    }
+    s_in_proc_thread_started = true;
+#endif
+    LOG_I("in_process_server_start: server thread started, waiting for bind...");
+
+    /* wan-fixes-16 (round 6) — block until the server thread has
+     * bound its UDP socket. Without this, the client's first CONNECT
+     * packet would race against the server's net_server_start —
+     * arriving at an unbound port, getting dropped, with ENet's
+     * retransmit timer slow enough that the 5 s connect window
+     * expires before the retry lands. */
+    int waited_ms = 0;
+    const int READY_TIMEOUT_MS = 3000;
+    while (!s_in_proc_server_ready && waited_ms < READY_TIMEOUT_MS) {
+        time_sleep_ms(10);
+        waited_ms += 10;
+    }
+    if (!s_in_proc_server_ready) {
+        LOG_E("in_process_server_start: server thread didn't reach "
+              "net_server_start within %d ms — aborting", READY_TIMEOUT_MS);
+        in_process_server_stop();
+        return false;
+    }
+    LOG_I("in_process_server_start: server ready (waited %d ms)", waited_ms);
+    return true;
+}
+
+static void in_process_server_stop(void) {
+    s_in_proc_server_quit = 1;
+#if defined(_WIN32)
+    if (s_in_proc_thread_handle) {
+        win32_wait_close_thread_compat(s_in_proc_thread_handle);
+        s_in_proc_thread_handle = NULL;
+    }
+#else
+    if (s_in_proc_thread_started) {
+        pthread_join(s_in_proc_thread_id, NULL);
+        s_in_proc_thread_started = false;
+        s_in_proc_thread_id = 0;
+    }
+#endif
 }
 
 /* Tear down a dedicated child if the host spawned one. Idempotent —
  * safe to call from any shutdown path (window close, ESC quit,
  * MODE_TITLE return, error paths). */
 static void stop_dedicated_child_if_any(Game *g) {
+    /* wan-fixes-16 (round 5) — in-process server thread path. The
+     * sentinel ProcHandle { .native = -1, .pid = -1 } means
+     * host_start_begin started an in-process server thread instead
+     * of spawning an external process. Signal the thread to exit
+     * and join it. */
+    if (g->dedicated_proc.native == (int64_t)-1 && g->dedicated_proc.pid == -1) {
+        LOG_I("stop_dedicated_child: signalling in-process server thread");
+        in_process_server_stop();
+        g->dedicated_proc = PROC_HANDLE_NULL;
+        return;
+    }
     if (!proc_handle_valid(g->dedicated_proc)) return;
     LOG_I("stop_dedicated_child: terminating pid=%d", g->dedicated_proc.pid);
     proc_terminate(g->dedicated_proc);
@@ -1388,55 +1563,58 @@ static bool host_start_begin(Game *g, const LaunchArgs *args,
     if (port == 0) port = SOLDUT_DEFAULT_PORT;
 
     /* wan-fixes-6 — forward the host's MODE_HOST_SETUP choices to the
-     * dedicated child as CLI args. The choices live in `g->config`
-     * (the host UI applies them there before this call); the child is
-     * a separate process with its own config defaults, so without
-     * forwarding the lobby would silently reset to map=foundry /
-     * mode=ffa / etc. The arg-pack format mirrors the public CLI so
-     * power users get the same UX from the shell. */
-    char port_str[16];     snprintf(port_str, sizeof port_str, "%u", (unsigned)port);
-    char score_str[16];    snprintf(score_str, sizeof score_str, "%d", g->config.score_limit);
-    char time_str[16];     snprintf(time_str,  sizeof time_str,  "%d", (int)g->config.time_limit);
+     * server. With wan-fixes-16's in-process server thread these are
+     * just passed via the LaunchArgs struct instead of CLI args; the
+     * server reads the same fields either way (mode_override,
+     * map_name, score_limit, time_limit_s, friendly_fire). */
     const char *mode_name = match_mode_name((MatchModeId)g->config.mode);
     const MapDef *map = (g->config.map_rotation_count > 0)
                             ? map_def(g->config.map_rotation[0])
                             : map_def(MAP_FOUNDRY);
     const char *map_name_str = (map && map->short_name[0]) ? map->short_name : "foundry";
 
-    enum { CHILD_ARGV_CAP = 16 };
-    const char *child_argv[CHILD_ARGV_CAP];
-    int n = 0;
-    child_argv[n++] = "--dedicated";
-    child_argv[n++] = port_str;
-    child_argv[n++] = "--mode";
-    child_argv[n++] = mode_name;
-    child_argv[n++] = "--map";
-    child_argv[n++] = map_name_str;
-    if (g->config.score_limit > 0) {
-        child_argv[n++] = "--score";
-        child_argv[n++] = score_str;
-    }
-    if (g->config.time_limit > 0.0f) {
-        child_argv[n++] = "--time";
-        child_argv[n++] = time_str;
-    }
-    if (g->config.friendly_fire) {
-        child_argv[n++] = "--ff";
-    }
-    child_argv[n] = NULL;
-
-    LOG_I("host_start: spawn args mode=%s map=%s score=%d time=%d ff=%d port=%u",
+    LOG_I("host_start: server args mode=%s map=%s score=%d time=%d ff=%d port=%u",
           mode_name, map_name_str, g->config.score_limit,
           (int)g->config.time_limit, (int)g->config.friendly_fire,
           (unsigned)port);
 
-    ProcHandle child = proc_spawn_self(argv0_self, child_argv);
-    if (!proc_handle_valid(child)) {
-        LOG_E("host_start: proc_spawn_self failed");
+    /* wan-fixes-16 — IN-PROCESS server thread instead of a spawned
+     * child. Windows silently drops UDP between any pair of processes
+     * in the same spawn tree, regardless of PPID, destination IP, or
+     * which process did the spawning (proved with parent-process
+     * spoofing where PPID was Explorer's, and the filter still
+     * applied). Confirmed on two machines. The fix is to not have a
+     * second process at all — same-process UDP loopback works fine.
+     *
+     * The server runs in a separate thread of the host UI process.
+     * Both threads have completely separate Game states; the only
+     * thing they share is the kernel-level UDP socket pair. The
+     * client (UI main thread) connects to 127.0.0.1:<port> exactly
+     * like any other peer, going through the network code, so the
+     * host has no zero-latency advantage. */
+    (void)argv0_self;
+
+    LaunchArgs server_args;
+    memset(&server_args, 0, sizeof server_args);
+    server_args.port = port;
+    snprintf(server_args.mode_override, sizeof server_args.mode_override,
+             "%s", mode_name);
+    snprintf(server_args.map_name, sizeof server_args.map_name,
+             "%s", map_name_str);
+    if (g->config.score_limit > 0) server_args.score_limit = g->config.score_limit;
+    if (g->config.time_limit > 0.0f) server_args.time_limit_s = (int)g->config.time_limit;
+    if (g->config.friendly_fire)    { server_args.friendly_fire = true; server_args.ff_set = true; }
+
+    if (!in_process_server_start(&server_args)) {
+        LOG_E("host_start: in_process_server_start failed");
         return false;
     }
-    LOG_I("host_start: launched dedicated child pid=%d on port %u",
-          child.pid, (unsigned)port);
+    /* Sentinel ProcHandle { .native = -1, .pid = -1 } communicates
+     * "no external process, server runs on our own thread" to the
+     * shutdown / poll paths. */
+    ProcHandle child = (ProcHandle){ .native = (int64_t)-1, .pid = -1 };
+    LOG_I("host_start: in-process server thread started on port %u",
+          (unsigned)port);
 
     s_host_start.active      = true;
     s_host_start.child       = child;
@@ -1458,7 +1636,13 @@ static bool host_start_begin(Game *g, const LaunchArgs *args,
 static int host_start_poll(Game *g) {
     if (!s_host_start.active) return -1;
 
-    if (!proc_alive(s_host_start.child)) {
+    /* wan-fixes-16 (round 5) — in-process sentinel: skip proc_alive
+     * since there's no external process. The thread is alive unless
+     * we explicitly stopped it. */
+    bool in_process = (s_host_start.child.native == (int64_t)-1 &&
+                       s_host_start.child.pid    == -1);
+
+    if (!in_process && !proc_alive(s_host_start.child)) {
         LOG_E("host_start: dedicated child exited before client could connect");
         proc_close(s_host_start.child);
         host_start_reset();
@@ -1468,10 +1652,14 @@ static int host_start_poll(Game *g) {
     if (s_host_start.deadline_at > 0.0 &&
         GetTime() >= s_host_start.deadline_at) {
         LOG_E("host_start: client connect to local dedicated server timed out");
-        proc_terminate(s_host_start.child);
-        proc_wait(s_host_start.child, 500);
-        proc_kill(s_host_start.child);
-        proc_close(s_host_start.child);
+        if (in_process) {
+            in_process_server_stop();
+        } else {
+            proc_terminate(s_host_start.child);
+            proc_wait(s_host_start.child, 500);
+            proc_kill(s_host_start.child);
+            proc_close(s_host_start.child);
+        }
         host_start_reset();
         return -1;
     }
@@ -1491,7 +1679,9 @@ static int host_start_poll(Game *g) {
 
 static void host_start_abort(void) {
     if (!s_host_start.active) return;
-    if (proc_handle_valid(s_host_start.child)) {
+    if (s_host_start.child.native == (int64_t)-1 && s_host_start.child.pid == -1) {
+        in_process_server_stop();
+    } else if (proc_handle_valid(s_host_start.child)) {
         proc_terminate(s_host_start.child);
         proc_wait(s_host_start.child, 500);
         proc_kill(s_host_start.child);

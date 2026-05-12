@@ -467,6 +467,7 @@ void net_close(NetState *ns) {
     memset(ns, 0, sizeof *ns);
 }
 
+
 /* ---- Server: peer table ------------------------------------------- */
 
 static NetPeer *server_alloc_peer(NetState *ns, void *enet_peer) {
