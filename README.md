@@ -426,6 +426,7 @@ local-LAN test session.
 | **wan-fixes-13** (PR #31) | Kill feed wire flags + names end-to-end, top-right corner with banner-aware layout, 15 s linger with 3 s fade-tail, **default window 1920×1080** | Client never populated `world.killfeed[]`, wire dropped the flag byte (no headshot/gib/overkill icons), HUD rendered "mech#N". |
 | **wan-fixes-14** (PR #32) | Loadout + team picker lock once Ready Up is committed | You could ready up and keep tweaking weapons; `round_start` used whatever the slot held when ready latched. |
 | **wan-fixes-15** (PR #33) | HP numerals 18 → 22 px, armor bar lifted 10 px above the text top | Armor bar's bottom edge clipped the top of the HP digits by 4 px. |
+| **wan-fixes-16** (PR #37) | "Host Server" UI runs the dedicated server in a separate **thread** of the host UI process instead of spawning a child. | Windows silently drops UDP between any pair of processes that share a spawn-tree ancestor — confirmed on two machines through five increasingly aggressive workarounds (handle inheritance off, breakaway from job, launcher-pattern PPID severance, parent-spoofing to Explorer). Same-process UDP loopback works fine, so the server moves into a thread of the UI process. Two `Game` structs share zero memory — they communicate strictly over UDP loopback, host has no zero-latency advantage. |
 
 Five new wire messages cumulatively (`NET_MSG_EXPLOSION` for AOE
 events; the kill-event payload widened from 7 to 39 bytes for flags

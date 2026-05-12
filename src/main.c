@@ -71,17 +71,6 @@ typedef enum {
      * flow. The default `--host` path goes through the spawn-child
      * route. */
     LAUNCH_LISTEN_HOST,
-    /* wan-fixes-16 — `--launch-dedicated PORT [args]`. Windows-only
-     * launcher pattern. Spawns the real `--dedicated PORT [args]` as
-     * its own immediate child and exits with the dedi's PID as its
-     * exit code. The host UI uses the exit code to OpenProcess the
-     * orphaned dedi for kill-on-exit. Breaks the direct parent-child
-     * relationship between the UI and the dedi — necessary on Windows
-     * because Windows silently drops UDP between processes in that
-     * relationship even with bInheritHandles=FALSE + CREATE_NO_WINDOW
-     * + CREATE_BREAKAWAY_FROM_JOB. See proc_spawn_via_launcher() in
-     * proc_spawn.c. */
-    LAUNCH_LAUNCHER,
 } LaunchMode;
 
 typedef struct {
@@ -139,18 +128,6 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
         }
         else if (strcmp(argv[i], "--dedicated") == 0) {
             out->mode = LAUNCH_DEDICATED;
-            out->skip_title = true;
-            if (i + 1 < argc && argv[i+1][0] != '-') {
-                out->port = (uint16_t)atoi(argv[++i]);
-                if (out->port == 0) out->port = SOLDUT_DEFAULT_PORT;
-            }
-        }
-        else if (strcmp(argv[i], "--launch-dedicated") == 0) {
-            /* wan-fixes-16 — launcher pattern entry. We don't parse
-             * the remaining args here; the launcher handler in main()
-             * passes argv through almost verbatim (substituting
-             * --launch-dedicated with --dedicated) and re-spawns. */
-            out->mode = LAUNCH_LAUNCHER;
             out->skip_title = true;
             if (i + 1 < argc && argv[i+1][0] != '-') {
                 out->port = (uint16_t)atoi(argv[++i]);
@@ -1106,15 +1083,6 @@ static bool bootstrap_host(Game *g, const LaunchArgs *args, bool offline) {
 /* Pure client: connect, sit in lobby until ROUND_START. */
 static bool bootstrap_client(Game *g, const LaunchArgs *args) {
     if (!net_init()) return false;
-    /* wan-fixes-16 (diag round 3) — multi-destination raw UDP probe.
-     * Tests whether the filter is loopback-IP-specific by also probing
-     * 127.0.0.2 and the machine's LAN IP. Whichever destinations
-     * arrive in the dedi's raw_diag drain tell us where to redirect
-     * the real connect. */
-    if (args->port) {
-        net_raw_send_probe_multi((uint16_t)(args->port + 7),
-                                  "bootstrap_client-pre-connect");
-    }
     if (!net_client_connect(&g->net, args->host, args->port,
                             args->name, g))
     {
@@ -1275,15 +1243,6 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
         if (opts->standalone) log_shutdown();
         return EXIT_FAILURE;
     }
-    /* Open the raw_diag listener in BOTH paths so the client's
-     * pre-connect raw probes have somewhere to land. The
-     * self-loopback probe stays standalone-only (it's a diagnostic
-     * for the dedi's own socket from inside the dedi process). */
-    net_raw_diag_listener_open((uint16_t)(game.config.port + 7));
-    if (opts->standalone) {
-        net_raw_send_probe("127.0.0.1", (uint16_t)(game.config.port + 7),
-                           "dedi-self-loopback");
-    }
     if (!net_server_start(&game.net, game.config.port, &game)) {
         LOG_E("%s: failed to bind UDP %u",
               opts->log_prefix, (unsigned)game.config.port);
@@ -1387,11 +1346,6 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
                   opts->log_prefix, (unsigned long long)iters,
                   match_phase_name(game.match.phase),
                   game.net.peer_count);
-            /* Raw diag listener is open in both standalone and
-             * in-proc paths now, so drain it in both. The socket-
-             * diag log is also informative in both. */
-            net_socket_diag_log(opts->log_prefix, &game.net);
-            net_raw_diag_listener_drain(opts->log_prefix);
             next_heartbeat_at = now + 1.0;
         }
 
@@ -1405,7 +1359,6 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
     LOG_I("%s: shutting down (iters=%llu, last_signal=%d)",
           opts->log_prefix, (unsigned long long)iters,
           (int)s_dedicated_last_signal);
-    net_raw_diag_listener_close();
     net_close(&game.net);
     /* net_shutdown() is process-global ENet teardown — only call it
      * from the standalone path so the host UI's main-thread client
@@ -1610,56 +1563,28 @@ static bool host_start_begin(Game *g, const LaunchArgs *args,
     if (port == 0) port = SOLDUT_DEFAULT_PORT;
 
     /* wan-fixes-6 — forward the host's MODE_HOST_SETUP choices to the
-     * dedicated child as CLI args. The choices live in `g->config`
-     * (the host UI applies them there before this call); the child is
-     * a separate process with its own config defaults, so without
-     * forwarding the lobby would silently reset to map=foundry /
-     * mode=ffa / etc. The arg-pack format mirrors the public CLI so
-     * power users get the same UX from the shell. */
-    char port_str[16];     snprintf(port_str, sizeof port_str, "%u", (unsigned)port);
-    char score_str[16];    snprintf(score_str, sizeof score_str, "%d", g->config.score_limit);
-    char time_str[16];     snprintf(time_str,  sizeof time_str,  "%d", (int)g->config.time_limit);
+     * server. With wan-fixes-16's in-process server thread these are
+     * just passed via the LaunchArgs struct instead of CLI args; the
+     * server reads the same fields either way (mode_override,
+     * map_name, score_limit, time_limit_s, friendly_fire). */
     const char *mode_name = match_mode_name((MatchModeId)g->config.mode);
     const MapDef *map = (g->config.map_rotation_count > 0)
                             ? map_def(g->config.map_rotation[0])
                             : map_def(MAP_FOUNDRY);
     const char *map_name_str = (map && map->short_name[0]) ? map->short_name : "foundry";
 
-    enum { CHILD_ARGV_CAP = 16 };
-    const char *child_argv[CHILD_ARGV_CAP];
-    int n = 0;
-    child_argv[n++] = "--dedicated";
-    child_argv[n++] = port_str;
-    child_argv[n++] = "--mode";
-    child_argv[n++] = mode_name;
-    child_argv[n++] = "--map";
-    child_argv[n++] = map_name_str;
-    if (g->config.score_limit > 0) {
-        child_argv[n++] = "--score";
-        child_argv[n++] = score_str;
-    }
-    if (g->config.time_limit > 0.0f) {
-        child_argv[n++] = "--time";
-        child_argv[n++] = time_str;
-    }
-    if (g->config.friendly_fire) {
-        child_argv[n++] = "--ff";
-    }
-    child_argv[n] = NULL;
-
-    LOG_I("host_start: spawn args mode=%s map=%s score=%d time=%d ff=%d port=%u",
+    LOG_I("host_start: server args mode=%s map=%s score=%d time=%d ff=%d port=%u",
           mode_name, map_name_str, g->config.score_limit,
           (int)g->config.time_limit, (int)g->config.friendly_fire,
           (unsigned)port);
 
-    /* wan-fixes-16 (round 5) — IN-PROCESS server thread instead of
-     * a spawned child. Windows silently drops UDP between any pair
-     * of processes in the same spawn tree, regardless of PPID,
-     * destination IP, or which process spawned which (proved with
-     * parent-process spoofing where PPID was Explorer's, and the
-     * filter still applied). Confirmed on two machines. The only
-     * remaining path is same-process — and we proved same-process
-     * UDP loopback works (the dedi's self-loopback probe arrived).
+    /* wan-fixes-16 — IN-PROCESS server thread instead of a spawned
+     * child. Windows silently drops UDP between any pair of processes
+     * in the same spawn tree, regardless of PPID, destination IP, or
+     * which process did the spawning (proved with parent-process
+     * spoofing where PPID was Explorer's, and the filter still
+     * applied). Confirmed on two machines. The fix is to not have a
+     * second process at all — same-process UDP loopback works fine.
      *
      * The server runs in a separate thread of the host UI process.
      * Both threads have completely separate Game states; the only
@@ -1668,19 +1593,14 @@ static bool host_start_begin(Game *g, const LaunchArgs *args,
      * like any other peer, going through the network code, so the
      * host has no zero-latency advantage. */
     (void)argv0_self;
-    (void)child_argv;
 
     LaunchArgs server_args;
     memset(&server_args, 0, sizeof server_args);
     server_args.port = port;
-    if (mode_name && mode_name[0]) {
-        snprintf(server_args.mode_override, sizeof server_args.mode_override,
-                 "%s", mode_name);
-    }
-    if (map_name_str && map_name_str[0]) {
-        snprintf(server_args.map_name, sizeof server_args.map_name,
-                 "%s", map_name_str);
-    }
+    snprintf(server_args.mode_override, sizeof server_args.mode_override,
+             "%s", mode_name);
+    snprintf(server_args.map_name, sizeof server_args.map_name,
+             "%s", map_name_str);
     if (g->config.score_limit > 0) server_args.score_limit = g->config.score_limit;
     if (g->config.time_limit > 0.0f) server_args.time_limit_s = (int)g->config.time_limit;
     if (g->config.friendly_fire)    { server_args.friendly_fire = true; server_args.ff_set = true; }
@@ -1689,10 +1609,9 @@ static bool host_start_begin(Game *g, const LaunchArgs *args,
         LOG_E("host_start: in_process_server_start failed");
         return false;
     }
-    /* Use a sentinel ProcHandle so the existing kill-on-shutdown
-     * path in stop_dedicated_child_if_any can detect "no external
-     * process, just an in-process thread" and route to
-     * in_process_server_stop instead. */
+    /* Sentinel ProcHandle { .native = -1, .pid = -1 } communicates
+     * "no external process, server runs on our own thread" to the
+     * shutdown / poll paths. */
     ProcHandle child = (ProcHandle){ .native = (int64_t)-1, .pid = -1 };
     LOG_I("host_start: in-process server thread started on port %u",
           (unsigned)port);
@@ -1895,37 +1814,6 @@ static void reload_halftone_shader(const char *path) {
 /* ---- Main --------------------------------------------------------- */
 
 int main(int argc, char **argv) {
-    /* wan-fixes-16 — `--launch-dedicated PORT [args]` early-exit.
-     * Detected BEFORE log_init so the launcher leaves no trace in
-     * soldut.log (its job is just to spawn the real dedi and exit).
-     * Re-spawn ourselves with the same argv except --launch-dedicated
-     * substituted with --dedicated, then exit with the dedi's PID as
-     * our exit code. The parent UI reads that exit code and opens
-     * the dedi by PID. */
-    for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "--launch-dedicated") == 0) {
-            enum { LAUNCH_MAX = 32 };
-            const char *new_argv[LAUNCH_MAX + 4];
-            int n = 0;
-            new_argv[n++] = argv[0];
-            new_argv[n++] = "--dedicated";
-            for (int j = 1; j < argc && n < LAUNCH_MAX; ++j) {
-                if (j == i) continue;        /* skip the --launch-dedicated arg */
-                new_argv[n++] = argv[j];
-            }
-            new_argv[n] = NULL;
-            ProcHandle dedi = proc_spawn(new_argv);
-            if (!proc_handle_valid(dedi)) {
-                /* Sentinel for spawn failure — proc_spawn_via_launcher
-                 * checks for this exact value. */
-                return (int)0xFFFFFFFF;
-            }
-            int dedi_pid = dedi.pid;
-            proc_close(dedi);
-            return dedi_pid;
-        }
-    }
-
     /* wan-fixes-5 — `--dedicated PORT` early-exit. Detected BEFORE
      * log_init / game_init so the dedicated server has its own log
      * file (`soldut-server.log`) and doesn't fight the parent client's

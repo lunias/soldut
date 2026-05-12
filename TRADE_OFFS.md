@@ -1425,35 +1425,68 @@ WAN polish. Net effect on the trade-off ledger:
     P09's lobby-list broadcast pattern makes that mostly true
     but not guaranteed.
 
-### Host's dedicated child is the only architecture (wan-fixes-5)
+### Host UI's dedicated server runs in a thread, not a child process (wan-fixes-5 → wan-fixes-16)
 
 - **What we did** — "Host Server" in the title screen calls
-  `host_start_begin` which spawns a `--dedicated PORT` child of
-  the same binary and the host UI joins as a regular client
-  loopback (127.0.0.1). The listen-server path (`--listen-host`
-  or `bootstrap_host(... offline=false)`) is retained but no
-  longer reachable from the production UI; only shotmode tests
-  + offline-solo + `--listen-host` CLI fast-path use it.
-- **Why** — Pre-fix the host had zero-latency to its own world
-  (`world.authoritative = true` in the same process) while the
-  joiner ate full RTT. Asymmetric experience — kills felt
-  instant on host, sluggish on client. The dedicated child gives
-  both peers the same client pipeline.
-- **Cost** — Process spawn adds ~50–300 ms between "Start
-  Hosting" and "in lobby" (covered by wan-fixes-9's async
-  overlay). Memory is doubled (host process + dedi child each
-  own a full `Game`). Offline-solo (single-player) still uses
-  the in-process listen-server because spawning a child for
-  100% local play is pointless overhead.
+  `host_start_begin` which spawns a THREAD inside the host UI
+  process (not a child process) via
+  `in_process_server_start`. The thread runs `dedicated_run`
+  against a separate `Game` struct and binds its UDP socket on
+  port 23073. The host UI's main thread then connects as a
+  regular client to `127.0.0.1:23073`. Standalone `--dedicated`
+  CLI still exists for external dedi servers; `--listen-host`
+  is retained for offline solo + shotmode tests.
+- **Why** — wan-fixes-5 originally spawned a `--dedicated PORT`
+  child of the same binary. On Windows this is broken at the OS
+  level: any UDP packet between two processes that share a
+  spawn-tree ancestor is silently dropped. Confirmed on two
+  separate machines with five workarounds (handle inheritance
+  off, `CREATE_NO_WINDOW`, `CREATE_BREAKAWAY_FROM_JOB`, a
+  launcher-pattern that orphans the dedi from a now-dead
+  intermediate, and `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`
+  spoofing to Explorer). The filter sticks regardless of kernel
+  PPID, destination IP, or job-object membership — almost
+  certainly an AV / WFP callout tracking process ancestry
+  independent of the kernel's PPID field. Same-process UDP
+  loopback DOES work (proved with a dedi self-loopback probe),
+  so the fix is to not have a second process at all.
+- **How it preserves the dedicated-server philosophy** — Two
+  fully separate `Game` structs (UI client + server), zero
+  shared memory between threads, communication strictly over
+  the kernel UDP socket pair. Host's input goes through
+  `net_send_input` → kernel UDP → server's `net_poll` exactly
+  like any other peer. Server tick / snapshot broadcast runs on
+  its own cadence on its thread. Host has no zero-latency
+  advantage.
+- **Cost** —
+  - Threading: this is the first thread in the v1 codebase
+    (CLAUDE.md previously said "no threads at v1"). The thread
+    is fully isolated — no shared mutable state with the main
+    thread — so the synchronization burden is minimal (one
+    `volatile sig_atomic_t s_in_proc_server_ready` and one
+    `volatile sig_atomic_t s_in_proc_server_quit`).
+  - Memory: ~60 MB extra for the second `Game` struct (arenas
+    + pools). Acceptable on modern hardware.
+  - Server crash takes down the UI (no process isolation).
+    Acceptable v1 — the server doesn't allocate or run any
+    obviously fault-prone code.
+  - raylib's GL context lives on the main thread; the server
+    thread is forbidden from calling raylib. `decal_init` is
+    gated standalone-only because `LoadRenderTexture` needs the
+    GL context. Other raylib touch-points are already gated by
+    `IsWindowReady()` checks that no-op when called from a
+    non-GL-context thread, but new server-side code MUST stay
+    raylib-free.
 - **Revisit when** —
-  - We want a true single-process listen-server for low-end
-    hardware (memory-budget machines). The plumbing exists:
-    flip the UI's `host_start_begin` to call `bootstrap_host(...
-    offline=false)` instead, skip the spawn-overlay, world stays
-    authoritative.
-  - Cross-platform process-spawn becomes fragile (Windows path
-    quoting, macOS bundle layout). Spawn currently works via
-    `proc_spawn_self` in `src/proc_spawn.c` on all three.
+  - The Windows UDP filter behavior changes (e.g., a future
+    Windows version or AV update no longer drops same-spawn-tree
+    UDP). Re-introducing the spawn-child path would restore
+    process isolation but is currently impossible on the
+    machines we've tested.
+  - We need crash isolation (e.g., the server runs heavy
+    third-party code that might fault). At that point a
+    spawn-child path could be conditionally reintroduced on
+    non-Windows platforms.
 
 ### Host-setup overlay can't cancel mid-spawn (wan-fixes-9)
 
