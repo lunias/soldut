@@ -1083,6 +1083,16 @@ static bool bootstrap_host(Game *g, const LaunchArgs *args, bool offline) {
 /* Pure client: connect, sit in lobby until ROUND_START. */
 static bool bootstrap_client(Game *g, const LaunchArgs *args) {
     if (!net_init()) return false;
+    /* wan-fixes-16 (diag round 2) — send a raw UDP probe to the
+     * dedi's raw-diag listener BEFORE attempting the ENet connect.
+     * If the dedi's raw_diag recvs count goes up after this, raw
+     * UDP works between the two processes and ENet is to blame; if
+     * it stays at 0, Windows is dropping ALL UDP from parent to
+     * spawned child. */
+    if (args->port) {
+        net_raw_send_probe(args->host, (uint16_t)(args->port + 7),
+                           "bootstrap_client-pre-connect");
+    }
     if (!net_client_connect(&g->net, args->host, args->port,
                             args->name, g))
     {
@@ -1209,6 +1219,12 @@ static int dedicated_main(const LaunchArgs *args) {
     }
 
     if (!net_init()) { game_shutdown(&game); log_shutdown(); return EXIT_FAILURE; }
+    /* wan-fixes-16 (diag round 2) — open a raw UDP listener on
+     * port+7 (e.g., 23080 when ENet runs 23073). The parent UI's
+     * bootstrap_client sends a raw probe to this port right before
+     * its ENet connect. Confirms whether raw UDP can cross the
+     * parent-spawn-child relationship at all. */
+    net_raw_diag_listener_open((uint16_t)(game.config.port + 7));
     if (!net_server_start(&game.net, game.config.port, &game)) {
         LOG_E("dedicated: failed to bind UDP %u", (unsigned)game.config.port);
         net_shutdown();
@@ -1301,6 +1317,10 @@ static int dedicated_main(const LaunchArgs *args) {
              * recv buffer is filling (ENet not draining) or empty
              * (OS not delivering packets). */
             net_socket_diag_log("dedicated:", &game.net);
+            /* wan-fixes-16 (diag round 2) — drain raw listener too.
+             * If anything's there, the parent's pre-connect raw probe
+             * crossed the spawn relationship. */
+            net_raw_diag_listener_drain("dedicated:");
             next_heartbeat_at = now + 1.0;
         }
 
@@ -1313,6 +1333,7 @@ static int dedicated_main(const LaunchArgs *args) {
 
     LOG_I("dedicated: shutting down (iters=%llu, last_signal=%d)",
           (unsigned long long)iters, (int)s_dedicated_last_signal);
+    net_raw_diag_listener_close();
     net_close(&game.net);
     net_shutdown();
     game_shutdown(&game);

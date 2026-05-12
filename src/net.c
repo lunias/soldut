@@ -52,6 +52,11 @@
    * <sys/socket.h> + <netinet/in.h> on Linux via its unix.h, but
    * sys/ioctl.h is missing from that path. */
   #include <sys/ioctl.h>
+  /* Raw UDP probe path: O_NONBLOCK / fcntl / close / errno / inet_addr. */
+  #include <arpa/inet.h>
+  #include <errno.h>
+  #include <fcntl.h>
+  #include <unistd.h>
 #endif
 
 #include <stdio.h>
@@ -544,6 +549,190 @@ void net_socket_diag_log(const char *prefix, NetState *ns) {
         LOG_I("%s socket diag: FIONREAD=%d bytes pending in recv buf",
               prefix, pending);
     }
+#endif
+}
+
+/* wan-fixes-16 (diag round 2) — raw UDP probe path. See net.h. */
+
+static int g_raw_diag_fd = -1;
+static unsigned long g_raw_diag_recv_count = 0;
+static unsigned long g_raw_diag_recv_bytes = 0;
+
+bool net_raw_diag_listener_open(uint16_t port) {
+    if (g_raw_diag_fd >= 0) return true;
+
+#if defined(_WIN32)
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s == INVALID_SOCKET) {
+        LOG_E("raw diag: socket() failed (WSAerr=%d)", WSAGetLastError());
+        return false;
+    }
+    u_long nb = 1;
+    if (ioctlsocket(s, FIONBIO, &nb) != 0) {
+        LOG_W("raw diag: FIONBIO failed (WSAerr=%d)", WSAGetLastError());
+    }
+#else
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0) {
+        LOG_E("raw diag: socket() failed errno=%d", errno);
+        return false;
+    }
+    int flags = fcntl(s, F_GETFL, 0);
+    if (flags >= 0) fcntl(s, F_SETFL, flags | O_NONBLOCK);
+#endif
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    sa.sin_addr.s_addr = htonl(INADDR_ANY);
+
+#if defined(_WIN32)
+    if (bind(s, (struct sockaddr *)&sa, (int)sizeof sa) != 0) {
+        LOG_E("raw diag: bind(%u) failed (WSAerr=%d)", (unsigned)port,
+              WSAGetLastError());
+        closesocket(s);
+        return false;
+    }
+#else
+    if (bind(s, (struct sockaddr *)&sa, (socklen_t)sizeof sa) != 0) {
+        LOG_E("raw diag: bind(%u) failed errno=%d", (unsigned)port, errno);
+        close(s);
+        return false;
+    }
+#endif
+
+    g_raw_diag_fd = (int)(intptr_t)s;
+    g_raw_diag_recv_count = 0;
+    g_raw_diag_recv_bytes = 0;
+    LOG_I("raw diag: listener open on 0.0.0.0:%u (fd=%d)",
+          (unsigned)port, g_raw_diag_fd);
+    return true;
+}
+
+void net_raw_diag_listener_drain(const char *prefix) {
+    if (g_raw_diag_fd < 0) return;
+    char buf[256];
+    struct sockaddr_in from;
+    int drained_this_call = 0;
+    for (;;) {
+#if defined(_WIN32)
+        int fromlen = (int)sizeof from;
+        int n = recvfrom((SOCKET)(intptr_t)g_raw_diag_fd, buf, (int)sizeof buf, 0,
+                         (struct sockaddr *)&from, &fromlen);
+        if (n == SOCKET_ERROR) {
+            int err = WSAGetLastError();
+            if (err != WSAEWOULDBLOCK) {
+                LOG_W("%s raw diag: recvfrom error WSAerr=%d", prefix, err);
+            }
+            break;
+        }
+#else
+        socklen_t fromlen = (socklen_t)sizeof from;
+        ssize_t n = recvfrom(g_raw_diag_fd, buf, sizeof buf, 0,
+                             (struct sockaddr *)&from, &fromlen);
+        if (n < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                LOG_W("%s raw diag: recvfrom errno=%d", prefix, errno);
+            }
+            break;
+        }
+#endif
+        ++g_raw_diag_recv_count;
+        g_raw_diag_recv_bytes += (unsigned long)n;
+        ++drained_this_call;
+        if (n > 0) {
+            int show = (n < 60) ? (int)n : 60;
+            buf[show] = '\0';
+            unsigned src_addr = (unsigned)ntohl(from.sin_addr.s_addr);
+            LOG_I("%s raw diag: recv %d bytes from %u.%u.%u.%u:%u payload='%s'",
+                  prefix, (int)n,
+                  (src_addr >> 24) & 0xff, (src_addr >> 16) & 0xff,
+                  (src_addr >>  8) & 0xff,  src_addr        & 0xff,
+                  (unsigned)ntohs(from.sin_port), buf);
+        }
+    }
+    LOG_I("%s raw diag: cumulative recvs=%lu bytes=%lu (this tick=%d)",
+          prefix, g_raw_diag_recv_count, g_raw_diag_recv_bytes,
+          drained_this_call);
+}
+
+void net_raw_diag_listener_close(void) {
+    if (g_raw_diag_fd < 0) return;
+#if defined(_WIN32)
+    closesocket((SOCKET)(intptr_t)g_raw_diag_fd);
+#else
+    close(g_raw_diag_fd);
+#endif
+    g_raw_diag_fd = -1;
+    g_raw_diag_recv_count = 0;
+    g_raw_diag_recv_bytes = 0;
+}
+
+void net_raw_send_probe(const char *host, uint16_t port, const char *tag) {
+    if (!host || !host[0]) return;
+
+#if defined(_WIN32)
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s == INVALID_SOCKET) {
+        LOG_E("raw probe '%s': socket() failed (WSAerr=%d)",
+              tag ? tag : "(null)", WSAGetLastError());
+        return;
+    }
+#else
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0) {
+        LOG_E("raw probe '%s': socket() failed errno=%d",
+              tag ? tag : "(null)", errno);
+        return;
+    }
+#endif
+
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof to);
+    to.sin_family = AF_INET;
+    to.sin_port = htons(port);
+    /* inet_addr is deprecated on POSIX but works fine for "127.0.0.1".
+     * inet_pton is the modern one but we don't need its IPv6 path. */
+    to.sin_addr.s_addr = inet_addr(host);
+    if (to.sin_addr.s_addr == INADDR_NONE) {
+        LOG_E("raw probe '%s': inet_addr('%s') failed",
+              tag ? tag : "(null)", host);
+#if defined(_WIN32)
+        closesocket(s);
+#else
+        close(s);
+#endif
+        return;
+    }
+
+    char buf[64];
+    int n = snprintf(buf, sizeof buf, "RAW_PROBE:%s",
+                     tag ? tag : "(null)");
+    if (n <= 0 || n >= (int)sizeof buf) n = (int)sizeof buf - 1;
+
+#if defined(_WIN32)
+    int rc = sendto(s, buf, n, 0, (struct sockaddr *)&to, (int)sizeof to);
+    if (rc == SOCKET_ERROR) {
+        LOG_E("raw probe '%s' -> %s:%u: sendto failed (WSAerr=%d)",
+              tag ? tag : "(null)", host, (unsigned)port,
+              WSAGetLastError());
+    } else {
+        LOG_I("raw probe '%s' -> %s:%u: sendto sent %d bytes",
+              tag ? tag : "(null)", host, (unsigned)port, rc);
+    }
+    closesocket(s);
+#else
+    ssize_t rc = sendto(s, buf, (size_t)n, 0,
+                        (struct sockaddr *)&to, (socklen_t)sizeof to);
+    if (rc < 0) {
+        LOG_E("raw probe '%s' -> %s:%u: sendto failed errno=%d",
+              tag ? tag : "(null)", host, (unsigned)port, errno);
+    } else {
+        LOG_I("raw probe '%s' -> %s:%u: sendto sent %d bytes",
+              tag ? tag : "(null)", host, (unsigned)port, (int)rc);
+    }
+    close(s);
 #endif
 }
 

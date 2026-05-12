@@ -378,6 +378,43 @@ void net_close(NetState *ns);
  * grows while no events fire). No-op when ns has no enet_host. */
 void net_socket_diag_log(const char *prefix, NetState *ns);
 
+/* wan-fixes-16 (diag round 2) — raw UDP probe path.
+ *
+ * After round 1 confirmed the dedi's ENet socket sees FIONREAD=0
+ * across the parent's 5 s connect window — and the user reproduced
+ * on a second machine — the next question is whether ANY UDP packet
+ * can cross from the parent process to its spawned child. These
+ * functions bypass ENet entirely:
+ *
+ *   net_raw_diag_listener_open(port)
+ *       Opens a non-blocking UDP socket bound to 0.0.0.0:port and
+ *       stores the fd in a module-static slot. Independent of the
+ *       ENet host. Logs success/failure with errno / WSAerror.
+ *
+ *   net_raw_diag_listener_drain(prefix)
+ *       Non-blocking recvfrom in a loop. Logs each received packet's
+ *       source addr + payload (first 64 bytes). Call from the dedi
+ *       heartbeat once a second.
+ *
+ *   net_raw_diag_listener_close()
+ *       Closes and clears the slot. Idempotent.
+ *
+ *   net_raw_send_probe(host, port, payload_tag)
+ *       Opens a transient UDP socket, sendto(host:port, "RAW_PROBE:<tag>"),
+ *       closes. Logs the sendto return value + last error.
+ *
+ * In the failing case the dedi opens a raw listener on port 23080 and
+ * the parent's bootstrap_client sends a raw probe to 127.0.0.1:23080
+ * RIGHT BEFORE the ENet host_service wait. A non-zero raw_recvs
+ * count on the dedi proves UDP can cross the spawn relationship —
+ * implicating ENet specifically. A continuing-zero count points the
+ * finger at Windows OS-level filtering of parent→child UDP. */
+bool net_raw_diag_listener_open(uint16_t port);
+void net_raw_diag_listener_drain(const char *prefix);
+void net_raw_diag_listener_close(void);
+
+void net_raw_send_probe(const char *host, uint16_t port, const char *tag);
+
 /* ---- Per-frame pump ----------------------------------------------- */
 
 /* Drain ENet events. On the server: receives inputs, completes
