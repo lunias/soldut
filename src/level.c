@@ -54,7 +54,13 @@ static void set_tri(LvlPoly *q, PolyKind kind,
 void level_build_tutorial(Level *level, Arena *arena) {
     /* 100×40 tile arena = 3200×1280 px world. Comfortable for the M1
      * loop: enough room to run, jet, miss with the rifle, and find your
-     * way back to the dummy. */
+     * way back to the dummy.
+     *
+     * Zero the Level first — matches level_load + map_alloc_tiles so
+     * stale counts/pointers from a prior build don't leak into this
+     * one. See map_alloc_tiles in src/maps.c for the long form of the
+     * cross-build leak this prevents. */
+    memset(level, 0, sizeof *level);
     level->width     = 100;
     level->height    = 40;
     level->tile_size = TILE_SIZE_PX;

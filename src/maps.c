@@ -374,6 +374,32 @@ static void add_pickup_to_map(Level *L, Arena *arena, int wx, int wy,
 }
 
 static void map_alloc_tiles(Level *level, Arena *arena, int w, int h) {
+    /* Zero the whole Level struct first. This matches what level_load
+     * does after parsing the .lvl header; without it, code-built
+     * fallbacks inherit stale poly_count / pickup_count / spawn_count /
+     * flag_count / *_pointers from whatever map was last loaded into
+     * this World. The pointers themselves point into the arena that
+     * was JUST reset by the caller, so they're aliased with whatever
+     * tiles / spawns / flags get allocated next — i.e., garbage
+     * geometry rendered as polygons, ghost pickups at random
+     * positions, etc.
+     *
+     * Repro that surfaced this: host UI cycles foundry→slipstream→
+     * reactor in the lobby UI (each .lvl load sets L->poly_count to
+     * 4/5/6), then picks crossfire (code-built, no .lvl). build_crossfire
+     * doesn't touch L->polys / L->poly_count, so L->poly_count stays
+     * at 6 with L->polys pointing into the freshly-reset arena. The
+     * renderer paints 6 garbage triangles. The joiner client (which
+     * didn't cycle through the lobby) lands on crossfire with
+     * poly_count=0 — same map_id, different rendered geometry.
+     *
+     * Also fixes the pickup append-without-reset bug: add_pickup_to_map
+     * checks `if (!L->pickups)` to allocate. Pre-fix the pointer
+     * survived across builds even after arena_reset; the next build
+     * appended to a stale count instead of starting fresh, so a series
+     * of map cycles produced 5 → 10 → 15 → 16 (capped) pickups for
+     * the SAME crossfire map. */
+    memset(level, 0, sizeof *level);
     level->width     = w;
     level->height    = h;
     level->tile_size = TILE_PX;
