@@ -169,32 +169,52 @@ ProcHandle proc_spawn(const char *const *argv) {
     STARTUPINFOA si = {0};
     PROCESS_INFORMATION pi = {0};
     si.cb = sizeof(si);
-    /* wan-fixes-16 — DO NOT inherit handles from the parent.
+    /* wan-fixes-16 — DO NOT inherit handles from the parent, AND
+     * break away from the parent's Job Object.
      *
-     * Earlier revisions of this file passed bInheritHandles=TRUE +
-     * STARTF_USESTDHANDLES so the dedicated child's stdout would
-     * mux into the parent's console. That works fine when the
-     * parent is PowerShell or cmd.exe (manual `Soldut.exe --dedicated`
-     * from a shell), but on Windows it breaks the parent↔child UDP
-     * path in the Host Server flow: the parent UI's enet_host_connect
-     * to 127.0.0.1:<port> sends CONNECT packets that never reach
-     * the dedicated child's enet_host_service. Both sides log
-     * "listening" / "connecting" successfully, both report peers=0
-     * after a 5 s timeout, yet two INDEPENDENT Soldut.exe processes
-     * (one started in PowerShell with --dedicated, one Explorer-
-     * launched with --connect to the manual dedi) talk fine, and
-     * the Explorer-launched UI can connect to a manually-started
-     * dedi from a Server Browser entry. The only difference between
-     * the working case and the failing case is bInheritHandles=TRUE
-     * + STARTF_USESTDHANDLES on the spawn. The dedicated child
-     * already writes everything to soldut-server.log, so losing
-     * the muxed-console-output is a small price for the Host Server
-     * button actually working from a double-click launch.
+     * Background: the M2-era Host Server flow ran a listen-server
+     * (server + client in the same process) and worked fine on
+     * Windows. wan-fixes-5 split that into a parent UI + a spawned
+     * `--dedicated PORT` child of the same binary; on Windows the
+     * parent's UDP CONNECT packets to 127.0.0.1:<port> never reach
+     * the spawned child. Diagnostics confirmed:
      *
-     * CREATE_NO_WINDOW keeps the child headless (no visible
-     * console window flashes) — it's still a console-subsystem
-     * binary, just with the console hidden. */
-    DWORD flags = CREATE_NO_WINDOW;
+     *   - getsockname shows the dedi bound 0.0.0.0:23073
+     *   - FIONREAD on the dedi's socket stays at 0 across the
+     *     parent's full 5 s connect window
+     *   - A separate raw UDP probe sent from the parent to
+     *     127.0.0.1:23080 with the dedi listening on a fresh
+     *     non-blocking socket bound to the same port — sendto
+     *     reports 38 bytes sent, recvfrom on the dedi returns
+     *     nothing.
+     *   - Two INDEPENDENT Soldut.exe processes (no parent-child
+     *     relationship) talk over UDP loopback fine.
+     *   - A separate machine (the user's friend's) reproduces the
+     *     same behavior.
+     *
+     * Pattern: Windows silently drops UDP packets between a parent
+     * process and its CreateProcess-spawned child when both are
+     * descendants of an Explorer-launched ancestor. The most likely
+     * mechanism is a Job Object that newer Explorer puts launched
+     * processes into; the child inherits the job; UDP between
+     * processes in the same restricted job is dropped.
+     *
+     * CREATE_BREAKAWAY_FROM_JOB tells CreateProcess to put the new
+     * process OUTSIDE any job the parent is in. This requires the
+     * parent's job to have JOB_OBJECT_LIMIT_BREAKAWAY_OK set —
+     * Explorer's default job does, so this works in practice. If a
+     * future parent is in a stricter job, CreateProcess returns
+     * ERROR_ACCESS_DENIED (5) and we retry without the flag below.
+     *
+     * Also keeping handle inheritance off (no STARTF_USESTDHANDLES,
+     * bInheritHandles=FALSE) so the dedi's I/O is fully its own —
+     * already established in the previous wan-fixes-16 commit; the
+     * dedi writes everything to soldut-server.log.
+     *
+     * CREATE_NO_WINDOW keeps the child headless (no visible console
+     * flash) — still a console-subsystem binary, just hidden. */
+    DWORD base_flags = CREATE_NO_WINDOW;
+    DWORD flags = base_flags | CREATE_BREAKAWAY_FROM_JOB;
 
     BOOL ok = CreateProcessA(
         /*lpApplicationName*/ NULL,
@@ -204,6 +224,34 @@ ProcHandle proc_spawn(const char *const *argv) {
         /*dwCreationFlags*/   flags,
         NULL, NULL,
         &si, &pi);
+    if (!ok) {
+        DWORD err = GetLastError();
+        /* If the parent's job doesn't allow breakaway, ERROR_ACCESS_DENIED
+         * comes back. Retry without the flag — at least the spawn itself
+         * succeeds, even if the parent↔child UDP path will still be
+         * blocked by the job. We log the fallback so it's visible. */
+        if (err == ERROR_ACCESS_DENIED) {
+            LOG_W("proc_spawn: CREATE_BREAKAWAY_FROM_JOB denied "
+                  "(parent job doesn't allow breakaway) — retrying "
+                  "without it; UDP loopback to child may not work");
+            flags = base_flags;
+            ok = CreateProcessA(
+                /*lpApplicationName*/ NULL,
+                /*lpCommandLine*/     cmd,
+                NULL, NULL,
+                /*bInheritHandles*/   FALSE,
+                /*dwCreationFlags*/   flags,
+                NULL, NULL,
+                &si, &pi);
+            if (ok) {
+                LOG_I("proc_spawn: fallback CreateProcess (no breakaway) "
+                      "succeeded");
+            }
+        }
+    } else {
+        LOG_I("proc_spawn: CreateProcess with CREATE_BREAKAWAY_FROM_JOB "
+              "succeeded");
+    }
     if (!ok) {
         LOG_E("proc_spawn: CreateProcess(%s) failed: code=%lu",
               argv[0], (unsigned long)GetLastError());
