@@ -842,10 +842,25 @@ static void host_match_flow_step(Game *g, float dt) {
              * everyone hits Ready, override it to a short 3 s so the
              * round actually starts soon — otherwise players see "all
              * ready ✓" but nothing happens. Only override down (don't
-             * extend a shorter timer). */
-            bool all_ready = lobby_all_ready(&g->lobby);
+             * extend a shorter timer).
+             *
+             * Single-player (offline_solo, not editor F5 test-play)
+             * compresses the 3 s lobby grace + 5 s countdown to a
+             * single sub-frame value so Ready Up starts the round
+             * immediately — the title-screen "Single Player" path
+             * explicitly does NOT auto-arm the lobby (see request_
+             * single_player), so the user sets up at their own pace
+             * and the click is the trigger. test-play keeps its
+             * existing 1 s + 1 s timing via the explicit launch-time
+             * arm and match.countdown_default. */
+            bool all_ready  = lobby_all_ready(&g->lobby);
+            bool sp_instant = g->offline_solo && !g->test_play_lvl[0];
             if (all_ready) {
-                if (!g->lobby.auto_start_active) {
+                if (sp_instant) {
+                    if (!g->lobby.auto_start_active) {
+                        lobby_auto_start_arm(&g->lobby, 0.001f);
+                    }
+                } else if (!g->lobby.auto_start_active) {
                     lobby_auto_start_arm(&g->lobby, 3.0f);
                 } else if (g->lobby.auto_start_remaining > 3.0f) {
                     g->lobby.auto_start_remaining = 3.0f;
@@ -877,13 +892,19 @@ static void host_match_flow_step(Game *g, float dt) {
                      * wan-fixes-5 — cfg.countdown_default also flows
                      * through match.countdown_default at dedicated_main
                      * startup, so shot-test cfgs can shrink it without
-                     * touching the test-play path. */
-                    float secs = (g->match.countdown_default > 0.0f &&
-                                  g->match.countdown_default < 5.0f)
-                                     ? g->match.countdown_default
-                                     : (g->test_play_lvl[0]
-                                          ? g->match.countdown_default
-                                          : 5.0f);
+                     * touching the test-play path. Single-player skips
+                     * the countdown too — Ready Up should feel instant. */
+                    float secs;
+                    if (sp_instant) {
+                        secs = 0.001f;
+                    } else {
+                        secs = (g->match.countdown_default > 0.0f &&
+                                g->match.countdown_default < 5.0f)
+                                   ? g->match.countdown_default
+                                   : (g->test_play_lvl[0]
+                                        ? g->match.countdown_default
+                                        : 5.0f);
+                    }
                     match_begin_countdown(&g->match, secs);
                     if (g->net.role == NET_ROLE_SERVER) {
                         net_server_broadcast_match_state(&g->net, &g->match);
@@ -1917,9 +1938,12 @@ int main(int argc, char **argv) {
                game.config.time_limit, game.config.friendly_fire);
     game.match.rounds_per_match = game.config.rounds_per_match;
     if (args.test_play_lvl[0]) {
-        /* Drop the in-match countdown to 1 s as well so a designer's
-         * F5 round-trip time stays short (default is 5 s). */
-        game.match.countdown_default = 1.0f;
+        /* Sub-frame countdown so the F5 round-trip drops the designer
+         * straight into the map — paired with the 0.001 s lobby arm
+         * below the launch-to-MATCH_PHASE_ACTIVE latency is ~33 ms.
+         * The host_match_flow_step `secs` calc reads this via the
+         * test_play_lvl branch. */
+        game.match.countdown_default = 0.001f;
     }
     game.match.map_id = config_pick_map(&game.config, 0);
     game.lobby.auto_start_default = game.config.auto_start_seconds;
@@ -1992,7 +2016,13 @@ int main(int argc, char **argv) {
      * cycle-button click via prefs_save_from_ui. */
     {
         UserPrefs prefs;
-        if (prefs_load(&prefs, PREFS_PATH)) {
+        bool had_prefs = prefs_load(&prefs, PREFS_PATH);
+        /* Apply persisted master volume regardless — prefs_load fills
+         * the struct with defaults (PREFS_DEFAULT_VOLUME = 0.80) even
+         * when the file is missing, so a fresh install lands at 80%
+         * without a separate code path. */
+        audio_set_bus_volume(AUDIO_BUS_MASTER, prefs.master_volume);
+        if (had_prefs) {
             snprintf(ui.player_name, sizeof ui.player_name, "%s", prefs.name);
             ui.lobby_chassis   = prefs.loadout.chassis_id;
             ui.lobby_primary   = prefs.loadout.primary_id;
@@ -2031,8 +2061,11 @@ int main(int argc, char **argv) {
             game.mode = MODE_LOBBY;
             if (args.test_play_lvl[0]) {
                 /* Arm the round immediately — test-play wants to skip
-                 * the lobby UX and drop the player into the map. */
-                lobby_auto_start_arm(&game.lobby, 1.0f);
+                 * the lobby UX and drop the player into the map.
+                 * Sub-frame value fires on the next lobby_tick;
+                 * combined with countdown_default below the F5 round-
+                 * trip is ~2 frames from launch to MATCH_PHASE_ACTIVE. */
+                lobby_auto_start_arm(&game.lobby, 0.001f);
             }
         } else if (args.mode == LAUNCH_LISTEN_HOST) {
             /* Legacy in-process server (server + client in one
@@ -2077,6 +2110,20 @@ int main(int argc, char **argv) {
          * audio_toggle_mute logs the new state. */
         if (IsKeyPressed(KEY_F2)) {
             audio_toggle_mute();
+        }
+
+        /* +/- nudge master volume in 5% steps. Held keys auto-repeat
+         * via IsKeyPressedRepeat. Special cases handled inside
+         * audio_master_volume_nudge: '+' while muted un-mutes (and
+         * keeps the prior gain); '-' while muted is a no-op. Volume
+         * persists across launches via soldut-prefs.cfg. */
+        {
+            bool up = IsKeyPressed(KEY_EQUAL)   || IsKeyPressedRepeat(KEY_EQUAL)
+                   || IsKeyPressed(KEY_KP_ADD)  || IsKeyPressedRepeat(KEY_KP_ADD);
+            bool dn = IsKeyPressed(KEY_MINUS)         || IsKeyPressedRepeat(KEY_MINUS)
+                   || IsKeyPressed(KEY_KP_SUBTRACT)   || IsKeyPressedRepeat(KEY_KP_SUBTRACT);
+            if (up && audio_master_volume_nudge(+0.05f)) lobby_ui_save_prefs(&ui);
+            if (dn && audio_master_volume_nudge(-0.05f)) lobby_ui_save_prefs(&ui);
         }
 
         /* M5 P14 — advance the audio mixer state: decay duck
@@ -2136,6 +2183,7 @@ int main(int argc, char **argv) {
             BeginDrawing();
             title_screen_run(&ui, &game, pf.render_w, pf.render_h);
             audio_draw_mute_overlay(pf.render_w, pf.render_h);
+            audio_draw_volume_overlay(pf.render_w, pf.render_h);
             EndDrawing();
             if (ui.request_quit)             { game.mode = MODE_QUIT; }
             else if (ui.request_single_player) {
@@ -2145,8 +2193,11 @@ int main(int argc, char **argv) {
                  * edits made on the title screen this session. */
                 lobby_ui_save_prefs(&ui);
                 if (bootstrap_host(&game, &args, /*offline*/true)) {
-                    /* Auto-start with a short countdown. */
-                    lobby_auto_start_arm(&game.lobby, 1.0f);
+                    /* Single-player sits in the lobby indefinitely — no
+                     * auto-start. The user picks map / loadout / mode at
+                     * their own pace; clicking Ready Up is what triggers
+                     * the round (handled in host_match_flow_step with an
+                     * offline_solo fast path). */
                     game.mode = MODE_LOBBY;
                 }
             }
@@ -2190,6 +2241,7 @@ int main(int argc, char **argv) {
                 host_setup_screen_draw_overlay(&ui, pf.render_w, pf.render_h);
             }
             audio_draw_mute_overlay(pf.render_w, pf.render_h);
+            audio_draw_volume_overlay(pf.render_w, pf.render_h);
             EndDrawing();
 
             if (ui.request_start_host && !ui.host_starting) {
@@ -2285,6 +2337,7 @@ int main(int argc, char **argv) {
             BeginDrawing();
             browser_screen_run(&ui, &game, pf.render_w, pf.render_h);
             audio_draw_mute_overlay(pf.render_w, pf.render_h);
+            audio_draw_volume_overlay(pf.render_w, pf.render_h);
             EndDrawing();
             net_poll(&game.net, &game, dt);   /* drain discovery replies */
             if (ui.request_connect) {
@@ -2305,6 +2358,7 @@ int main(int argc, char **argv) {
             BeginDrawing();
             connect_screen_run(&ui, &game, pf.render_w, pf.render_h);
             audio_draw_mute_overlay(pf.render_w, pf.render_h);
+            audio_draw_volume_overlay(pf.render_w, pf.render_h);
             EndDrawing();
             if (ui.request_connect) {
                 ui.request_connect = false;
@@ -2361,6 +2415,7 @@ int main(int argc, char **argv) {
                 match_loading_overlay_draw(&ui, &game, pf.render_w, pf.render_h);
             }
             audio_draw_mute_overlay(pf.render_w, pf.render_h);
+            audio_draw_volume_overlay(pf.render_w, pf.render_h);
             EndDrawing();
 
             /* Honor the lobby UI's "Leave" button. */
@@ -2634,6 +2689,7 @@ int main(int argc, char **argv) {
             BeginDrawing();
             ClearBackground(BLACK);
             audio_draw_mute_overlay(pf.render_w, pf.render_h);
+            audio_draw_volume_overlay(pf.render_w, pf.render_h);
             EndDrawing();
             break;
         }

@@ -73,6 +73,15 @@ static AudioBus g_buses[AUDIO_BUS_COUNT];
  * SetMusicVolume / SetSoundVolume reads zero. */
 static bool g_muted = false;
 
+/* Volume overlay — armed (set to VOL_OVERLAY_LIFETIME) whenever the
+ * user nudges master volume via +/- keys. Decays toward zero in
+ * audio_step. While > 0, audio_draw_volume_overlay paints a
+ * top-center pill; the last VOL_OVERLAY_FADE_TAIL seconds linearly
+ * fade alpha. */
+#define VOL_OVERLAY_LIFETIME   2.0f
+#define VOL_OVERLAY_FADE_TAIL  0.5f
+static float g_vol_overlay_timer = 0.0f;
+
 static float bus_resolved(AudioBusId bus) {
     if (g_muted) return 0.0f;
     if (bus < 0 || bus >= AUDIO_BUS_COUNT) bus = AUDIO_BUS_SFX;
@@ -123,6 +132,91 @@ void audio_set_bus_volume(AudioBusId bus, float v) {
     if (v < 0.0f) v = 0.0f;
     if (v > 1.0f) v = 1.0f;
     g_buses[bus].gain = v;
+}
+
+float audio_get_bus_volume(AudioBusId bus) {
+    if (bus < 0 || bus >= AUDIO_BUS_COUNT) return 0.0f;
+    return g_buses[bus].gain;
+}
+
+bool audio_master_volume_nudge(float delta) {
+    /* F2-mute interaction: pressing '+' while muted is the universal
+     * "give me sound back" gesture — un-mute but don't move the gain
+     * (the user's previously chosen volume is restored). Pressing
+     * '-' while muted is a no-op: we're already at zero output, so
+     * dropping the underlying gain would be invisible and the
+     * overlay would lie about why nothing is audible. */
+    if (g_muted) {
+        if (delta > 0.0f) {
+            audio_toggle_mute();
+            g_vol_overlay_timer = VOL_OVERLAY_LIFETIME;
+            return true;
+        }
+        return false;
+    }
+    float prev = g_buses[AUDIO_BUS_MASTER].gain;
+    float v    = prev + delta;
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    g_buses[AUDIO_BUS_MASTER].gain = v;
+    g_vol_overlay_timer = VOL_OVERLAY_LIFETIME;
+    return v != prev;
+}
+
+void audio_draw_volume_overlay(int sw, int sh) {
+    if (g_vol_overlay_timer <= 0.0f) return;
+    (void)sh;
+
+    float sc = (float)sw / 1920.0f;
+    if (sc < 0.5f) sc = 0.5f;
+    if (sc > 2.0f) sc = 2.0f;
+
+    /* Fade out the last VOL_OVERLAY_FADE_TAIL seconds; hold full
+     * opacity before that. Same shape as draw_kill_feed in src/hud.c. */
+    float a_frac = (g_vol_overlay_timer < VOL_OVERLAY_FADE_TAIL)
+                   ? (g_vol_overlay_timer / VOL_OVERLAY_FADE_TAIL)
+                   : 1.0f;
+    if (a_frac < 0.0f) a_frac = 0.0f;
+    unsigned char a_scrim = (unsigned char)(a_frac * 220.0f);
+    unsigned char a_fg    = (unsigned char)(a_frac * 240.0f);
+    unsigned char a_acc   = (unsigned char)(a_frac * 200.0f);
+
+    int   pct      = (int)(g_buses[AUDIO_BUS_MASTER].gain * 100.0f + 0.5f);
+    char  label[32];
+    snprintf(label, sizeof label, "VOL  %3d%%", pct);
+
+    int font_px = (int)(18.0f * sc);
+    if (font_px < 12) font_px = 12;
+
+    int text_w = MeasureText(label, font_px);
+    int pad_x  = (int)(12.0f * sc);
+    int pad_y  = (int)(6.0f  * sc);
+    int bar_w  = (int)(120.0f * sc);
+    int bar_h  = (int)(8.0f   * sc);
+    int gap    = (int)(10.0f  * sc);
+    int box_w  = text_w + bar_w + 2 * pad_x + gap;
+    int box_h  = font_px + 2 * pad_y;
+    int x      = (sw - box_w) / 2;
+    /* Park below the F2 MUTED pill if it's currently drawn so the two
+     * overlays don't overlap. Mute pill is at y = 8*sc with the same
+     * height; leave a small gap between them. */
+    int y_top  = (int)(8.0f * sc);
+    if (g_muted) y_top += box_h + (int)(4.0f * sc);
+
+    DrawRectangle(x, y_top, box_w, box_h, (Color){ 12, 14, 18, a_scrim });
+    DrawRectangleLines(x, y_top, box_w, box_h, (Color){ 80, 160, 220, a_acc });
+    DrawText(label, x + pad_x, y_top + pad_y, font_px,
+             (Color){ 240, 240, 240, a_fg });
+
+    int bar_x = x + pad_x + text_w + gap;
+    int bar_y = y_top + (box_h - bar_h) / 2;
+    DrawRectangle(bar_x, bar_y, bar_w, bar_h, (Color){ 40, 44, 52, a_scrim });
+    int fill = (int)(g_buses[AUDIO_BUS_MASTER].gain * (float)bar_w + 0.5f);
+    if (fill > 0) {
+        DrawRectangle(bar_x, bar_y, fill, bar_h,
+                      (Color){ 80, 200, 240, a_fg });
+    }
+    DrawRectangleLines(bar_x, bar_y, bar_w, bar_h, (Color){ 80, 160, 220, a_acc });
 }
 
 /* ---- SFX manifest + alias pool ------------------------------------ */
@@ -438,6 +532,11 @@ void audio_step(struct World *w, float dt) {
     duck_step(dt);
     music_step();
     ambient_step();
+
+    if (g_vol_overlay_timer > 0.0f) {
+        g_vol_overlay_timer -= dt;
+        if (g_vol_overlay_timer < 0.0f) g_vol_overlay_timer = 0.0f;
+    }
 
     update_listener(w);
 
