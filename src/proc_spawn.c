@@ -607,4 +607,26 @@ void time_sleep_ms(int ms) {
     Sleep((DWORD)ms);
 }
 
+/* wan-fixes-16 (round 5) — Windows thread helpers used by main.c's
+ * in-process server. Implemented here so main.c doesn't need to pull
+ * in <windows.h> (which conflicts with raylib's typedefs for
+ * Rectangle / CloseWindow). Both helpers are tiny wrappers; the
+ * extern declarations in main.c reference these. */
+void *win32_create_thread_compat(unsigned long (*entry)(void *)) {
+    /* DWORD WINAPI thread entry. The caller's function pointer
+     * matches DWORD WINAPI signature for an unsigned-long return. */
+    DWORD tid = 0;
+    HANDLE h = CreateThread(NULL, 0,
+        (LPTHREAD_START_ROUTINE)entry,
+        NULL, 0, &tid);
+    return (void *)h;
+}
+
+void win32_wait_close_thread_compat(void *handle) {
+    if (!handle) return;
+    HANDLE h = (HANDLE)handle;
+    WaitForSingleObject(h, INFINITE);
+    CloseHandle(h);
+}
+
 #endif
