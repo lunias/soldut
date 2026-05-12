@@ -1655,10 +1655,16 @@ int shotmode_run(const char *script_path) {
 
     /* M5 P10 — chassis sprite atlases (capsule fallback when missing).
      * M5 P11 — shared weapon atlas (line fallback when missing).
-     * M5 P14 — audio module init (no-op silently for missing assets). */
+     * M5 P14 — audio module init (no-op silently for missing assets).
+     * Shotmode does not read soldut-prefs.cfg (deterministic runs),
+     * so audio_init's defaults stick — pin the master bus to 30% so
+     * any developer auditioning a .shot script hears a comfortable
+     * mix without their last-saved game-volume bleeding into the
+     * test. */
     mech_sprites_load_all();
     weapons_atlas_load();
     audio_init(&game);
+    audio_set_bus_volume(AUDIO_BUS_MASTER, 0.30f);
 
     /* Networked path: bootstrap host or client, then run the full
      * mode dispatcher each tick. The legacy match-only path below is
