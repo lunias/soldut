@@ -29,7 +29,7 @@ auto_start_seconds=2
 time_limit=4
 score_limit=5
 mode=tdm
-map_rotation=foundry
+map_rotation=reactor
 mode_rotation=tdm
 EOF
 done
@@ -90,11 +90,11 @@ assert_log "host spawns 3 mechs"      "$HL"  "lobby_spawn_round_mechs: 3 mech\\(
 assert_log "host begins TDM round"    "$HL"  "match: round begin .mode=TDM"
 
 assert_log "client B connects"        "$C1L" "ACCEPT client_id=0 mech_id=1"
-assert_log "client B reaches MATCH"   "$C1L" "ROUND_START map=0 mode=TDM"
+assert_log "client B reaches MATCH"   "$C1L" "ROUND_START map=2 mode=TDM"
 assert_log "client B resolves mech"   "$C1L" "local_mech_id resolved → 1"
 
 assert_log "client C connects"        "$C2L" "ACCEPT client_id=1 mech_id=2"
-assert_log "client C reaches MATCH"   "$C2L" "ROUND_START map=0 mode=TDM"
+assert_log "client C reaches MATCH"   "$C2L" "ROUND_START map=2 mode=TDM"
 assert_log "client C resolves mech"   "$C2L" "local_mech_id resolved → 2"
 
 echo
