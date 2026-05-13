@@ -118,6 +118,13 @@ typedef struct BotMind {
     Vec2            wander_pos;
     int16_t         seen_enemy_id;
     int16_t         pad1;
+    /* Jet fuel hysteresis — true when we've recently drained the
+     * jet and are waiting for it to refill before re-engaging.
+     * Without this, bots mash JET in tight corners while fuel is
+     * empty: the input flows but the chassis applies no thrust,
+     * so they look "stuck on JET" forever. */
+    bool            jet_locked_out;
+    uint8_t         pad2[3];
     pcg32_t         rng;
 } BotMind;
 

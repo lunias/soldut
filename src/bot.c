@@ -1470,8 +1470,24 @@ static ClientInput run_motor(World *w, int mid, BotMind *mind,
         in.buttons |= (dx > 0) ? BTN_RIGHT : BTN_LEFT;
     }
 
-    /* Vertical: explicit jet (path tells us when). */
-    if (wants->want_jet) in.buttons |= BTN_JET;
+    /* Vertical: explicit jet (path tells us when), gated on fuel.
+     * Hysteresis: once fuel falls below 10 % we lock out JET until
+     * the gauge refills to 40 %. Without this gate the bot would
+     * mash JET against an empty tank — the input flows but the
+     * chassis applies no thrust (apply_jet_force gates on fuel
+     * internally), so the bot looks frozen with JET held. With the
+     * lock-out, the bot releases JET, lets the gauge regen while
+     * grounded (chassis.fuel_regen), and re-engages at 40 %. The
+     * 40 % retry floor keeps "press, fuel hits zero, release,
+     * regen one tick, press again" chatter out of the wire. */
+    float fuel_frac = (m->fuel_max > 0.0f) ? (m->fuel / m->fuel_max) : 0.0f;
+    if (mind->jet_locked_out) {
+        if (fuel_frac >= 0.40f) mind->jet_locked_out = false;
+    } else if (fuel_frac < 0.10f) {
+        mind->jet_locked_out = true;
+    }
+    bool jet_ok = !mind->jet_locked_out && fuel_frac > 0.10f;
+    if (wants->want_jet && jet_ok) in.buttons |= BTN_JET;
     if (wants->want_jump) {
         in.buttons |= BTN_JUMP;
         mind->last_jump_tick = w->tick;
@@ -1496,13 +1512,23 @@ static ClientInput run_motor(World *w, int mid, BotMind *mind,
     if (wants->want_reload) in.buttons |= BTN_RELOAD;
     if (wants->want_swap)   in.buttons |= BTN_SWAP;
 
-    /* Auto-recover from being stuck: brief burst of jet + jump when
-     * pelvis hasn't moved meaningfully in BOT_STUCK_TICKS. */
+    /* Auto-recover from being stuck: jet (if fuel) + jump, and on
+     * persistent stuck flip the walk direction so we don't keep
+     * pushing the same wall. Without the fuel gate, a bot stuck in
+     * a corner would mash JET against an empty tank and never
+     * recover; the wall-flip is what actually un-jams them. */
     if (fabsf(pelv.x - mind->stuck_last_x) < 0.5f) {
         if (mind->stuck_since_tick == 0) mind->stuck_since_tick = w->tick;
-        if (w->tick - mind->stuck_since_tick > BOT_STUCK_TICKS) {
-            if ((w->tick % 4) < 3) in.buttons |= BTN_JET;
+        uint64_t stuck_for = w->tick - mind->stuck_since_tick;
+        if (stuck_for > BOT_STUCK_TICKS) {
+            if (jet_ok && (w->tick % 4) < 3) in.buttons |= BTN_JET;
             if ((w->tick % 30) == 0) in.buttons |= BTN_JUMP;
+        }
+        /* Still stuck after ~4 s — flip the walking direction so
+         * the bot stops slamming into whatever's in the way. */
+        if (stuck_for > BOT_STUCK_TICKS * 4) {
+            in.buttons &= (uint16_t)~(BTN_LEFT | BTN_RIGHT);
+            in.buttons |= (dx > 0) ? BTN_LEFT : BTN_RIGHT;
         }
     } else {
         mind->stuck_since_tick = 0;
