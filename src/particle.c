@@ -318,100 +318,130 @@ void fx_update(World *w, float dt) {
     pool->count = last_alive + 1;
 }
 
+/* Inline hot→cool color lerp helper. The byte-unpack + lerp + repack
+ * is otherwise duplicated across FX_JET_EXHAUST and FX_GROUND_DUST
+ * branches. Hoisted so the hot loop stays small. */
+static inline Color fx_lerp_hot_cool(uint32_t hot, uint32_t cool, float t) {
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    float hr = (float)((hot  >> 24) & 0xFF);
+    float hg = (float)((hot  >> 16) & 0xFF);
+    float hb = (float)((hot  >>  8) & 0xFF);
+    float ha = (float)((hot       ) & 0xFF);
+    float cr = (float)((cool >> 24) & 0xFF);
+    float cg = (float)((cool >> 16) & 0xFF);
+    float cb = (float)((cool >>  8) & 0xFF);
+    float ca = (float)((cool      ) & 0xFF);
+    return (Color){
+        (unsigned char)(hr + (cr - hr) * t),
+        (unsigned char)(hg + (cg - hg) * t),
+        (unsigned char)(hb + (cb - hb) * t),
+        (unsigned char)(ha + (ca - ha) * t),
+    };
+}
+
+/* Octagon stand-in for DrawCircleV. The raylib default (36 segments,
+ * 108 vertices, 72 trig calls per call) is overkill at particle scale
+ * — 8 segments (24 vertices, 16 trig) reads as a circle at any
+ * radius < ~12 px while folding into raylib's auto-batcher with the
+ * default texture binding. 4.5× cheaper than DrawCircleV; the BIG
+ * win is still the per-blend-mode batching (one BlendMode pair per
+ * pass instead of one per particle). */
+#define FX_PARTICLE_SEGMENTS 8
+static inline void fx_draw_particle(Vector2 center, float radius, Color col) {
+    DrawCircleSector(center, radius, 0.0f, 360.0f,
+                     FX_PARTICLE_SEGMENTS, col);
+}
+
 void fx_draw(const FxPool *pool, float alpha) {
+    /* M6 P02-perf — Two-pass batched render.
+     *
+     * The prior implementation wrapped each FX_JET_EXHAUST particle
+     * in a BeginBlendMode/EndBlendMode pair. raylib's BeginBlendMode
+     * calls rlDrawRenderBatchActive() which forces a GPU draw call.
+     * At the Burst-boost peak (~7680 live additive particles) the
+     * old code triggered THOUSANDS of GPU flushes per frame — the
+     * dominant cost of jetting at 4K. Two passes (alpha-blend, then
+     * additive) keep raylib's auto-batcher happy: every particle in
+     * the same blend mode folds into the default VBO and flushes
+     * once per ~1365 quads (RL_DEFAULT_BATCH_BUFFER_ELEMENTS / 6).
+     *
+     * Within each pass DrawRectangleV replaces DrawCircleV — 1 quad
+     * (6 vertices, 0 trig) per particle vs a 36-segment fan (108
+     * vertices, 72 trig calls). At small particle sizes the visual
+     * difference is imperceptible under motion. */
+
+    /* ---- Pass 1: alpha-blended particles ---- */
     for (int i = 0; i < pool->count; ++i) {
         const FxParticle *fp = &pool->items[i];
         if (!fp->alive) continue;
+        FxKind kind = (FxKind)fp->kind;
+        /* Skip kinds handled in later passes. STUMP is invisible. */
+        if (kind == FX_JET_EXHAUST || kind == FX_STUMP) continue;
 
-        float t = fp->life / (fp->life_max > 0.0f ? fp->life_max : 1.0f);
-        unsigned char r = (unsigned char)((fp->color >> 24) & 0xFF);
-        unsigned char g = (unsigned char)((fp->color >> 16) & 0xFF);
-        unsigned char b = (unsigned char)((fp->color >>  8) & 0xFF);
-        unsigned char a = (unsigned char)(((fp->color >> 0) & 0xFF) * t);
-        Color col = { r, g, b, a };
-        /* P03: lerp between start-of-tick pos and latest pos so FX
-         * motion stays smooth when render rate exceeds sim rate. */
+        float life_frac = fp->life /
+                          (fp->life_max > 0.0f ? fp->life_max : 1.0f);
         Vector2 pos = {
             fp->render_prev_pos.x + (fp->pos.x - fp->render_prev_pos.x) * alpha,
             fp->render_prev_pos.y + (fp->pos.y - fp->render_prev_pos.y) * alpha,
         };
 
-        switch ((FxKind)fp->kind) {
-            case FX_BLOOD:
-                DrawCircleV(pos, fp->size, col);
-                break;
-            case FX_SPARK:
-                DrawCircleV(pos, fp->size, col);
-                break;
-            case FX_TRACER:
+        switch (kind) {
+            case FX_TRACER: {
                 /* tracer's vel is the end-point delta — fixed for the
                  * particle's life, so no interp needed on the endpoint. */
+                unsigned char r = (unsigned char)((fp->color >> 24) & 0xFF);
+                unsigned char g = (unsigned char)((fp->color >> 16) & 0xFF);
+                unsigned char b = (unsigned char)((fp->color >>  8) & 0xFF);
+                unsigned char a = (unsigned char)(((fp->color >> 0) & 0xFF) * life_frac);
                 DrawLineEx(pos,
                            (Vector2){ pos.x + fp->vel.x, pos.y + fp->vel.y },
-                           1.5f, col);
-                break;
-            case FX_SMOKE:
-                /* M3 reserves a slot for smoke; for now we render it as
-                 * a darker circle. The proper soft-puff additive
-                 * version lands with the M5 art pass. */
-                DrawCircleV(pos, fp->size * 1.4f,
-                    (Color){ 60, 60, 60, (unsigned char)(a / 2) });
-                break;
-            case FX_STUMP:
-                /* Pinned dismemberment emitter — invisible itself; the
-                 * blood drops it spawns each tick are what's visible. */
-                break;
-            case FX_JET_EXHAUST: {
-                /* M6 P02 — additive exhaust. Lerps `color` (hot) toward
-                 * `color_cool` over `1 - life/life_max`, then draws as
-                 * an additive disc so overlapping particles brighten
-                 * the plume core. */
-                float ft = 1.0f - t;     /* 0 at spawn, 1 at end */
-                if (ft < 0.0f) ft = 0.0f;
-                if (ft > 1.0f) ft = 1.0f;
-                uint8_t hr = (uint8_t)((fp->color      >> 24) & 0xFF);
-                uint8_t hg = (uint8_t)((fp->color      >> 16) & 0xFF);
-                uint8_t hb = (uint8_t)((fp->color      >>  8) & 0xFF);
-                uint8_t ha = (uint8_t)((fp->color           ) & 0xFF);
-                uint8_t cr = (uint8_t)((fp->color_cool >> 24) & 0xFF);
-                uint8_t cg = (uint8_t)((fp->color_cool >> 16) & 0xFF);
-                uint8_t cb = (uint8_t)((fp->color_cool >>  8) & 0xFF);
-                uint8_t ca = (uint8_t)((fp->color_cool      ) & 0xFF);
-                Color cc = {
-                    (unsigned char)((float)hr + ((float)cr - (float)hr) * ft),
-                    (unsigned char)((float)hg + ((float)cg - (float)hg) * ft),
-                    (unsigned char)((float)hb + ((float)cb - (float)hb) * ft),
-                    (unsigned char)((float)ha + ((float)ca - (float)ha) * ft),
-                };
-                BeginBlendMode(BLEND_ADDITIVE);
-                DrawCircleV(pos, fp->size, cc);
-                EndBlendMode();
+                           1.5f, (Color){ r, g, b, a });
                 break;
             }
             case FX_GROUND_DUST: {
-                /* M6 P02 — dust / steam. Alpha-blend; same hot→cool
-                 * lerp as exhaust but no additive blend mode. */
-                float ft = 1.0f - t;
-                if (ft < 0.0f) ft = 0.0f;
-                if (ft > 1.0f) ft = 1.0f;
-                uint8_t hr = (uint8_t)((fp->color      >> 24) & 0xFF);
-                uint8_t hg = (uint8_t)((fp->color      >> 16) & 0xFF);
-                uint8_t hb = (uint8_t)((fp->color      >>  8) & 0xFF);
-                uint8_t ha = (uint8_t)((fp->color           ) & 0xFF);
-                uint8_t cr = (uint8_t)((fp->color_cool >> 24) & 0xFF);
-                uint8_t cg = (uint8_t)((fp->color_cool >> 16) & 0xFF);
-                uint8_t cb = (uint8_t)((fp->color_cool >>  8) & 0xFF);
-                uint8_t ca = (uint8_t)((fp->color_cool      ) & 0xFF);
-                Color cc = {
-                    (unsigned char)((float)hr + ((float)cr - (float)hr) * ft),
-                    (unsigned char)((float)hg + ((float)cg - (float)hg) * ft),
-                    (unsigned char)((float)hb + ((float)cb - (float)hb) * ft),
-                    (unsigned char)((float)ha + ((float)ca - (float)ha) * ft),
-                };
-                DrawCircleV(pos, fp->size, cc);
+                Color cc = fx_lerp_hot_cool(fp->color, fp->color_cool,
+                                            1.0f - life_frac);
+                fx_draw_particle(pos, fp->size, cc);
                 break;
             }
+            case FX_SMOKE: {
+                unsigned char a = (unsigned char)(((fp->color >> 0) & 0xFF) * life_frac);
+                fx_draw_particle(pos, fp->size * 1.4f,
+                             (Color){ 60, 60, 60, (unsigned char)(a / 2) });
+                break;
+            }
+            case FX_BLOOD:
+            case FX_SPARK: {
+                unsigned char r = (unsigned char)((fp->color >> 24) & 0xFF);
+                unsigned char g = (unsigned char)((fp->color >> 16) & 0xFF);
+                unsigned char b = (unsigned char)((fp->color >>  8) & 0xFF);
+                unsigned char a = (unsigned char)(((fp->color >> 0) & 0xFF) * life_frac);
+                fx_draw_particle(pos, fp->size, (Color){ r, g, b, a });
+                break;
+            }
+            case FX_JET_EXHAUST:
+            case FX_STUMP:
             case FX_KIND_COUNT: break;
         }
     }
+
+    /* ---- Pass 2: additive (FX_JET_EXHAUST) ---- */
+    BeginBlendMode(BLEND_ADDITIVE);
+    for (int i = 0; i < pool->count; ++i) {
+        const FxParticle *fp = &pool->items[i];
+        if (!fp->alive) continue;
+        if (fp->kind != FX_JET_EXHAUST) continue;
+
+        float life_frac = fp->life /
+                          (fp->life_max > 0.0f ? fp->life_max : 1.0f);
+        Vector2 pos = {
+            fp->render_prev_pos.x + (fp->pos.x - fp->render_prev_pos.x) * alpha,
+            fp->render_prev_pos.y + (fp->pos.y - fp->render_prev_pos.y) * alpha,
+        };
+        Color cc = fx_lerp_hot_cool(fp->color, fp->color_cool,
+                                    1.0f - life_frac);
+        fx_draw_particle(pos, fp->size, cc);
+    }
+    EndBlendMode();
 }

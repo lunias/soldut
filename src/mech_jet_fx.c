@@ -429,6 +429,18 @@ void mech_jet_fx_draw_plumes(const World *w, float interp_alpha) {
     if (!w) return;
     try_load_plume_atlas();
 
+    /* M6 P02-perf — single BeginBlendMode wrap. Previously each plume
+     * paid the cost of a full GPU batch flush (~16 mechs × 2 nozzles
+     * = 32 state changes per frame). One pair lets raylib batch
+     * every DrawTexturePro across all mechs into a single VBO call —
+     * texture binding stays on the plume atlas the whole time. */
+    BeginBlendMode(BLEND_ADDITIVE);
+    Rectangle plume_src = (s_plume_atlas.id != 0)
+        ? (Rectangle){ 0, 0,
+                       (float)s_plume_atlas.width,
+                       (float)s_plume_atlas.height }
+        : (Rectangle){0};
+
     for (int i = 0; i < w->mech_count; ++i) {
         const Mech *m = &w->mechs[i];
         if (!m->alive) continue;
@@ -473,34 +485,28 @@ void mech_jet_fx_draw_plumes(const World *w, float interp_alpha) {
                 /* Textured plume. Source = full atlas; dest at noz
                  * (sized plume_w × plume_len); origin at (plume_w/2,
                  * 0) so the top-middle of the quad pins to the
-                 * nozzle and the rotation pivots there. Additive
-                 * blend so overlapping plume cores brighten. */
-                BeginBlendMode(BLEND_ADDITIVE);
-                Rectangle src = {
-                    0, 0,
-                    (float)s_plume_atlas.width,
-                    (float)s_plume_atlas.height,
-                };
+                 * nozzle and the rotation pivots there. */
                 Rectangle dst = { noz.x, noz.y, plume_w, plume_len };
                 Vector2 origin = { plume_w * 0.5f, 0.0f };
-                DrawTexturePro(s_plume_atlas, src, dst, origin,
+                DrawTexturePro(s_plume_atlas, plume_src, dst, origin,
                                angle_deg, tint);
-                EndBlendMode();
             } else {
                 /* Atlas-free fallback: bright line from nozzle along
-                 * thrust_dir, sized to plume_len. Additive blend so
-                 * overlapping lines brighten. */
-                BeginBlendMode(BLEND_ADDITIVE);
+                 * thrust_dir. Note: DrawLineEx draws a quad strip,
+                 * which batches with the textured plumes — but if
+                 * mixed, raylib will flush twice (line uses no
+                 * texture). In practice the atlas is always present
+                 * post-Phase-4 so this branch rarely fires. */
                 Vector2 a = { noz.x, noz.y };
                 Vector2 t = {
                     noz.x + nz->thrust_dir.x * plume_len,
                     noz.y + nz->thrust_dir.y * plume_len,
                 };
                 DrawLineEx(a, t, plume_w * 0.45f, tint);
-                EndBlendMode();
             }
         }
     }
+    EndBlendMode();
 }
 
 bool mech_jet_fx_any_active(const World *w) {

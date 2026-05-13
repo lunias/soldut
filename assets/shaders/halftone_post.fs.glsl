@@ -48,6 +48,12 @@ uniform float     halftone_density;
 #define JET_HOT_ZONE_MAX 16
 uniform vec4  jet_hot_zones[JET_HOT_ZONE_MAX];
 uniform float jet_time;
+/* M6 P02-perf — actual filled count for the loop bound. Most ticks
+ * have 0-4 active zones; iterating to MAX every fragment at 4K is
+ * 133M wasted op/frame just for the `z.w <= 0.001` check. Uniform-
+ * bounded loop lets the driver shrink the iteration count to what's
+ * actually needed. */
+uniform int   jet_hot_zone_count;
 
 out vec4 finalColor;
 
@@ -72,7 +78,15 @@ const float bayer8[64] = float[](
  * empty common-case is one comparison per slot. */
 vec2 shimmer_offset(vec2 frag_px) {
     vec2 offs = vec2(0.0);
-    for (int i = 0; i < JET_HOT_ZONE_MAX; ++i) {
+    /* Loop is dynamically-bounded on `jet_hot_zone_count`. Most
+     * drivers compile this efficiently when the bound is a uniform
+     * — when no zones are active, the loop body doesn't execute
+     * at all (vs the old MAX-bounded version which always paid the
+     * "is this slot empty?" check). The MAX_* clamp is defensive
+     * against a malformed uniform push. */
+    int n = jet_hot_zone_count;
+    if (n > JET_HOT_ZONE_MAX) n = JET_HOT_ZONE_MAX;
+    for (int i = 0; i < n; ++i) {
         vec4 z = jet_hot_zones[i];
         if (z.w <= 0.001) continue;
         vec2 d = frag_px - z.xy;

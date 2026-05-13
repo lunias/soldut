@@ -43,6 +43,7 @@ static int             g_halftone_loc_density    = -1;
  * shader" (graceful skip — pre-M6-P02 shaders work unchanged). */
 static int             g_halftone_loc_hot_zones  = -1;
 static int             g_halftone_loc_jet_time   = -1;
+static int             g_halftone_loc_hot_zone_count = -1;
 static bool            g_halftone_loaded         = false;
 static bool            g_halftone_load_attempted = false;
 
@@ -75,9 +76,10 @@ static void halftone_load_once(void) {
     g_halftone_loc_density    = loc_den;
     /* M6 P02 — shimmer uniforms. Missing locations are fine (a stale
      * shader file falls back to halftone-only). */
-    g_halftone_loc_hot_zones  = GetShaderLocation(s, "jet_hot_zones");
-    g_halftone_loc_jet_time   = GetShaderLocation(s, "jet_time");
-    g_halftone_loaded         = true;
+    g_halftone_loc_hot_zones      = GetShaderLocation(s, "jet_hot_zones");
+    g_halftone_loc_jet_time       = GetShaderLocation(s, "jet_time");
+    g_halftone_loc_hot_zone_count = GetShaderLocation(s, "jet_hot_zone_count");
+    g_halftone_loaded             = true;
     LOG_I("halftone: shader loaded; density=%.2f shimmer=%s",
           (double)HALFTONE_DENSITY,
           (g_halftone_loc_hot_zones >= 0 ? "ok" : "missing"));
@@ -116,10 +118,11 @@ void renderer_post_shutdown(void) {
         g_halftone_loaded = false;
     }
     g_halftone_load_attempted = false;
-    g_halftone_loc_resolution = -1;
-    g_halftone_loc_density    = -1;
-    g_halftone_loc_hot_zones  = -1;
-    g_halftone_loc_jet_time   = -1;
+    g_halftone_loc_resolution     = -1;
+    g_halftone_loc_density        = -1;
+    g_halftone_loc_hot_zones      = -1;
+    g_halftone_loc_jet_time       = -1;
+    g_halftone_loc_hot_zone_count = -1;
 }
 
 void renderer_init(Renderer *r, int sw, int sh, Vec2 follow) {
@@ -1353,32 +1356,44 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
          * clean state and the cheap-fast `z.w <= 0.001` early-out
          * in the shader fires for every slot. */
         if (g_halftone_loc_hot_zones >= 0 && g_halftone_loc_jet_time >= 0) {
-            static bool s_zones_zeroed = false;
+            /* M6 P02-perf — pass the actual zone count via the
+             * `jet_hot_zone_count` uniform so the shader's fragment
+             * loop iterates only over real zones. At 4K (8.3M
+             * pixels) the prior MAX-bounded loop paid 133M ops/frame
+             * just to check empty slots; with count=0 the new shader
+             * loop runs 0 times. The conditional uniform push below
+             * still applies so we don't pay shader-setup cost on
+             * idle ticks. */
             /* Skip shimmer in shot mode for deterministic screenshots
              * — the per-frame jet_time uniform would otherwise pull
              * in wall-clock time and tile-noise would walk between
              * test runs. */
             bool any = !g_shot_mode && mech_jet_fx_any_active(w);
+            int  zone_count = 0;
             if (any) {
                 JetHotZone zones[JET_HOT_ZONE_MAX] = {0};
-                int nz = mech_jet_fx_collect_hot_zones(w, &r->camera,
-                                                       zones, JET_HOT_ZONE_MAX);
-                (void)nz;
-                /* Pass as a flat vec4 array — JetHotZone matches
-                 * vec4 layout (4 floats: x, y, radius, intensity). */
-                SetShaderValueV(g_halftone_post, g_halftone_loc_hot_zones,
-                                zones, SHADER_UNIFORM_VEC4,
-                                JET_HOT_ZONE_MAX);
+                zone_count = mech_jet_fx_collect_hot_zones(
+                    w, &r->camera, zones, JET_HOT_ZONE_MAX);
+                /* Only push the filled prefix — saves a few µs of
+                 * uniform copy on every active-jet frame. */
+                if (zone_count > 0) {
+                    SetShaderValueV(g_halftone_post,
+                                    g_halftone_loc_hot_zones, zones,
+                                    SHADER_UNIFORM_VEC4, zone_count);
+                }
                 float jt = (float)GetTime();
                 SetShaderValue(g_halftone_post, g_halftone_loc_jet_time,
                                &jt, SHADER_UNIFORM_FLOAT);
-                s_zones_zeroed = false;
-            } else if (!s_zones_zeroed) {
-                JetHotZone zeros[JET_HOT_ZONE_MAX] = {0};
-                SetShaderValueV(g_halftone_post, g_halftone_loc_hot_zones,
-                                zeros, SHADER_UNIFORM_VEC4,
-                                JET_HOT_ZONE_MAX);
-                s_zones_zeroed = true;
+            }
+            /* Push count on every frame the shader location exists;
+             * cost is one int upload. Shader's loop bound updates
+             * immediately so an active-then-idle transition stops
+             * shimmer the very next frame without a "zone-zeroing"
+             * pass. */
+            if (g_halftone_loc_hot_zone_count >= 0) {
+                SetShaderValue(g_halftone_post,
+                               g_halftone_loc_hot_zone_count,
+                               &zone_count, SHADER_UNIFORM_INT);
             }
         }
 
