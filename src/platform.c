@@ -85,17 +85,31 @@ bool platform_init(const PlatformConfig *cfg) {
      * M6 P03 — MSAA dropped from the backbuffer. The world goes
      * through a capped internal RT + bilinear upscale + halftone
      * screen, all of which mask sub-pixel aliasing. The HUD is
-     * axis-aligned rects + bilinear-sampled glyphs (raylib's
-     * SetTextureFilter on the font texture) — neither benefits from
-     * MSAA on the backbuffer. Recovers ~1 ms / frame and ~57 MB of
-     * VRAM at maximised 3440×1440. See
+     * axis-aligned rects + bilinear-sampled glyphs — neither
+     * benefits from MSAA on the backbuffer. Recovers ~1 ms / frame
+     * and ~57 MB of VRAM at maximised 3440×1440. See
      * documents/m6/03-perf-4k-enhancements.md §3 Phase 3.
      *
-     * HIGHDPI tells raylib to give us a backbuffer at the monitor's
-     * physical pixel count on hi-DPI displays (Retina, 4K-scaled
-     * Windows). We then use GetScreenHeight() to pick our UI scale
-     * — at 4K we want fonts/widgets ~3× the pixel size of 720p. */
-    unsigned flags = FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI;
+     * M6 P03-hotfix — HIGHDPI dropped too. The flag used to be on so
+     * raylib would give us a backbuffer at the monitor's physical
+     * pixel count on hi-DPI displays (4K-scaled Windows, Retina).
+     * Reality on Windows: with fractional DPI scaling (anything other
+     * than 100 %) the framebuffer comes back at physical-pixel size
+     * but the OS does NOT scale it down to the logical window — the
+     * window's client area only covers a fraction of the framebuffer
+     * (≈ 1 / scale-factor), so the centered UI lands far off to the
+     * right of the visible area. We hit this on a friend's machine
+     * at ~192 % DPI: the title bar showed "SOL" pinned to the right
+     * edge with the rest of "SOLDUT" off-screen. The internal-RT
+     * pipeline below already handles "render at a fixed internal
+     * size, blit to window" explicitly, so HIGHDPI buys us nothing
+     * post-P03 and the OS-side downscale of a non-HiDPI window is
+     * the well-behaved path on every platform. Trade-off: HUD text
+     * on a true 4K monitor with 200 % scaling is now upscaled by the
+     * OS compositor instead of rendered at native; it'll look a hair
+     * softer but read at the right size. If anyone wants the old
+     * behaviour back, this is the single line to flip. */
+    unsigned flags = FLAG_WINDOW_RESIZABLE;
     if (cfg->vsync) flags |= FLAG_VSYNC_HINT;
     if (cfg->fullscreen) flags |= FLAG_FULLSCREEN_MODE;
     SetConfigFlags(flags);
@@ -138,7 +152,7 @@ bool platform_init(const PlatformConfig *cfg) {
         LOG_W("platform_init: audio device failed to open; continuing silently");
     }
 
-    LOG_I("platform_init: %dx%d (highdpi) internal_h=%d vsync=%d",
+    LOG_I("platform_init: %dx%d internal_h=%d vsync=%d",
           cfg->window_w, cfg->window_h, cfg->internal_h, cfg->vsync);
     return true;
 }
