@@ -2,6 +2,18 @@
 
 A 2D side-scrolling multiplayer mech shooter in C, in the lineage of Soldat.
 
+**M6 — Stability & ship prep** in flight (2026-05-13). P01 (IK + pose
+sync), P02 (jetpack propulsion FX), P03 (capped internal render
+target / "4K" FPS fix), and P04 (map balance + bot AI hardening)
+shipped; crash logging, code signing, and the 32-player stress test
+remain. P04 added a layered classical bot AI module
+(`src/bot.{c,h}`) with full lobby integration + tier chip UI, then
+wired a 320-cell bake-test sweep (8 maps × 5 chassis × 8 primaries)
+to drive iteration on 4 of 8 maps + the bot AI until every ship map
+produces real combat at Champion tier. See
+[`documents/m6/04-map-balance.md`](documents/m6/04-map-balance.md)
+for the per-map loadout findings.
+
 **M5 — Maps & content** complete (2026-05-12). P01–P19 in, plus off-roadmap wan-fixes 1–16, plus seven post-P19 follow-up rounds that retired bugs surfaced by paired-window LAN playtests (audio loudnorm wrecking short transients, jetpack/servo masking footsteps, the wan-fixes-3 inv_mass race that broke joining-client physics, the slope-tangent stretch that inflated mechs uphill, the pose-drive feedback loop that stretched remote-mech bones).
 M4 shipped the lobby & matches layer: full game flow
 (title → server browser → lobby → countdown → match → summary →
