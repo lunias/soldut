@@ -542,8 +542,19 @@ static void build_reactor(void) {
     tile_fill(W - 4, H - 8, W - 2, H - 4, TILE_F_EMPTY);
     tile_fill(W - 4, H - 9, W - 2, H - 8, SOLID);
 
-    /* Big central pillar (the reactor core). */
-    tile_fill(51, H - 16, 59, H - 4, SOLID);
+    /* Central pillar (the reactor core) — narrowed to 4 tiles wide
+     * (was 8) so it reads as a column, not a wall. Cap shortened by
+     * 2 tiles so the flanking-platform sniper line of sight ALMOST
+     * but not quite clears it — you have to step a tile off the
+     * platform to see over. Reactor's intent is "contested center,"
+     * not "wall splits the map." */
+    tile_fill(53, H - 14, 57, H - 4, SOLID);
+
+    /* Pillar viewport — a 2-tile-tall window 1 tile from the top
+     * gives ground-level snipers a sliver of LOS across the map
+     * when they line up exactly with the column. Reads visually as
+     * a reactor inspection port. */
+    tile_fill(53, H - 12, 57, H - 10, TILE_F_EMPTY);
 
     /* Two flanking platforms at mid height. */
     tile_fill(16, H - 12, 38, H - 11, SOLID);
@@ -556,23 +567,21 @@ static void build_reactor(void) {
     /* ---- Slope polygons ---- */
     const int floor_y     = t2w(H - 4);
     const int bowl_low    = t2w(H - 3);                  /* 1 tile below floor mark */
-    const int pillar_left  = t2w(51), pillar_right = t2w(59);
-    const int pillar_top   = t2w(H - 16);
+    const int pillar_left  = t2w(53), pillar_right = t2w(57);
+    const int pillar_top   = t2w(H - 14);
     const int flank_left_top = t2w(38);                  /* right edge of left flank */
     const int flank_right_top = t2w(72);
     const int flank_top_y     = t2w(H - 11);
 
-    /* Bowl floor — gentle 30° from spawn side toward the pillar base.
-     * Each side is a long shallow triangle. The interior side meets the
-     * pillar wall; the spawn side meets the outer wall. */
+    /* Bowl floor — gentle 30° from spawn side toward the pillar base. */
     push_tri(POLY_KIND_SOLID,
              t2w(4),  floor_y,
-             t2w(51), bowl_low,
-             t2w(51), floor_y);
+             t2w(53), bowl_low,
+             t2w(53), floor_y);
     push_tri(POLY_KIND_SOLID,
-             t2w(59), bowl_low,
+             t2w(57), bowl_low,
              t2w(W - 4), floor_y,
-             t2w(59), floor_y);
+             t2w(57), floor_y);
 
     /* 45° pillar-underside overhangs — slope-roof alcove ceiling. */
     push_tri(POLY_KIND_SOLID,
@@ -610,14 +619,14 @@ static void build_reactor(void) {
     const int flank_pick = t2w(H - 12) - 16;
     const int over_pick  = t2w(H - 22) - 16;
     /* Pillar base, both sides: WEAPON Plasma SMG twin. */
-    push_pickup(t2w(48), floor_pick, PICKUP_WEAPON, WEAPON_PLASMA_SMG);
-    push_pickup(t2w(62), floor_pick, PICKUP_WEAPON, WEAPON_PLASMA_SMG);
+    push_pickup(t2w(50), floor_pick, PICKUP_WEAPON, WEAPON_PLASMA_SMG);
+    push_pickup(t2w(60), floor_pick, PICKUP_WEAPON, WEAPON_PLASMA_SMG);
     /* Spawn alcoves — AMMO_PRIMARY. */
     push_pickup(t2w(3),     floor_pick, PICKUP_AMMO_PRIMARY, 0);
     push_pickup(t2w(W - 3), floor_pick, PICKUP_AMMO_PRIMARY, 0);
     /* Pillar-underside alcoves: JET_FUEL ×2. */
-    push_pickup(t2w(48), pillar_top + t2w(3),  PICKUP_JET_FUEL, 0);
-    push_pickup(t2w(62), pillar_top + t2w(3),  PICKUP_JET_FUEL, 0);
+    push_pickup(t2w(50), pillar_top + t2w(3),  PICKUP_JET_FUEL, 0);
+    push_pickup(t2w(60), pillar_top + t2w(3),  PICKUP_JET_FUEL, 0);
     /* Floor mid: HEALTH small ×4. */
     push_pickup(t2w(15),     floor_pick, PICKUP_HEALTH, HEALTH_SMALL);
     push_pickup(t2w(W - 15), floor_pick, PICKUP_HEALTH, HEALTH_SMALL);
@@ -663,37 +672,47 @@ static void build_concourse(void) {
     tile_fill(0,     0, 2,     H - 4, SOLID);
     tile_fill(W - 2, 0, W,     H - 4, SOLID);
 
-    /* Wing partition walls (cut openings to the concourse). The wings
-     * are cols 2..22 (left) and 78..98 (right). Partition walls at x=22
-     * and x=78 run the full height, with 4-tile openings at the wing
-     * exit doors (rows H-8..H-4). */
-    tile_fill(22, 0, 23, H - 8, SOLID);
-    tile_fill(77, 0, 78, H - 8, SOLID);
+    /* M6 iter — open atrium redesign. The original full-height
+     * partition walls at x=22/77 walled the wings off so bots (and
+     * lower-skill humans) never reached the central concourse. We
+     * replace them with short cover stubs (4 tiles tall, on the
+     * floor) that visually separate "wing entry" from "atrium body"
+     * but stay walk-around-able. The wings remain as the
+     * left/right thirds of the floor; the atrium body is the wide
+     * middle. */
+    tile_fill(22, H - 8, 23, H - 4, SOLID);   /* left wing-side cover stub */
+    tile_fill(77, H - 8, 78, H - 4, SOLID);   /* right wing-side cover stub */
 
-    /* Upper gallery catwalks — span the wings only, at row H-30. */
-    tile_fill(2,  H - 30, 22, H - 29, SOLID);
-    tile_fill(78, H - 30, 98, H - 29, SOLID);
+    /* Upper gallery catwalks — wider, span more of the wings. The
+     * brief calls for catwalks above the wings; this version makes
+     * the gallery span cols 4..28 on the left, 72..96 on the right,
+     * leaving a wide gap in the middle (cols 28..72) so the
+     * mid-atrium air space is unobstructed. */
+    tile_fill(4,  H - 30, 28, H - 29, SOLID);
+    tile_fill(72, H - 30, 96, H - 29, SOLID);
 
     /* Concourse cover columns — 4 tile-pillars between x=30..70.
-     * 2 tiles wide × 6 tiles tall from the floor. */
-    tile_fill(30, H - 10, 32, H - 4, SOLID);
-    tile_fill(43, H - 10, 45, H - 4, SOLID);
-    tile_fill(55, H - 10, 57, H - 4, SOLID);
-    tile_fill(68, H - 10, 70, H - 4, SOLID);
+     * 2 tiles wide × 6 tiles tall from the floor. The widely-spaced
+     * pillars give snipers angles but leave plenty of walkways. */
+    tile_fill(34, H - 10, 36, H - 4, SOLID);
+    tile_fill(47, H - 10, 49, H - 4, SOLID);
+    tile_fill(58, H - 10, 60, H - 4, SOLID);
+    tile_fill(70, H - 10, 72, H - 4, SOLID);
 
-    /* Wing-floor edge alcoves (one per wing) — edge alcove archetype,
-     * 2 tiles deep × 3 tiles tall against the outer wall, at floor row. */
+    /* Wing-floor edge alcoves — supply lockers against the outer
+     * wall. 2 tiles deep × 3 tiles tall. */
     tile_fill(2, H - 7, 4, H - 4, TILE_F_EMPTY);
     tile_fill(2, H - 8, 4, H - 7, SOLID);
     tile_fill(W - 4, H - 7, W - 2, H - 4, TILE_F_EMPTY);
     tile_fill(W - 4, H - 8, W - 2, H - 7, SOLID);
 
-    /* Upper-gallery jetpack alcoves — one per gallery, cut into the
-     * partition wall, mouth facing the gallery interior. */
-    tile_fill(20, H - 33, 22, H - 30, TILE_F_EMPTY);     /* left alcove cavity */
-    tile_fill(20, H - 34, 22, H - 33, SOLID);            /* alcove ceiling */
-    tile_fill(78, H - 33, 80, H - 30, TILE_F_EMPTY);     /* right alcove cavity */
-    tile_fill(78, H - 34, 80, H - 33, SOLID);
+    /* Upper-gallery jetpack alcoves — cut into the outer wall above
+     * the gallery floor. Reachable only by jet from the gallery
+     * surface. Mouth faces inward. */
+    tile_fill(2, H - 33, 4, H - 30, TILE_F_EMPTY);       /* left alcove cavity */
+    tile_fill(2, H - 34, 4, H - 33, SOLID);              /* alcove ceiling */
+    tile_fill(W - 4, H - 33, W - 2, H - 30, TILE_F_EMPTY);
+    tile_fill(W - 4, H - 34, W - 2, H - 33, SOLID);
 
     /* ---- Slope polygons ---- */
     const int floor_y = t2w(H - 4);
@@ -808,10 +827,18 @@ static void build_concourse(void) {
 /* ===================================================================== */
 /* ============================ CATWALK ================================ */
 /* ===================================================================== */
-/* 120×70 TDM. Vertical layout — RED base at the bottom-left, BLUE base
- * at the top-right, connected by stacked catwalks. 60° external slide
- * slopes drop between catwalks; 45° angled overhead struts above mid;
- * 3 mid-catwalk jetpack alcoves; 2 WIND zones at the top. */
+/* 120×70 TDM. Vertical playscape — both team bases at floor level so
+ * the ground route is always available; the suspended catwalks above
+ * are the optional skill-expression layer. Slide slopes, angled
+ * struts, jet-only alcoves with the rare prizes (ARMOR, BERSERK,
+ * Rail Cannon). Snipers + Engineers prefer the catwalks; Heavies +
+ * Troopers prefer the floor.
+ *
+ * M6 iter — the original "no ground route between bases" design left
+ * bots (and lower-skill humans) marooned in their spawn alcoves. We
+ * keep the iconic vertical geometry but bring both bases to the
+ * ground and add walkable ramps so the height game is a CHOICE, not
+ * a requirement. */
 
 static void build_catwalk(void) {
     cook_reset(120, 70);
@@ -827,147 +854,141 @@ static void build_catwalk(void) {
     tile_fill(0,     2, 2,     H - 4, SOLID);
     tile_fill(W - 2, 2, W,     H - 4, SOLID);
 
-    /* RED spawn alcove (bottom-left, edge archetype). Cavity at floor
-     * level, capped above so jets won't pop the player out the roof. */
-    tile_fill(2, H - 9, 14, H - 4, TILE_F_EMPTY);
-    tile_fill(2, H - 10, 14, H - 9, SOLID);
+    /* RED + BLUE spawn alcoves — both at floor level, mirrored. */
+    tile_fill(2, H - 9, 14, H - 4, TILE_F_EMPTY);          /* RED cavity */
+    tile_fill(2, H - 10, 14, H - 9, SOLID);                /* RED roof */
+    tile_fill(W - 14, H - 9, W - 2, H - 4, TILE_F_EMPTY);  /* BLUE cavity */
+    tile_fill(W - 14, H - 10, W - 2, H - 9, SOLID);        /* BLUE roof */
 
-    /* BLUE spawn alcove (top-right, jetpack archetype). Cavity 6 tiles
-     * tall × 12 wide, with its own platform floor at row 11 + roof at
-     * row 5. */
-    tile_fill(W - 14, 6, W - 2, 11, TILE_F_EMPTY);
-    tile_fill(W - 14, 11, W - 2, 12, SOLID);
-    tile_fill(W - 14,  5, W - 2,  6, SOLID);
-
-    /* Catwalks — 4 layers + bottom floor.
+    /* Catwalks — 3 stacked layers above the ground, suspended.
      *
      *   row    span
-     *   ─────────────────────────────
-     *   20-21  cw4 — top connector x=40..80
-     *   32-33  cw3 — left x=20..50, right x=70..100 (split)
-     *   44-45  cw2 — left x=15..50, right x=70..105 (split)
-     *   56-57  cw1 — long central x=25..95 */
-    tile_fill(40, H - 50, 80,  H - 49, SOLID);
-    tile_fill(20, H - 38, 50,  H - 37, SOLID);
-    tile_fill(70, H - 38, 100, H - 37, SOLID);
-    tile_fill(15, H - 26, 50,  H - 25, SOLID);
-    tile_fill(70, H - 26, 105, H - 25, SOLID);
-    tile_fill(25, H - 14, 95,  H - 13, SOLID);
+     *   ─────────────────────────────────────────────
+     *   16-17  cw3 — top connector x=40..80
+     *   28-29  cw2 — split: left x=20..55, right x=65..100
+     *   40-41  cw1 — long central x=20..100 (the easy access layer) */
+    tile_fill(40, H - 54, 80,  H - 53, SOLID);
+    tile_fill(20, H - 42, 55,  H - 41, SOLID);
+    tile_fill(65, H - 42, 100, H - 41, SOLID);
+    tile_fill(20, H - 30, 100, H - 29, SOLID);
 
-    /* Jetpack alcoves above central catwalks (3). 3-wide × 3-deep cavities
-     * cut into the side walls — only reachable by jet from below. */
-    tile_fill(2, H - 43, 8, H - 40, TILE_F_EMPTY);    /* above cw3 left */
-    tile_fill(2, H - 44, 8, H - 43, SOLID);
-    tile_fill(W - 8, H - 43, W - 2, H - 40, TILE_F_EMPTY);     /* above cw3 right */
-    tile_fill(W - 8, H - 44, W - 2, H - 43, SOLID);
-    tile_fill(58, H - 56, 62, H - 53, TILE_F_EMPTY);  /* above cw4 (overhead) */
-    tile_fill(58, H - 57, 62, H - 56, SOLID);
+    /* Jetpack alcoves cut into the outer walls above mid catwalks. */
+    tile_fill(2, H - 35, 8, H - 32, TILE_F_EMPTY);    /* LEFT cw2 alcove cavity */
+    tile_fill(2, H - 36, 8, H - 35, SOLID);
+    tile_fill(W - 8, H - 35, W - 2, H - 32, TILE_F_EMPTY);  /* RIGHT cw2 alcove */
+    tile_fill(W - 8, H - 36, W - 2, H - 35, SOLID);
+    tile_fill(56, H - 60, 64, H - 57, TILE_F_EMPTY);  /* top overhead alcove */
+    tile_fill(56, H - 61, 64, H - 60, SOLID);
 
     /* ---- Slope polygons ---- */
     const int floor_y = t2w(H - 4);
-    const int cw1_top = t2w(H - 13);
-    const int cw3_top = t2w(H - 37);
-    const int cw4_top = t2w(H - 49);
-    const int red_plat_y  = t2w(H - 9);
-    const int blue_plat_y = t2w(11);
+    const int cw1_top = t2w(H - 30);
+    const int cw2_top = t2w(H - 42);
+    const int cw3_top = t2w(H - 54);
 
-    /* 60° slide slopes — drop from cw3 endpoints to cw1 (centre catwalk).
-     * tan(60°) ≈ 1.73 → ~5 tile rise per 3 tile run. */
+    /* Walkable 45° ramps — give the ground route a way up to cw1 at
+     * both ends, plus a center ramp from cw1 to cw2 and another from
+     * cw2 to cw3. Ground players can walk the whole vertical stack
+     * if they're patient; they're slow (45° uphill at <50% speed) so
+     * jetting is still faster. */
+    /* Floor → cw1 left ramp (cols 16..20). */
     push_tri(POLY_KIND_SOLID,
-             t2w(50), cw3_top, t2w(55), cw1_top, t2w(50), cw1_top);
+             t2w(16), floor_y, t2w(20), cw1_top, t2w(20), floor_y);
+    /* Floor → cw1 right ramp (cols 100..104). */
     push_tri(POLY_KIND_SOLID,
-             t2w(65), cw1_top, t2w(70), cw3_top, t2w(70), cw1_top);
-    /* 60° drops from cw4 to cw3. */
+             t2w(100), cw1_top, t2w(104), floor_y, t2w(100), floor_y);
+    /* cw1 → cw2 left ramp (cols 50..55). */
     push_tri(POLY_KIND_SOLID,
-             t2w(40), cw4_top, t2w(45), cw3_top, t2w(40), cw3_top);
+             t2w(50), cw1_top, t2w(55), cw2_top, t2w(55), cw1_top);
+    /* cw2 → cw3 ramp (cols 60..64). */
     push_tri(POLY_KIND_SOLID,
-             t2w(75), cw3_top, t2w(80), cw4_top, t2w(80), cw3_top);
+             t2w(60), cw2_top, t2w(64), cw3_top, t2w(64), cw2_top);
 
-    /* 45° angled overhead struts — 5 small triangles hanging from the
-     * top ceiling band. Each is a right-triangle with the hypotenuse
-     * acting as a slide-jet redirect surface. */
+    /* 60° slide slopes — fast downhill traversal back to the floor.
+     * From cw1 left end straight down to floor (cols 22..27, rise of
+     * 12 tiles). */
+    push_tri(POLY_KIND_SOLID,
+             t2w(22), cw1_top, t2w(27), floor_y, t2w(27), cw1_top);
+    push_tri(POLY_KIND_SOLID,
+             t2w(93), cw1_top, t2w(98), floor_y, t2w(93), floor_y);
+
+    /* 45° angled overhead struts — 4 small triangles hanging from the
+     * ceiling band, each acting as a jet-redirect surface. */
     {
         const int cy = t2w(2);
-        push_tri(POLY_KIND_SOLID, t2w(20), cy, t2w(26), cy, t2w(20), cy + t2w(3));
-        push_tri(POLY_KIND_SOLID, t2w(45), cy, t2w(51), cy, t2w(45), cy + t2w(3));
-        push_tri(POLY_KIND_SOLID, t2w(70), cy, t2w(76), cy, t2w(76), cy + t2w(3));
-        push_tri(POLY_KIND_SOLID, t2w(95), cy, t2w(101),cy, t2w(101),cy + t2w(3));
-        push_tri(POLY_KIND_SOLID, t2w(58), cy, t2w(64), cy, t2w(58), cy + t2w(3));
+        push_tri(POLY_KIND_SOLID, t2w(30), cy, t2w(36), cy, t2w(30), cy + t2w(3));
+        push_tri(POLY_KIND_SOLID, t2w(48), cy, t2w(54), cy, t2w(48), cy + t2w(3));
+        push_tri(POLY_KIND_SOLID, t2w(66), cy, t2w(72), cy, t2w(72), cy + t2w(3));
+        push_tri(POLY_KIND_SOLID, t2w(84), cy, t2w(90), cy, t2w(90), cy + t2w(3));
     }
 
-    /* WIND ambient zones at top (sideways push on the highest catwalk). */
-    push_ambi(t2w(38), t2w(H - 56), t2w(20), t2w(8),
+    /* WIND ambient zones at top — push toward the center so a sniper
+     * camping the Rail Cannon spot has to fight drift. */
+    push_ambi(t2w(20), t2w(H - 58), t2w(40), t2w(8),
               AMBI_WIND, 0.18f, +1.0f, 0.0f);
-    push_ambi(t2w(20), t2w(H - 44), t2w(20), t2w(6),
-              AMBI_WIND, 0.15f, -1.0f, 0.0f);
+    push_ambi(t2w(60), t2w(H - 58), t2w(40), t2w(8),
+              AMBI_WIND, 0.18f, -1.0f, 0.0f);
 
-    /* ---- Spawns — 8 RED on bottom, 8 BLUE on top. ---- */
-    const int red_floor_y = floor_y - 40;
-    const int red_plat    = red_plat_y  - 40;
-    const int blue_plat   = blue_plat_y - 40;
-    push_spawn(t2w(3),  red_floor_y, 1, 1, 0);
-    push_spawn(t2w(6),  red_floor_y, 1, 1, 1);
-    push_spawn(t2w(9),  red_floor_y, 1, 1, 2);
-    push_spawn(t2w(12), red_floor_y, 1, 1, 3);
-    push_spawn(t2w(20), red_floor_y, 1, 1, 4);
-    push_spawn(t2w(28), red_floor_y, 1, 1, 5);
-    push_spawn(t2w(40), red_floor_y, 1, 1, 6);
-    push_spawn(t2w(60), red_floor_y, 1, 1, 7);
+    /* ---- Spawns — 8 RED bottom-left, 8 BLUE bottom-right. ---- */
+    const int floor_spawn_y = floor_y - 40;
+    push_spawn(t2w(3),  floor_spawn_y, 1, 1, 0);
+    push_spawn(t2w(6),  floor_spawn_y, 1, 1, 1);
+    push_spawn(t2w(9),  floor_spawn_y, 1, 1, 2);
+    push_spawn(t2w(12), floor_spawn_y, 1, 1, 3);
+    push_spawn(t2w(20), floor_spawn_y, 1, 1, 4);
+    push_spawn(t2w(28), floor_spawn_y, 1, 1, 5);
+    push_spawn(t2w(40), floor_spawn_y, 1, 1, 6);
+    push_spawn(t2w(50), floor_spawn_y, 1, 1, 7);
 
-    push_spawn(t2w(W -  3), blue_plat, 2, 1, 8);
-    push_spawn(t2w(W -  6), blue_plat, 2, 1, 9);
-    push_spawn(t2w(W -  9), blue_plat, 2, 1, 10);
-    push_spawn(t2w(W - 12), blue_plat, 2, 1, 11);
-    push_spawn(t2w(60),     t2w(H - 49) - 40, 2, 1, 12);    /* cw4 top */
-    push_spawn(t2w(35),     t2w(H - 37) - 40, 2, 1, 13);
-    push_spawn(t2w(85),     t2w(H - 37) - 40, 2, 1, 14);
-    push_spawn(t2w(W - 30), blue_plat, 2, 1, 15);
+    push_spawn(t2w(W -  3), floor_spawn_y, 2, 1,  8);
+    push_spawn(t2w(W -  6), floor_spawn_y, 2, 1,  9);
+    push_spawn(t2w(W -  9), floor_spawn_y, 2, 1, 10);
+    push_spawn(t2w(W - 12), floor_spawn_y, 2, 1, 11);
+    push_spawn(t2w(W - 20), floor_spawn_y, 2, 1, 12);
+    push_spawn(t2w(W - 28), floor_spawn_y, 2, 1, 13);
+    push_spawn(t2w(W - 40), floor_spawn_y, 2, 1, 14);
+    push_spawn(t2w(W - 50), floor_spawn_y, 2, 1, 15);
 
-    /* ---- Pickups (≈20 per brief). ---- */
+    /* ---- Pickups (≈22 per brief). ---- */
     const int floor_pick = floor_y - 16;
     const int cw1_pick   = cw1_top - 16;
-    const int cw2_pick   = t2w(H - 25) - 16;
+    const int cw2_pick   = cw2_top - 16;
     const int cw3_pick   = cw3_top - 16;
-    const int cw4_pick   = cw4_top - 16;
-    const int red_pick   = red_plat_y  - 16;
-    const int blue_pick  = blue_plat_y - 16;
 
-    /* Red base alcove. */
-    push_pickup(t2w(3),  red_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
-    push_pickup(t2w(6),  red_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
-    push_pickup(t2w(9),  red_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
-    push_pickup(t2w(11), red_pick, PICKUP_AMMO_PRIMARY, 0);
-    push_pickup(t2w(13), red_pick, PICKUP_AMMO_PRIMARY, 0);
+    /* Red base alcove — HEALTH + AMMO supply. */
+    push_pickup(t2w(3),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(6),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(9),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(12), floor_pick, PICKUP_AMMO_PRIMARY, 0);
     /* Blue base alcove. */
-    push_pickup(t2w(W -  3), blue_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
-    push_pickup(t2w(W -  6), blue_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
-    push_pickup(t2w(W -  9), blue_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
-    push_pickup(t2w(W - 11), blue_pick, PICKUP_AMMO_PRIMARY, 0);
-    push_pickup(t2w(W - 13), blue_pick, PICKUP_AMMO_PRIMARY, 0);
-    /* Mid-catwalk jetpack alcoves: JET_FUEL, ARMOR light, POWERUP berserk. */
-    push_pickup(t2w(5),     t2w(H - 41) - 16, PICKUP_JET_FUEL, 0);
-    push_pickup(t2w(W - 5), t2w(H - 41) - 16, PICKUP_ARMOR, ARMOR_LIGHT);
-    push_pickup(t2w(60),    t2w(H - 54) - 16, PICKUP_POWERUP, POWERUP_BERSERK);
-    /* Open catwalks: HEALTH_SMALL ×4 + JET_FUEL ×3. */
-    push_pickup(t2w(35), cw3_pick, PICKUP_HEALTH, HEALTH_SMALL);
-    push_pickup(t2w(85), cw3_pick, PICKUP_HEALTH, HEALTH_SMALL);
-    push_pickup(t2w(30), cw2_pick, PICKUP_HEALTH, HEALTH_SMALL);
-    push_pickup(t2w(90), cw2_pick, PICKUP_HEALTH, HEALTH_SMALL);
-    push_pickup(t2w(40), cw1_pick, PICKUP_JET_FUEL, 0);
-    push_pickup(t2w(60), cw1_pick, PICKUP_JET_FUEL, 0);
-    push_pickup(t2w(80), cw1_pick, PICKUP_JET_FUEL, 0);
-    /* Highest catwalk: Rail Cannon (exposed). */
-    push_pickup(t2w(60), cw4_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
-    /* Lowest gap mid-floor: Mass Driver (suicide pickup — you have to
-     * jet back up after grabbing). */
+    push_pickup(t2w(W -  3), floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W -  6), floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W -  9), floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(W - 12), floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    /* Floor mid — Mass Driver as the "ground prize" + HEALTH small. */
     push_pickup(t2w(60), floor_pick, PICKUP_WEAPON, WEAPON_MASS_DRIVER);
+    push_pickup(t2w(40), floor_pick, PICKUP_HEALTH, HEALTH_SMALL);
+    push_pickup(t2w(80), floor_pick, PICKUP_HEALTH, HEALTH_SMALL);
+    /* cw1 (easy access) — JET_FUEL ×2 + HEALTH ×2. */
+    push_pickup(t2w(30), cw1_pick, PICKUP_HEALTH, HEALTH_SMALL);
+    push_pickup(t2w(45), cw1_pick, PICKUP_JET_FUEL, 0);
+    push_pickup(t2w(75), cw1_pick, PICKUP_JET_FUEL, 0);
+    push_pickup(t2w(90), cw1_pick, PICKUP_HEALTH, HEALTH_SMALL);
+    /* cw2 jetpack alcoves: ARMOR left, ARMOR right (mirror balance). */
+    push_pickup(t2w(5),     t2w(H - 33) - 16, PICKUP_ARMOR, ARMOR_LIGHT);
+    push_pickup(t2w(W - 5), t2w(H - 33) - 16, PICKUP_ARMOR, ARMOR_LIGHT);
+    /* cw2 open — AMMO_SECONDARY and a Plasma Cannon mid prize. */
+    push_pickup(t2w(35), cw2_pick, PICKUP_AMMO_SECONDARY, 0);
+    push_pickup(t2w(85), cw2_pick, PICKUP_AMMO_SECONDARY, 0);
+    push_pickup(t2w(60), cw2_pick, PICKUP_WEAPON, WEAPON_PLASMA_CANNON);
+    /* cw3 (top) + overhead alcove — the rare prizes. */
+    push_pickup(t2w(60), cw3_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
+    push_pickup(t2w(60), t2w(H - 58) - 16, PICKUP_POWERUP, POWERUP_BERSERK);
 
     set_meta("Catwalk",
-             "Vertical TDM. Slide catwalks; grapple-friendly struts.",
+             "Vertical TDM. Ground game + risk/reward catwalks.",
              "exterior",
              (uint16_t)(1u << MATCH_MODE_TDM));
-
-    (void)red_plat;
 }
 
 /* ===================================================================== */
@@ -1164,7 +1185,13 @@ static void build_aurora(void) {
  * cave segments; central-high jetpack alcoves with POWERUP invisibility. */
 
 static void build_crossfire(void) {
-    cook_reset(180, 85);
+    /* M6 iter — shrunk 180×85 → 140×60. The original was so wide
+     * (5760 px from base to base) that bots and human runners alike
+     * spent all match traversing instead of fighting; mid-map fires
+     * were sustained but kills were near zero. The new size keeps
+     * CTF's mirror identity (RED left, BLUE right, central
+     * battleground) at a more aggressive tempo. */
+    cook_reset(140, 60);
     Level *L = &g_cooker.world.level;
     const int W = L->width, H = L->height;
     const uint16_t SOLID = TILE_F_SOLID;
@@ -1177,85 +1204,61 @@ static void build_crossfire(void) {
     /* Top ceiling band (thinner — open sky on the sides). */
     tile_fill(0, 0, W, 2, SOLID);
 
-    /* Base structures. RED on left x=2..30, BLUE on right x=W-30..W-2.
-     * Each base has:
-     *   - a flag platform at row H-14 (16 tiles up from floor)
-     *   - a resupply alcove cut into the side wall
-     *   - a 30° entry ramp from the central area up to the flag platform */
-    const int base_w = 28;
-    const int flag_plat_top_row = H - 14;
-    /* RED flag platform — extends from x=2 to x=base_w. */
+    /* Base structures. RED on left x=2..base_w, BLUE mirrored. */
+    const int base_w = 22;
+    const int flag_plat_top_row = H - 12;
+    /* Flag platforms. */
     tile_fill(2, flag_plat_top_row, base_w, flag_plat_top_row + 1, SOLID);
-    /* RED back wall (cuts the base off from the world edge above). */
-    tile_fill(2, 4, base_w, flag_plat_top_row, TILE_F_EMPTY);
-    /* RED resupply alcove — cavity at floor level, ceiling at row H-7. */
-    tile_fill(2, H - 7, 12, H - 4, TILE_F_EMPTY);
-    tile_fill(2, H - 8, 12, H - 7, SOLID);
-    /* RED base ceiling cap (so jetting up under the flag platform from
-     * floor doesn't escape into the sky). */
-    /* (the flag platform tile itself caps the top of the interior) */
-
-    /* BLUE — mirror. */
     tile_fill(W - base_w, flag_plat_top_row, W - 2, flag_plat_top_row + 1, SOLID);
-    tile_fill(W - base_w, 4, W - 2, flag_plat_top_row, TILE_F_EMPTY);
-    tile_fill(W - 12, H - 7, W - 2, H - 4, TILE_F_EMPTY);
-    tile_fill(W - 12, H - 8, W - 2, H - 7, SOLID);
+    /* Resupply alcoves — cavity at floor level. */
+    tile_fill(2, H - 7, 10, H - 4, TILE_F_EMPTY);
+    tile_fill(2, H - 8, 10, H - 7, SOLID);
+    tile_fill(W - 10, H - 7, W - 2, H - 4, TILE_F_EMPTY);
+    tile_fill(W - 10, H - 8, W - 2, H - 7, SOLID);
 
-    /* Central catwalks above the battleground. Two short platforms at
-     * row H-22 and a higher pair at row H-32 (sky bridge alternatives). */
-    tile_fill(60, H - 22, 80, H - 21, SOLID);
-    tile_fill(W - 80, H - 22, W - 60, H - 21, SOLID);
-    tile_fill(75, H - 32, 105, H - 31, SOLID);          /* sky bridge */
+    /* Central cover columns + catwalks above the battleground. */
+    const int cw_row = H - 18;
+    tile_fill(W / 2 - 18, cw_row, W / 2 - 10, cw_row + 1, SOLID);
+    tile_fill(W / 2 + 10, cw_row, W / 2 + 18, cw_row + 1, SOLID);
+    /* Sky bridge across the mid at row H-26. */
+    const int sky_row = H - 26;
+    tile_fill(W / 2 - 12, sky_row, W / 2 + 12, sky_row + 1, SOLID);
 
-    /* Flank tunnels — covered passages below the battleground. The
-     * ceiling at row H-8 cuts off the bottom 4 rows so the tunnel reads
-     * as enclosed; openings at the base sides + a central exit. */
-    tile_fill(40, H - 8, 60,  H - 7, SOLID);
-    tile_fill(80, H - 8, 100, H - 7, SOLID);
-    tile_fill(120, H - 8, 140, H - 7, SOLID);
+    /* Flank-tunnel mid-alcove rooms cut as 2-tile cover stubs sitting
+     * on the floor — clean shapes that won't trap bots. */
+    tile_fill(W / 2 - 28, H - 7, W / 2 - 24, H - 4, SOLID);
+    tile_fill(W / 2 + 24, H - 7, W / 2 + 28, H - 4, SOLID);
 
-    /* Flank-tunnel mid-alcove rooms (one per side, cut into the ceiling
-     * line above the tunnel). */
-    tile_fill(48, H - 11, 54, H - 8, TILE_F_EMPTY);
-    tile_fill(48, H - 12, 54, H - 11, SOLID);
-    tile_fill(W - 54, H - 11, W - 48, H - 8, TILE_F_EMPTY);
-    tile_fill(W - 54, H - 12, W - 48, H - 11, SOLID);
-
-    /* Central-high jetpack alcoves — above the central catwalks at row
-     * H-32, mouth facing center, only reachable by jet from below. */
-    tile_fill(75, H - 36, 80, H - 32, TILE_F_EMPTY);
-    tile_fill(75, H - 37, 80, H - 36, SOLID);
-    tile_fill(W - 80, H - 36, W - 75, H - 32, TILE_F_EMPTY);
-    tile_fill(W - 80, H - 37, W - 75, H - 36, SOLID);
+    /* Central-high jetpack alcoves cut into the sky-bridge underside. */
+    tile_fill(W / 2 - 8, H - 30, W / 2 - 4, H - 26, TILE_F_EMPTY);
+    tile_fill(W / 2 - 8, H - 31, W / 2 - 4, H - 30, SOLID);
+    tile_fill(W / 2 + 4, H - 30, W / 2 + 8, H - 26, TILE_F_EMPTY);
+    tile_fill(W / 2 + 4, H - 31, W / 2 + 8, H - 30, SOLID);
 
     /* ---- Slope polygons ---- */
     const int floor_y   = t2w(H - 4);
     const int flag_y    = t2w(flag_plat_top_row);
 
-    /* 30° entry ramps from central area up to each base's flag platform.
-     * tan(30°) ≈ 0.58 → 7 tile rise / 12 tile run. */
+    /* 30° entry ramps from central floor up to each base's flag
+     * platform — 8-tile run, ~5-tile rise. */
     push_tri(POLY_KIND_SOLID,
              t2w(base_w),       flag_y,
-             t2w(base_w + 14),  floor_y,
+             t2w(base_w + 10),  floor_y,
              t2w(base_w),       floor_y);
     push_tri(POLY_KIND_SOLID,
-             t2w(W - base_w - 14), floor_y,
+             t2w(W - base_w - 10), floor_y,
              t2w(W - base_w),      flag_y,
              t2w(W - base_w),      floor_y);
 
     /* 45° angled struts above central mid (3). */
     push_tri(POLY_KIND_SOLID,
-             t2w(W / 2 - 12), t2w(2),
-             t2w(W / 2 -  6), t2w(2),
-             t2w(W / 2 -  6), t2w(8));
+             t2w(W / 2 - 10), t2w(2),
+             t2w(W / 2 -  4), t2w(2),
+             t2w(W / 2 -  4), t2w(8));
     push_tri(POLY_KIND_SOLID,
-             t2w(W / 2 +  6), t2w(2),
-             t2w(W / 2 + 12), t2w(2),
-             t2w(W / 2 +  6), t2w(8));
-    push_tri(POLY_KIND_SOLID,
-             t2w(W / 2 -  6), t2w(2),
-             t2w(W / 2 +  6), t2w(2),
-             t2w(W / 2),      t2w(8));
+             t2w(W / 2 +  4), t2w(2),
+             t2w(W / 2 + 10), t2w(2),
+             t2w(W / 2 +  4), t2w(8));
 
     /* ---- Flag records (2). Place each flag at the center of its team's
      * flag platform, slightly above the surface (16 px). */
@@ -1283,49 +1286,41 @@ static void build_crossfire(void) {
     push_spawn(t2w(W - 18), blue_flag_spawn, 2, 1, 14);
     push_spawn(t2w(W - 24), blue_flag_spawn, 2, 1, 15);
 
-    /* ---- Pickups (≈30 per brief). ---- */
+    /* ---- Pickups (≈26 per brief). ---- */
     const int floor_pick = floor_y - 16;
     const int flag_pick  = flag_y - 16;
-    const int cw_pick    = t2w(H - 22) - 16;
-    const int sky_pick   = t2w(H - 32) - 16;
+    const int cw_pick    = t2w(cw_row) - 16;
+    const int sky_pick   = t2w(sky_row) - 16;
 
-    /* Red base resupply (in alcove): HEALTH medium ×4, AMMO ×4, ARMOR
-     * light, WEAPON Pulse Rifle. */
+    /* Red base resupply (in alcove): HEALTH medium ×3, AMMO ×3, ARMOR
+     * light, WEAPON Pulse Rifle on the flag platform. */
     push_pickup(t2w(3),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
     push_pickup(t2w(5),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
     push_pickup(t2w(7),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
-    push_pickup(t2w(9),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
     push_pickup(t2w(4),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
     push_pickup(t2w(6),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
     push_pickup(t2w(8),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
-    push_pickup(t2w(10), floor_pick, PICKUP_AMMO_PRIMARY, 0);
-    push_pickup(t2w(11), floor_pick, PICKUP_ARMOR, ARMOR_LIGHT);
-    push_pickup(t2w(12), flag_pick,  PICKUP_WEAPON, WEAPON_PULSE_RIFLE);
+    push_pickup(t2w(9),  floor_pick, PICKUP_ARMOR, ARMOR_LIGHT);
+    push_pickup(t2w(10), flag_pick,  PICKUP_WEAPON, WEAPON_PULSE_RIFLE);
     /* Blue base mirror. */
     push_pickup(t2w(W -  3),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
     push_pickup(t2w(W -  5),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
     push_pickup(t2w(W -  7),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
-    push_pickup(t2w(W -  9),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
     push_pickup(t2w(W -  4),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
     push_pickup(t2w(W -  6),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
     push_pickup(t2w(W -  8),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
-    push_pickup(t2w(W - 10),  floor_pick, PICKUP_AMMO_PRIMARY, 0);
-    push_pickup(t2w(W - 11),  floor_pick, PICKUP_ARMOR, ARMOR_LIGHT);
-    push_pickup(t2w(W - 12),  flag_pick,  PICKUP_WEAPON, WEAPON_PULSE_RIFLE);
-    /* Flank-tunnel alcoves: HEALTH small ×2, AMMO_SECONDARY ×2 per side. */
-    push_pickup(t2w(51),     t2w(H - 9) - 16, PICKUP_HEALTH, HEALTH_SMALL);
-    push_pickup(t2w(W - 51), t2w(H - 9) - 16, PICKUP_HEALTH, HEALTH_SMALL);
-    push_pickup(t2w(50),     t2w(H - 9) - 16, PICKUP_AMMO_SECONDARY, 0);
-    push_pickup(t2w(W - 50), t2w(H - 9) - 16, PICKUP_AMMO_SECONDARY, 0);
-    /* Central battleground low: HEALTH large + JET_FUEL ×2 (exposed). */
+    push_pickup(t2w(W -  9),  floor_pick, PICKUP_ARMOR, ARMOR_LIGHT);
+    push_pickup(t2w(W - 10),  flag_pick,  PICKUP_WEAPON, WEAPON_PULSE_RIFLE);
+    /* Central battleground low: HEALTH large + JET_FUEL ×2. */
     push_pickup(t2w(W / 2),     floor_pick, PICKUP_HEALTH, HEALTH_LARGE);
-    push_pickup(t2w(W / 2 - 8), floor_pick, PICKUP_JET_FUEL, 0);
-    push_pickup(t2w(W / 2 + 8), floor_pick, PICKUP_JET_FUEL, 0);
-    /* Central catwalks: Mass Driver + Rail Cannon (heavily contested). */
-    push_pickup(t2w(70),  cw_pick, PICKUP_WEAPON, WEAPON_MASS_DRIVER);
-    push_pickup(t2w(W - 70), cw_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
-    /* Sky bridge: ARMOR heavy. */
-    push_pickup(t2w(W / 2), sky_pick, PICKUP_ARMOR, ARMOR_HEAVY);
+    push_pickup(t2w(W / 2 - 6), floor_pick, PICKUP_JET_FUEL, 0);
+    push_pickup(t2w(W / 2 + 6), floor_pick, PICKUP_JET_FUEL, 0);
+    /* Central catwalks: Mass Driver + Auto-Cannon. */
+    push_pickup(t2w(W / 2 - 14), cw_pick, PICKUP_WEAPON, WEAPON_MASS_DRIVER);
+    push_pickup(t2w(W / 2 + 14), cw_pick, PICKUP_WEAPON, WEAPON_AUTO_CANNON);
+    /* Sky bridge: ARMOR heavy + Rail Cannon. */
+    push_pickup(t2w(W / 2 - 4), sky_pick, PICKUP_ARMOR, ARMOR_HEAVY);
+    push_pickup(t2w(W / 2 + 4), sky_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
     /* Central-high jetpack alcoves: POWERUP invisibility ×2. */
     push_pickup(t2w(77),     t2w(H - 33) - 16, PICKUP_POWERUP, POWERUP_INVISIBILITY);
     push_pickup(t2w(W - 77), t2w(H - 33) - 16, PICKUP_POWERUP, POWERUP_INVISIBILITY);
@@ -1346,7 +1341,13 @@ static void build_crossfire(void) {
  * tunnel ends, 10 caves/alcoves. */
 
 static void build_citadel(void) {
-    cook_reset(200, 100);
+    /* M6 iter — shrunk 200×100 → 160×80. The XL CTF identity survives
+     * (still our biggest map), but the plaza is now 100 tiles wide
+     * instead of 140 — short enough that bots, and humans without
+     * grapple, can cross in <8 s. Castles are also smaller (20 tiles
+     * wide, 18 tall) and the east passage is wider (4 tiles) so the
+     * flag room is visible from the plaza approach. */
+    cook_reset(160, 80);
     Level *L = &g_cooker.world.level;
     const int W = L->width, H = L->height;
     const uint16_t SOLID = TILE_F_SOLID;
@@ -1359,76 +1360,54 @@ static void build_citadel(void) {
     tile_fill(0,     2, 2,     H - 4, SOLID);
     tile_fill(W - 2, 2, W,     H - 4, SOLID);
 
-    /* CASTLES — left and right blocks of solid stone with carved-out
-     * dungeon interiors. Each castle is ~30 tiles wide × 24 tall.
-     * The interior dungeon is a 3-room cave network. */
-    const int castle_w = 30;
+    /* CASTLES — 20 tiles wide × 18 tall stone blocks with carved-out
+     * 2-room dungeon interiors. Smaller than the original 200×100
+     * version so a flag carrier exiting via the east passage is in
+     * plaza sightlines within 4 tiles. */
+    const int castle_w = 20;
     /* RED castle solid envelope. */
-    tile_fill(2,            H - 30, 2 + castle_w, H - 4, SOLID);
-    /* RED castle dungeon interior — carve out 3 connected rooms. */
-    tile_fill(4,  H - 28, 14, H - 4, TILE_F_EMPTY);   /* room 1: flag room (west) */
-    tile_fill(16, H - 28, 24, H - 4, TILE_F_EMPTY);   /* room 2: resupply (center) */
-    tile_fill(26, H - 14, 30, H - 4, TILE_F_EMPTY);   /* room 3: defender perch (east, smaller) */
-    /* Inter-room walls (1-tile partitions with 3-tile passages). */
-    tile_fill(14, H - 10, 16, H - 4, SOLID);          /* partition between rooms 1-2, opening above row H-10 */
-    tile_fill(24, H - 14, 26, H - 4, SOLID);          /* partition rooms 2-3 */
-    /* Castle entrance — opening in east wall at floor level. */
-    /* (the east wall is already solid; cut a passage) */
-    tile_fill(30, H - 8, 32, H - 4, TILE_F_EMPTY);    /* east-facing exit */
-    tile_fill(30, H - 9, 32, H - 8, SOLID);
+    tile_fill(2,            H - 22, 2 + castle_w, H - 4, SOLID);
+    /* RED castle interior — flag room (west) + resupply (east). */
+    tile_fill(4,  H - 20, 12, H - 4, TILE_F_EMPTY);   /* flag room */
+    tile_fill(14, H - 20, 22, H - 4, TILE_F_EMPTY);   /* resupply room */
+    tile_fill(12, H - 8, 14, H - 4, SOLID);            /* partition with floor-level passage */
+    /* Castle entrance — 4-tile-wide opening in east wall at floor. */
+    tile_fill(22, H - 8, 26, H - 4, TILE_F_EMPTY);
+    tile_fill(22, H - 9, 26, H - 8, SOLID);
 
-    /* BLUE castle — mirror. */
-    tile_fill(W - 2 - castle_w, H - 30, W - 2, H - 4, SOLID);
-    tile_fill(W - 14, H - 28, W - 4,  H - 4, TILE_F_EMPTY);
-    tile_fill(W - 24, H - 28, W - 16, H - 4, TILE_F_EMPTY);
-    tile_fill(W - 30, H - 14, W - 26, H - 4, TILE_F_EMPTY);
-    tile_fill(W - 16, H - 10, W - 14, H - 4, SOLID);
-    tile_fill(W - 26, H - 14, W - 24, H - 4, SOLID);
-    tile_fill(W - 32, H - 8, W - 30, H - 4, TILE_F_EMPTY);
-    tile_fill(W - 32, H - 9, W - 30, H - 8, SOLID);
+    /* BLUE castle mirror. */
+    tile_fill(W - 2 - castle_w, H - 22, W - 2, H - 4, SOLID);
+    tile_fill(W - 12, H - 20, W - 4,  H - 4, TILE_F_EMPTY);
+    tile_fill(W - 22, H - 20, W - 14, H - 4, TILE_F_EMPTY);
+    tile_fill(W - 14, H - 8, W - 12, H - 4, SOLID);
+    tile_fill(W - 26, H - 8, W - 22, H - 4, TILE_F_EMPTY);
+    tile_fill(W - 26, H - 9, W - 22, H - 8, SOLID);
 
-    /* Outer wall catwalks circling each castle (defender vantage). */
-    tile_fill(2,            H - 30, 2 + castle_w, H - 29, SOLID);  /* castle roof */
-    tile_fill(W - 2 - castle_w, H - 30, W - 2, H - 29, SOLID);
+    /* Castle roofs (defender vantage — walkable, accessible by jet
+     * from plaza or via the inner stairs we'll add as a ramp poly). */
+    tile_fill(2,            H - 22, 2 + castle_w, H - 21, SOLID);
+    tile_fill(W - 2 - castle_w, H - 22, W - 2, H - 21, SOLID);
 
-    /* Underground tunnels — low-route between bases. Tunnel ceiling at
-     * row H-10 spans the central plaza, with openings at the castle
-     * exits. */
-    tile_fill(2 + castle_w, H - 10, W - 2 - castle_w, H - 9, SOLID);
-
-    /* Tunnel choke alcoves (one per side, mid-tunnel). */
-    tile_fill(60, H - 13, 66, H - 10, TILE_F_EMPTY);
-    tile_fill(60, H - 14, 66, H - 13, SOLID);
-    tile_fill(W - 66, H - 13, W - 60, H - 10, TILE_F_EMPTY);
-    tile_fill(W - 66, H - 14, W - 60, H - 13, SOLID);
-
-    /* Sky bridges — 2 high-altitude crossings above the plaza. */
-    tile_fill(70,     H - 60, 130,    H - 59, SOLID);  /* lower bridge */
-    tile_fill(85,     H - 75, 115,    H - 74, SOLID);  /* upper bridge */
-
-    /* Sky-bridge overlook alcoves on the underside (mouth facing down). */
-    tile_fill(75,     H - 63, 80,     H - 60, TILE_F_EMPTY);
-    tile_fill(75,     H - 64, 80,     H - 63, SOLID);
-    tile_fill(120,    H - 63, 125,    H - 60, TILE_F_EMPTY);
-    tile_fill(120,    H - 64, 125,    H - 63, SOLID);
+    /* Sky bridge — one mid-altitude crossing above the plaza, jet/
+     * grapple only from the floor. */
+    tile_fill(60, H - 40, 100, H - 39, SOLID);
 
     /* ---- Slope polygons ---- */
     const int floor_y    = t2w(H - 4);
-    const int castle_top = t2w(H - 30);
+    const int castle_top = t2w(H - 22);
 
-    /* 30° plaza bowl — 60 tiles wide (x=70..130), basin 8 tiles wide at
-     * the bottom (x=96..104). Slopes meet the floor at the castle exits. */
+    /* 30° plaza bowl — slope from each castle exit down to the basin.
+     * Basin is 8 tiles wide at the bottom (x=76..84). */
     push_tri(POLY_KIND_SOLID,
              t2w(2 + castle_w + 4), floor_y,
-             t2w(96), floor_y + t2w(2),
-             t2w(96), floor_y);
+             t2w(76), floor_y + t2w(2),
+             t2w(76), floor_y);
     push_tri(POLY_KIND_SOLID,
-             t2w(104), floor_y + t2w(2),
+             t2w(84), floor_y + t2w(2),
              t2w(W - 2 - castle_w - 4), floor_y,
-             t2w(104), floor_y);
+             t2w(84), floor_y);
 
-    /* 60° castle ramparts — steep outer slopes on each castle's
-     * approach side (facing the plaza). tan(60°) ≈ 1.73. */
+    /* 60° castle outer slopes (the plaza-facing rampart). */
     push_tri(POLY_KIND_SOLID,
              t2w(2 + castle_w),     castle_top,
              t2w(2 + castle_w + 4), floor_y,
@@ -1438,141 +1417,93 @@ static void build_citadel(void) {
              t2w(W - 2 - castle_w),     castle_top,
              t2w(W - 2 - castle_w),     floor_y);
 
-    /* 45° angled castle ceilings inside each castle's flag room — slope
-     * from the back wall down to the inner partition. */
-    push_tri(POLY_KIND_SOLID,
-             t2w(4),  t2w(H - 28),
-             t2w(4),  t2w(H - 24),
-             t2w(8),  t2w(H - 28));
-    push_tri(POLY_KIND_SOLID,
-             t2w(W - 4), t2w(H - 28),
-             t2w(W - 8), t2w(H - 28),
-             t2w(W - 4), t2w(H - 24));
-
-    /* Slope-roof nooks — formed by each angled castle ceiling above. The
-     * inner triangular space is the alcove. Mark it with a pickup so it
-     * shows up clearly; no extra geometry needed. */
-
-    /* 30° tunnel grades — gentle rise/fall in the tunnel floor between
-     * castle exit and tunnel choke alcove. */
-    push_tri(POLY_KIND_SOLID,
-             t2w(32), floor_y,
-             t2w(40), floor_y - t2w(1),
-             t2w(40), floor_y);
-    push_tri(POLY_KIND_SOLID,
-             t2w(W - 40), floor_y - t2w(1),
-             t2w(W - 32), floor_y,
-             t2w(W - 32), floor_y);
-
-    /* 12+ grapple-anchor struts — small floating platforms across the
-     * plaza at varied heights. */
-    for (int i = 0; i < 12; ++i) {
-        int x   = 70 + i * 5;
-        int y_r = H - 45 - ((i * 7) % 12);
+    /* 6 grapple-anchor struts spread across the plaza at varied
+     * heights — fewer than the original 12, but still enough for the
+     * grapple play. */
+    for (int i = 0; i < 6; ++i) {
+        int x   = 50 + i * 12;
+        int y_r = H - 30 - ((i * 5) % 10);
         push_quad(POLY_KIND_SOLID, t2w(x), t2w(y_r),
                                    t2w(x + 3), t2w(y_r + 1));
     }
 
     /* ---- Ambient zones. ---- */
-    /* 4 WIND zones at plaza height (varied directions, randomize long
-     * shots). */
-    push_ambi(t2w(70),  t2w(H - 50), t2w(15), t2w(8),
-              AMBI_WIND, 0.18f, +1.0f, 0.0f);
-    push_ambi(t2w(85),  t2w(H - 55), t2w(15), t2w(8),
-              AMBI_WIND, 0.18f, -1.0f, 0.0f);
-    push_ambi(t2w(115), t2w(H - 55), t2w(15), t2w(8),
-              AMBI_WIND, 0.18f, +1.0f, 0.0f);
-    push_ambi(t2w(130), t2w(H - 50), t2w(15), t2w(8),
-              AMBI_WIND, 0.18f, -1.0f, 0.0f);
-    /* 2 ACID zones at tunnel ends (5 HP/s — punishment for camping). */
-    push_ambi(t2w(40),     t2w(H - 9), t2w(8), t2w(5),
-              AMBI_ACID, 1.00f, 0.0f, 0.0f);
-    push_ambi(t2w(W - 48), t2w(H - 9), t2w(8), t2w(5),
-              AMBI_ACID, 1.00f, 0.0f, 0.0f);
+    /* 2 WIND zones at sky-bridge height — push toward the center so
+     * a grappler swinging between bridges has to fight drift. */
+    push_ambi(t2w(50),  t2w(H - 50), t2w(20), t2w(8),
+              AMBI_WIND, 0.20f, +1.0f, 0.0f);
+    push_ambi(t2w(90),  t2w(H - 50), t2w(20), t2w(8),
+              AMBI_WIND, 0.20f, -1.0f, 0.0f);
 
-    /* ---- CTF flags. Place each inside its castle's flag room. ---- */
-    push_flag(t2w(8),     t2w(H - 6),  MATCH_TEAM_RED);
-    push_flag(t2w(W - 8), t2w(H - 6),  MATCH_TEAM_BLUE);
+    /* ---- CTF flags — at the back of each castle's flag room. ---- */
+    push_flag(t2w(6),     t2w(H - 6),  MATCH_TEAM_RED);
+    push_flag(t2w(W - 6), t2w(H - 6),  MATCH_TEAM_BLUE);
 
-    /* ---- Spawns — 8 per team across multiple lanes. ---- */
-    const int red_castle_floor  = floor_y - 40;
-    const int red_castle_roof   = castle_top - 40;
-    const int blue_castle_floor = floor_y - 40;
-    const int blue_castle_roof  = castle_top - 40;
-    /* RED spawns inside dungeon. */
-    push_spawn(t2w(6),  red_castle_floor, 1, 1, 0);
-    push_spawn(t2w(8),  red_castle_floor, 1, 1, 1);
-    push_spawn(t2w(10), red_castle_floor, 1, 1, 2);
-    push_spawn(t2w(18), red_castle_floor, 1, 1, 3);
-    push_spawn(t2w(20), red_castle_floor, 1, 1, 4);
-    push_spawn(t2w(22), red_castle_floor, 1, 1, 5);
-    push_spawn(t2w(28), red_castle_floor, 1, 1, 6);
-    push_spawn(t2w(15), red_castle_roof,  1, 1, 7);
-    /* BLUE spawns mirror. */
-    push_spawn(t2w(W -  6),  blue_castle_floor, 2, 1, 8);
-    push_spawn(t2w(W -  8),  blue_castle_floor, 2, 1, 9);
-    push_spawn(t2w(W - 10),  blue_castle_floor, 2, 1, 10);
-    push_spawn(t2w(W - 18),  blue_castle_floor, 2, 1, 11);
-    push_spawn(t2w(W - 20),  blue_castle_floor, 2, 1, 12);
-    push_spawn(t2w(W - 22),  blue_castle_floor, 2, 1, 13);
-    push_spawn(t2w(W - 28),  blue_castle_floor, 2, 1, 14);
-    push_spawn(t2w(W - 15),  blue_castle_roof,  2, 1, 15);
+    /* ---- Spawns — 8 per team. Some spawns INSIDE the castle near
+     * the flag (defensive); some OUTSIDE the east passage (attack
+     * runners ready). ---- */
+    const int castle_floor = floor_y - 40;
+    const int castle_roof  = castle_top - 40;
+    /* RED interior + exit-ready spawns. */
+    push_spawn(t2w(6),  castle_floor, 1, 1, 0);
+    push_spawn(t2w(8),  castle_floor, 1, 1, 1);
+    push_spawn(t2w(16), castle_floor, 1, 1, 2);
+    push_spawn(t2w(20), castle_floor, 1, 1, 3);
+    push_spawn(t2w(28), castle_floor, 1, 1, 4);   /* just outside east passage */
+    push_spawn(t2w(32), castle_floor, 1, 1, 5);
+    push_spawn(t2w(36), castle_floor, 1, 1, 6);
+    push_spawn(t2w(12), castle_roof,  1, 1, 7);
+    /* BLUE mirror. */
+    push_spawn(t2w(W -  6),  castle_floor, 2, 1,  8);
+    push_spawn(t2w(W -  8),  castle_floor, 2, 1,  9);
+    push_spawn(t2w(W - 16),  castle_floor, 2, 1, 10);
+    push_spawn(t2w(W - 20),  castle_floor, 2, 1, 11);
+    push_spawn(t2w(W - 28),  castle_floor, 2, 1, 12);
+    push_spawn(t2w(W - 32),  castle_floor, 2, 1, 13);
+    push_spawn(t2w(W - 36),  castle_floor, 2, 1, 14);
+    push_spawn(t2w(W - 12),  castle_roof,  2, 1, 15);
 
-    /* ---- Pickups (≈32 per brief). ---- */
-    const int floor_pick = floor_y - 16;
-    const int castle_pick = floor_y - 16;
+    /* ---- Pickups (≈26 — denser than before for the smaller map). ---- */
+    const int floor_pick   = floor_y - 16;
     const int rampart_pick = castle_top - 16;
-    const int bridge_pick  = t2w(H - 60) - 16;
-    const int upper_pick   = t2w(H - 75) - 16;
-    const int alcove_pick  = t2w(H - 13) - 16;
+    const int bridge_pick  = t2w(H - 40) - 16;
 
-    /* Red castle cave network: HEALTH medium ×3 + AMMO ×3 + ARMOR + Pulse Rifle. */
-    push_pickup(t2w(6),  castle_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
-    push_pickup(t2w(8),  castle_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
-    push_pickup(t2w(10), castle_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
-    push_pickup(t2w(18), castle_pick, PICKUP_AMMO_PRIMARY, 0);
-    push_pickup(t2w(20), castle_pick, PICKUP_AMMO_PRIMARY, 0);
-    push_pickup(t2w(22), castle_pick, PICKUP_AMMO_PRIMARY, 0);
-    push_pickup(t2w(20), castle_pick - 16, PICKUP_ARMOR, ARMOR_LIGHT);
-    push_pickup(t2w(28), castle_pick, PICKUP_WEAPON, WEAPON_PULSE_RIFLE);
+    /* Red castle interior — flag room + resupply HEALTH/AMMO/ARMOR. */
+    push_pickup(t2w(6),  floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(10), floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(16), floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(20), floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(18), floor_pick - 16, PICKUP_ARMOR, ARMOR_LIGHT);
     /* Blue castle mirror. */
-    push_pickup(t2w(W -  6), castle_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
-    push_pickup(t2w(W -  8), castle_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
-    push_pickup(t2w(W - 10), castle_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
-    push_pickup(t2w(W - 18), castle_pick, PICKUP_AMMO_PRIMARY, 0);
-    push_pickup(t2w(W - 20), castle_pick, PICKUP_AMMO_PRIMARY, 0);
-    push_pickup(t2w(W - 22), castle_pick, PICKUP_AMMO_PRIMARY, 0);
-    push_pickup(t2w(W - 20), castle_pick - 16, PICKUP_ARMOR, ARMOR_LIGHT);
-    push_pickup(t2w(W - 28), castle_pick, PICKUP_WEAPON, WEAPON_PULSE_RIFLE);
-    /* Castle slope-roof nooks: ARMOR reactive ×2. */
-    push_pickup(t2w(6),     t2w(H - 27) - 16, PICKUP_ARMOR, ARMOR_REACTIVE);
-    push_pickup(t2w(W - 6), t2w(H - 27) - 16, PICKUP_ARMOR, ARMOR_REACTIVE);
-    /* Plaza basin (lowest point of bowl): Mass Driver. */
+    push_pickup(t2w(W -  6), floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W - 10), floor_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W - 16), floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(W - 20), floor_pick, PICKUP_AMMO_PRIMARY, 0);
+    push_pickup(t2w(W - 18), floor_pick - 16, PICKUP_ARMOR, ARMOR_LIGHT);
+    /* Plaza floor — HEALTH small ×3 + JET_FUEL ×2 + power weapons. */
+    push_pickup(t2w(40), floor_pick, PICKUP_HEALTH, HEALTH_SMALL);
+    push_pickup(t2w(W / 2), floor_pick, PICKUP_HEALTH, HEALTH_LARGE);
+    push_pickup(t2w(W - 40), floor_pick, PICKUP_HEALTH, HEALTH_SMALL);
+    push_pickup(t2w(50), floor_pick, PICKUP_JET_FUEL, 0);
+    push_pickup(t2w(W - 50), floor_pick, PICKUP_JET_FUEL, 0);
+    push_pickup(t2w(45), floor_pick, PICKUP_WEAPON, WEAPON_AUTO_CANNON);
+    push_pickup(t2w(W - 45), floor_pick, PICKUP_WEAPON, WEAPON_AUTO_CANNON);
+    /* Plaza bowl basin: Mass Driver (the contested center prize). */
     push_pickup(t2w(W / 2), floor_pick + 64, PICKUP_WEAPON, WEAPON_MASS_DRIVER);
-    /* Plaza mid: Rail Cannon + HEALTH large + JET_FUEL ×2. */
-    push_pickup(t2w(W / 2),     bridge_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
-    push_pickup(t2w(W / 2 - 8), floor_pick,  PICKUP_HEALTH, HEALTH_LARGE);
-    push_pickup(t2w(W / 2 - 12),floor_pick,  PICKUP_JET_FUEL, 0);
-    push_pickup(t2w(W / 2 + 12),floor_pick,  PICKUP_JET_FUEL, 0);
-    /* Sky-bridge overlook alcoves: JET_FUEL ×2. */
-    push_pickup(t2w(77),  t2w(H - 62) - 16, PICKUP_JET_FUEL, 0);
-    push_pickup(t2w(122), t2w(H - 62) - 16, PICKUP_JET_FUEL, 0);
-    /* Upper sky bridge: HEALTH small ×2. */
-    push_pickup(t2w(95),  upper_pick, PICKUP_HEALTH, HEALTH_SMALL);
-    push_pickup(t2w(105), upper_pick, PICKUP_HEALTH, HEALTH_SMALL);
-    /* Tunnel choke alcoves: POWERUP godmode ×2 (high-stakes pickup). */
-    push_pickup(t2w(63),     alcove_pick, PICKUP_POWERUP, POWERUP_GODMODE);
-    push_pickup(t2w(W - 63), alcove_pick, PICKUP_POWERUP, POWERUP_GODMODE);
-    /* Rampart catwalks: HEALTH medium ×2. */
-    push_pickup(t2w(15),     rampart_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
-    push_pickup(t2w(W - 15), rampart_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    /* Sky bridge mid: Rail Cannon (jet/grapple-only). */
+    push_pickup(t2w(W / 2), bridge_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
+    push_pickup(t2w(70), bridge_pick, PICKUP_POWERUP, POWERUP_GODMODE);
+    push_pickup(t2w(W - 70), bridge_pick, PICKUP_POWERUP, POWERUP_BERSERK);
+    /* Rampart catwalks: HEALTH medium ×2 + AMMO_SECONDARY ×2. */
+    push_pickup(t2w(12),     rampart_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(W - 12), rampart_pick, PICKUP_HEALTH, HEALTH_MEDIUM);
+    push_pickup(t2w(18),     rampart_pick, PICKUP_AMMO_SECONDARY, 0);
+    push_pickup(t2w(W - 18), rampart_pick, PICKUP_AMMO_SECONDARY, 0);
 
     set_meta("Citadel",
-             "XL CTF. Castle keeps, plaza bowl, sky bridges.",
+             "Large CTF. Castle keeps, plaza bowl, sky bridge.",
              "citadel",
              (uint16_t)(1u << MATCH_MODE_CTF));
-
-    (void)rampart_pick; (void)bridge_pick; (void)upper_pick; (void)alcove_pick;
 }
 
 /* ===================================================================== */

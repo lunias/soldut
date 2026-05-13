@@ -1,5 +1,6 @@
 #include "lobby.h"
 
+#include "bot.h"
 #include "log.h"
 #include "maps.h"
 #include "match.h"
@@ -51,6 +52,99 @@ int lobby_add_slot(LobbyState *L, int peer_id, const char *name, bool is_host) {
         return i;
     }
     return -1;
+}
+
+int lobby_add_bot_slot(LobbyState *L, int bot_index, uint8_t tier) {
+    if (!L) return -1;
+    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+        if (L->slots[i].in_use) continue;
+        LobbySlot *s = &L->slots[i];
+        memset(s, 0, sizeof *s);
+        s->in_use   = true;
+        s->peer_id  = -1;
+        s->mech_id  = -1;
+        s->is_bot   = true;
+        s->bot_tier = tier;
+        s->team     = MATCH_TEAM_FFA;
+        s->ready    = true;        /* bots never block ready-up */
+        bot_default_loadout_for_tier(bot_index, (BotTier)tier, &s->loadout);
+        bot_name_for_index(bot_index, (BotTier)tier, s->name, (int)sizeof s->name);
+        L->slot_count++;
+        L->dirty = true;
+        return i;
+    }
+    return -1;
+}
+
+int lobby_bot_count(const LobbyState *L) {
+    if (!L) return 0;
+    int n = 0;
+    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+        if (L->slots[i].in_use && L->slots[i].is_bot) n++;
+    }
+    return n;
+}
+
+void lobby_clear_bot_slots(LobbyState *L) {
+    if (!L) return;
+    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+        if (L->slots[i].in_use && L->slots[i].is_bot) {
+            lobby_remove_slot(L, i);
+        }
+    }
+}
+
+void lobby_apply_bot_fill(LobbyState *L, int want, uint8_t tier,
+                          bool team_balance)
+{
+    if (!L) return;
+    if (want < 0) want = 0;
+    if (want > MAX_LOBBY_SLOTS) want = MAX_LOBBY_SLOTS;
+
+    /* Pass 1: count + correct tier on existing bot slots. */
+    int existing = 0;
+    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+        LobbySlot *s = &L->slots[i];
+        if (!s->in_use || !s->is_bot) continue;
+        if (s->bot_tier != tier) {
+            s->bot_tier = tier;
+            bot_default_loadout_for_tier(existing, (BotTier)tier, &s->loadout);
+            bot_name_for_index(existing, (BotTier)tier,
+                               s->name, (int)sizeof s->name);
+            L->dirty = true;
+        }
+        existing++;
+    }
+
+    /* Pass 2: remove excess from the highest indices so lower bot
+     * indices keep stable names. */
+    if (existing > want) {
+        int to_remove = existing - want;
+        for (int i = MAX_LOBBY_SLOTS - 1; i >= 0 && to_remove > 0; --i) {
+            LobbySlot *s = &L->slots[i];
+            if (!s->in_use || !s->is_bot) continue;
+            lobby_remove_slot(L, i);
+            to_remove--;
+        }
+    }
+
+    /* Pass 3: add missing bot slots. */
+    while (lobby_bot_count(L) < want) {
+        int next_idx = lobby_bot_count(L);
+        int slot = lobby_add_bot_slot(L, next_idx, tier);
+        if (slot < 0) break;
+        if (team_balance) {
+            int red = 0, blue = 0;
+            for (int j = 0; j < MAX_LOBBY_SLOTS; ++j) {
+                if (!L->slots[j].in_use) continue;
+                if (j == slot) continue;
+                if (L->slots[j].team == MATCH_TEAM_RED)  red++;
+                if (L->slots[j].team == MATCH_TEAM_BLUE) blue++;
+            }
+            L->slots[slot].team = (red <= blue) ? MATCH_TEAM_RED
+                                                : MATCH_TEAM_BLUE;
+        }
+    }
 }
 
 void lobby_remove_slot(LobbyState *L, int slot) {
@@ -420,7 +514,17 @@ static void encode_one_slot(const LobbySlot *s, uint8_t **p) {
     w_u8 (p, s->in_use ? 1u : 0u);
     w_u8 (p, (uint8_t)s->team);
     w_u8 (p, s->ready ? 1u : 0u);
-    w_u8 (p, s->is_host ? 1u : 0u);
+    /* Flags byte (formerly bare is_host bool):
+     *   bit 0 — is_host
+     *   bit 1 — is_bot          (M6+ bot fill)
+     *   bits 4-5 — bot_tier     (0..3, only meaningful when is_bot)
+     * Old clients that read this as 0/1 keep working: a bot slot
+     * has is_host=0 so bit 0 is 0; the higher bits are ignored. */
+    uint8_t hf = 0;
+    if (s->is_host) hf |= 1u;
+    if (s->is_bot)  hf |= 2u;
+    hf |= (uint8_t)((s->bot_tier & 3u) << 4);
+    w_u8 (p, hf);
     w_u8 (p, (uint8_t)s->loadout.chassis_id);
     w_u8 (p, (uint8_t)s->loadout.primary_id);
     w_u8 (p, (uint8_t)s->loadout.secondary_id);
@@ -441,7 +545,10 @@ static void decode_one_slot(LobbySlot *s, const uint8_t **p) {
     s->in_use            = r_u8(p) ? true : false;
     s->team              = (int)r_u8(p);
     s->ready             = r_u8(p) ? true : false;
-    s->is_host           = r_u8(p) ? true : false;
+    uint8_t hf = r_u8(p);
+    s->is_host  = (hf & 1u) != 0u;
+    s->is_bot   = (hf & 2u) != 0u;
+    s->bot_tier = (uint8_t)((hf >> 4) & 3u);
     s->loadout.chassis_id   = (int)r_u8(p);
     s->loadout.primary_id   = (int)r_u8(p);
     s->loadout.secondary_id = (int)r_u8(p);

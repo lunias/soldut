@@ -5,7 +5,50 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-12** (M6 — CROUCH + PRONE poses implemented and network-synced). User-reported "crouch and prone don't appear to be working" — verified pre-implementation: `BTN_CROUCH` (S/Down) and `BTN_PRONE` (X) existed in `input.h` and `SNAP_STATE_CROUCH` / `SNAP_STATE_PRONE` existed in `snapshot.h`, but NOTHING consumed them. No `ANIM_CROUCH` / `ANIM_PRONE` in `AnimId`; no anim_id transition in `mech_step_drive`; no pose rules in `pose_compute`. Implementation:
+Last updated: **2026-05-13** (M6 P04 — map balance + bot AI hardening). Bake-test-driven iteration pass: ran a 320-cell sweep (8 maps × 5 chassis × 8 primaries, 60 s/cell at Champion tier) to measure what each loadout actually does on each map. Pre-iteration most maps produced 0 fires/kills regardless of tier; post-iteration all 8 maps PASS at Champion (every map produces real combat) and the loadout matrix shows distinct top performers per map. Full report at `documents/m6/04-map-balance.md`. Changes:
+
+- **Bot AI (`src/bot.{c,h}`)**: rewrote floor-node sampling to scan world-space columns and detect both tile floors AND polygon-built floors (slopes, bowls, suspended platforms) — pre-fix tile-only sampler produced ≤7 nav nodes on most maps; post-fix every map has 60-220. `body_corridor_clear` dropped the foot ray that scraped every walkable surface (made every cross-floor WALK reach fail). `BOT_MAX_PATH_LEN` 16 → 32, A* expansion budget 2N → 4N (big maps now find continuous routes spawn-to-enemy in one plan). New opportunistic-fire fallback: bots fire on any LOS-clear enemy within ~1.6× awareness regardless of strategy goal — was the deciding fix for Concourse/Catwalk/Citadel-style maps with sparse central engagement. Adaptive fire cadence: weapons with `charge_sec > 0` (Rail Cannon, Microgun spin-up) hold BTN_FIRE continuously; others pulse with a 5-on-5-off duty cycle (Rail Cannon went 5 → 67 total matrix kills). Reposition node picker requires ≥1200 px from current pos so bots spread instead of pacing the spawn.
+
+- **Maps (`tools/cook_maps/cook_maps.c`)**: 4 of 8 maps got geometry edits to match the bot's pathing capabilities (and incidentally to make them more playable for lower-skill humans). **Concourse**: replaced full-height partition walls (cols 22/77, 52 tiles tall) with short 4-tile cover stubs on the floor — atrium body is now one continuous play space. **Catwalk**: brought BLUE base from the top-right elevated jet-only alcove down to the bottom-right floor; the suspended catwalks above are now the optional risk/reward layer (Rail Cannon + Berserk live up top, Mass Driver on the floor). **Citadel**: shrunk 200×100 → 160×80, castle interiors 30→20 tiles wide, east passage 2→4 tiles wide, removed tunnel ceiling + most sky bridges. **Crossfire**: shrunk 180×85 → 140×60 (the original 5760 px base-to-base distance made for 41 k fires / 0 kills). **Reactor**: pillar narrowed 8→4 tiles, shortened 2 tiles, added a 2-tile-tall viewport window — pillar is still the dominant feature but ground-to-ground LOS isn't fully blocked.
+
+- **Per-mech bake instrumentation (`tools/bake/run_bake.c`)**: per-mech TSV output at `build/bake/<map>.per_mech.tsv` (kills/deaths/fires/pickups/distance_px/alive_s/longest_streak), console summary table after each run. New CLI flags `--chassis`, `--primary`, `--secondary` let a sweep pin all 8 bots to one loadout. New `tools/bake/run_matrix.sh` (8 maps × 3 tiers smoke) and `tools/bake/run_loadout_matrix.sh` (320-cell sweep with per-chassis / per-primary / per-map aggregates). Matrix outputs land under `build/bake/loadout/<tag>/matrix.tsv` (`.gitignore`-d).
+
+iter7 measured numbers — sum across 40 (chassis × primary) cells × 60 s × Champion tier per map:
+```
+ map         kills  fires   pickups   notes
+ ─────────────────────────────────────────────────────────────
+ Slipstream    86   25816    108      vertical caves, busiest map
+ Citadel       83   24312    197      large CTF; baseline-chassis dominates
+ Aurora        59   17978    168      open hills, ranged precision
+ Catwalk       44    3743     78      vertical playscape, sustain wins
+ Concourse     43   16662    237      atrium, AOE rewarded
+ Foundry       39    7091    207      open ground, sustained fire
+ Crossfire     30   34192    218      mirror CTF, AOE clears carriers
+ Reactor       17    2792    151      pillar deliberately tight (design)
+
+ chassis     kills  notes
+ ─────────────────────────────────────────────────────────────
+ Engineer     87    AOE secondary + repair pack survival edge
+ Scout        85    speed wins first contact + pickup races
+ Trooper      82    consistent across maps; the "Citadel chassis"
+ Sniper       79    precision but fragile
+ Heavy        68    slow; out-paced for pickups
+
+ primary           kills  fires-per-kill  notes
+ ─────────────────────────────────────────────────────────────
+ Mass Driver        76        27         AOE rocket; top of matrix
+ Rail Cannon        67        32         charge-hold fix made this viable
+ Plasma Cannon      62       102         AOE plasma orb; mid-range punisher
+ Auto-Cannon        51       246         single-shot rifle; everywhere weapon
+ Plasma SMG         47       457         sustained-fire
+ Microgun           46       616         spin-up sustained
+ Pulse Rifle        42       270         baseline
+ Riot Cannon        10      4833         6-pellet spread; bots can't aim cone
+```
+
+Open balance follow-up: Mass Driver is the matrix's dominant weapon (76 kills, 27 fires-per-kill). Lever options: `fire_rate_sec` 0.7 → 1.0 OR AOE radius 96 → 72 px. Real-player playtest signal is required before tuning. Logged in the M6 P04 report's "follow-ups" section.
+
+Previously: **2026-05-12** (M6 — CROUCH + PRONE poses implemented and network-synced). User-reported "crouch and prone don't appear to be working" — verified pre-implementation: `BTN_CROUCH` (S/Down) and `BTN_PRONE` (X) existed in `input.h` and `SNAP_STATE_CROUCH` / `SNAP_STATE_PRONE` existed in `snapshot.h`, but NOTHING consumed them. No `ANIM_CROUCH` / `ANIM_PRONE` in `AnimId`; no anim_id transition in `mech_step_drive`; no pose rules in `pose_compute`. Implementation:
   - `mech.h`: added `ANIM_CROUCH`, `ANIM_PRONE` to `AnimId`.
   - `mech_step_drive`: priority gate JET > FALL > PRONE > CROUCH > RUN > STAND. Buttons land on their anim states when held.
   - `mech_post_physics_anchor`: for CROUCH, `pelvis_y_target = foot_y - chain * 0.55` so the pelvis sits at half-height with feet still planted. Allows downward anchor in addition to upward (STAND/RUN's "only pull up against gravity" doesn't apply when the player WANTS the pelvis lower). PRONE skips the anchor entirely — its rotated leg pose puts feet at `pelvis.y ± 8` which would make `foot_y_avg = pelvis.y` and the anchor would chase itself downward; gravity + tile collision place the body on the ground naturally.

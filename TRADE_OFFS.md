@@ -13,7 +13,16 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-12** (M6 P02 — jetpack propulsion FX).
+Last updated: **2026-05-13** (M6 P04 — map balance pass + bot AI
+hardening). **Added** four new entries: "M5 map geometry deviates
+from the original `m5/07-maps.md` design intent (M6 P04)",
+"Mass Driver is matrix-dominant; not retuned this pass (M6 P04)",
+"Bot opportunistic-fire scan is 1.6× awareness, magic constant
+(M6 P04)", and "Riot Cannon is bot-hostile (M6 P04)". No entries
+deleted; the bake-test-verdict-is-informational entry from M5 P18
+stays relevant.
+
+Previously: **2026-05-12** (M6 P02 — jetpack propulsion FX).
 **Added** three new entries under "Jet propulsion FX (M6 P02)":
 "Scorch decals are permanent for the round (no per-decal fade)",
 "Jet exhaust is client-local (no per-particle wire data)", and
@@ -2057,6 +2066,119 @@ WAN polish. Net effect on the trade-off ledger:
   regression. Wiring it into CI without that is just running it for
   show.
 - **Revisit when** — `headless_sim` gets assertions.
+
+---
+
+## Map balance + bot AI (M6 P04)
+
+### M5 map geometry deviates from `documents/m5/07-maps.md` for 4 of 8 maps
+
+- **What we did** — During the M6 P04 bake-test pass we edited
+  `tools/cook_maps/cook_maps.c` for Concourse, Catwalk, Citadel, and
+  Crossfire. The M5 doc still describes the **original design
+  intent** (partition-wall wings on Concourse, no-ground-route
+  vertical TDM on Catwalk, 200×100 castle dungeons on Citadel,
+  180×85 mirror-CTF arena on Crossfire). The shipped geometry is
+  smaller / more open / more bot-traversable. Cross-link in
+  `documents/m5/07-maps.md` points to `documents/m6/04-map-balance.md`
+  for the post-iteration state.
+- **Why** — The original layouts produced 0 kills / 0 fires under
+  bake-test at every tier (bot-AI couldn't traverse them; the same
+  geometry would feel rough to lower-skill humans). Updating the
+  M5 doc would lose the design history; updating only the M6 doc
+  preserves both the intent and the iteration record.
+- **Revisit when** —
+  - Bot AI gains enough strength (or the M6+ trained-policy tier
+    ships) that the original geometry becomes viable, at which
+    point we can revert one or more maps and update both docs.
+  - Real-player playtest reports the post-iteration geometry feels
+    too forgiving / less interesting than the original. Citadel is
+    the most likely candidate — the 200×100 size had real "this
+    is the XL map" character that 160×80 trades for accessibility.
+  - A designer wants to rework one of the four maps through the
+    editor instead of `cook_maps.c`. Either re-cook a 1:1 replica
+    of the cook_maps output and edit from there, OR re-cook from
+    the M5 spec and re-iterate.
+
+### Mass Driver is matrix-dominant; not retuned this pass
+
+- **What we did** — The iter7 loadout matrix (320 cells × 60 s ×
+  Champion) shows Mass Driver as the top weapon by kills (76,
+  next-closest is Rail Cannon at 67) and the top weapon by
+  efficiency (27 fires per kill, vs. 246 for Auto-Cannon and 4833
+  for Riot Cannon). It wins outright on Slipstream, Concourse,
+  Crossfire and ties on Catwalk. We left the weapon stats unchanged.
+- **Why** — One bake run with one seed at one tier is a *signal*,
+  not a verdict. Tuning weapon balance from bot-vs-bot data risks
+  optimizing for behaviors that don't transfer to human play (bots
+  cluster at pickups, which is exactly the situation Mass Driver's
+  AOE punishes — humans space out). Real-player playtest data needs
+  to confirm before we touch `g_weapons[].fire_rate_sec` or
+  `aoe_radius`. The lever options when we DO tune: `fire_rate_sec`
+  0.7 → 1.0, OR `aoe_radius` 96 → 72 px, OR both at half magnitude.
+- **Revisit when** —
+  - Real-player playtest reports "Mass Driver feels overpowered."
+  - A second bake-iteration with a higher bot tier (M6+ trained
+    policy) re-confirms the dominance.
+  - We want the matrix to have *no* clear top weapon — the
+    "everything is equally viable" balance pillar from
+    [`documents/00-vision.md`](documents/00-vision.md).
+
+### Bot opportunistic-fire scan radius is `1.6 × awareness`, a magic constant
+
+- **What we did** — `src/bot.c::bot_step` post-tactic adds an
+  opportunistic-fire check: if the strategy goal didn't already
+  set `wants.want_fire`, scan for the nearest LOS-clear enemy
+  within `1.6 × mind->pers.awareness_radius_px` (with a floor of
+  1200 px) and aim+fire on it. Without this fallback the maps
+  with sparse central engagement (Concourse, Catwalk, Citadel)
+  produced 0 fires regardless of tier.
+- **Why** — The full strategy/tactic pipeline IS the answer; the
+  opportunistic-fire fallback is a backstop for cases where the
+  strategy correctly chose REPOSITION / PURSUE_PICKUP but an enemy
+  happens to walk into LOS during the move. A real player fires
+  on visible enemies regardless of their current "plan"; bots
+  should too. The 1.6× multiplier + 1200 px floor are tuned to the
+  current map sizes — at 160×80 (Citadel) the floor barely matters;
+  at 100×40 (Foundry) the 1.6× factor extends Veteran's 900 px
+  awareness to 1440 px which still doesn't reach across the map.
+- **Revisit when** —
+  - Map sizes change significantly (smaller → reduce constants;
+    larger → consider per-tier scaling instead of fixed multiplier).
+  - The strategy scorer learns to keep score_engage > 0 even when
+    LOS is briefly blocked — that would make the fallback
+    redundant.
+  - A balance pass on tier `awareness_radius_px` values changes the
+    relative ratios; the fallback should track tier intent.
+
+### Riot Cannon is bot-hostile (matrix kills: 10 vs. 76 for Mass Driver)
+
+- **What we did** — Across the 320-cell loadout matrix, Riot Cannon
+  posted 10 kills against 48 329 fires (4 833 pellets per kill,
+  10× worse than the next-worst weapon). The bot fires it whenever
+  the strategy goal allows; the pellets just don't connect.
+- **Why** — Riot Cannon fires 6 pellets in a `spread_cone_rad`
+  cone. The bot's aim direction is a single point per fire; the
+  cone disperses pellets in 6 directions of which 1 is the
+  bot's intended aim. At mid-to-long range the pellets miss in
+  the other 5 directions. The fix is to either (a) gate Riot
+  Cannon engagement to `weapon.range_px` distances only (close-
+  range), or (b) have the bot's aim model dither the per-pellet
+  aim points so multiple pellets converge on the target. Both
+  changes touch the bot's strategy/tactic layer; both are real
+  work. We elected to ship the imbalance as findings rather than
+  fix it this pass.
+- **Revisit when** —
+  - The bot AI gets a per-weapon engagement-range gate (the obvious
+    fix lives at the strategy layer: `score_engage` returns 0 when
+    the enemy is outside the weapon's effective range).
+  - We add a "spread weapons aim mode" to the motor — instead of
+    aiming AT the chest, aim a small cone width offset from chest
+    so the cone overlaps the target volume.
+  - A second balance pass on Riot Cannon's per-pellet damage
+    compensates: bumping damage to ~30 per pellet would let the
+    handful of connecting pellets matter even with the bot's
+    spray-and-pray aim.
 
 ---
 

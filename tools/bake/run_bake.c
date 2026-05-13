@@ -28,6 +28,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "../../src/arena.h"
+#include "../../src/bot.h"
 #include "../../src/ctf.h"
 #include "../../src/game.h"
 #include "../../src/input.h"
@@ -49,6 +50,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>            /* strcasecmp */
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -72,11 +74,22 @@ typedef struct {
     int       mech_id;          /* index into world.mechs */
     int       team;             /* MATCH_TEAM_RED / _BLUE / _FFA */
     int       chassis;          /* CHASSIS_* */
-    float     target_x;         /* current wander destination, world px */
-    float     target_y;
-    int       reselect_in_ticks;
-    int       stuck_ticks;
-    float     last_x;           /* pelvis x last tick, for stuck detection */
+    int       primary;          /* WeaponId */
+    int       secondary;
+    int       armor;
+    int       jetpack;
+    /* Per-mech stats. */
+    int       kills_made;       /* this mech was killer */
+    int       deaths;            /* this mech was victim */
+    int       fires_count;       /* firefeed entries with this shooter */
+    int       pickups_grabbed;
+    float     distance_px;       /* sum of per-tick |dx| + |dy| while alive */
+    int       ticks_alive;
+    int       longest_streak;
+    int       current_streak;
+    /* Per-tick scratch for distance + death-edge detection. */
+    float     prev_x, prev_y;
+    bool      prev_alive;
 } Bot;
 
 typedef struct {
@@ -166,133 +179,68 @@ static Vec2 mech_pelvis_pos(const World *w, int mid) {
     return (Vec2){ w->particles.pos_x[p], w->particles.pos_y[p] };
 }
 
-/* Simple LOS check via the polygon broadphase. We sample the line
- * between A and B at 8 points and ask the existing tile-grid lookup
- * whether each sample is inside a solid tile. Polygon-solid samples
- * are missed but the heatmap doesn't need perfection — it's a wander
- * heuristic, not a hit oracle. */
-static bool world_los(const World *w, Vec2 a, Vec2 b) {
-    int steps = 8;
-    float dx = (b.x - a.x) / (float)steps;
-    float dy = (b.y - a.y) / (float)steps;
-    for (int i = 1; i < steps; ++i) {
-        float sx = a.x + dx * (float)i;
-        float sy = a.y + dy * (float)i;
-        int tx = (int)(sx / w->level.tile_size);
-        int ty = (int)(sy / w->level.tile_size);
-        if (tx < 0 || tx >= w->level.width || ty < 0 || ty >= w->level.height) continue;
-        const LvlTile *t = &w->level.tiles[ty * w->level.width + tx];
-        if (t->flags & TILE_F_SOLID) return false;
+/* Bot AI moved to src/bot.{c,h} — bake delegates to bot_step. */
+
+/* ---- Per-mech accounting -------------------------------------------- */
+
+static Bot *bot_for_mech(int mech_id) {
+    for (int i = 0; i < g_stats.bot_count; ++i) {
+        if (g_stats.bots[i].mech_id == mech_id) return &g_stats.bots[i];
     }
-    return true;
+    return NULL;
 }
 
-static int find_nearest_enemy(const World *w, int mid, float max_range) {
-    const Mech *me = &w->mechs[mid];
-    if (!me->alive) return -1;
-    Vec2 mp = mech_pelvis_pos(w, mid);
-    int best = -1;
-    float best_d2 = max_range * max_range;
-    for (int i = 0; i < w->mech_count; ++i) {
-        if (i == mid) continue;
-        const Mech *o = &w->mechs[i];
-        if (!o->alive) continue;
-        if (o->is_dummy) continue;
-        if (o->team == me->team && o->team != MATCH_TEAM_FFA) continue;
-        Vec2 op = mech_pelvis_pos(w, i);
-        float dx = op.x - mp.x, dy = op.y - mp.y;
-        float d2 = dx*dx + dy*dy;
-        if (d2 < best_d2 && world_los(w, mp, op)) {
-            best_d2 = d2;
-            best = i;
-        }
-    }
-    return best;
-}
-
-/* Pick a new wander target. Strategy: pick a random spawn point (or
- * map_spawn_point if FFA had a sensible result). Random spawn keeps
- * bots distributed across the map. */
-static void bot_pick_target(Bot *bot, const World *w, uint32_t *seed) {
-    int n = w->level.spawn_count;
-    if (n <= 0) {
-        bot->target_x = (float)w->level.width  * w->level.tile_size * 0.5f;
-        bot->target_y = (float)w->level.height * w->level.tile_size * 0.5f;
-    } else {
-        int s = (int)(rng_unit(seed) * (float)n);
-        if (s < 0) s = 0; else if (s >= n) s = n - 1;
-        bot->target_x = (float)w->level.spawns[s].pos_x;
-        bot->target_y = (float)w->level.spawns[s].pos_y;
-    }
-    bot->reselect_in_ticks = (int)frangef(seed, 6.0f * TICK_HZ, 12.0f * TICK_HZ);
-    bot->stuck_ticks = 0;
-}
-
-/* Drive bot inputs each tick. */
-static void bot_tick(Bot *bot, World *w, uint32_t *seed) {
-    if (bot->mech_id < 0 || bot->mech_id >= w->mech_count) return;
-    Mech *m = &w->mechs[bot->mech_id];
-    if (!m->alive) {
-        m->latched_input = (ClientInput){ .dt = TICK_DT };
-        return;
-    }
-    Vec2 mp = mech_pelvis_pos(w, bot->mech_id);
-
-    /* Stuck detection. */
-    float dx_moved = fabsf(mp.x - bot->last_x);
-    if (dx_moved < 0.5f) bot->stuck_ticks++; else bot->stuck_ticks = 0;
-    bot->last_x = mp.x;
-
-    if (bot->reselect_in_ticks <= 0 || bot->stuck_ticks > TICK_HZ) {
-        bot_pick_target(bot, w, seed);
-    }
-    bot->reselect_in_ticks--;
-
-    int enemy = find_nearest_enemy(w, bot->mech_id, 800.0f);
-    ClientInput in = {0};
-    in.dt = TICK_DT;
-    in.seq = (uint16_t)(w->tick & 0xffffu);
-
-    if (enemy >= 0) {
-        /* Stand and shoot. */
-        Vec2 ep = mech_pelvis_pos(w, enemy);
-        in.aim_x = ep.x;
-        in.aim_y = ep.y - 24.0f;             /* aim at chest, not pelvis */
-        in.buttons = BTN_FIRE;
-        /* Occasional jet pulse to climb if enemy is above. */
-        if (ep.y < mp.y - 64.0f && (w->tick % 8) < 3) in.buttons |= BTN_JET;
-        /* Pulse to avoid being pinned by the shared fire_cooldown — re-edge
-         * the press every 12 ticks since some weapons (Sidearm) edge-trigger. */
-        if ((w->tick % 12) < 6) in.buttons &= ~BTN_FIRE;
-        m->aim_world = (Vec2){ in.aim_x, in.aim_y };
-    } else {
-        /* Wander toward target_x. */
-        float dx = bot->target_x - mp.x;
-        float dy = bot->target_y - mp.y;
-        if (fabsf(dx) > 24.0f) {
-            in.buttons |= (dx > 0) ? BTN_RIGHT : BTN_LEFT;
+/* Walk every alive bot once per tick: integrate distance from
+ * last-known pelvis, increment ticks_alive, detect death edges. */
+static void update_per_bot_tick(const World *w) {
+    for (int i = 0; i < g_stats.bot_count; ++i) {
+        Bot *b = &g_stats.bots[i];
+        if (b->mech_id < 0 || b->mech_id >= w->mech_count) continue;
+        const Mech *m = &w->mechs[b->mech_id];
+        if (m->alive) {
+            Vec2 p = mech_pelvis_pos(w, b->mech_id);
+            if (b->prev_alive) {
+                b->distance_px += fabsf(p.x - b->prev_x) + fabsf(p.y - b->prev_y);
+            }
+            b->prev_x = p.x; b->prev_y = p.y;
+            b->ticks_alive++;
+            b->prev_alive = true;
         } else {
-            /* Arrived — pick a fresh target. */
-            bot->reselect_in_ticks = 0;
+            if (b->prev_alive) {
+                /* Death edge — counted in killfeed drain so we don't
+                 * double-count here. */
+            }
+            b->prev_alive = false;
         }
-        /* Climb if the target is above. */
-        if (dy < -64.0f) {
-            if ((w->tick % 6) < 3) in.buttons |= BTN_JET;
-            else                    in.buttons |= BTN_JUMP;
-        }
-        /* Stuck → jet up and over. The cover walls on Foundry/Crossfire
-         * are 5 tiles tall (160 px) — a jump alone won't clear them.
-         * Bias the burst toward jet for ~1 s after we start unsticking. */
-        if (bot->stuck_ticks > TICK_HZ / 2) {
-            if ((w->tick % 4) < 3) in.buttons |= BTN_JET;
-            if ((w->tick % 30) == 0) in.buttons |= BTN_JUMP;
-        }
-        in.aim_x = bot->target_x;
-        in.aim_y = bot->target_y;
-        m->aim_world = (Vec2){ in.aim_x, in.aim_y };
     }
+}
 
-    m->latched_input = in;
+/* Drain firefeed for per-shooter counts. The firefeed has shooter_mech_id;
+ * we credit each entry to the matching bot. */
+static void drain_firefeed_per_bot(const World *w) {
+    for (int i = 0; i < w->firefeed_count; ++i) {
+        int sid = w->firefeed[i].shooter_mech_id;
+        Bot *b = bot_for_mech(sid);
+        if (b) b->fires_count++;
+    }
+}
+
+/* For each AVAILABLE→COOLDOWN pickup transition this tick, attribute
+ * the grab to the closest alive bot within 64 px (the actual touch
+ * radius is 24 px; we widen to handle the one-tick latency). */
+static void attribute_pickup_to_nearest(const World *w, Vec2 spawner_pos) {
+    int best = -1;
+    float best_d2 = 64.0f * 64.0f;
+    for (int i = 0; i < g_stats.bot_count; ++i) {
+        Bot *b = &g_stats.bots[i];
+        if (b->mech_id < 0 || b->mech_id >= w->mech_count) continue;
+        if (!w->mechs[b->mech_id].alive) continue;
+        Vec2 p = mech_pelvis_pos(w, b->mech_id);
+        float dx = p.x - spawner_pos.x, dy = p.y - spawner_pos.y;
+        float d2 = dx*dx + dy*dy;
+        if (d2 < best_d2) { best_d2 = d2; best = i; }
+    }
+    if (best >= 0) g_stats.bots[best].pickups_grabbed++;
 }
 
 /* ---- Stats recording ------------------------------------------------ */
@@ -359,6 +307,25 @@ static void drain_killfeed(const World *w) {
         else if (victim->team == MATCH_TEAM_BLUE) g_stats.total_kills_blue++;
         else                                       g_stats.total_kills_ffa++;
 
+        /* Per-mech attribution: credit killer (if any) and debit victim.
+         * Skip suicides + environmental deaths (killer == victim or -1).
+         * Track current_streak/longest_streak per killer; reset on death. */
+        Bot *killer_bot = (e->killer_mech_id >= 0 &&
+                           e->killer_mech_id != e->victim_mech_id)
+                          ? bot_for_mech(e->killer_mech_id) : NULL;
+        if (killer_bot) {
+            killer_bot->kills_made++;
+            killer_bot->current_streak++;
+            if (killer_bot->current_streak > killer_bot->longest_streak) {
+                killer_bot->longest_streak = killer_bot->current_streak;
+            }
+        }
+        Bot *victim_bot = bot_for_mech(e->victim_mech_id);
+        if (victim_bot) {
+            victim_bot->deaths++;
+            victim_bot->current_streak = 0;
+        }
+
         if (g_stats.kill_count < MAX_KILL_EVENTS) {
             g_stats.kills[g_stats.kill_count++] = (KillEvent){
                 .tick = w->tick,
@@ -391,6 +358,7 @@ static void drain_pickup_transitions(const World *w) {
                     .x = s->pos.x, .y = s->pos.y,
                 };
             }
+            attribute_pickup_to_nearest(w, s->pos);
         }
         g_stats.spawner_prev_state[i] = s->state;
     }
@@ -425,6 +393,52 @@ static void drain_flag_transitions(const World *w) {
 
 static void ensure_dir(const char *path) {
     (void)mkdir(path, 0755);
+}
+
+static void write_per_mech_tsv(const char *short_name) {
+    char path[256];
+    snprintf(path, sizeof path, "build/bake/%s.per_mech.tsv", short_name);
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "mech_id\tteam\tchassis\tprimary\tsecondary\tarmor\tjetpack"
+               "\tkills\tdeaths\tfires\tpickups\talive_s\tdist_px\tlongest_streak\n");
+    for (int i = 0; i < g_stats.bot_count; ++i) {
+        const Bot *b = &g_stats.bots[i];
+        const char *cname = mech_chassis((ChassisId)b->chassis) ?
+                            mech_chassis((ChassisId)b->chassis)->name : "?";
+        const char *pname = weapon_def(b->primary)   ? weapon_def(b->primary)->name   : "?";
+        const char *sname = weapon_def(b->secondary) ? weapon_def(b->secondary)->name : "?";
+        const char *aname = armor_def(b->armor)      ? armor_def(b->armor)->name      : "?";
+        const char *jname = jetpack_def(b->jetpack)  ? jetpack_def(b->jetpack)->name  : "?";
+        fprintf(f, "%d\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%.1f\t%.0f\t%d\n",
+                b->mech_id, b->team, cname, pname, sname, aname, jname,
+                b->kills_made, b->deaths, b->fires_count, b->pickups_grabbed,
+                (float)b->ticks_alive / (float)TICK_HZ, b->distance_px,
+                b->longest_streak);
+    }
+    fclose(f);
+}
+
+static void print_per_mech_summary(const char *short_name) {
+    fprintf(stdout, "\n=== per-mech stats for %s ===\n", short_name);
+    fprintf(stdout, "%-3s %-4s %-9s %-14s %-14s %-5s %-5s %-5s %-5s %-7s %-6s\n",
+            "ID", "TEAM", "CHASSIS", "PRIMARY", "SECONDARY",
+            "K", "D", "FIRE", "PICK", "ALIVE", "STREAK");
+    for (int i = 0; i < g_stats.bot_count; ++i) {
+        const Bot *b = &g_stats.bots[i];
+        const char *cname = mech_chassis((ChassisId)b->chassis) ?
+                            mech_chassis((ChassisId)b->chassis)->name : "?";
+        const char *pname = weapon_short_name(b->primary);
+        const char *sname = weapon_short_name(b->secondary);
+        fprintf(stdout, "%-3d %-4s %-9s %-14s %-14s %5d %5d %5d %5d %5.1fs %6d\n",
+                b->mech_id,
+                b->team == MATCH_TEAM_RED ? "RED" :
+                b->team == MATCH_TEAM_BLUE ? "BLUE" : "FFA",
+                cname, pname ? pname : "?", sname ? sname : "?",
+                b->kills_made, b->deaths, b->fires_count, b->pickups_grabbed,
+                (float)b->ticks_alive / (float)TICK_HZ,
+                b->longest_streak);
+    }
 }
 
 static void write_csvs(const char *short_name) {
@@ -626,13 +640,49 @@ static MatchModeId pick_mode_from_mask(uint16_t mode_mask) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: bake <short_name> [--bots N] [--duration_s S] [--seed S]\n");
+        fprintf(stderr,
+                "usage: bake <short_name> [--bots N] [--duration_s S] [--seed S]\n"
+                "       [--tier TIER] [--chassis CHASSIS] [--primary WEAPON]\n"
+                "  TIER: recruit | veteran | elite | champion (default: veteran)\n"
+                "  CHASSIS: trooper | scout | heavy | sniper | engineer\n"
+                "           (default: mixed by bot index)\n"
+                "  WEAPON: short name (default: mixed by bot index)\n");
         return 1;
     }
     const char *short_name = argv[1];
     int bots_requested = 16;
     int duration_s = 60;
     uint32_t seed = 0xC0FFEEu;
+    BotTier tier = BOT_TIER_VETERAN;
+    int chassis_override   = -1;
+    int primary_override   = -1;
+    int secondary_override = -1;
+    /* Resolve weapon name. Accepts full names ("Pulse Rifle") and
+     * short names ("pulse"). Returns -1 on miss. Snapshots the input
+     * into a local because we expand it with `argv[++i]` and we MUST
+     * NOT re-evaluate the increment per use. */
+    #define RESOLVE_WEAPON(out, _q)                                          \
+        do {                                                                 \
+            const char *_qs = (_q);                                          \
+            int _k_found = -1;                                               \
+            if (_qs) {                                                       \
+                for (int _k = 0; _k < WEAPON_COUNT; ++_k) {                  \
+                    const Weapon *_def = weapon_def(_k);                     \
+                    if (_def && _def->name && !strcasecmp(_def->name, _qs)) {\
+                        _k_found = _k; break;                                \
+                    }                                                        \
+                }                                                            \
+                if (_k_found < 0) {                                          \
+                    for (int _k = 0; _k < WEAPON_COUNT; ++_k) {              \
+                        const char *_sn = weapon_short_name(_k);             \
+                        if (_sn && !strcasecmp(_sn, _qs)) {                  \
+                            _k_found = _k; break;                            \
+                        }                                                    \
+                    }                                                        \
+                }                                                            \
+            }                                                                \
+            (out) = _k_found;                                                \
+        } while (0)
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--bots") && i + 1 < argc) {
             bots_requested = atoi(argv[++i]);
@@ -640,8 +690,17 @@ int main(int argc, char **argv) {
             duration_s = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--seed") && i + 1 < argc) {
             seed = (uint32_t)strtoul(argv[++i], NULL, 0);
+        } else if (!strcmp(argv[i], "--tier") && i + 1 < argc) {
+            tier = bot_tier_from_name(argv[++i]);
+        } else if (!strcmp(argv[i], "--chassis") && i + 1 < argc) {
+            chassis_override = (int)chassis_id_from_name(argv[++i]);
+        } else if (!strcmp(argv[i], "--primary") && i + 1 < argc) {
+            RESOLVE_WEAPON(primary_override, argv[++i]);
+        } else if (!strcmp(argv[i], "--secondary") && i + 1 < argc) {
+            RESOLVE_WEAPON(secondary_override, argv[++i]);
         }
     }
+    #undef RESOLVE_WEAPON
     if (bots_requested < 2)              bots_requested = 2;
     if (bots_requested > BAKE_BOTS_MAX)  bots_requested = BAKE_BOTS_MAX;
 
@@ -695,47 +754,47 @@ int main(int argc, char **argv) {
     /* Spawn bots. Alternate teams for TDM/CTF; all on team RED (=FFA) for
      * FFA per the match.h convention (MATCH_TEAM_FFA aliases _RED). */
     g_stats.bot_count = 0;
-    uint32_t rng = seed;
+    BotSystem bot_sys;
+    bot_system_init(&bot_sys);
+    bot_sys.seed = (uint64_t)seed * 0x9E3779B97F4A7C15uLL;
+    bot_system_build_nav(&bot_sys, L, &g.level_arena);
     for (int i = 0; i < bots_requested; ++i) {
         int team;
         if (mode == MATCH_MODE_FFA) team = MATCH_TEAM_FFA;
         else                         team = (i & 1) ? MATCH_TEAM_BLUE : MATCH_TEAM_RED;
 
-        ChassisId chassis = (ChassisId)(i % CHASSIS_COUNT);
-
         Vec2 spawn = map_spawn_point(mid_fallback, L, i, team, mode);
 
-        MechLoadout lo = mech_default_loadout();
-        lo.chassis_id  = chassis;
-        /* Weapon variety: round-robin primaries; secondary stays sidearm. */
-        const int primaries[] = {
-            WEAPON_PULSE_RIFLE, WEAPON_PLASMA_SMG, WEAPON_AUTO_CANNON,
-            WEAPON_RIOT_CANNON, WEAPON_PLASMA_CANNON,
-        };
-        lo.primary_id   = primaries[i % (int)(sizeof primaries / sizeof primaries[0])];
-        lo.secondary_id = (i % 4 == 0) ? WEAPON_FRAG_GRENADES : WEAPON_SIDEARM;
-        lo.armor_id     = ARMOR_LIGHT;
-        lo.jetpack_id   = JET_STANDARD;
+        MechLoadout lo;
+        bot_default_loadout_for_tier(i, tier, &lo);
+        if (chassis_override   >= 0) lo.chassis_id   = chassis_override;
+        if (primary_override   >= 0) lo.primary_id   = primary_override;
+        if (secondary_override >= 0) lo.secondary_id = secondary_override;
 
         int mech_id = mech_create_loadout(&g.world, lo, spawn, team, false);
         if (mech_id < 0) break;          /* pool full */
         Bot *bot = &g_stats.bots[g_stats.bot_count++];
         bot->mech_id    = mech_id;
         bot->team       = team;
-        bot->chassis    = chassis;
-        bot->target_x   = spawn.x;
-        bot->target_y   = spawn.y;
-        bot->reselect_in_ticks = (int)frangef(&rng, 1.0f * TICK_HZ, 3.0f * TICK_HZ);
-        bot->stuck_ticks = 0;
-        bot->last_x     = spawn.x;
+        bot->chassis    = lo.chassis_id;
+        bot->primary    = lo.primary_id;
+        bot->secondary  = lo.secondary_id;
+        bot->armor      = lo.armor_id;
+        bot->jetpack    = lo.jetpack_id;
+        bot->prev_alive = true;
+        bot->prev_x     = spawn.x;
+        bot->prev_y     = spawn.y;
+        bot_attach(&bot_sys, mech_id, tier, (uint64_t)i * 0xBF58476D1CE4E5B9uLL);
     }
 
     fprintf(stdout,
-            "bake[%s]: %d bots, %d s, mode=%s, map=%dx%d, %d spawns, "
-            "%d pickups, %d polys, %d flags\n",
-            short_name, g_stats.bot_count, duration_s,
+            "bake[%s]: %d bots (tier=%s), %d s, mode=%s, map=%dx%d, %d spawns, "
+            "%d pickups, %d polys, %d flags, %d nav nodes\n",
+            short_name, g_stats.bot_count, bot_tier_name(tier),
+            duration_s,
             match_mode_name(mode), L->width, L->height,
-            L->spawn_count, L->pickup_count, L->poly_count, L->flag_count);
+            L->spawn_count, L->pickup_count, L->poly_count, L->flag_count,
+            bot_nav_node_count(&bot_sys));
 
     /* Seed per-spawner state so the first tick's delta detects nothing. */
     for (int i = 0; i < g.world.pickups.count; ++i) {
@@ -748,10 +807,8 @@ int main(int argc, char **argv) {
     /* Main bake loop. */
     int total_ticks = duration_s * TICK_HZ;
     for (int t = 0; t < total_ticks; ++t) {
-        /* Drive bot inputs. */
-        for (int b = 0; b < g_stats.bot_count; ++b) {
-            bot_tick(&g_stats.bots[b], &g.world, &rng);
-        }
+        /* Drive bot inputs via the layered AI in src/bot.c. */
+        bot_step(&bot_sys, &g.world, &g, TICK_DT);
         /* Step the world. */
         simulate_step(&g.world, TICK_DT);
         if (mode == MATCH_MODE_CTF) {
@@ -760,8 +817,10 @@ int main(int argc, char **argv) {
         /* Drain stats. */
         record_traffic(&g.world);
         drain_killfeed(&g.world);
+        drain_firefeed_per_bot(&g.world);
         drain_pickup_transitions(&g.world);
         drain_flag_transitions(&g.world);
+        update_per_bot_tick(&g.world);
 
         /* Drain feed buffers so they don't grow unboundedly (we already
          * captured what we needed). */
@@ -786,6 +845,7 @@ int main(int argc, char **argv) {
 
     /* Write outputs. */
     write_csvs(short_name);
+    write_per_mech_tsv(short_name);
     write_heatmap_png(short_name);
     Verdict v = compute_verdict(&g.world, short_name);
     write_summary(short_name, &g.world, &v, g_stats.bot_count, duration_s);
@@ -793,6 +853,11 @@ int main(int argc, char **argv) {
     fprintf(stdout, "bake[%s]: %s — %s\n",
             short_name, v.pass ? "PASS" : "FAIL", v.detail);
 
+    /* Compact per-mech summary on stdout (the TSV holds the full
+     * detail for tooling). */
+    print_per_mech_summary(short_name);
+
+    bot_system_destroy(&bot_sys);
     game_shutdown(&g);
     return v.pass ? 0 : 2;
 }

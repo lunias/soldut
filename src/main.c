@@ -119,12 +119,18 @@ typedef struct {
     /* M6 P03 — `--fullscreen` enables raylib FLAG_FULLSCREEN_MODE.
      * Pair with --window to force a specific monitor resolution. */
     bool        fullscreen;
+    /* Bot fill — `--bots N --bot-tier veteran`. -1 / -1 = leave the
+     * config values alone. */
+    int         bots_override;
+    int         bot_tier_override;
 } LaunchArgs;
 
 static void parse_args(int argc, char **argv, LaunchArgs *out) {
     memset(out, 0, sizeof *out);
     out->port = SOLDUT_DEFAULT_PORT;
     out->internal_h_override = -1;
+    out->bots_override       = -1;
+    out->bot_tier_override   = -1;
     snprintf(out->name, sizeof out->name, "player");
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--host") == 0) {
@@ -212,6 +218,15 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
         }
         else if (strcmp(argv[i], "--fullscreen") == 0) {
             out->fullscreen = true;
+        }
+        else if (strcmp(argv[i], "--bots") == 0 && i + 1 < argc) {
+            int n = atoi(argv[++i]);
+            if (n < 0) n = 0;
+            if (n > 31) n = 31;
+            out->bots_override = n;
+        }
+        else if (strcmp(argv[i], "--bot-tier") == 0 && i + 1 < argc) {
+            out->bot_tier_override = (int)bot_tier_from_name(argv[++i]);
         }
         /* M5 P04 — editor F5 test-play. Boots into an offline-solo round
          * on the supplied .lvl file. We force LAUNCH_HOST + skip_title;
@@ -621,6 +636,28 @@ static void start_round(Game *g) {
         g->lobby.dirty = true;
     }
 
+    /* Bot fill safety net — idempotent. Normally bootstrap_host /
+     * dedicated_run seeds the slots earlier so they're visible in the
+     * pre-round lobby; this call corrects the population if the host
+     * changed config.bots between rounds. */
+    {
+        int tier = g->config.bot_tier;
+        if (tier < 0) tier = 0;
+        if (tier > BOT_TIER_CHAMPION) tier = BOT_TIER_CHAMPION;
+        bool team_balance = (g->match.mode == MATCH_MODE_TDM ||
+                             g->match.mode == MATCH_MODE_CTF);
+        int human_slots = 0;
+        for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+            if (g->lobby.slots[i].in_use && !g->lobby.slots[i].is_bot) {
+                human_slots++;
+            }
+        }
+        int room = MAX_LOBBY_SLOTS - human_slots;
+        int want = g->config.bots;
+        if (want > room) want = room;
+        lobby_apply_bot_fill(&g->lobby, want, (uint8_t)tier, team_balance);
+    }
+
     /* Spawn mechs for every active slot. lobby_spawn_round_mechs sets
      * each slot's mech_id and reads slot.team to set mech.team; mark
      * the table dirty so the next net_poll iteration broadcasts the
@@ -633,6 +670,20 @@ static void start_round(Game *g) {
                             g->match.map_id, g->local_slot_id,
                             g->match.mode);
     g->lobby.dirty = true;
+
+    /* Build the bot nav graph for the just-loaded level + attach a
+     * BotMind to every is_bot slot's mech. Both are no-ops on a pure
+     * client (server-only state); on the authoritative side they're
+     * what makes bots actually drive their mechs. */
+    bot_system_reset_minds(&g->bots);
+    bot_system_build_nav(&g->bots, &g->world.level, &g->level_arena);
+    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+        LobbySlot *s = &g->lobby.slots[i];
+        if (!s->in_use || !s->is_bot) continue;
+        if (s->mech_id < 0)            continue;
+        bot_attach(&g->bots, s->mech_id, (BotTier)s->bot_tier,
+                   (uint64_t)i * 0xBF58476D1CE4E5B9uLL);
+    }
 
     /* P05 — populate spawner pool from the level's PICK records and
      * spawn any practice-dummy mechs. Server-side; clients call the
@@ -1085,6 +1136,20 @@ static bool bootstrap_host(Game *g, const LaunchArgs *args, bool offline) {
 
     apply_loadout_flags(g, args);
 
+    /* Seed bot slots immediately so the host sees them in the
+     * lobby (single-player + listen-host paths). The
+     * dedicated-thread path does the same after match_init in
+     * dedicated_run; both produce identical lobby state. */
+    if (g->config.bots > 0) {
+        bool team_balance = (g->match.mode == MATCH_MODE_TDM ||
+                             g->match.mode == MATCH_MODE_CTF);
+        lobby_apply_bot_fill(&g->lobby, g->config.bots,
+                             (uint8_t)g->config.bot_tier, team_balance);
+        LOG_I("bootstrap_host: bot fill — %d slot(s) at tier %s",
+              lobby_bot_count(&g->lobby),
+              bot_tier_name((BotTier)g->config.bot_tier));
+    }
+
     /* Pre-build the level so the first-time lobby has *something* to
      * draw under the UI. ROUND_START rebuilds it for the chosen map.
      *
@@ -1271,6 +1336,15 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
         game.config.friendly_fire = args->friendly_fire;
         LOG_I("dedicated: --ff %d", (int)args->friendly_fire);
     }
+    if (args && args->bots_override >= 0) {
+        game.config.bots = args->bots_override;
+        LOG_I("dedicated: --bots %d", args->bots_override);
+    }
+    if (args && args->bot_tier_override >= 0) {
+        game.config.bot_tier = args->bot_tier_override;
+        LOG_I("dedicated: --bot-tier %s",
+              bot_tier_name((BotTier)args->bot_tier_override));
+    }
 
     if (!net_init()) {
         game_shutdown(&game);
@@ -1311,6 +1385,19 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
      * existing >= 2 active-slot threshold for auto-start kicks in
      * once two clients are in (or one if cfg lowers the threshold). */
     game.local_slot_id = -1;
+
+    /* Seed the lobby with bot slots so they're visible BEFORE the
+     * round starts. The host UI connects as a normal client and gets
+     * the freshly-broadcast lobby list including these bot rows. */
+    if (game.config.bots > 0) {
+        bool team_balance = (game.match.mode == MATCH_MODE_TDM ||
+                             game.match.mode == MATCH_MODE_CTF);
+        lobby_apply_bot_fill(&game.lobby, game.config.bots,
+                             (uint8_t)game.config.bot_tier, team_balance);
+        LOG_I("%s: bot fill — %d slot(s) at tier %s",
+              opts->log_prefix, lobby_bot_count(&game.lobby),
+              bot_tier_name((BotTier)game.config.bot_tier));
+    }
 
     /* Pre-build the lobby map so INITIAL_STATE carries a sensible
      * crc/descriptor. start_round rebuilds for whatever map_rotation /
@@ -1363,6 +1450,9 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
         if (game.match.phase == MATCH_PHASE_ACTIVE) {
             sim_accum += dt;
             while (sim_accum >= TICK_DT) {
+                /* Bot AI runs first so each bot's latched_input is
+                 * ready when simulate_step consumes it. */
+                bot_step(&game.bots, &game.world, &game, (float)TICK_DT);
                 simulate_step(&game.world, (float)TICK_DT);
                 sim_accum -= TICK_DT;
             }
@@ -1638,6 +1728,11 @@ static bool host_start_begin(Game *g, const LaunchArgs *args,
     if (g->config.score_limit > 0) server_args.score_limit = g->config.score_limit;
     if (g->config.time_limit > 0.0f) server_args.time_limit_s = (int)g->config.time_limit;
     if (g->config.friendly_fire)    { server_args.friendly_fire = true; server_args.ff_set = true; }
+    /* Forward bot fill to the in-process server thread (it runs a
+     * separate Game with its own config, so the values would
+     * otherwise reset to soldut.cfg defaults). */
+    server_args.bots_override     = g->config.bots;
+    server_args.bot_tier_override = g->config.bot_tier;
 
     if (!in_process_server_start(&server_args)) {
         LOG_E("host_start: in_process_server_start failed");
@@ -1889,6 +1984,8 @@ int main(int argc, char **argv) {
         game.config.port = args.port;
     }
     if (args.ff_set) game.config.friendly_fire = args.friendly_fire;
+    if (args.bots_override >= 0)     game.config.bots     = args.bots_override;
+    if (args.bot_tier_override >= 0) game.config.bot_tier = args.bot_tier_override;
     /* M5 P04 — editor test-play overrides match config: FFA, 60 s round,
      * 1 s auto-start, no networking. Stash the .lvl path on Game so
      * bootstrap_host + start_round can find it. */
@@ -2264,6 +2361,14 @@ int main(int argc, char **argv) {
                 /* wan-fixes-8 — capture player_name + connect_addr
                  * edits made on the title screen this session. */
                 lobby_ui_save_prefs(&ui);
+                /* Single-player default: 7 bots at Veteran tier so the
+                 * practice arena fills out immediately. Only kicks in
+                 * when the user / config hasn't already chosen a bot
+                 * count this session. */
+                if (game.config.bots <= 0) {
+                    game.config.bots     = 7;
+                    game.config.bot_tier = BOT_TIER_VETERAN;
+                }
                 if (bootstrap_host(&game, &args, /*offline*/true)) {
                     /* Single-player sits in the lobby indefinitely — no
                      * auto-start. The user picks map / loadout / mode at
@@ -2332,6 +2437,8 @@ int main(int argc, char **argv) {
                 game.config.map_rotation_count = 1;
                 game.config.mode_rotation[0]   = (MatchModeId)ui.setup_mode;
                 game.config.mode_rotation_count= 1;
+                game.config.bots               = ui.setup_bots;
+                game.config.bot_tier           = ui.setup_bot_tier;
 
                 /* Re-init MatchState from the new config. */
                 match_init(&game.match, game.config.mode,
@@ -2629,6 +2736,13 @@ int main(int argc, char **argv) {
                 } else {
                     if (game.world.local_mech_id >= 0) {
                         game.world.mechs[game.world.local_mech_id].latched_input = in;
+                    }
+                    /* Host-with-UI / offline-solo: bot AI runs server-
+                     * side too. Skipped on pure clients (the host's
+                     * latched_input wins on the wire). */
+                    if (game.world.authoritative) {
+                        bot_step(&game.bots, &game.world, &game,
+                                 (float)TICK_DT);
                     }
                     simulate_step(&game.world, (float)TICK_DT);
                 }

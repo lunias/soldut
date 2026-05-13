@@ -208,6 +208,7 @@ Picked up alongside the roadmap items (carry-forwards from M1–M4 + design fill
 - [x] **P01 — IK + pose sync** (shipped 2026-05-12; see `documents/m6/01-ik-and-pose-sync.md`)
 - [x] **P02 — Jetpack propulsion FX** (shipped 2026-05-12; see `documents/m6/02-jetpack-propulsion-fx.md`)
 - [x] **P03 — Capped internal render target / "4K" FPS fix** (shipped 2026-05-12; see `documents/m6/03-perf-4k-enhancements.md`; the long-standing internal-resolution cap from `10-performance-budget.md:208` is now real)
+- [x] **P04 — Map balance + bot AI hardening** (shipped 2026-05-13; see `documents/m6/04-map-balance.md`). New `src/bot.{c,h}` layered classical AI; lobby bot fill + tier chip UI; 320-cell loadout-sweep bake harness (`tools/bake/run_loadout_matrix.sh`); 4 of 8 maps iterated against bot-bake findings (Concourse / Catwalk / Citadel / Crossfire). Retires the M5 stretch goal "Bots — AI-driven mechs to fill servers" listed below — the classical layer ships in M6 and is sufficient for bot mode; the PPO self-play tier from `documents/13-bot-ai.md` remains post-v1.
 - [ ] Cross-platform builds work on every CI run
 - [ ] macOS code signing + notarization in the release script
 - [ ] Windows build verified on Win10 + Win11
@@ -246,7 +247,7 @@ Picked up alongside the roadmap items (carry-forwards from M1–M4 + design fill
 
 These are *not* on the roadmap. They live here so we don't forget.
 
-- **Bots** — AI-driven mechs to fill servers. Behavior tree + pathfinding on the tile grid.
+- **Bots** — ~~AI-driven mechs to fill servers. Behavior tree + pathfinding on the tile grid.~~ Shipped at **M6 P04**: layered classical AI (`src/bot.{c,h}`) with 4 difficulty tiers (Recruit / Veteran / Elite / Champion), lobby bot fill UI, and a 320-cell bake-test sweep harness. See `documents/m6/04-map-balance.md` and `documents/13-bot-ai.md`. The optional PPO self-play "Trained" tier from the bot-ai doc remains post-v1 — would require a Python trainer + onnxruntime dependency.
 - **Replays** — server logs inputs + RNG seed, viewer replays the match.
 - **Spectator mode** — connect as observer, free camera.
 - **More mech chassis** — community-friendly to add (data + sprites).
