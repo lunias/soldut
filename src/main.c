@@ -636,27 +636,13 @@ static void start_round(Game *g) {
         g->lobby.dirty = true;
     }
 
-    /* Bot fill safety net — idempotent. Normally bootstrap_host /
-     * dedicated_run seeds the slots earlier so they're visible in the
-     * pre-round lobby; this call corrects the population if the host
-     * changed config.bots between rounds. */
-    {
-        int tier = g->config.bot_tier;
-        if (tier < 0) tier = 0;
-        if (tier > BOT_TIER_CHAMPION) tier = BOT_TIER_CHAMPION;
-        bool team_balance = (g->match.mode == MATCH_MODE_TDM ||
-                             g->match.mode == MATCH_MODE_CTF);
-        int human_slots = 0;
-        for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
-            if (g->lobby.slots[i].in_use && !g->lobby.slots[i].is_bot) {
-                human_slots++;
-            }
-        }
-        int room = MAX_LOBBY_SLOTS - human_slots;
-        int want = g->config.bots;
-        if (want > room) want = room;
-        lobby_apply_bot_fill(&g->lobby, want, (uint8_t)tier, team_balance);
-    }
+    /* Bot slots persist in `g->lobby` from the time the host added
+     * them (each at its own tier — see the host's [Add Bot] flow in
+     * src/lobby_ui.c). We deliberately do NOT call
+     * `lobby_apply_bot_fill` here: that helper rewrites tiers to a
+     * single value, which would erase per-bot tiers picked in the
+     * lobby. The initial seed of bots (from `soldut.cfg` or
+     * --bots N) is done once in bootstrap_host / dedicated_run. */
 
     /* Spawn mechs for every active slot. lobby_spawn_round_mechs sets
      * each slot's mech_id and reads slot.team to set mech.team; mark
@@ -774,6 +760,11 @@ static void host_start_map_vote(Game *g) {
     float dur = (g->match.summary_remaining > 0.0f)
                 ? g->match.summary_remaining * 0.8f : 12.0f;
     lobby_vote_start(&g->lobby, a, b, c, dur);
+    /* Bots vote randomly the instant the cards land so the
+     * "all-voted → fast-forward summary" path triggers when the
+     * humans have all cast (instead of waiting the full ~10 s
+     * timer because the bot slots never voted). */
+    lobby_vote_cast_bots(&g->lobby, a, b, c, g->world.rng);
     if (g->net.role == NET_ROLE_SERVER) {
         net_server_broadcast_vote_state(&g->net, &g->lobby);
     }
@@ -2437,8 +2428,8 @@ int main(int argc, char **argv) {
                 game.config.map_rotation_count = 1;
                 game.config.mode_rotation[0]   = (MatchModeId)ui.setup_mode;
                 game.config.mode_rotation_count= 1;
-                game.config.bots               = ui.setup_bots;
-                game.config.bot_tier           = ui.setup_bot_tier;
+                /* Bot fill is per-bot in the lobby now; nothing to
+                 * forward from host-setup. */
 
                 /* Re-init MatchState from the new config. */
                 match_init(&game.match, game.config.mode,

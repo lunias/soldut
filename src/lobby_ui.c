@@ -306,6 +306,21 @@ static int setup_next_map_for_mode(int cur_map, int mode_id,
     return cur_map;
 }
 
+/* Step direction: +1 walks the registry forward, -1 walks backward.
+ * Used by `ui_cycle_button` callers so LMB advances and RMB rewinds. */
+static int setup_step_map_for_mode(int cur_map, int mode_id, int dir,
+                                   World *w, Arena *arena) {
+    int n = g_map_registry.count;
+    if (n <= 0) return cur_map;
+    if (dir == 0) return cur_map;
+    int sign = (dir > 0) ? 1 : -1;
+    for (int step = 1; step <= n; ++step) {
+        int next = ((cur_map + sign * step) % n + n) % n;
+        if (setup_map_supports_mode(next, mode_id, w, arena)) return next;
+    }
+    return cur_map;
+}
+
 void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     Vec2 mouse = (Vec2){ (float)GetMouseX(), (float)GetMouseY() };
     ui_begin(&L->ui, mouse, GetFrameTime(), sh);
@@ -321,8 +336,9 @@ void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
         L->setup_score_limit  = g->config.score_limit;
         L->setup_time_limit_s = (int)g->config.time_limit;
         L->setup_friendly_fire= g->config.friendly_fire;
-        L->setup_bots         = g->config.bots;
-        L->setup_bot_tier     = g->config.bot_tier;
+        /* Bot fill is configured per-bot in the lobby (M6 post-P04
+         * UX rewrite). The host setup screen no longer surfaces
+         * a count or tier picker. */
         /* Fix CTF defaults that the FFA-default config wouldn't reach.
          * If the user picked CTF on entry, clamp the score limit. */
         if (L->setup_mode == MATCH_MODE_CTF && L->setup_score_limit >= 25) {
@@ -359,7 +375,7 @@ void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
 
     Rectangle panel = (Rectangle){ panel_x - S(16), panel_y - S(16),
                                    panel_w + S(32),
-                                   row_h * 8 + gap * 7 + S(32) };
+                                   row_h * 6 + gap * 5 + S(32) };
     ui_panel_default(&L->ui, panel);
 
     int y = panel_y;
@@ -407,14 +423,19 @@ void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     }
     y += row_h + gap;
 
-    /* ---- Map cycle button ---- */
+    /* ---- Map cycle button (LMB = next mode-compatible map,
+     *      RMB = previous). ---- */
     ui_draw_text(&L->ui, "Map", panel_x, y + S(14), 18, (Color){200, 220, 240, 255});
     Rectangle map_r = (Rectangle){panel_x + label_w, y, btn_w, row_h};
-    if (ui_button(&L->ui, map_r,
-                  TextFormat("%s  ▶", map_def(L->setup_map_id)->display_name),
-                  true)) {
-        L->setup_map_id = setup_next_map_for_mode(
-            L->setup_map_id, L->setup_mode, &g->world, &g->level_arena);
+    {
+        int step = ui_cycle_button(&L->ui, map_r,
+                                    map_def(L->setup_map_id)->display_name,
+                                    true);
+        if (step != 0) {
+            L->setup_map_id = setup_step_map_for_mode(
+                L->setup_map_id, L->setup_mode, step,
+                &g->world, &g->level_arena);
+        }
     }
     y += row_h + gap;
 
@@ -477,50 +498,7 @@ void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     }
     y += row_h + gap;
 
-    /* ---- Bot fill (count) ---- */
-    ui_draw_text(&L->ui, "Bots", panel_x, y + S(14), 18,
-                 (Color){200, 220, 240, 255});
-    if (ui_button(&L->ui, (Rectangle){panel_x + label_w, y, step_w, row_h},
-                  "-", true) && L->setup_bots > 0) {
-        L->setup_bots--;
-    }
-    Rectangle bval_r = (Rectangle){panel_x + label_w + step_w + S(4), y,
-                                    sval_w, row_h};
-    DrawRectangleRec(bval_r, (Color){20, 24, 32, 255});
-    DrawRectangleLinesEx(bval_r, L->ui.scale, L->ui.panel_edge);
-    char bbuf[32]; snprintf(bbuf, sizeof bbuf, "%d", L->setup_bots);
-    int bw_ = ui_measure(&L->ui, bbuf, 18);
-    ui_draw_text(&L->ui, bbuf,
-                 (int)(bval_r.x + (bval_r.width - bw_) * 0.5f),
-                 (int)(bval_r.y + (bval_r.height - 18*L->ui.scale) * 0.5f),
-                 18, L->ui.text_col);
-    if (ui_button(&L->ui, (Rectangle){panel_x + label_w + step_w + sval_w + S(8),
-                                       y, step_w, row_h}, "+", true) &&
-        L->setup_bots < MAX_LOBBY_SLOTS - 1)
-    {
-        L->setup_bots++;
-    }
-    y += row_h + gap;
-
-    /* ---- Bot tier (cycle button) ---- */
-    ui_draw_text(&L->ui, "Bot tier", panel_x, y + S(14), 18,
-                 (Color){200, 220, 240, 255});
-    Rectangle tier_r = (Rectangle){panel_x + label_w, y, btn_w, row_h};
-    {
-        const char *names[BOT_TIER_COUNT] = {
-            "Recruit", "Veteran", "Elite", "Champion",
-        };
-        int t = L->setup_bot_tier;
-        if (t < 0) t = 0;
-        if (t >= BOT_TIER_COUNT) t = BOT_TIER_COUNT - 1;
-        int step = ui_cycle_button(&L->ui, tier_r, names[t],
-                                   L->setup_bots > 0);
-        if (step != 0) {
-            t = (t + step + BOT_TIER_COUNT) % BOT_TIER_COUNT;
-            L->setup_bot_tier = t;
-        }
-    }
-    y += row_h + gap;
+    /* (Bot fill UI lives in the lobby, not here.) */
 
     /* ---- Confirm / Cancel buttons ---- */
     /* wan-fixes-9 — while the dedicated-child spawn is in flight,
@@ -1273,10 +1251,9 @@ static void player_row(const UIContext *u, Rectangle row, int idx,
                  chip_y + (chip_h - (int)(16 * u->scale)) / 2,
                  16, BLACK);
 
-    /* Bot tier chip — placed on the far right where the [Kick] /
-     * [Ban] buttons live for human rows (suppressed below for bots,
-     * so the slot is free). Per-tier accent color signals difficulty
-     * at a glance:
+    /* Bot tier chip — placed to the LEFT of the [Remove] button on
+     * the bot row. Per-tier accent color signals difficulty at a
+     * glance:
      *   Recruit  — pale cyan (low threat)
      *   Veteran  — green     (baseline)
      *   Elite    — orange    (sharp)
@@ -1292,16 +1269,16 @@ static void player_row(const UIContext *u, Rectangle row, int idx,
         int t = s->bot_tier;
         if (t < 0) t = 0;
         if (t > 3) t = 3;
-        /* Right-anchored: same footprint as the two Kick/Ban buttons
-         * combined (2*72 + 8 = 152 px at scale 1). Big enough that
-         * "BOT · Champion" stays inside the chip at every scale. */
-        float bw = 72.0f * u->scale;
+        /* Right-anchored to the LEFT of the Remove button (which sits
+         * flush with the row's right edge — 72 px + 8 px margin). */
+        float btn_w  = 72.0f * u->scale;
+        float btn_pad = 8.0f * u->scale;
         float bh = row.height - 8.0f * u->scale;
         float by = row.y + 4.0f * u->scale;
-        float bx_right = row.x + row.width - 8.0f * u->scale;
-        float bx_left  = bx_right - (2.0f * bw + 8.0f * u->scale);
-        Rectangle tc = (Rectangle){ bx_left, by,
-                                    bx_right - bx_left, bh };
+        float bx_right = row.x + row.width - btn_pad - btn_w - btn_pad;
+        float chip_w   = 130.0f * u->scale;
+        float bx_left  = bx_right - chip_w;
+        Rectangle tc = (Rectangle){ bx_left, by, chip_w, bh };
         DrawRectangleRec(tc, tier_colors[t]);
         DrawRectangleLinesEx(tc, u->scale, (Color){20, 24, 32, 255});
         char tlabel[24];
@@ -1334,28 +1311,34 @@ static void player_row(const UIContext *u, Rectangle row, int idx,
     /* P09 — host controls: [Kick] [Ban] on every non-host row when the
      * local player is the host. Click stages the slot in the
      * confirmation-modal state on the lobby UI; the modal itself is
-     * rendered in lobby_screen_run after the list iteration. Skipped
-     * for bots (they're not network peers — kick / ban has no
-     * meaning).
+     * rendered in lobby_screen_run after the list iteration.
+     *
+     * For BOT rows the Kick button removes the bot directly with no
+     * confirmation modal (the modal handler treats `is_bot &&
+     * kick_target_slot >= 0` as the direct-remove path); the Ban
+     * button is hidden since "ban a bot" has no meaning.
      *
      * Sized for click-target legibility (~72×28 at 1× scale). The
      * buttons sit flush with the right edge of the row; layout above
      * leaves a comfortable ~120 px gap after the K/D score column. */
-    if (ctx->host_view && !s->is_host && !s->is_bot && ctx->ui_state) {
+    if (ctx->host_view && !s->is_host && ctx->ui_state) {
         float bw = 72.0f * u->scale;
         float bh = row.height - 8.0f * u->scale;
         float by = row.y + 4.0f * u->scale;
-        float bx_ban  = row.x + row.width - bw - 8.0f * u->scale;
-        float bx_kick = bx_ban - bw - 8.0f * u->scale;
+        float bx_right = row.x + row.width - 8.0f * u->scale;
+        float bx_ban   = s->is_bot ? bx_right    /* not drawn */
+                                   : bx_right - bw;
+        float bx_kick  = s->is_bot ? bx_right - bw
+                                   : bx_ban - bw - 8.0f * u->scale;
         Rectangle rk = (Rectangle){ bx_kick, by, bw, bh };
-        Rectangle rb = (Rectangle){ bx_ban,  by, bw, bh };
 
         bool hk = ui_point_in_rect(u->mouse, rk);
+        const char *kick_label = s->is_bot ? "Remove" : "Kick";
         DrawRectangleRec(rk, hk ? (Color){180, 150,  90, 240}
                                 : (Color){ 90,  70,  50, 220});
         DrawRectangleLinesEx(rk, u->scale, (Color){200, 170, 110, 255});
-        int twk = ui_measure(u, "Kick", 16);
-        ui_draw_text(u, "Kick",
+        int twk = ui_measure(u, kick_label, 16);
+        ui_draw_text(u, kick_label,
                      (int)(rk.x + (rk.width  - twk) * 0.5f),
                      (int)(rk.y + (rk.height - 16*u->scale) * 0.5f),
                      16, hk ? (Color){20, 18, 12, 255} : u->text_col);
@@ -1364,18 +1347,21 @@ static void player_row(const UIContext *u, Rectangle row, int idx,
             ctx->ui_state->ban_target_slot  = -1;
         }
 
-        bool hb = ui_point_in_rect(u->mouse, rb);
-        DrawRectangleRec(rb, hb ? (Color){200,  80,  80, 240}
-                                : (Color){120,  40,  50, 220});
-        DrawRectangleLinesEx(rb, u->scale, (Color){220, 110, 110, 255});
-        int twb = ui_measure(u, "Ban", 16);
-        ui_draw_text(u, "Ban",
-                     (int)(rb.x + (rb.width  - twb) * 0.5f),
-                     (int)(rb.y + (rb.height - 16*u->scale) * 0.5f),
-                     16, hb ? (Color){20, 12, 14, 255} : u->text_col);
-        if (hb && u->mouse_pressed) {
-            ctx->ui_state->ban_target_slot  = slot;
-            ctx->ui_state->kick_target_slot = -1;
+        if (!s->is_bot) {
+            Rectangle rb = (Rectangle){ bx_ban,  by, bw, bh };
+            bool hb = ui_point_in_rect(u->mouse, rb);
+            DrawRectangleRec(rb, hb ? (Color){200,  80,  80, 240}
+                                    : (Color){120,  40,  50, 220});
+            DrawRectangleLinesEx(rb, u->scale, (Color){220, 110, 110, 255});
+            int twb = ui_measure(u, "Ban", 16);
+            ui_draw_text(u, "Ban",
+                         (int)(rb.x + (rb.width  - twb) * 0.5f),
+                         (int)(rb.y + (rb.height - 16*u->scale) * 0.5f),
+                         16, hb ? (Color){20, 12, 14, 255} : u->text_col);
+            if (hb && u->mouse_pressed) {
+                ctx->ui_state->ban_target_slot  = slot;
+                ctx->ui_state->kick_target_slot = -1;
+            }
         }
     }
 }
@@ -1611,6 +1597,93 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     ui_draw_text(&L->ui, stat, sx_text, sty, 16,
                  (Color){180, 200, 220, 255});
 
+    /* Host-only bot fill — second row directly below the match
+     * panel. The tier cycle selects the PENDING tier for the next
+     * bot to be added; clicking [Add Bot] appends one bot at that
+     * tier. Existing bots keep whatever tier they were added at —
+     * the only way to change a bot's tier is to remove it and add
+     * a new one. Per-bot removal happens via the [Kick] button on
+     * the bot's row in the player list. Disabled for non-hosts +
+     * during ACTIVE/COUNTDOWN. */
+    {
+        int br_y = mp_y + mp_h + S(8);          /* second row */
+        int br_h = S(32);                        /* shorter than match strip */
+        int bx   = mp_x;
+        int tierw = S(140);
+        int addw  = S(120);
+        int br_sty = br_y + (br_h - (int)(16*L->ui.scale + 0.5f)) / 2;
+        /* Tier picker — pending tier for the next [Add Bot] click. */
+        ui_draw_text(&L->ui, "Tier:", bx, br_sty, 16,
+                     can_change ? L->ui.text_col : L->ui.text_dim);
+        bx += ui_measure(&L->ui, "Tier:", 16) + S(8);
+        Rectangle tr = (Rectangle){bx, br_y, tierw, br_h};
+        const char *tlbl = bot_tier_name((BotTier)g->config.bot_tier);
+        int step = ui_cycle_button(&L->ui, tr, tlbl, can_change);
+        if (step != 0) {
+            int t = g->config.bot_tier + step;
+            while (t < 0) t += BOT_TIER_COUNT;
+            t = t % BOT_TIER_COUNT;
+            g->config.bot_tier = t;
+            /* Tier change does NOT touch existing bots — by design. */
+        }
+        bx += tierw + S(16);
+        /* [Add Bot] — append a single bot at the currently-selected
+         * tier. Bot index = current bot count so names stay unique. */
+        int bot_count_now = lobby_bot_count(&g->lobby);
+        int human_slots = 0;
+        for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+            if (g->lobby.slots[i].in_use && !g->lobby.slots[i].is_bot)
+                human_slots++;
+        }
+        bool room_left = (human_slots + bot_count_now) < MAX_LOBBY_SLOTS;
+        Rectangle ar = (Rectangle){bx, br_y, addw, br_h};
+        if (ui_button(&L->ui, ar, "+ Add Bot",
+                      can_change && room_left))
+        {
+            /* Host-UI client: send the request over the wire; the
+             * server adds the slot + broadcasts the updated list.
+             * Dedicated server / offline-solo: mutate directly. */
+            if (g->net.role == NET_ROLE_CLIENT) {
+                net_client_send_add_bot(&g->net,
+                                         (uint8_t)g->config.bot_tier);
+            } else {
+                int slot = lobby_add_bot_slot(&g->lobby, bot_count_now,
+                                              (uint8_t)g->config.bot_tier);
+                if (slot >= 0) {
+                    if (g->match.mode == MATCH_MODE_TDM ||
+                        g->match.mode == MATCH_MODE_CTF)
+                    {
+                        int red = 0, blue = 0;
+                        for (int j = 0; j < MAX_LOBBY_SLOTS; ++j) {
+                            if (!g->lobby.slots[j].in_use) continue;
+                            if (j == slot) continue;
+                            if (g->lobby.slots[j].team == MATCH_TEAM_RED)  red++;
+                            if (g->lobby.slots[j].team == MATCH_TEAM_BLUE) blue++;
+                        }
+                        g->lobby.slots[slot].team = (red <= blue)
+                                                    ? MATCH_TEAM_RED
+                                                    : MATCH_TEAM_BLUE;
+                    }
+                    if (g->net.role == NET_ROLE_SERVER) {
+                        net_server_broadcast_lobby_list(&g->net, &g->lobby);
+                        g->lobby.dirty = false;
+                    }
+                }
+            }
+        }
+        bx += addw + S(16);
+        /* Count display: "N bots". */
+        char count_label[32];
+        snprintf(count_label, sizeof count_label,
+                 bot_count_now == 1 ? "%d bot" : "%d bots", bot_count_now);
+        ui_draw_text(&L->ui, count_label, bx, br_sty, 16,
+                     bot_count_now > 0 ? L->ui.text_col : L->ui.text_dim);
+        /* Re-bind sty so the next-down draws (auto-start banner, etc.)
+         * don't accidentally inherit a stale value if anyone else uses
+         * `sty` later. */
+        sty = br_sty;
+    }
+
     /* Auto-start countdown banner — top-right. */
     if (g->lobby.auto_start_active) {
         char cd[64];
@@ -1648,7 +1721,7 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
      * +-------------------------------------------+
      */
     int margin    = S(24);
-    int header_h  = S(112);                 /* room for title + MATCH panel + countdown */
+    int header_h  = S(160);                 /* room for title + MATCH panel + host bot-fill row + countdown */
     int btn_row_h = S(56);                  /* bottom button row */
     int lp_w      = S(320);                 /* loadout panel width */
     int lp_x      = sw - lp_w - margin;
@@ -1669,7 +1742,14 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     int n = 0;
     for (int i = 0; i < MAX_LOBBY_SLOTS; ++i)
         if (g->lobby.slots[i].in_use) order[n++] = i;
-    bool host_view = (g->net.role == NET_ROLE_SERVER);
+    /* Show Kick/Ban (and the new Remove-bot button) whenever the
+     * LOCAL player is the host — which after wan-fixes-16 includes
+     * the case where the host UI runs as NET_ROLE_CLIENT against
+     * the in-process dedicated server. `is_host` from earlier in
+     * the function is the right check; the previous
+     * `role == NET_ROLE_SERVER` test only fired on the headless
+     * dedicated binary (no UI). */
+    bool host_view = is_host;
     PlayerListCtx pctx = {
         .lobby = &g->lobby, .order = order, .n = n,
         .mode = (int)g->match.mode,
@@ -1998,6 +2078,15 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
         const LobbySlot *ts = (target >= 0 && target < MAX_LOBBY_SLOTS)
                               ? &g->lobby.slots[target] : NULL;
         if (!ts || !ts->in_use) {
+            L->kick_target_slot = L->ban_target_slot = -1;
+        } else if (ts->is_bot && !ban) {
+            /* Bots: no confirmation modal. The Kick button on a bot
+             * row is "remove THIS bot" — single-click, no undo,
+             * since the host can re-add it from the Tier picker in
+             * one click. Route through `apply_kick_or_ban` so the
+             * SERVER (or in-process server thread, for the host UI)
+             * is the single authority that mutates lobby state. */
+            apply_kick_or_ban(g, target, /*ban=*/false);
             L->kick_target_slot = L->ban_target_slot = -1;
         } else {
             DrawRectangle(0, 0, sw, sh, (Color){0, 0, 0, 200});

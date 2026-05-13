@@ -181,24 +181,55 @@ int ui_cycle_button(UIContext *u, Rectangle r, const char *label, bool enabled) 
         : u->text_dim;
     int arrow_y = (int)(r.y + (r.height - (float)fp) * 0.5f);
     int pad     = (int)(u->scale * 12.0f);
+    int aw_l    = ui_measure(u, "<", u->font_size);
+    int aw_r    = ui_measure(u, ">", u->font_size);
     ui_draw_text(u, "<", (int)(r.x + pad), arrow_y, u->font_size, arrow_col);
-    int rw = ui_measure(u, ">", u->font_size);
     ui_draw_text(u, ">",
-                 (int)(r.x + r.width - pad - rw),
+                 (int)(r.x + r.width - pad - aw_r),
                  arrow_y, u->font_size, arrow_col);
 
     Color text = enabled ? u->text_col : u->text_dim;
     if (label) {
-        int tw = ui_measure(u, label, u->font_size);
-        int tx = (int)(r.x + (r.width - (float)tw) * 0.5f);
-        int ty = (int)(r.y + (r.height - (float)fp) * 0.5f);
+        /* Center the label in the area BETWEEN the arrows, not over
+         * them — pad + arrow + small gap on each side. Without this
+         * carve-out, long labels (e.g. "Tier: Veteran" in a
+         * 128-px-wide button) overlap the arrow glyphs. If the label
+         * still won't fit, we let it bleed past the arrows rather
+         * than truncating — better that the user can read it than
+         * we hide it for the sake of clean geometry. */
+        int gap      = (int)(u->scale * 6.0f);
+        int inner_x0 = (int)(r.x) + pad + aw_l + gap;
+        int inner_x1 = (int)(r.x + r.width) - pad - aw_r - gap;
+        int inner_w  = inner_x1 - inner_x0;
+        int tw       = ui_measure(u, label, u->font_size);
+        int tx       = (tw < inner_w)
+                       ? inner_x0 + (inner_w - tw) / 2
+                       : (int)(r.x + (r.width - (float)tw) * 0.5f);
+        int ty       = (int)(r.y + (r.height - (float)fp) * 0.5f);
         ui_draw_text(u, label, tx, ty, u->font_size, text);
     }
 
     if (!enabled) return 0;
     int step = 0;
-    if (hover && u->mouse_pressed)       step = +1;
-    else if (hover && u->mouse_right_pressed) step = -1;
+    if (hover && (u->mouse_pressed || u->mouse_right_pressed)) {
+        /* Split the button into three hit regions: left quarter is
+         * "left arrow", right quarter is "right arrow", middle is
+         * "label area." Arrow clicks act DIRECTIONALLY regardless
+         * of mouse button — clicking the right arrow always cycles
+         * forward (LMB or RMB), and clicking the left arrow always
+         * cycles backward. Clicking the middle (over the label)
+         * keeps the original convention: LMB forward, RMB backward.
+         * This way the arrows behave the way users expect from a
+         * "stepper" while the body retains the dual-button fast-
+         * scroll shape. */
+        float qx_l = r.x + r.width * 0.25f;
+        float qx_r = r.x + r.width * 0.75f;
+        bool on_left_arrow  = (u->mouse.x <  qx_l);
+        bool on_right_arrow = (u->mouse.x >= qx_r);
+        if (on_left_arrow)       step = -1;
+        else if (on_right_arrow) step = +1;
+        else                     step = u->mouse_pressed ? +1 : -1;
+    }
     if (step != 0) audio_play_global(SFX_UI_CLICK);
     return step;
 }

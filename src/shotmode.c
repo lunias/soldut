@@ -1037,6 +1037,7 @@ static void shot_host_start_map_vote(Game *g) {
     float dur = (g->match.summary_remaining > 0.0f)
                 ? g->match.summary_remaining * 0.8f : 12.0f;
     lobby_vote_start(&g->lobby, a, b, c, dur);
+    lobby_vote_cast_bots(&g->lobby, a, b, c, g->world.rng);
     if (g->net.role == NET_ROLE_SERVER) {
         net_server_broadcast_vote_state(&g->net, &g->lobby);
     }

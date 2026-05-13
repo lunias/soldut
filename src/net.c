@@ -22,6 +22,7 @@
 #include "net.h"
 
 #include "audio.h"
+#include "bot.h"
 #include "ctf.h"
 #include "decal.h"
 #include "game.h"
@@ -1098,6 +1099,18 @@ void net_server_kick_or_ban_slot(NetState *ns, Game *g, int target_slot, bool ba
     if (!g) return;
     LobbySlot *ts = lobby_slot(&g->lobby, target_slot);
     if (!ts || !ts->in_use || ts->is_host) return;       /* can't kick the host */
+    /* Bots have no peer; remove the slot directly + broadcast. Ban
+     * doesn't apply (no IP to remember). */
+    if (ts->is_bot) {
+        if (ban) return;
+        char msg[64];
+        snprintf(msg, sizeof msg, "%s removed by host", ts->name);
+        lobby_remove_slot(&g->lobby, target_slot);
+        net_server_broadcast_lobby_list(&g->net, &g->lobby);
+        g->lobby.dirty = false;
+        lobby_chat_system(&g->lobby, msg);
+        return;
+    }
     if (ban) lobby_ban_addr(&g->lobby, 0, ts->name);
     /* Disconnect the corresponding peer. */
     if (ts->peer_id >= 0) {
@@ -1113,6 +1126,42 @@ void net_server_kick_or_ban_slot(NetState *ns, Game *g, int target_slot, bool ba
     char msg[80];
     snprintf(msg, sizeof msg, "%s was %s by host", ts->name, ban ? "banned" : "kicked");
     lobby_chat_system(&g->lobby, msg);
+}
+
+/* M6 P04+ — host (over the wire) requests a new bot slot. */
+static void server_handle_lobby_add_bot(NetState *ns, NetPeer *p,
+                                        const uint8_t *body, int blen, Game *g)
+{
+    if (blen < 1) return;
+    int requester = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
+    if (requester < 0) return;
+    if (!g->lobby.slots[requester].is_host) {
+        LOG_W("server: non-host slot %d tried ADD_BOT", requester);
+        return;
+    }
+    uint8_t tier = body[0];
+    if (tier >= BOT_TIER_COUNT) tier = BOT_TIER_VETERAN;
+    int bot_idx = lobby_bot_count(&g->lobby);
+    int slot = lobby_add_bot_slot(&g->lobby, bot_idx, tier);
+    if (slot < 0) {
+        LOG_W("server: ADD_BOT — lobby full");
+        return;
+    }
+    /* Auto-balance teams for TDM / CTF. FFA keeps the default. */
+    if (g->match.mode == MATCH_MODE_TDM || g->match.mode == MATCH_MODE_CTF) {
+        int red = 0, blue = 0;
+        for (int j = 0; j < MAX_LOBBY_SLOTS; ++j) {
+            if (!g->lobby.slots[j].in_use) continue;
+            if (j == slot) continue;
+            if (g->lobby.slots[j].team == MATCH_TEAM_RED)  red++;
+            if (g->lobby.slots[j].team == MATCH_TEAM_BLUE) blue++;
+        }
+        g->lobby.slots[slot].team = (red <= blue) ? MATCH_TEAM_RED
+                                                  : MATCH_TEAM_BLUE;
+    }
+    net_server_broadcast_lobby_list(ns, &g->lobby);
+    g->lobby.dirty = false;
+    LOG_I("server: ADD_BOT slot=%d tier=%s", slot, bot_tier_name((BotTier)tier));
 }
 
 static void server_handle_lobby_kick_or_ban(NetState *ns, NetPeer *p,
@@ -2344,6 +2393,8 @@ static void server_pump_events(NetState *ns, Game *g) {
                         server_handle_lobby_kick_or_ban(ns, p, body, blen, g, true); break;
                     case NET_MSG_LOBBY_HOST_SETUP:
                         server_handle_lobby_host_setup(ns, p, body, blen, g); break;
+                    case NET_MSG_LOBBY_ADD_BOT:
+                        server_handle_lobby_add_bot(ns, p, body, blen, g); break;
                     case NET_MSG_MAP_REQUEST:
                         server_handle_map_request(ns, p, g, body, blen); break;
                     case NET_MSG_MAP_READY:
@@ -3089,6 +3140,13 @@ void net_client_send_map_vote(NetState *ns, int choice) {
 void net_client_send_kick(NetState *ns, int target_slot) {
     if (!ns || ns->role != NET_ROLE_CLIENT || !ns->connected) return;
     uint8_t buf[2] = { NET_MSG_LOBBY_KICK, (uint8_t)target_slot };
+    enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
+                 buf, 2);
+}
+
+void net_client_send_add_bot(NetState *ns, uint8_t tier) {
+    if (!ns || ns->role != NET_ROLE_CLIENT || !ns->connected) return;
+    uint8_t buf[2] = { NET_MSG_LOBBY_ADD_BOT, tier };
     enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
                  buf, 2);
 }

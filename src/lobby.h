@@ -167,6 +167,16 @@ void lobby_vote_cast (LobbyState *L, int slot, int choice /*0/1/2*/);
 int  lobby_vote_winner(const LobbyState *L);    /* the map_id with the most votes */
 void lobby_vote_clear(LobbyState *L);
 
+/* Auto-cast votes for every bot slot in the lobby. Each bot picks
+ * uniformly at random across the 3 cards; if `b` or `c` is -1
+ * (registry too small for a full set) the choice is clamped to 0.
+ * Must be called AFTER lobby_vote_start so vote_active is true.
+ * Without this, matches with bots never trigger the
+ * "all-voted → fast-forward summary" path because bots never cast.
+ * `rng` is the lobby/world PCG — pulls one u32 per bot. */
+void lobby_vote_cast_bots(LobbyState *L, int a, int b, int c,
+                          pcg32_t *rng);
+
 /* Auto-start. Caller decides when to enter (e.g. when N>=2 slots filled).
  * Tick advances the countdown; returns true when it expires. */
 void lobby_auto_start_arm   (LobbyState *L, float seconds);
