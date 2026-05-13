@@ -4,8 +4,8 @@
 
 #define SOLDUT_VERSION_MAJOR  0
 #define SOLDUT_VERSION_MINOR  0
-#define SOLDUT_VERSION_PATCH  8
-#define SOLDUT_VERSION_STRING "0.0.8-m6p01"
+#define SOLDUT_VERSION_PATCH  9
+#define SOLDUT_VERSION_STRING "0.0.9-m6p02"
 
 /* 'S0LD' — stamped on every connection handshake. Bump on netcode
  * changes. Lineage:
@@ -32,8 +32,15 @@
  *                                  u16 — gait cycle position so the
  *                                  M6 procedural pose function renders
  *                                  the same foot frame on every
- *                                  client. Wire size 29 → 31 bytes). */
-#define SOLDUT_PROTOCOL_ID    ((uint32_t)0x53304C4Au)   /* 'S0LJ' */
+ *                                  client. Wire size 29 → 31 bytes).
+ *   M6/P02 = 0x53304C4B ('S0LK')   (SNAP_STATE_BOOSTING bit at slot
+ *                                  14 of state_bits — drives the
+ *                                  Burst-jet 8× particle spike +
+ *                                  leading-edge SFX_JET_BOOST cue
+ *                                  on remote mechs. No wire-size
+ *                                  change; older clients ignore the
+ *                                  bit and miss the visual spike). */
+#define SOLDUT_PROTOCOL_ID    ((uint32_t)0x53304C4Bu)   /* 'S0LK' */
 
 /* Default UDP port for the listen socket. 23073 is a Soldat homage
  * (the original used the same port). */

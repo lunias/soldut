@@ -326,6 +326,31 @@ assets/sprites/weapons.png  (P16 — weapon-rack pack)
                     Microgun / Sidearm / Burst SMG / Frag Grenades / Micro-
                     Rockets / Combat Knife / Grappling Hook.
 
+assets/sprites/jet_plume.png  (M6 P02 — jetpack plume teardrop)
+  source:           Soldut-original (procedural, Python + PIL)
+  license:          CC0 / project-MIT (Soldut-authored geometry).
+  pipeline:         tools/build_jet_atlases.sh
+                    (32×96 RGBA8; RGB stays white; alpha = vertical
+                    brightness × horizontal circular falloff. Per-row
+                    width grows from 0.30 at top to 1.0 at bottom for
+                    the cone shape; (1-r²)^1.2 horizontal kernel gives
+                    the narrow rim per spec §8.) Re-run the script to
+                    re-bake; output is deterministic.
+  human_direction:  Tint comes from per-jetpack `plume_color_rim`
+                    and `_core` (g_jet_fx[] in src/mech_jet_fx.c) at
+                    draw time. Missing file falls back to additive
+                    DrawLineEx along thrust_dir — game still plays.
+
+assets/sprites/jet_dust.png  (M6 P02 — ground-impingement dust puff)
+  source:           Soldut-original (procedural, Python + PIL)
+  license:          CC0 / project-MIT (Soldut-authored geometry).
+  pipeline:         tools/build_jet_atlases.sh
+                    (16×16 RGBA8; soft-disc alpha via exp(-r²×2.6)
+                    falloff so the edge fades smoothly. Currently
+                    unused at draw time — fx_draw renders dust as
+                    a tinted DrawCircleV directly; the atlas exists
+                    as a hot-reload-watched stub for future polish.)
+
 assets/ui/hud.png  (P16 — HUD atlas)
   source:           Perplexity (single prompt for the 256×256 HUD atlas —
                     HP bar end-caps, jet bar end-caps, weapon-icon family
@@ -446,6 +471,8 @@ sfx/footstep_concrete.wav  ← kenney_impact-sounds/Audio/footstep_concrete_000.
 sfx/footstep_ice.wav       ← kenney_impact-sounds/Audio/footstep_snow_000.ogg
 sfx/jet_pulse.wav          ← kenney_sci-fi-sounds/Audio/thrusterFire_002.ogg
 sfx/jet_boost.wav          ← kenney_sci-fi-sounds/Audio/spaceEngineLarge_000.ogg
+sfx/jet_ignition_concrete.wav ← kenney_sci-fi-sounds/Audio/lowFrequency_explosion_000.ogg
+sfx/jet_ignition_ice.wav      ← kenney_sci-fi-sounds/Audio/thrusterFire_003.ogg
 sfx/landing_hard.wav       ← kenney_impact-sounds/Audio/impactPlate_heavy_000.ogg
 sfx/landing_soft.wav       ← kenney_impact-sounds/Audio/impactSoft_medium_000.ogg
 sfx/pickup_health.wav      ← kenney_digital-audio/Audio/powerUp1.ogg

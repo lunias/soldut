@@ -159,6 +159,15 @@ enum {
      * anim_id mirror the server's deterministically. Additive bit;
      * old clients ignore it and fall back to the velocity heuristic. */
     SNAP_STATE_RUNNING     = 1u << 13,
+    /* M6 P02 — Burst-jet boost active. Set when m->boost_timer > 0.0f
+     * at snapshot-record time. Drives:
+     *  (a) the 8× exhaust-particle spike on the plume FX, and
+     *  (b) the leading-edge SFX_JET_BOOST trigger on remote mechs in
+     *      snapshot_apply (the SFX for owner-side mechs fires from
+     *      mech_step_drive directly).
+     * Boost timer decays locally on each side so we only need the
+     * bit, not a timer field. */
+    SNAP_STATE_BOOSTING    = 1u << 14,
 };
 
 /* Bits used in the per-entity dirty mask when delta-encoding. (We

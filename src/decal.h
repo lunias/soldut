@@ -19,6 +19,13 @@ void decal_shutdown(void);
  * inside decal_flush_pending, which the renderer calls once per frame). */
 void decal_paint_blood(Vec2 pos, float radius);
 
+/* M6 P02 — Paint a single scorch mark at world-space `pos`. Same queue
+ * + flush shape as decal_paint_blood; different stamp (dark
+ * brown/grey discs). Used by mech_jet_fx for grounded-jet impingement
+ * scorch marks and by ignition-flash takeoff scars. Scorch decals are
+ * permanent for the round (TRADE_OFFS.md). */
+void decal_paint_scorch(Vec2 pos, float radius);
+
 /* Called by the renderer once per frame, *outside* its main BeginMode2D
  * pair, to flush any queued paints into the layer. (raylib forbids
  * nesting BeginTextureMode inside BeginMode2D.) */

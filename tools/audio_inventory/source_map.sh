@@ -134,6 +134,15 @@ mkwav "$K/kenney_impact-sounds/Audio/footstep_concrete_000.ogg"  "$SFX/footstep_
 mkwav "$K/kenney_impact-sounds/Audio/footstep_snow_000.ogg"      "$SFX/footstep_ice.wav"      0.18
 mkwav "$K/kenney_sci-fi-sounds/Audio/thrusterFire_002.ogg"       "$SFX/jet_pulse.wav"          0.15
 mkwav "$K/kenney_sci-fi-sounds/Audio/spaceEngineLarge_000.ogg"   "$SFX/jet_boost.wav"          0.60
+# M6 P02 — Grounded → airborne ignition cue, material-keyed.
+# CONCRETE pulls from the same deep-impact family the explosion +
+# death_grunt cues use (lowFrequency_explosion_000 / _001), but
+# trimmed harder for the punchy "rocket-takeoff thump" character.
+# ICE pulls from the thruster family (same as jet_pulse) for a
+# whoosh + sibilance distinct from CONCRETE's low-end weight; reads
+# as a hot exhaust hitting a cold/wet surface instead of solid floor.
+mkwav "$K/kenney_sci-fi-sounds/Audio/lowFrequency_explosion_000.ogg" "$SFX/jet_ignition_concrete.wav" 0.55
+mkwav "$K/kenney_sci-fi-sounds/Audio/thrusterFire_003.ogg"           "$SFX/jet_ignition_ice.wav"      0.50
 mkwav "$K/kenney_impact-sounds/Audio/impactPlate_heavy_000.ogg"  "$SFX/landing_hard.wav"
 mkwav "$K/kenney_impact-sounds/Audio/impactSoft_medium_000.ogg"  "$SFX/landing_soft.wav"
 

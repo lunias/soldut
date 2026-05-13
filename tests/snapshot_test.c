@@ -21,11 +21,18 @@
  * batch of up to NET_INPUT_REDUNDANCY=4 inputs per datagram (server
  * dedupes by seq so packet loss doesn't desync prediction).
  *
- * M6: protocol id bumped S0LI → S0LJ (0x53304C49 → 0x53304C4A) because
- * EntitySnapshot gained a `gait_phase_q` u16 between `ammo_secondary`
- * and the optional grapple suffix. ENTITY_SNAPSHOT_WIRE_BYTES 29 → 31.
- * The new field carries gait cycle position so the M6 procedural pose
- * function renders the same foot frame on every client.
+ * M6 P01: protocol id bumped S0LI → S0LJ (0x53304C49 → 0x53304C4A)
+ * because EntitySnapshot gained a `gait_phase_q` u16 between
+ * `ammo_secondary` and the optional grapple suffix.
+ * ENTITY_SNAPSHOT_WIRE_BYTES 29 → 31. The new field carries gait cycle
+ * position so the M6 procedural pose function renders the same foot
+ * frame on every client.
+ *
+ * M6 P02: protocol id bumped S0LJ → S0LK (0x53304C4A → 0x53304C4B)
+ * for SNAP_STATE_BOOSTING at bit 14 of state_bits — drives the
+ * Burst-jet plume FX spike + leading-edge SFX_JET_BOOST cue on
+ * remote mechs. No wire-size change; bit lives in slots previously
+ * unused at S0LJ.
  */
 
 #include "../src/log.h"
@@ -52,9 +59,9 @@ static int g_failed = 0;
 int main(void) {
     log_init("/tmp/snapshot_test.log");
 
-    /* ---- Test 1: protocol id bumped to S0LJ (M6) ----------------- */
-    ASSERT_EQ("SOLDUT_PROTOCOL_ID == 'S0LJ'", SOLDUT_PROTOCOL_ID,
-              0x53304C4Au);
+    /* ---- Test 1: protocol id bumped to S0LK (M6 P02) ------------- */
+    ASSERT_EQ("SOLDUT_PROTOCOL_ID == 'S0LK'", SOLDUT_PROTOCOL_ID,
+              0x53304C4Bu);
 
     /* ---- Test 2: ENTITY_SNAPSHOT_WIRE_BYTES grew to 31 ----------- */
     ASSERT_EQ("ENTITY_SNAPSHOT_WIRE_BYTES == 31",

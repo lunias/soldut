@@ -8,6 +8,7 @@
 #include "map_kit.h"
 #include "match.h"
 #include "mech.h"
+#include "mech_jet_fx.h"
 #include "mech_sprites.h"
 #include "particle.h"
 #include "pickup.h"
@@ -37,6 +38,11 @@
 static Shader          g_halftone_post = {0};
 static int             g_halftone_loc_resolution = -1;
 static int             g_halftone_loc_density    = -1;
+/* M6 P02 — heat-shimmer uniforms. Cached at load time; re-cached after
+ * hot-reload via the same lazy halftone_load_once path. -1 = "not in
+ * shader" (graceful skip — pre-M6-P02 shaders work unchanged). */
+static int             g_halftone_loc_hot_zones  = -1;
+static int             g_halftone_loc_jet_time   = -1;
 static bool            g_halftone_loaded         = false;
 static bool            g_halftone_load_attempted = false;
 
@@ -67,8 +73,14 @@ static void halftone_load_once(void) {
     g_halftone_post           = s;
     g_halftone_loc_resolution = loc_res;
     g_halftone_loc_density    = loc_den;
+    /* M6 P02 — shimmer uniforms. Missing locations are fine (a stale
+     * shader file falls back to halftone-only). */
+    g_halftone_loc_hot_zones  = GetShaderLocation(s, "jet_hot_zones");
+    g_halftone_loc_jet_time   = GetShaderLocation(s, "jet_time");
     g_halftone_loaded         = true;
-    LOG_I("halftone: shader loaded; density=%.2f", (double)HALFTONE_DENSITY);
+    LOG_I("halftone: shader loaded; density=%.2f shimmer=%s",
+          (double)HALFTONE_DENSITY,
+          (g_halftone_loc_hot_zones >= 0 ? "ok" : "missing"));
 }
 
 static bool ensure_post_target(int sw, int sh) {
@@ -104,6 +116,10 @@ void renderer_post_shutdown(void) {
         g_halftone_loaded = false;
     }
     g_halftone_load_attempted = false;
+    g_halftone_loc_resolution = -1;
+    g_halftone_loc_density    = -1;
+    g_halftone_loc_hot_zones  = -1;
+    g_halftone_loc_jet_time   = -1;
 }
 
 void renderer_init(Renderer *r, int sw, int sh, Vec2 follow) {
@@ -1239,6 +1255,10 @@ static void draw_world_pass(Renderer *r, World *w, float alpha,
          * silhouettes that read in front of geometry but behind action). */
         draw_decorations(&w->level, 2);
         decal_draw_layer();
+        /* M6 P02 — jetpack plume sprites. Drawn between the decal
+         * pass and the mech loop so the mech body silhouettes
+         * against the plume. */
+        mech_jet_fx_draw_plumes(w, alpha);
         draw_pickups(&w->pickups, GetTime());
         for (int i = 0; i < w->mech_count; ++i) {
             /* Reconcile-smoothing offset only applies to the local
@@ -1324,6 +1344,43 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
         if (g_halftone_loc_density >= 0)
             SetShaderValue(g_halftone_post, g_halftone_loc_density,
                            &den, SHADER_UNIFORM_FLOAT);
+
+        /* M6 P02 — Heat-shimmer hot zones. Gated on
+         * mech_jet_fx_any_active so the uniform set + the shader's
+         * 16-slot loop only fire when at least one plume is on
+         * screen. When no jet is active we zero the array once (on
+         * the first-active-then-idle transition) so the GPU sees a
+         * clean state and the cheap-fast `z.w <= 0.001` early-out
+         * in the shader fires for every slot. */
+        if (g_halftone_loc_hot_zones >= 0 && g_halftone_loc_jet_time >= 0) {
+            static bool s_zones_zeroed = false;
+            /* Skip shimmer in shot mode for deterministic screenshots
+             * — the per-frame jet_time uniform would otherwise pull
+             * in wall-clock time and tile-noise would walk between
+             * test runs. */
+            bool any = !g_shot_mode && mech_jet_fx_any_active(w);
+            if (any) {
+                JetHotZone zones[JET_HOT_ZONE_MAX] = {0};
+                int nz = mech_jet_fx_collect_hot_zones(w, &r->camera,
+                                                       zones, JET_HOT_ZONE_MAX);
+                (void)nz;
+                /* Pass as a flat vec4 array — JetHotZone matches
+                 * vec4 layout (4 floats: x, y, radius, intensity). */
+                SetShaderValueV(g_halftone_post, g_halftone_loc_hot_zones,
+                                zones, SHADER_UNIFORM_VEC4,
+                                JET_HOT_ZONE_MAX);
+                float jt = (float)GetTime();
+                SetShaderValue(g_halftone_post, g_halftone_loc_jet_time,
+                               &jt, SHADER_UNIFORM_FLOAT);
+                s_zones_zeroed = false;
+            } else if (!s_zones_zeroed) {
+                JetHotZone zeros[JET_HOT_ZONE_MAX] = {0};
+                SetShaderValueV(g_halftone_post, g_halftone_loc_hot_zones,
+                                zeros, SHADER_UNIFORM_VEC4,
+                                JET_HOT_ZONE_MAX);
+                s_zones_zeroed = true;
+            }
+        }
 
         BeginDrawing();
             ClearBackground(BLACK);

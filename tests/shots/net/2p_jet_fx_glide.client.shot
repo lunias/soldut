@@ -1,0 +1,27 @@
+# M6 P02 — jetpack FX sync test (client) — JumpJet (discrete kick,
+# green flash on every press, no continuous plume).
+
+window 1280 720
+out build/shots/net/2p_jet_fx_glide.client
+network connect 127.0.0.1:24202
+name ClientJump
+loadout Trooper "Pulse Rifle" Sidearm Light JumpJet
+spawn_at 650 1176
+
+aim 200 1140
+
+# JumpJet only fires on BTN_JET press edge — tap it three times to
+# get three green ignition flashes.
+at 240 tap jet
+at 245 shot t245_ignition
+at 270 shot t270_sustain
+at 290 tap jet
+at 295 shot t295_second_kick
+at 320 shot t320_late_sustain
+at 340 tap jet
+at 360 shot t360_falling
+at 400 shot t400_grounded_again
+
+at 460 end
+
+contact_sheet sheet cols 3 cell 640 360

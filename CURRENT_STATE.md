@@ -3190,6 +3190,15 @@ them against playtest reactions. (Per-weapon stats are in the
 | `src/hud.c`               | `KILL_FEED_FADE_TAIL_SEC`       | 3 (last 3 s alpha-fade; wan-fixes-13) |
 | `src/hud.c`               | HP numerals font_px             | **22** (was 18; wan-fixes-15) |
 | `src/net.c`               | client render interp delay (ms) | 100 (restored by wan-fixes-2) |
+| `src/world.h`             | `MAX_BLOOD` (FX pool capacity)  | **8000** (was 3000; M6 P02 — Burst-jet plume worst case) |
+| `src/particle.c`          | `JET_BUOY_PXS2` (exhaust lift)  | 80   |
+| `src/particle.c`          | `GROUND_DUST_GRAVITY_PXS2`      | 120  |
+| `src/mech_jet_fx.c`       | `JET_IMPINGE_MAX_DIST` (ground query) | 48 px |
+| `src/mech_jet_fx.c`       | `g_jet_fx[JET_BURST].boost_particles_per_tick` | 8 (sustain 1×) |
+| `src/mech_jet_fx.c`       | `g_jet_fx[JET_JUMP_JET].ignition_particles` | 16 |
+| `src/mech_jet_fx.c`       | hot-zone radius (sustain/boost/ignition) | 40 / 80 / 120 px |
+| `src/mech_jet_fx.c`       | `plume_length_px` (Standard/Burst/Glide) | **56 / 64 / 36** (revised from 28 / 34 / 18 after visual iteration — the spec-default was occluded by mech body) |
+| `src/render.c`            | `JET_HOT_ZONE_MAX` (shimmer slots)   | 16 |
 
 The simulation runs at **60 Hz** at M1 (not 120 Hz as
 [documents/03-physics-and-mechs.md](documents/03-physics-and-mechs.md)

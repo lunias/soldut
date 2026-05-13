@@ -1,0 +1,33 @@
+# M6 P02 — jetpack FX sync test (host) — Glide vs JumpJet coverage.
+#
+# Pairs with 2p_jet_fx_glide.client.shot. Host runs Glide-wing
+# (intermittent pale-cyan wisps); client runs JumpJet (discrete kick
+# on each jet press, green-cyan ignition flash, no continuous plume).
+#
+# Same map + spawns as 2p_jet_fx for camera framing consistency.
+
+window 1280 720
+out build/shots/net/2p_jet_fx_glide.host
+network host 24202
+name HostGlide
+map reactor
+loadout Trooper "Pulse Rifle" Sidearm Light Glide
+
+spawn_at 400 1176
+peer_spawn 1 650 1176
+
+aim 1100 1140
+
+# Glide sustains — hold jet, capture wisps at sustain divisor's
+# 4-tick cadence.
+at 240 press jet
+at 245 shot t245_ignition
+at 270 shot t270_sustain
+at 320 shot t320_late_sustain
+at 340 release jet
+at 360 shot t360_falling
+at 400 shot t400_grounded_again
+
+at 460 end
+
+contact_sheet sheet cols 3 cell 640 360

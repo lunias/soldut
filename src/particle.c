@@ -126,6 +126,57 @@ int fx_spawn_stump_emitter(FxPool *pool, int mech_id, int limb,
     return idx;
 }
 
+/* M6 P02 — Jet exhaust + ground dust. fx_pool_init already zeros every
+ * slot so the unused pin_* fields stay clean; we set them defensively
+ * here in case fx_alloc returns an overwritten slot. */
+int fx_spawn_jet_exhaust(FxPool *pool, Vec2 pos, Vec2 vel,
+                         float life, float size,
+                         uint32_t color_hot, uint32_t color_cool)
+{
+    int idx = fx_alloc(pool);
+    if (idx < 0) return -1;
+    FxParticle *fp = &pool->items[idx];
+    fp->pos             = pos;
+    fp->render_prev_pos = pos;
+    fp->vel             = vel;
+    fp->life            = life;
+    fp->life_max        = life;
+    fp->size            = size;
+    fp->color           = color_hot;
+    fp->color_cool      = color_cool;
+    fp->kind            = FX_JET_EXHAUST;
+    fp->alive           = 1;
+    fp->pin_mech_id     = -1;
+    fp->pin_limb        = 0;
+    fp->pin_pad         = 0;
+    return idx;
+}
+
+int fx_spawn_ground_dust(FxPool *pool, Vec2 pos, Vec2 vel,
+                         float life, float size, uint32_t color)
+{
+    int idx = fx_alloc(pool);
+    if (idx < 0) return -1;
+    FxParticle *fp = &pool->items[idx];
+    fp->pos             = pos;
+    fp->render_prev_pos = pos;
+    fp->vel             = vel;
+    fp->life            = life;
+    fp->life_max        = life;
+    fp->size            = size;
+    fp->color           = color;
+    /* Cool color = same RGB with alpha 0, so the puff fades to zero
+     * over its life without a colour shift. Packed as RGBA8 with the
+     * alpha byte cleared. */
+    fp->color_cool      = color & 0xFFFFFF00u;
+    fp->kind            = FX_GROUND_DUST;
+    fp->alive           = 1;
+    fp->pin_mech_id     = -1;
+    fp->pin_limb        = 0;
+    fp->pin_pad         = 0;
+    return idx;
+}
+
 int fx_spawn_tracer(FxPool *pool, Vec2 a, Vec2 b) {
     int idx = fx_alloc(pool);
     if (idx < 0) return -1;
@@ -207,6 +258,40 @@ void fx_update(World *w, float dt) {
             continue;     /* skip integrate + wall-collide */
         }
 
+        if (fp->kind == FX_JET_EXHAUST) {
+            /* M6 P02 — additive exhaust. Linear drag (gas dissipates
+             * fast) + mild upward buoyancy fights gravity so the trail
+             * rises a touch as it cools. JET_BUOY_PXS2 = 80 px/s²
+             * comfortably under JET_THRUST so the trail still drifts
+             * downward when the body is climbing. */
+            const float JET_BUOY_PXS2 = 80.0f;
+            fp->vel.x *= 0.92f;
+            fp->vel.y *= 0.92f;
+            fp->vel.y -= JET_BUOY_PXS2 * dt;
+            fp->pos.x += fp->vel.x * dt;
+            fp->pos.y += fp->vel.y * dt;
+            /* No wall-collide — exhaust passes through; tile collision
+             * here would just kill particles spawned half a pixel below
+             * the nozzle the moment a mech is on a slope. */
+            if (i > last_alive) last_alive = i;
+            continue;
+        }
+
+        if (fp->kind == FX_GROUND_DUST) {
+            /* M6 P02 — dust + steam. Heavy drag, mild gravity so the
+             * cloud hangs low and dissipates. No tile-collide death
+             * (the dust spawns AT ground level; one frame later it'd
+             * always be inside a tile and die instantly). */
+            const float GROUND_DUST_GRAVITY_PXS2 = 120.0f;
+            fp->vel.x *= 0.88f;
+            fp->vel.y *= 0.88f;
+            fp->vel.y += GROUND_DUST_GRAVITY_PXS2 * dt * 0.3f;
+            fp->pos.x += fp->vel.x * dt;
+            fp->pos.y += fp->vel.y * dt;
+            if (i > last_alive) last_alive = i;
+            continue;
+        }
+
         if (fp->kind != FX_TRACER) {
             /* semi-implicit Euler: v += g*dt; p += v*dt */
             fp->vel.x += g.x * dt;
@@ -276,6 +361,56 @@ void fx_draw(const FxPool *pool, float alpha) {
                 /* Pinned dismemberment emitter — invisible itself; the
                  * blood drops it spawns each tick are what's visible. */
                 break;
+            case FX_JET_EXHAUST: {
+                /* M6 P02 — additive exhaust. Lerps `color` (hot) toward
+                 * `color_cool` over `1 - life/life_max`, then draws as
+                 * an additive disc so overlapping particles brighten
+                 * the plume core. */
+                float ft = 1.0f - t;     /* 0 at spawn, 1 at end */
+                if (ft < 0.0f) ft = 0.0f;
+                if (ft > 1.0f) ft = 1.0f;
+                uint8_t hr = (uint8_t)((fp->color      >> 24) & 0xFF);
+                uint8_t hg = (uint8_t)((fp->color      >> 16) & 0xFF);
+                uint8_t hb = (uint8_t)((fp->color      >>  8) & 0xFF);
+                uint8_t ha = (uint8_t)((fp->color           ) & 0xFF);
+                uint8_t cr = (uint8_t)((fp->color_cool >> 24) & 0xFF);
+                uint8_t cg = (uint8_t)((fp->color_cool >> 16) & 0xFF);
+                uint8_t cb = (uint8_t)((fp->color_cool >>  8) & 0xFF);
+                uint8_t ca = (uint8_t)((fp->color_cool      ) & 0xFF);
+                Color cc = {
+                    (unsigned char)((float)hr + ((float)cr - (float)hr) * ft),
+                    (unsigned char)((float)hg + ((float)cg - (float)hg) * ft),
+                    (unsigned char)((float)hb + ((float)cb - (float)hb) * ft),
+                    (unsigned char)((float)ha + ((float)ca - (float)ha) * ft),
+                };
+                BeginBlendMode(BLEND_ADDITIVE);
+                DrawCircleV(pos, fp->size, cc);
+                EndBlendMode();
+                break;
+            }
+            case FX_GROUND_DUST: {
+                /* M6 P02 — dust / steam. Alpha-blend; same hot→cool
+                 * lerp as exhaust but no additive blend mode. */
+                float ft = 1.0f - t;
+                if (ft < 0.0f) ft = 0.0f;
+                if (ft > 1.0f) ft = 1.0f;
+                uint8_t hr = (uint8_t)((fp->color      >> 24) & 0xFF);
+                uint8_t hg = (uint8_t)((fp->color      >> 16) & 0xFF);
+                uint8_t hb = (uint8_t)((fp->color      >>  8) & 0xFF);
+                uint8_t ha = (uint8_t)((fp->color           ) & 0xFF);
+                uint8_t cr = (uint8_t)((fp->color_cool >> 24) & 0xFF);
+                uint8_t cg = (uint8_t)((fp->color_cool >> 16) & 0xFF);
+                uint8_t cb = (uint8_t)((fp->color_cool >>  8) & 0xFF);
+                uint8_t ca = (uint8_t)((fp->color_cool      ) & 0xFF);
+                Color cc = {
+                    (unsigned char)((float)hr + ((float)cr - (float)hr) * ft),
+                    (unsigned char)((float)hg + ((float)cg - (float)hg) * ft),
+                    (unsigned char)((float)hb + ((float)cb - (float)hb) * ft),
+                    (unsigned char)((float)ha + ((float)ca - (float)ha) * ft),
+                };
+                DrawCircleV(pos, fp->size, cc);
+                break;
+            }
             case FX_KIND_COUNT: break;
         }
     }

@@ -4,6 +4,7 @@
 #include "../third_party/raylib/src/raylib.h"
 
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 /*
@@ -27,9 +28,20 @@
 #define DECAL_THRESHOLD   4096
 #define DECAL_MAX_CHUNKS  64       /* 8×8 grid worst case; covers any v1 map */
 
+/* M6 P02 — splat kind discriminator. BLOOD uses the existing red
+ * outer+inner stamp; SCORCH paints a dark brown/grey pair (warm-grey
+ * outer halo + dark-charcoal core) for grounded-jet impingement
+ * scorch marks. */
+typedef enum {
+    SPLAT_BLOOD  = 0,
+    SPLAT_SCORCH = 1,
+} SplatKind;
+
 typedef struct {
-    Vec2  pos;
-    float radius;
+    Vec2    pos;
+    float   radius;
+    uint8_t kind;     /* SplatKind */
+    uint8_t pad[3];
 } PendingSplat;
 
 typedef struct {
@@ -138,7 +150,15 @@ void decal_clear(void) {
 
 void decal_paint_blood(Vec2 pos, float radius) {
     if (g_pending_count >= MAX_PENDING) return;   /* drop on overflow */
-    g_pending[g_pending_count++] = (PendingSplat){ pos, radius };
+    g_pending[g_pending_count++] = (PendingSplat){ pos, radius, SPLAT_BLOOD, {0,0,0} };
+}
+
+void decal_paint_scorch(Vec2 pos, float radius) {
+    /* Shares the blood queue + flush — kind discriminator picks color
+     * in stamp_splat. Drop on overflow is acceptable: scorch is a
+     * polish layer, not a gameplay signal. */
+    if (g_pending_count >= MAX_PENDING) return;
+    g_pending[g_pending_count++] = (PendingSplat){ pos, radius, SPLAT_SCORCH, {0,0,0} };
 }
 
 /* Lazy-alloc a chunk on first paint. Idempotent. */
@@ -157,11 +177,19 @@ static void ensure_chunk_alloc(int cx, int cy) {
     EndTextureMode();
 }
 
-/* Stamp the two-layer blood splat (outer translucent + inner opaque)
- * into a render-texture at the supplied chunk-local position. */
-static void stamp_splat(Vec2 lp, float r) {
-    DrawCircleV((Vector2){lp.x, lp.y}, r * 1.4f, (Color){120,  0,  0, 110});
-    DrawCircleV((Vector2){lp.x, lp.y}, r,        (Color){180, 10, 10, 220});
+/* Stamp the two-layer splat (outer translucent + inner opaque) into
+ * a render-texture at the supplied chunk-local position. M6 P02
+ * adds the SCORCH kind: warm-grey halo + dark-charcoal core, no fade
+ * (scorch decals are permanent for the round — see TRADE_OFFS.md
+ * "Scorch decals are permanent for the round (no per-decal fade)"). */
+static void stamp_splat(Vec2 lp, float r, uint8_t kind) {
+    if (kind == SPLAT_SCORCH) {
+        DrawCircleV((Vector2){lp.x, lp.y}, r * 1.4f, (Color){ 20, 16, 14, 110});
+        DrawCircleV((Vector2){lp.x, lp.y}, r,        (Color){ 40, 32, 28, 200});
+    } else {
+        DrawCircleV((Vector2){lp.x, lp.y}, r * 1.4f, (Color){120,  0,  0, 110});
+        DrawCircleV((Vector2){lp.x, lp.y}, r,        (Color){180, 10, 10, 220});
+    }
 }
 
 void decal_flush_pending(void) {
@@ -171,7 +199,8 @@ void decal_flush_pending(void) {
         if (g_layer.chunks[0].id == 0) { g_pending_count = 0; return; }
         BeginTextureMode(g_layer.chunks[0]);
             for (int i = 0; i < g_pending_count; ++i) {
-                stamp_splat(g_pending[i].pos, g_pending[i].radius);
+                stamp_splat(g_pending[i].pos, g_pending[i].radius,
+                            g_pending[i].kind);
             }
         EndTextureMode();
         g_pending_count = 0;
@@ -213,7 +242,7 @@ void decal_flush_pending(void) {
                 if (p.x + rx < wx0 || p.x - rx >= wx1 ||
                     p.y + rx < wy0 || p.y - rx >= wy1) continue;
                 Vec2 lp = { p.x - wx0, p.y - wy0 };
-                stamp_splat(lp, r);
+                stamp_splat(lp, r, g_pending[i].kind);
             }
         EndTextureMode();
         g_layer.dirty[ci] = true;

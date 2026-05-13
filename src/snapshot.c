@@ -139,6 +139,9 @@ void snapshot_capture(const World *w, SnapshotFrame *out, uint16_t ack_input_seq
         if (m->powerup_berserk_remaining > 0.0f)  bits |= SNAP_STATE_BERSERK;
         if (m->powerup_invis_remaining   > 0.0f)  bits |= SNAP_STATE_INVIS;
         if (m->powerup_godmode_remaining > 0.0f)  bits |= SNAP_STATE_GODMODE;
+        /* M6 P02 — burst-jet boost on the wire. Drives the FX plume
+         * spike + leading-edge SFX_JET_BOOST cue on remote mechs. */
+        if (m->boost_timer > 0.0f)               bits |= SNAP_STATE_BOOSTING;
 
         /* P06 — Grapple state. The trailing 8-byte suffix is only on
          * the wire when SNAP_STATE_GRAPPLING is set; idle stays flat.
@@ -614,6 +617,35 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
         m->powerup_berserk_remaining = (e->state_bits & SNAP_STATE_BERSERK) ? 1.0f : 0.0f;
         m->powerup_invis_remaining   = (e->state_bits & SNAP_STATE_INVIS)   ? 1.0f : 0.0f;
         m->powerup_godmode_remaining = (e->state_bits & SNAP_STATE_GODMODE) ? 1.0f : 0.0f;
+        /* M6 P02 — Visual jet state for remote mechs. Owner-side mechs
+         * (server, or this client's local mech) populate jet_state_bits
+         * in mech_step_drive from real input + boost_timer; for remote
+         * mechs on the client the snapshot's state bits are the only
+         * source. The MECH_JET_IGNITION_TICK edge is derived locally
+         * from m->jet_prev_grounded vs the just-applied m->grounded so
+         * the trigger lands on the same tick host and client agree the
+         * mech left the ground. Leading-edge SFX_JET_BOOST fires before
+         * we overwrite jet_state_bits, mirroring the owner-side audio
+         * fired from mech_step_drive. */
+        bool snap_jet   = (e->state_bits & SNAP_STATE_JET)      != 0;
+        bool snap_boost = (e->state_bits & SNAP_STATE_BOOSTING) != 0;
+        if (!is_local) {
+            bool prev_boost = (m->jet_state_bits & MECH_JET_BOOSTING) != 0;
+            if (snap_boost && !prev_boost) {
+                audio_play_at(SFX_JET_BOOST, mech_chest_pos(w, mid));
+            }
+            bool was_grounded_jb = m->jet_prev_grounded != 0;
+            uint8_t new_bits = 0;
+            if (snap_jet) {
+                new_bits |= MECH_JET_ACTIVE;
+                if (was_grounded_jb && !m->grounded) {
+                    new_bits |= MECH_JET_IGNITION_TICK;
+                }
+                if (snap_boost) new_bits |= MECH_JET_BOOSTING;
+            }
+            m->jet_state_bits    = new_bits;
+            m->jet_prev_grounded = m->grounded ? 1u : 0u;
+        }
         /* P06 — Grapple. Clients never allocate a constraint (the
          * pull is felt through the snapshot's pelvis_pos updates);
          * we just store state + anchor for the rope renderer. */

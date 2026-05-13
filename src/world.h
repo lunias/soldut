@@ -113,6 +113,17 @@ enum {
 
 /* All-limbs mask — used by dismemberment counting for KILLFLAG_GIB. */
 #define LIMB_ALL_MASK (LIMB_HEAD | LIMB_L_ARM | LIMB_R_ARM | LIMB_L_LEG | LIMB_R_LEG)
+
+/* M6 P02 — Visual jet state flags. Source of truth for the
+ * `mech_jet_fx_step` driver in src/mech_jet_fx.c. Set each tick by
+ * mech_step_drive for owner mechs (server-side, or the local mech on a
+ * client) and by snapshot_apply for remote mechs on the client. The FX
+ * step reads these as a pure consumer — it never writes them. */
+enum {
+    MECH_JET_ACTIVE        = 1u << 0,   /* this tick is producing thrust (or jump impulse) */
+    MECH_JET_IGNITION_TICK = 1u << 1,   /* first ACTIVE tick after grounded → airborne */
+    MECH_JET_BOOSTING      = 1u << 2,   /* JET_BURST mid-boost (boost_timer > 0) */
+};
 static inline int limb_count(uint8_t mask) {
     int n = 0;
     while (mask) { n += (int)(mask & 1u); mask >>= 1; }
@@ -152,7 +163,12 @@ typedef struct {
 
 /* ---- Mech ----------------------------------------------------------- */
 #define MAX_MECHS         32
-#define MAX_BLOOD         3000
+/* M6 P02 — bumped 3000 → 8000 to cover worst-case Burst-jet plume
+ * spew: 16 mechs × 2 nozzles × 8 particles/tick × 60 Hz × ~0.5 s
+ * average life = ~7680 live FX particles peak. ~384 KB permanent at
+ * the new sizeof(FxParticle) (~48 B with the M6 P02 color_cool field).
+ * Inside the 256 MB resident budget by a wide margin. */
+#define MAX_BLOOD         8000
 
 /* P12 — Persistent damage decals composited over each visible mech
  * part. Decals are stored in sprite-local space (i8 px relative to the
@@ -313,6 +329,14 @@ typedef struct {
      * pulse every JET_PULSE_INTERVAL_TICKS so a held-jet doesn't
      * machine-gun the cue. Compared against world.tick. */
     uint64_t  last_jet_pulse_tick;
+
+    /* M6 P02 — visual jet state. `jet_state_bits` is MECH_JET_* flags
+     * (set by mech_step_drive on the owner side, by snapshot_apply for
+     * remote mechs on a client); `jet_prev_grounded` is last tick's
+     * `grounded` value, used to detect the grounded→airborne edge that
+     * fires the ignition burst + SFX_JET_IGNITION_* cue. */
+    uint8_t   jet_state_bits;
+    uint8_t   jet_prev_grounded;
 
     /* Weapon state. Each mech carries a primary + secondary; only the
      * active slot consumes BTN_FIRE. BTN_SWAP toggles between them. */
@@ -599,6 +623,8 @@ typedef enum {
     FX_TRACER,
     FX_SMOKE,
     FX_STUMP,            /* P12: pinned dismemberment emitter — pin_mech_id / pin_limb track the parent particle each tick */
+    FX_JET_EXHAUST,      /* M6 P02: additive, color lerps color_hot → color_cool over life */
+    FX_GROUND_DUST,      /* M6 P02: alpha-blended, heavy drag, brief upward lift */
     FX_KIND_COUNT
 } FxKind;
 
@@ -610,7 +636,12 @@ typedef struct {
     float    life;       /* seconds remaining */
     float    life_max;
     float    size;
-    uint32_t color;      /* RGBA8 */
+    uint32_t color;      /* RGBA8 — "hot" / start color for kinds that lerp */
+    /* M6 P02 — End-of-life color for kinds that lerp hot→cool over
+     * `1 - life/life_max`. Only read by FX_JET_EXHAUST and
+     * FX_GROUND_DUST today; other kinds leave this at zero (their
+     * draw path doesn't consult it). Adds 4 bytes per particle. */
+    uint32_t color_cool;
     uint8_t  kind;       /* FxKind */
     uint8_t  alive;
     /* P12 — FX_STUMP only: pinned-emitter parent. The emitter has no
