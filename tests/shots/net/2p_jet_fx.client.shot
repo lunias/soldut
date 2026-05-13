@@ -1,0 +1,26 @@
+# M6 P02 — jetpack FX sync test (client). Pairs with the .host.shot.
+
+window 1280 720
+out build/shots/net/2p_jet_fx.client
+network connect 127.0.0.1:24201
+name ClientStd
+loadout Trooper "Pulse Rifle" Sidearm Light Standard
+
+# Cosmetic local pre-snap; host's peer_spawn slot=1 is the authority.
+spawn_at 650 1176
+
+# Aim left so the client mech faces the host (cursor parked).
+aim 200 1140
+
+at 240 press jet
+at 245 shot t245_ignition
+at 270 shot t270_sustain
+at 285 shot t285_boost_early
+at 295 shot t295_boost_mid
+at 310 shot t310_post_boost
+at 340 release jet
+at 360 shot t360_falling
+at 400 shot t400_grounded_again
+at 460 end
+
+contact_sheet sheet cols 3 cell 640 360

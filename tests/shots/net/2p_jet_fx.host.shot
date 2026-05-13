@@ -1,0 +1,49 @@
+# M6 P02 — jetpack FX sync test (host).
+#
+# Reactor map; host Burst, client Standard. Both spawn adjacent on
+# open floor (well clear of the central pillar). Host triggers boost
+# to capture the orange spike; client just sustains. Both windows
+# screenshot matching ticks for side-by-side visual diff.
+
+window 1280 720
+out build/shots/net/2p_jet_fx.host
+network host 24201
+name HostBurst
+map reactor
+loadout Trooper "Pulse Rifle" Sidearm Light Burst
+
+# Reactor floor at y=1216; spawn pelvis 40 px above (y=1176). Central
+# pillar at x=1632..1888 — keep well west.
+spawn_at 400 1176
+peer_spawn 1 650 1176
+
+# Aim at the client's chest height to the right (cursor parked, no
+# aim transitions during the test).
+aim 1100 1140
+
+# Phase 1: settle on floor (game ticks 0..40).
+# Phase 2 (game ticks 50+): both press jet. shotmode tick 240 maps
+# to game tick ~50 here per 2p_combat's timing convention. Going
+# generous: press at shotmode 240 (well past lobby + countdown).
+at 240 press jet
+at 245 shot t245_ignition
+
+# Sustain hold; capture mid-jet.
+at 270 shot t270_sustain
+
+# Boost: press DASH on the Burst host. Boost lasts 24 ticks
+# (0.4s × 60 Hz).
+at 280 press dash
+at 285 shot t285_boost_early
+at 290 release dash
+at 295 shot t295_boost_mid
+at 310 shot t310_post_boost
+
+# Release jet and fall.
+at 340 release jet
+at 360 shot t360_falling
+at 400 shot t400_grounded_again
+
+at 460 end
+
+contact_sheet sheet cols 3 cell 640 360

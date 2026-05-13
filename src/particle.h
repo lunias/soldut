@@ -32,6 +32,22 @@ int fx_spawn_smoke(FxPool *pool, Vec2 pos, Vec2 vel, pcg32_t *rng);
  * expiry or invalid pin. */
 int fx_spawn_stump_emitter(FxPool *pool, int mech_id, int limb, float duration_s);
 
+/* M6 P02 — Jet exhaust particle. Additive blend; linear drag; subtle
+ * upward buoyancy so the trail rises slightly as it dissipates. Color
+ * lerps from `color_hot` (spawn) to `color_cool` (life end). Pos/vel
+ * supplied by the caller — usually the nozzle position and a
+ * cone-jittered vector aligned with the thrust direction. */
+int fx_spawn_jet_exhaust(FxPool *pool, Vec2 pos, Vec2 vel,
+                         float life, float size,
+                         uint32_t color_hot, uint32_t color_cool);
+
+/* M6 P02 — Ground-impingement dust / steam puff. Alpha-blended (these
+ * are dust, not heat); heavy drag, mild gravity, brief upward lift.
+ * Color picked by the caller from the surface kind (warm grey on
+ * concrete, pale cyan on ice). */
+int fx_spawn_ground_dust(FxPool *pool, Vec2 pos, Vec2 vel,
+                         float life, float size, uint32_t color);
+
 /* Step all FX particles. Calls into decal.c for blood that should
  * leave a permanent splat. */
 void fx_update(World *w, float dt);

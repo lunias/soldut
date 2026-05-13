@@ -13,7 +13,19 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-12** (P19 — audio assets fill). **Deleted**
+Last updated: **2026-05-12** (M6 P02 — jetpack propulsion FX).
+**Added** three new entries under "Jet propulsion FX (M6 P02)":
+"Scorch decals are permanent for the round (no per-decal fade)",
+"Jet exhaust is client-local (no per-particle wire data)", and
+"Heat shimmer uniform loop has a 16-zone hard cap (one per active
+mech, at pelvis)". No entries deleted in this round — M6 P02 is
+net-additive over M6 P01's earlier shape. **Note**: the audio
+fallback path that quietly no-ops on missing files was exercised
+during dev (the two new `SFX_JET_IGNITION_*` entries existed in
+the manifest for ~5 minutes before the WAVs landed); 49/49 SFX
+load post-P02 (47 base + 2 ignition).
+
+Previously: **2026-05-12** (P19 — audio assets fill). **Deleted**
 "SFX manifest assets aren't on disk yet (post-P14)" — the 47-entry
 SFX manifest + servo loop + 7 per-map music tracks + 7 ambient loops
 are all on disk under `assets/sfx/` and `assets/music/`. Sources:
@@ -1867,6 +1879,92 @@ WAN polish. Net effect on the trade-off ledger:
     button to identify it, fire SFX_UI_HOVER on hash transition.
   - We add a settings menu where hover navigation is the primary
     interaction model. Same fix.
+
+---
+
+## Jet propulsion FX (M6 P02)
+
+### Scorch decals are permanent for the round (no per-decal fade)
+
+- **What we did** — `decal_paint_scorch(Vec2, float)` mirrors the
+  `decal_paint_blood` shape — queue → flush into the splat-layer
+  RT(s) inside one `BeginTextureMode` pair per dirty chunk. Once
+  painted, the pixels are baked into the RT and stay until the
+  level is rebuilt (round transition). The spec's "~2 s fade
+  window" never lands.
+- **Why** — The decal layer has no per-splat age tracking; it's
+  literally just painted pixels into a render texture. Adding a
+  parallel ring buffer of splat records (pos, age, fadable_color,
+  source_chunk) so the flush path can decrement age + re-paint
+  faded pixels every frame is real work — a separate data
+  structure, a per-frame walk, and a tricky "what does fade look
+  like on an alpha-blended pixel that was painted over by another
+  splat 50 ms later" interaction. We elected to ship without it;
+  the binary-on/permanent behavior reads fine against the rest of
+  the kit (blood decals already use the same permanent model).
+- **Revisit when** —
+  - The decal layer grows per-splat age records for any reason
+    (M6 polish on blood, the planned "blood dries to brown" feature,
+    etc.). Once the structure exists, scorch slots straight in.
+  - Playtest reports the scorch marks accumulating into visual
+    clutter on long matches. The chunk-rotation policy already
+    overwrites oldest pixels in a high-traffic chunk; if that's
+    not enough, an explicit fade is the next move.
+
+### Jet exhaust is client-local (no per-particle wire data)
+
+- **What we did** — Every client spawns its own jet-exhaust + dust
+  + scorch FX from the (replicated) `Mech.jet_state_bits` +
+  `chassis_id` + `jetpack_id` + `facing_left` + `grounded` state.
+  Particles are spawn-distribution-identical across clients (same
+  spawn rates, same color, same source position) but NOT particle-
+  bit-identical (each client's `world.rng` advances independently
+  through other FX paths). Two clients watching the same jetting
+  mech see "the same plume" — same length, color, density — but
+  the individual exhaust dots scatter differently.
+- **Why** — Per-particle networking would require ~5+ bytes per
+  spawn × dozens of spawns per active jet per tick × every jetting
+  mech × every snapshot — order-of-magnitude bandwidth blowout for
+  a purely visual layer. The existing `NET_MSG_HIT_EVENT` /
+  `NET_MSG_FIRE_EVENT` pattern (replicate the EVENT, let each
+  client spawn its own particles from it) is the established
+  precedent; jet FX follows the same model. The FX driver is a
+  pure read of replicated state — host and client run the exact
+  same code path and produce statistically-identical streams.
+- **Revisit when** —
+  - Playtest reports specific particle landing positions diverging
+    enough between clients to be a reportable bug ("my exhaust hit
+    that wall, theirs didn't"). The FX particles don't interact
+    with gameplay so this would be a pure aesthetic complaint.
+  - We add particle-driven gameplay (e.g. exhaust pushes other
+    players' aim, dust obscures sightlines for damage purposes).
+    At that point the FX layer becomes simulation, and per-particle
+    wire data is the right answer.
+
+### Heat shimmer uniform loop has a 16-zone hard cap (one per active mech, at pelvis)
+
+- **What we did** — `halftone_post.fs.glsl` carries a fixed
+  `vec4 jet_hot_zones[16]` uniform; `mech_jet_fx_collect_hot_zones`
+  writes ≤16 entries by walking alive mechs with `MECH_JET_ACTIVE`
+  set. To fit the cap, we collect ONE zone per active mech (at the
+  pelvis) instead of one per nozzle — so a 2-nozzle Burst-jet
+  contributes a single shimmer disc covering both plumes rather
+  than a per-nozzle pair.
+- **Why** — `MAX_LOBBY_SLOTS = 16` matches the cap exactly; any
+  more zones than active mechs is wasted shader work. A larger
+  uniform array (e.g. 32 for per-nozzle) is feasible but doubles
+  the per-fragment loop cost at 1920×1080 (~2M pixel-iters × N
+  zones). The per-mech-at-pelvis radius (40 px sustain, 80 px
+  boost, 120 px ignition) is wide enough to cover both nozzles
+  for any 2-nozzle jetpack on the current chassis size band.
+- **Revisit when** —
+  - `MAX_LOBBY_SLOTS` grows beyond 16. The cap shifts; the cleanest
+    response is to keep one-zone-per-mech but bump the array size
+    to match.
+  - Per-nozzle visual differentiation becomes important (Burst's
+    twin plumes shimmer independently as a stylistic statement).
+    At that point: 32-slot uniform, per-nozzle collection, and
+    a perf check on integrated graphics at 1080p.
 
 ---
 

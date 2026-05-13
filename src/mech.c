@@ -921,7 +921,13 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
                 && m->boost_timer <= 0.0f && m->fuel > jp->boost_fuel_cost * m->fuel_max) {
                 m->boost_timer = jp->boost_duration;
                 m->fuel -= jp->boost_fuel_cost * m->fuel_max;
-                SHOT_LOG("t=%llu mech=%d jet_burst",
+                /* M6 P02 — boost cue. Fires on the owner side (server,
+                 * or this client's local mech). Remote mechs on a pure
+                 * client fire from snapshot_apply's leading-edge
+                 * detection so the cue lands within one snapshot of
+                 * the server's boost trigger. */
+                audio_play_at(SFX_JET_BOOST, mech_chest_pos(w, mid));
+                SHOT_LOG("t=%llu mech=%d jet_burst sfx=jet_boost",
                          (unsigned long long)w->tick, mid);
             }
             if (m->boost_timer > 0.0f) m->boost_timer -= dt;
@@ -929,6 +935,52 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
 
         if ((in.buttons & BTN_JUMP) && grounded) {
             apply_jump(w, m, JUMP_IMPULSE_PXS * ch->jump_mult, dt);
+        }
+
+        /* M6 P02 — Visual jet state flags. Owner side (server, or this
+         * client's local mech) writes from real input + boost_timer +
+         * grounded edge; remote mechs on a pure client get these from
+         * snapshot_apply instead, so we leave them alone here.
+         *
+         * "Active this tick" mirrors the visible exhaust source:
+         *   - standard/burst — BTN_JET held & fuel > 0 (the `jetting`
+         *     local above)
+         *   - glide-wing — same, plus the glide-while-empty branch
+         *     (which produces lift at 0 fuel via jp->glide_thrust)
+         *   - jump-jet — only on the press edge that consumes fuel
+         *     (continuous BTN_JET holds produce no thrust). */
+        bool fx_owner = w->authoritative || mid == w->local_mech_id;
+        if (fx_owner) {
+            bool was_grounded = m->jet_prev_grounded != 0;
+            uint8_t new_bits = 0;
+            bool jet_btn          = (in.buttons & BTN_JET) != 0;
+            bool jet_press        = (pressed    & BTN_JET) != 0;
+            bool jet_glide_empty  = !jp->jump_on_land
+                                  && jet_btn
+                                  && jp->glide_thrust > 0.0f
+                                  && m->fuel <= 0.0f;
+            bool jet_jump_active  = jp->jump_on_land
+                                  && jet_press
+                                  && m->fuel > 0.05f;
+            bool jet_active = jetting || jet_glide_empty || jet_jump_active;
+            if (jet_active) {
+                new_bits |= MECH_JET_ACTIVE;
+                /* Ignition edge — set on grounded → airborne for
+                 * continuous-thrust jets. For JET_JUMP_JET the press
+                 * IS the ignition (the airborne edge fires on the
+                 * NEXT tick when BTN_JET is no longer held), so we
+                 * set IGNITION_TICK directly on the press tick. */
+                if (jet_jump_active) {
+                    new_bits |= MECH_JET_IGNITION_TICK;
+                } else if (was_grounded && !m->grounded) {
+                    new_bits |= MECH_JET_IGNITION_TICK;
+                }
+                if (m->boost_timer > 0.0f) {
+                    new_bits |= MECH_JET_BOOSTING;
+                }
+            }
+            m->jet_state_bits    = new_bits;
+            m->jet_prev_grounded = m->grounded ? 1u : 0u;
         }
 
         /* For REMOTE mechs on a non-authoritative side (= client),

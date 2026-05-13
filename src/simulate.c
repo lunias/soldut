@@ -4,6 +4,7 @@
 #include "log.h"
 #include "mech.h"
 #include "mech_ik.h"
+#include "mech_jet_fx.h"
 #include "particle.h"
 #include "physics.h"
 #include "pickup.h"
@@ -378,6 +379,11 @@ void simulate_step(World *w, float dt) {
             PoseBones bones;
             pose_compute(&in, bones);
             pose_write_to_particles(w, i, bones);
+            /* M6 P02 — jetpack FX driver. Reads jet_state_bits +
+             * pelvis (just placed by pose_compute) and spawns
+             * exhaust / dust particles + paints scorch decals. Pure
+             * consumer of replicated state — no sim mutation. */
+            mech_jet_fx_step(w, i, dt);
             /* M6 — post-pose terrain push-out. pose_compute writes
              * deterministic bone offsets from pelvis; on a slope or
              * against a wall, the straight-down feet (or other bones)

@@ -2806,6 +2806,55 @@ re-runs are byte-identical.
 
 ## Recently fixed
 
+### M6 P02-perf — Jet FX FPS regression (FIXED 2026-05-12, post-P02 ship)
+
+User-reported severe FPS degradation when any mech was jetting,
+worst on `JET_BURST` mid-boost. Required to maintain ≥60 FPS at
+4K per the perf budget.
+
+**Root cause** — `src/particle.c::fx_draw` wrapped every
+`FX_JET_EXHAUST` particle in `BeginBlendMode(BLEND_ADDITIVE)` /
+`EndBlendMode()`. raylib's `BeginBlendMode` calls
+`rlDrawRenderBatchActive()` which issues a full GPU draw call to
+flush the current VBO. At the Burst-boost peak (`g_jet_fx[BURST]`:
+8 particles/tick × 2 nozzles = 16/tick × 60 Hz × 0.4 s avg life ≈
+384 live per Burst-mech, ×16 worst-case = **~6000+ additive
+particles per frame**), the old path triggered one GPU draw call
+**per particle** — 6000+ draw calls per frame just for jet FX. That
+state-change firehose was the FPS hit.
+
+Plus `DrawCircleV` defaults to a 36-segment triangle fan (108
+vertices, 72 trig calls per particle). At 6000 particles that's
+**648K vertices + 432K trig calls per frame** just for FX.
+
+**Fix** — three surgical changes, all in the hot path:
+
+  1. `fx_draw` reorganized into two passes (alpha-blend kinds first,
+     then a single `BeginBlendMode(BLEND_ADDITIVE)` wrap around the
+     additive pass). One state-change pair per pass, not per
+     particle. raylib's auto-batcher folds every quad in the same
+     blend mode into one VBO until the buffer fills (~1365 quads at
+     `RL_DEFAULT_BATCH_BUFFER_ELEMENTS = 8192`). 6000 GPU draws
+     became ~5.
+  2. `DrawCircleV` → `DrawCircleSector(center, r, 0, 360, 8, color)`
+     via a new `fx_draw_particle` inline helper. 8-segment octagons
+     read as circles at the radii in use (1.5–6 px) but cost 24
+     vertices + 16 trig calls vs 108+72. 4.5× cheaper per particle.
+  3. `mech_jet_fx_draw_plumes` got the same treatment — one
+     `BeginBlendMode` wraps the entire mech loop instead of one per
+     nozzle. 32 plume state changes → 1.
+
+Plus a shader-side win: `halftone_post.fs.glsl`'s shimmer loop
+gained a `jet_hot_zone_count` uniform so the fragment loop iterates
+over only the active prefix. At 4K (8.3M pixels) with zero active
+zones the prior `MAX`-bounded loop paid 133M ops/frame on dead-slot
+checks; with `count=0` the new loop body doesn't execute.
+
+Visual fidelity preserved: paired Reactor sync tests
+(`2p_jet_fx*.shot`) still show correct colors, sync, and dramatic
+boost spike. New `fx_lerp_hot_cool` helper deduplicates the byte-
+unpack/lerp/repack that was inlined twice in the old code.
+
 ### wan-fixes 1–15 — WAN polish pass (FIXED 2026-05-11, off-roadmap between P16 and P17)
 
 Triggered by a real two-laptop bake test (MN ↔ AZ) on the M5 build
@@ -3190,6 +3239,15 @@ them against playtest reactions. (Per-weapon stats are in the
 | `src/hud.c`               | `KILL_FEED_FADE_TAIL_SEC`       | 3 (last 3 s alpha-fade; wan-fixes-13) |
 | `src/hud.c`               | HP numerals font_px             | **22** (was 18; wan-fixes-15) |
 | `src/net.c`               | client render interp delay (ms) | 100 (restored by wan-fixes-2) |
+| `src/world.h`             | `MAX_BLOOD` (FX pool capacity)  | **8000** (was 3000; M6 P02 — Burst-jet plume worst case) |
+| `src/particle.c`          | `JET_BUOY_PXS2` (exhaust lift)  | 80   |
+| `src/particle.c`          | `GROUND_DUST_GRAVITY_PXS2`      | 120  |
+| `src/mech_jet_fx.c`       | `JET_IMPINGE_MAX_DIST` (ground query) | 48 px |
+| `src/mech_jet_fx.c`       | `g_jet_fx[JET_BURST].boost_particles_per_tick` | 8 (sustain 1×) |
+| `src/mech_jet_fx.c`       | `g_jet_fx[JET_JUMP_JET].ignition_particles` | 16 |
+| `src/mech_jet_fx.c`       | hot-zone radius (sustain/boost/ignition) | 40 / 80 / 120 px |
+| `src/mech_jet_fx.c`       | `plume_length_px` (Standard/Burst/Glide) | **56 / 64 / 36** (revised from 28 / 34 / 18 after visual iteration — the spec-default was occluded by mech body) |
+| `src/render.c`            | `JET_HOT_ZONE_MAX` (shimmer slots)   | 16 |
 
 The simulation runs at **60 Hz** at M1 (not 120 Hz as
 [documents/03-physics-and-mechs.md](documents/03-physics-and-mechs.md)

@@ -64,6 +64,13 @@ typedef enum {
     SFX_FOOTSTEP_ICE,
     SFX_JET_PULSE,                 /* per-tick "puff" while jet held */
     SFX_JET_BOOST,                 /* Burst-jet dump */
+    /* M6 P02 — grounded→airborne ignition cue (rocket-takeoff thump).
+     * Two material variants keyed off the ground tile/poly flags at
+     * the nozzle-impingement point: ICE when TILE_F_ICE / POLY_KIND_ICE
+     * is hit, CONCRETE otherwise. Missing assets at boot-time no-op
+     * silently — same pattern as the rest of the manifest. */
+    SFX_JET_IGNITION_CONCRETE,
+    SFX_JET_IGNITION_ICE,
     SFX_LANDING_HARD,
     SFX_LANDING_SOFT,
     /* MECH_SERVO_LOOP is loaded separately as the modulated `g_servo`

@@ -14,6 +14,7 @@
 #include "maps.h"
 #include "match.h"
 #include "mech.h"
+#include "mech_jet_fx.h"
 #include "mech_sprites.h"
 #include "weapon_sprites.h"
 #include "net.h"
@@ -2003,6 +2004,14 @@ int main(int argc, char **argv) {
     hotreload_register("assets/ui/hud.png",           reload_hud_atlas);
     hotreload_register("assets/shaders/halftone_post.fs.glsl",
                        reload_halftone_shader);
+    /* M6 P02 — jetpack FX plume + ground-dust atlases. The textures
+     * are optional (missing-file fallback is a bright DrawLineEx
+     * plume); registering the paths lets artists drop the PNGs in
+     * later and have them pick up without restart. */
+    hotreload_register("assets/sprites/jet_plume.png",
+                       mech_jet_fx_reload_atlases);
+    hotreload_register("assets/sprites/jet_dust.png",
+                       mech_jet_fx_reload_atlases);
     /* M5 P14 — audio manifest + servo path. Music / ambient stay
      * outside the watcher (per-map stop+reload covers them). */
     audio_register_hotreload();

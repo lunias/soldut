@@ -289,6 +289,10 @@ static const SfxManifestEntry g_sfx_manifest[] = {
     { SFX_FOOTSTEP_ICE,      "assets/sfx/footstep_ice.wav",      5, 0.70f, AUDIO_BUS_SFX },
     { SFX_JET_PULSE,         "assets/sfx/jet_pulse.wav",         5, 0.55f, AUDIO_BUS_SFX },
     { SFX_JET_BOOST,         "assets/sfx/jet_boost.wav",         3, 0.80f, AUDIO_BUS_SFX },
+    /* M6 P02 — ignition cues. 3 aliases each, 0.85 SFX volume to sit
+     * above jet_pulse (0.55) without overpowering explosion cues. */
+    { SFX_JET_IGNITION_CONCRETE, "assets/sfx/jet_ignition_concrete.wav", 3, 0.85f, AUDIO_BUS_SFX },
+    { SFX_JET_IGNITION_ICE,      "assets/sfx/jet_ignition_ice.wav",      3, 0.85f, AUDIO_BUS_SFX },
     { SFX_LANDING_HARD,      "assets/sfx/landing_hard.wav",      3, 0.85f, AUDIO_BUS_SFX },
     { SFX_LANDING_SOFT,      "assets/sfx/landing_soft.wav",      3, 0.65f, AUDIO_BUS_SFX },
 
@@ -899,7 +903,7 @@ const char *audio_manifest_kind(int idx) {
     if (id <= SFX_HIT_CONCRETE)       return "SFX_HIT";
     if (id <= SFX_EXPLOSION_SMALL)    return "SFX_EXPLOSION";
     if (id <= SFX_FOOTSTEP_ICE)       return "SFX_FOOT";
-    if (id <= SFX_JET_BOOST)          return "SFX_JET";
+    if (id <= SFX_JET_IGNITION_ICE)   return "SFX_JET";
     if (id <= SFX_LANDING_SOFT)       return "SFX_LANDING";
     if (id <= SFX_PICKUP_RESPAWN)     return "SFX_PICKUP";
     if (id <= SFX_GRAPPLE_PULL_LOOP)  return "SFX_GRAPPLE";
