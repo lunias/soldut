@@ -2806,6 +2806,54 @@ re-runs are byte-identical.
 
 ## Recently fixed
 
+### M6 P03-hotfix — three follow-ups after the first PR build (LANDED 2026-05-12)
+
+The user shipped the P03 Windows artifact to a friend for a 2-player WAN
+play-test. The match worked end-to-end (port-forwarded UDP 23073, friend
+connected via the public IP, sync verified through real ENet over the
+internet) but two binaries plus the artifact bundle each needed a
+follow-up commit. All three landed on the same `perf-4k-enhancements`
+branch and merged with the original P03 commit when PR #44 closed:
+
+  1. **`FLAG_WINDOW_HIGHDPI` dropped from `src/platform.c`** (and the
+     version string bumped m6p02 → m6p03 which I'd forgotten on the
+     original P03 commit so the title bar can disambiguate builds).
+     Reason: friend's machine has fractional Windows DPI scaling
+     (≈ 192 %); HIGHDPI gave us a backbuffer at physical-pixel size,
+     but the Windows compositor did NOT scale it down to fit the
+     logical client area. Centred UI landed far to the right of the
+     visible window — friend's screenshot showed "SOL" pinned to the
+     right edge with the rest of "SOLDUT" off-screen, and every menu
+     button half off the right side. With the P03 internal-RT pipeline
+     in place, HIGHDPI was buying us nothing (we handle the resolution
+     mismatch ourselves) and costing correctness on real-player
+     hardware. Trade-off written to TRADE_OFFS.md — HUD text on a true
+     4K monitor with 200 % DPI is now OS-compositor-upscaled instead of
+     rendered at native pixels, so it reads a hair softer but at the
+     correct logical size.
+
+  2. **`FLAG_WINDOW_HIGHDPI` dropped from the editor** —
+     `tools/editor/main.c` + `tools/editor/shotmode.c`. Same friend,
+     same machine, same symptom; same fix. The editor keeps
+     `FLAG_MSAA_4X_HINT` (no internal-RT path; the polygon outlines +
+     grid lines benefit from MSAA in a designer tool).
+
+  3. **CI artifact bundle now ships `assets/sfx/` + `assets/music/`** —
+     `.github/workflows/ci.yml` Linux / Windows / macOS staging steps.
+     The audio asset trees had never been on the artifact-copy list
+     since the M5 P14 audio module landed; every shipped exe ran
+     silent because `audio_init` walks the SFX manifest at startup,
+     every `LoadSound("assets/sfx/<name>.wav")` returns id=0 when the
+     file isn't there, and `audio_play_at` silently no-ops for those
+     ids (graceful-no-asset path baked into `src/audio.c`). The bug
+     pre-dated P03 — it was just invisible until someone played a
+     match from the shipped binary. Adds 7.1 MB to the zip (1.8 MB
+     sfx, 5.3 MB music).
+
+WAN test verdict (post-hotfix Windows build): host + client both
+maximised on ultrawide monitors, full match played FFA on the cycle,
+audio + sync + menu layout all correct.
+
 ### M6 P03 — Capped internal render target for the "4K" FPS dip (LANDED 2026-05-12)
 
 User-reported FPS dip when maximising the window on a 3440×1440
