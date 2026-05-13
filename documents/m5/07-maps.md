@@ -4,6 +4,8 @@ The content payload of M5. Each map is authored in the editor, exported as a `.l
 
 This document is the brief for each map plus the bake-test that decides "ship" vs. "iterate."
 
+> **M6 post-iteration note.** Four of the eight maps received geometry edits in M6 P04 (the bot-bake balancing pass): Concourse's wing partitions, Catwalk's base placement, Citadel's size, and Crossfire's size were all changed to make the maps playable against bots and balanced for the loadout matrix. The current ship state and the per-map bake findings (including which loadouts dominate where) are documented in [`../m6/04-map-balance.md`](../m6/04-map-balance.md). The briefs below describe the **original design intent** — they remain the source of truth for character, but the geometry numbers reflect the M5 cook output, not the M6 iteration. See the M6 doc for what actually shipped.
+
 ## The roster
 
 | # | Name | Tile dims | World px | Modes | Air kit | Lean | Slope character |

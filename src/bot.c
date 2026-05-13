@@ -41,7 +41,9 @@
 #define BOT_STRATEGY_INTERVAL    6      /* every 6 ticks = ~10 Hz */
 #define BOT_NAV_MAX_NODES        512
 #define BOT_NAV_MAX_REACH        4096   /* ~8 per node */
-#define BOT_NAV_FLOOR_SAMPLE_T   4      /* one node every 4 tiles along a floor strip */
+#define BOT_NAV_FLOOR_SAMPLE_T   3      /* one column every 3 tiles (96 px) — denser than the
+                                         * documented 128 px so big maps still have a useful
+                                         * node count without blowing past BOT_NAV_MAX_NODES */
 #define BOT_NAV_REACH_MAX_PX     280.0f /* candidate-pair pruning radius */
 #define BOT_NAV_JUMP_DH_MAX_PX   40.0f  /* max vertical rise a JUMP reach can cover */
 #define BOT_NAV_JUMP_DX_MAX_PX   160.0f
@@ -329,60 +331,116 @@ static int nav_nearest_node(const struct BotNav *nv, Vec2 p,
     return best;
 }
 
-/* ---- Tile helpers --------------------------------------------------- */
+/* ---- Tile + polygon helpers ----------------------------------------- */
 
 static bool tile_is_solid(const Level *L, int tx, int ty) {
     return (level_flags_at(L, tx, ty) & TILE_F_SOLID) != 0;
 }
 
 static bool tile_is_floor_top(const Level *L, int tx, int ty) {
-    /* Floor-top: this tile is solid AND the tile above is not. */
     if (!tile_is_solid(L, tx, ty)) return false;
-    if (ty == 0) return false;     /* hugging the ceiling — not walkable */
+    if (ty == 0) return false;
     if (tile_is_solid(L, tx, ty - 1)) return false;
     return true;
 }
 
-/* Sample the level for floor strips and append nodes one every
- * BOT_NAV_FLOOR_SAMPLE_T tiles. Each node sits one px above the floor
- * tile center. */
+/* Sample world-space columns and emit a nav node at the top of every
+ * walkable surface. Catches both tile floors AND polygon-built floors
+ * (slopes, bowls, platforms). For each column at FLOOR_SAMPLE_T tile
+ * intervals, scan top-down; the first cell whose center is NOT solid
+ * but whose cell *just below* IS solid is the surface top — place a
+ * node there. Continues scanning to find platform tops too (a level
+ * has multiple walkable layers stacked vertically).
+ *
+ * Solidity check uses the polygon broadphase via `level_point_solid`
+ * for tiles, plus a polygon point-in-triangle test for free polys —
+ * `level_ray_hits` already integrates both. We use a tiny vertical
+ * ray from one px above to one px below the candidate row to detect
+ * "this row's top edge is a surface." */
+/* Sign of the cross product (B-A) × (P-A). Used by point_in_tri. */
+static inline float tri_side(float ax, float ay, float bx, float by,
+                             float px, float py)
+{
+    return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+}
+
+static bool point_in_tri(float px, float py,
+                         float ax, float ay, float bx, float by,
+                         float cx, float cy)
+{
+    float d1 = tri_side(ax, ay, bx, by, px, py);
+    float d2 = tri_side(bx, by, cx, cy, px, py);
+    float d3 = tri_side(cx, cy, ax, ay, px, py);
+    bool has_neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+    bool has_pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+    return !(has_neg && has_pos);
+}
+
+/* True iff (wx, wy) is inside a SOLID tile or a SOLID/ICE polygon.
+ * Treats OOB explicitly as "not solid" so the column sweep can start
+ * above the world without the OOB-tile sentinel firing. */
+static bool point_solid(const Level *L, float wx, float wy) {
+    int tx = (int)(wx / (float)L->tile_size);
+    int ty = (int)(wy / (float)L->tile_size);
+    if (tx >= 0 && tx < L->width && ty >= 0 && ty < L->height) {
+        uint16_t flags = L->tiles[ty * L->width + tx].flags;
+        if (flags & TILE_F_SOLID) return true;
+    }
+    /* Triangle list scan — small enough on every M5 map (<= a few
+     * hundred polys) to walk linearly. ICE counts as solid for nav
+     * (you can stand on ice). BACKGROUND / DEADLY / ONE_WAY skip. */
+    for (int i = 0; i < L->poly_count; ++i) {
+        const LvlPoly *p = &L->polys[i];
+        if (p->kind != POLY_KIND_SOLID && p->kind != POLY_KIND_ICE) continue;
+        if (point_in_tri(wx, wy,
+                         (float)p->v_x[0], (float)p->v_y[0],
+                         (float)p->v_x[1], (float)p->v_y[1],
+                         (float)p->v_x[2], (float)p->v_y[2])) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void build_floor_nodes(struct BotNav *nv, const Level *L) {
     const int ts = L->tile_size;
-    for (int ty = 0; ty < L->height; ++ty) {
-        int strip_start = -1;
-        for (int tx = 0; tx < L->width; ++tx) {
-            bool floor = tile_is_floor_top(L, tx, ty);
-            if (floor) {
-                if (strip_start < 0) strip_start = tx;
-            }
-            if (!floor || tx == L->width - 1) {
-                int end = floor ? tx : (tx - 1);
-                if (strip_start >= 0) {
-                    int len = end - strip_start + 1;
-                    int count = (len + BOT_NAV_FLOOR_SAMPLE_T - 1) /
-                                 BOT_NAV_FLOOR_SAMPLE_T;
-                    if (count < 1) count = 1;
-                    for (int i = 0; i < count; ++i) {
-                        if (nv->node_count >= BOT_NAV_MAX_NODES) return;
-                        int sample_tx = strip_start + i * BOT_NAV_FLOOR_SAMPLE_T;
-                        if (sample_tx > end) sample_tx = end;
-                        float wx = (sample_tx + 0.5f) * (float)ts;
-                        float wy = (ty - 0.0f) * (float)ts - 2.0f;
+    const int sample_step_px = ts * BOT_NAV_FLOOR_SAMPLE_T;
+    const int W_px = L->width  * ts;
+    const int H_px = L->height * ts;
+    /* Start one half-step in so columns aren't right against the
+     * outer wall, and step in tile-pixel units. */
+    for (int wx = sample_step_px / 2; wx < W_px; wx += sample_step_px) {
+        /* Top-down sweep. We pretend the sweep starts above the world
+         * in clear air; the first air→solid transition is a surface
+         * top, and the first solid→air transition resets so the next
+         * surface (a platform top, etc.) is also emitted. Lets us
+         * sample columns that start on a wall and dive down past a
+         * platform opening into the floor below. */
+        bool prev_solid = false;
+        int  last_node_y = -10000;
+        for (int wy = 0; wy < H_px; wy += 8) {
+            bool here = point_solid(L, (float)wx, (float)wy);
+            if (!prev_solid && here && wy > 8) {
+                int node_y = wy - 2;
+                if (node_y - last_node_y >= 64) {
+                    if (nv->node_count >= BOT_NAV_MAX_NODES) return;
+                    /* Minimal headroom check: ensure there's at least
+                     * 16 px of air directly above (so we're not placing
+                     * a node inside a 1-tile crack). The full body
+                     * height is only required for path edges, which the
+                     * corridor-clear test handles. */
+                    if (!point_solid(L, (float)wx, (float)(wy - 16))) {
                         BotNavNode *n = &nv->nodes[nv->node_count++];
                         memset(n, 0, sizeof *n);
-                        n->pos = (Vec2){ wx, wy };
-                        /* Walking-strip nodes are ON_FLOOR; PLATFORM
-                         * conflation isn't load-bearing in the runtime
-                         * use sites (cost only — kept distinct in the
-                         * flag bits so designers can tell them apart
-                         * in diagnostics). */
+                        n->pos = (Vec2){ (float)wx, (float)node_y };
                         n->flags = BOT_NODE_F_ON_FLOOR;
                         n->pickup_spawner_idx = -1;
                         n->flag_team = -1;
+                        last_node_y = node_y;
                     }
-                    strip_start = -1;
                 }
             }
+            prev_solid = here;
         }
     }
 }
@@ -451,31 +509,21 @@ static bool horizontal_clear(const Level *L, int ty, int tx0, int tx1) {
     return true;
 }
 
-/* For nodes "above the floor", convert px to tile coords above the
- * walkable surface (so the channel test asks the right rows). The
- * floor-strip nodes sit y = ty*ts - 2, so the body is mostly in row
- * ty-1; we test that row + the next one up for clearance. */
+/* Test that the body's path is clear of geometry — tiles AND polys.
+ * Two rays at pelvis-height and head-height (-40 px) — we deliberately
+ * do NOT sweep at foot level: nav nodes sit ~2 px above a surface, and
+ * a foot ray would always clip into the surface itself, breaking every
+ * cross-floor WALK reach. The pelvis ray catches cover columns + walls
+ * at body height; the head ray catches low overhangs that would knock
+ * the mech off a jet. */
 static bool body_corridor_clear(const Level *L, Vec2 from, Vec2 to) {
-    int ts = L->tile_size;
-    int x0 = (int)(from.x / (float)ts);
-    int x1 = (int)(to.x   / (float)ts);
-    int y0 = (int)(from.y / (float)ts);
-    int y1 = (int)(to.y   / (float)ts);
-    /* Sample along the line at half-tile granularity. */
-    int steps = (int)(fmaxf(fabsf((float)(x1 - x0)), fabsf((float)(y1 - y0))) * 2.0f);
-    if (steps < 4) steps = 4;
-    for (int i = 1; i < steps; ++i) {
-        float t = (float)i / (float)steps;
-        float sx = from.x + (to.x - from.x) * t;
-        float sy = from.y + (to.y - from.y) * t;
-        int tx = (int)(sx / (float)ts);
-        int ty = (int)(sy / (float)ts);
-        /* Body is two tiles tall — test the sample row and the row
-         * above (head). */
-        if (tile_is_solid(L, tx, ty))      return false;
-        if (tile_is_solid(L, tx, ty - 1))  return false;
+    float t;
+    Vec2 offs[2] = { (Vec2){0, -40}, (Vec2){0, -8} };
+    for (int i = 0; i < 2; ++i) {
+        Vec2 a = (Vec2){ from.x + offs[i].x, from.y + offs[i].y };
+        Vec2 b = (Vec2){ to.x   + offs[i].x, to.y   + offs[i].y };
+        if (level_ray_hits(L, a, b, &t)) return false;
     }
-    (void)x0; (void)x1; (void)y0; (void)y1;
     return true;
 }
 
@@ -652,8 +700,11 @@ static bool bot_plan_path(BotMind *mind, const struct BotNav *nv,
                                           nv->nodes[goal_node].pos);
     s.in_open[start_node] = 1;
 
-    /* Capped expansion budget keeps the worst case bounded. */
-    int max_expansions = N * 2;
+    /* Capped expansion budget keeps the worst case bounded. Bumped
+     * 2N→4N so big maps (Citadel, Crossfire) reliably find a path
+     * across the whole graph. With 200 nodes per nav graph the cap
+     * is 800 expansions — at ~50 ns each, that's 40 µs of A* time. */
+    int max_expansions = N * 4;
     int found_goal     = 0;
     while (max_expansions-- > 0) {
         int cur = astar_find_min(&s, N);
@@ -1035,10 +1086,12 @@ static float score_pursue_enemy(const World *w, const BotMind *mind,
     int node = nav_nearest_node(nv, ep, 192.0f, BOT_NODE_F_ON_FLOOR);
     if (node < 0) node = nav_nearest_node(nv, ep, 384.0f, 0);
     *out_node = node;
-    /* Scale slightly by aggression so Recruits don't full-tilt the map.
-     * Baseline ~0.35 — beats IDLE, loses to ENGAGE (close range LOS
-     * shot) and high-need PICKUP (low HP / no ammo). */
-    return 0.35f * (0.4f + 0.6f * mind->pers.aggression);
+    /* Baseline 0.40 — beats IDLE (0) and pickups the bot doesn't
+     * need, but loses to ENGAGE on close LOS-clear shots and to
+     * any high-need pickup (low HP / dry ammo). Bumping above this
+     * (0.55+) made small maps stop firing because bots committed
+     * to closing distance instead of holding cover-and-shoot. */
+    return 0.40f * (0.4f + 0.6f * mind->pers.aggression);
 }
 
 static GoalPick run_strategy(const World *w, BotMind *mind, int mid,
@@ -1195,22 +1248,28 @@ static void advance_path(BotMind *mind, const struct BotNav *nv, Vec2 pelv)
     }
 }
 
-/* Find the nearest WALK-reachable spawn node for repositioning. */
+/* Pick a varied reposition target — a node that ISN'T too close to
+ * the bot's current position so heatmap coverage actually spreads.
+ * Without the min-distance filter the random walk biased toward
+ * "stay near spawn" because half the nodes were within a tile. */
 static int pick_reposition_node(const struct BotNav *nv, Vec2 from,
                                 pcg32_t *rng)
 {
     if (!nv || nv->node_count == 0) return -1;
-    /* Cheap: pick a random SPAWN node within 1500 px and use that. */
-    int tries = 6;
+    /* Prefer distant SPAWN or ON_FLOOR nodes (≥ 1200 px away).
+     * Successive tries widen the band so big maps still find a
+     * target. */
+    int tries = 8;
     while (tries-- > 0) {
         uint32_t r = pcg32_next(rng) % (uint32_t)nv->node_count;
         const BotNavNode *n = &nv->nodes[r];
         if (!(n->flags & (BOT_NODE_F_SPAWN | BOT_NODE_F_ON_FLOOR))) continue;
         float dx = n->pos.x - from.x, dy = n->pos.y - from.y;
-        if (dx*dx + dy*dy > 1500.0f * 1500.0f) continue;
+        float d2 = dx*dx + dy*dy;
+        if (d2 < 1200.0f * 1200.0f) continue;     /* too close */
         return (int)r;
     }
-    /* Fallback: any node. */
+    /* Fallback: any node, even close. */
     return (int)(pcg32_next(rng) % (uint32_t)nv->node_count);
 }
 
@@ -1418,10 +1477,17 @@ static ClientInput run_motor(World *w, int mid, BotMind *mind,
         mind->last_jump_tick = w->tick;
     }
 
-    /* Fire — pulse to re-edge BTN_FIRE every dozen ticks for edge-
-     * triggered weapons. */
+    /* Fire — adaptive cadence. For charge or spin-up weapons (Rail
+     * Cannon, Microgun) we hold BTN_FIRE continuously so the charge
+     * actually builds. For everything else we pulse with a duty cycle
+     * so edge-triggered single-shots (Sidearm, Frag Grenade trigger)
+     * re-edge cleanly and auto weapons don't notice. */
     if (wants->want_fire) {
-        if ((w->tick % 10) < 5) in.buttons |= BTN_FIRE;
+        const Weapon *wpn = weapon_def(m->weapon_id);
+        bool hold = (wpn && wpn->charge_sec > 0.0f);
+        if (hold || (w->tick % 10) < 5) {
+            in.buttons |= BTN_FIRE;
+        }
     }
 
     if (wants->want_grapple_fire)    in.buttons |= BTN_FIRE_SECONDARY;
@@ -1725,6 +1791,35 @@ void bot_step(BotSystem *bs, World *w, struct Game *g, float dt) {
             Vec2 pelv = mech_pelvis_pos(w, mid);
             wants.aim_target = (Vec2){ pelv.x + (m->facing_left ? -100.0f : 100.0f),
                                         pelv.y };
+        }
+
+        /* Opportunistic fire — if there's *any* LOS-clear enemy
+         * within ~1.6× awareness, fire on it regardless of which
+         * goal won this strategy pass. Without this, bots on big
+         * maps (Foundry, Concourse, Citadel) never engage because
+         * the pickup/pursue scorers keep the goal away from ENGAGE
+         * even when an enemy is in plain sight. */
+        if (!wants.want_fire) {
+            float scan_r = mind->pers.awareness_radius_px * 1.6f;
+            if (scan_r < 1200.0f) scan_r = 1200.0f;
+            int eo = find_nearest_enemy(w, mid, scan_r, mode);
+            if (eo >= 0) {
+                Vec2 mp = mech_pelvis_pos(w, mid);
+                Vec2 ep = mech_pelvis_pos(w, eo);
+                /* Aim at chest. Apply a tiny lead so movement-vs-static
+                 * shots still hit. */
+                Vec2 chest = (Vec2){ ep.x, ep.y - 24.0f };
+                if (mind->pers.aim_lead_frac > 0.0f) {
+                    Vec2 ev = mech_pelvis_vel(w, eo);
+                    float dx = chest.x - mp.x, dy = chest.y - mp.y;
+                    float d  = sqrtf(dx*dx + dy*dy);
+                    float tof = d / 800.0f;
+                    chest.x += ev.x * tof * mind->pers.aim_lead_frac;
+                    chest.y += ev.y * tof * mind->pers.aim_lead_frac;
+                }
+                wants.aim_target = chest;
+                wants.want_fire  = true;
+            }
         }
 
         /* Motor. */

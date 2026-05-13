@@ -86,7 +86,11 @@ const char *bot_goal_name(BotGoal g);
 
 /* ---- Per-bot mind --------------------------------------------------- */
 
-#define BOT_MAX_PATH_LEN  16
+/* Path-prefix cap. 32 nodes × 96 px sample step = ~3 km of map can be
+ * pre-planned in one A* run. Big enough that Aurora / Citadel /
+ * Crossfire (5–6 km wide) get one continuous route from spawn into
+ * enemy territory instead of stalling at the prefix end. */
+#define BOT_MAX_PATH_LEN  32
 
 typedef struct BotMind {
     int8_t          mech_id;
