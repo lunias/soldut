@@ -1121,9 +1121,14 @@ int editor_shotmode_run(const char *script_path) {
 
     /* Window + GL context. We use a visible window (raylib's HIDDEN
      * flag is platform-dependent and we don't need it on a developer
-     * machine). MSAA matches the interactive editor. */
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT |
-                   FLAG_WINDOW_HIGHDPI);
+     * machine). MSAA matches the interactive editor.
+     *
+     * M6 P03-hotfix — HIGHDPI dropped here too. See
+     * tools/editor/main.c for the rationale; shotmode runs the editor
+     * at fixed window sizes for paired-screenshot regression tests,
+     * so HIGHDPI added nothing here and broke real users with
+     * fractional-DPI Windows. */
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(hdr.window_w, hdr.window_h, "soldut_editor — shot");
     if (!IsWindowReady()) {

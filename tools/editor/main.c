@@ -68,12 +68,16 @@ int main(int argc, char **argv) {
     log_init("soldut_editor.log");
     LOG_I("editor: starting");
 
-    /* HIGHDPI tells raylib to give us a backbuffer at the monitor's
-     * physical pixel count on hi-DPI displays (Retina, 4K-scaled
-     * Windows). We then use GetScreenHeight() to pick a UI scale
-     * that keeps text legible at native pixel density. */
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT |
-                   FLAG_WINDOW_HIGHDPI);
+    /* M6 P03-hotfix — HIGHDPI dropped. On Windows with fractional DPI
+     * scaling the backbuffer comes back at physical-pixel size but
+     * the OS does NOT scale it down to fit the logical window — the
+     * client area only covers ≈ 1 / scale of the framebuffer, so
+     * centered UI lands far off to the right of the visible window.
+     * Same fix as src/platform.c shipped at P03-hotfix. The OS-side
+     * downscale of a non-HiDPI window is the well-behaved path on
+     * every platform; UI text will be a hair softer on a 200 %-scaled
+     * 4K monitor but read at the right size. */
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     SetTraceLogLevel(LOG_WARNING);
 
     /* Initial window size: 80% of the primary monitor, clamped to a
