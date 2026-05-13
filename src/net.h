@@ -84,6 +84,11 @@ enum {
      * client picks it up. 8-byte fixed body: u8 mode, u16 map_id,
      * u16 score, u16 time_s, u8 ff. */
     NET_MSG_LOBBY_HOST_SETUP   = 34,    /* host → server (host only)          */
+    /* M6 P04+ — host adds a single bot to the lobby at the chosen
+     * tier. Body: 1 byte (BotTier 0..3). Bot index is server-side
+     * (= current bot count) so names stay stable across hosts.
+     * Removal reuses LOBBY_KICK — see server_handle_lobby_kick_or_ban. */
+    NET_MSG_LOBBY_ADD_BOT      = 35,    /* host → server (host only)          */
     NET_MSG_LOBBY_COUNTDOWN    = 30,    /* server → client: auto-start tick   */
     NET_MSG_LOBBY_ROUND_START  = 31,    /* server → client: enter MATCH       */
     NET_MSG_LOBBY_ROUND_END    = 32,    /* server → client: enter SUMMARY     */
@@ -487,6 +492,7 @@ void net_client_send_team_change(NetState *ns, int team);
 void net_client_send_chat       (NetState *ns, const char *text);
 void net_client_send_map_vote   (NetState *ns, int choice /*0/1/2*/);
 void net_client_send_kick       (NetState *ns, int target_slot);
+void net_client_send_add_bot    (NetState *ns, uint8_t tier);
 void net_client_send_ban        (NetState *ns, int target_slot);
 /* wan-fixes-6 — host pushes a mode / map / score / time / ff update
  * to the dedicated server. Server validates the sender is the

@@ -339,6 +339,21 @@ void lobby_vote_clear(LobbyState *L) {
     L->vote_mask_a = L->vote_mask_b = L->vote_mask_c = 0;
 }
 
+void lobby_vote_cast_bots(LobbyState *L, int a, int b, int c, pcg32_t *rng) {
+    if (!L || !L->vote_active) return;
+    if (!rng) return;
+    int max_choice = 1;            /* always have at least card A */
+    if (b >= 0) max_choice = 2;    /* A + B */
+    if (c >= 0) max_choice = 3;    /* A + B + C */
+    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+        LobbySlot *s = &L->slots[i];
+        if (!s->in_use || !s->is_bot) continue;
+        if (s->team == MATCH_TEAM_NONE) continue;
+        int choice = (int)(pcg32_next(rng) % (uint32_t)max_choice);
+        lobby_vote_cast(L, i, choice);
+    }
+}
+
 /* ---- Auto-start --------------------------------------------------- */
 
 void lobby_auto_start_arm(LobbyState *L, float seconds) {

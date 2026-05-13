@@ -13,7 +13,17 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-13** (M6 P04 — map balance pass + bot AI
+Last updated: **2026-05-13** (M6 P04 post-merge polish — lobby bot UX
+rewrite + fuel-aware jet). **Added** three new entries: "Bot jet
+fuel lockout is a hard 10/40 % hysteresis (M6 P04+)", "Bot map vote
+is uniform-random across the 3 cards (M6 P04+)", and
+"`NET_MSG_LOBBY_ADD_BOT` is additive, no protocol bump (M6 P04+)".
+**Note**: pre-existing `host_view = role == NET_ROLE_SERVER` bug
+fixed (the host UI runs as NET_ROLE_CLIENT after wan-fixes-16, so
+the old check never fired in real play). No trade-off entry —
+that's a defect we shipped accidentally, not a deliberate compromise.
+
+Previously: **2026-05-13** (M6 P04 — map balance pass + bot AI
 hardening). **Added** four new entries: "M5 map geometry deviates
 from the original `m5/07-maps.md` design intent (M6 P04)",
 "Mass Driver is matrix-dominant; not retuned this pass (M6 P04)",
@@ -2179,6 +2189,79 @@ WAN polish. Net effect on the trade-off ledger:
     compensates: bumping damage to ~30 per pellet would let the
     handful of connecting pellets matter even with the bot's
     spray-and-pray aim.
+
+### Bot jet fuel lockout is a hard 10 % / 40 % hysteresis
+
+- **What we did** — `src/bot.c`'s motor adds a `jet_locked_out`
+  flag per BotMind. Falls below `fuel_frac = 0.10` → locked.
+  Climbs back to `0.40` → cleared. While locked, BTN_JET is
+  suppressed entirely, even when the strategy / tactic wants it.
+- **Why** — Without this, bots mashed JET against an empty tank
+  in tight corners: `apply_jet_force` gates on fuel internally, so
+  the input flowed but no thrust applied; the bot looked stuck
+  with JET held. The 10/40 band is wide enough to keep the gauge
+  flutter (press → empty → release → 1-tick regen → press) off
+  the wire, but tight enough that bots return to normal jet use
+  within a couple seconds of grounding. Chassis-specific
+  `fuel_regen` (Scout > Trooper > Heavy) drives the timing
+  naturally — Scouts wait ~1.2 s, Heavies wait ~2.5 s, just by the
+  physics. The numbers are guesses, not playtested.
+- **Revisit when** —
+  - Tier-aware fuel management — Champion bots might be expected
+    to time their JET pulses to last 90 % rather than the
+    coarse "let it run dry then wait." A real player feathers JET
+    to avoid the lockout entirely.
+  - A specific jetpack variant (`JET_GLIDE_WING` has lift at
+    fuel=0; `JET_JUMP_JET` doesn't use JET at all) needs a
+    different lockout shape. Today all four jetpack types share
+    the same gate; the deficit is small at the bot's skill ceiling.
+  - Real playtest reports bots "obviously refilling" in a way
+    that reads as inhuman. Tighten the 40 % threshold, or
+    randomize per-bot to break the chassis-determined cadence.
+
+### Bot map vote is uniform-random across the 3 cards
+
+- **What we did** — `lobby_vote_cast_bots` casts one vote per bot
+  slot, choice picked by `pcg32_next(rng) % 3`. The world RNG is
+  the seed source; the choice is uniform.
+- **Why** — Bots have no map preferences (no "Mass Driver
+  rewards" model of map awareness in v1). A uniform random keeps
+  the vote tally noisy in a way that doesn't bias the rotation:
+  with 4 bots and 1 human, the human still has effective
+  pick-power over their preferred card (the bots smear the other
+  two). A weighted vote — e.g. "bots prefer maps that suit their
+  chassis" — would be design-deep work and is wrong for v1: bot
+  AI doesn't yet pick a chassis preference.
+- **Revisit when** —
+  - Bots gain a "match-history weight" — preferring maps they
+    haven't played recently — to encourage rotation variety.
+  - A specific map is consistently picked by bots in a way that
+    irritates human players (e.g. CTF maps get over-represented
+    because the post-round vote runs even when the next mode is
+    FFA — but the vote cards are mode-filtered, so this scenario
+    can't actually happen today).
+
+### `NET_MSG_LOBBY_ADD_BOT` is additive — no protocol bump
+
+- **What we did** — Added wire message id 35 (`LOBBY_ADD_BOT`,
+  1-byte body = tier). Server-side handler validates `is_host`
+  and applies. Did not bump the protocol id (currently `S0LK`).
+- **Why** — Pure additive change: an old client connecting to a
+  new server doesn't break because the old client never sends
+  the new message id. A new client connecting to an old server
+  hits the server's default-discard branch — the bot just
+  doesn't appear, no crash, no desync. The bump-or-not call is
+  judgment; we picked not-bump because the failure mode is
+  "Add Bot silently no-ops" which is exactly what we'd want
+  during a version skew.
+- **Revisit when** —
+  - The wire format changes in a way that's NOT purely additive
+    (e.g. extending an existing message body). At that point
+    bump the protocol id and add this entry's note to the bump's
+    list of "what changed."
+  - We start versioning the protocol — assigning a semantic
+    version, not just a 4-byte tag. Then each additive change
+    can bump a minor version without forcing a major.
 
 ---
 

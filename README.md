@@ -14,6 +14,23 @@ produces real combat at Champion tier. See
 [`documents/m6/04-map-balance.md`](documents/m6/04-map-balance.md)
 for the per-map loadout findings.
 
+**Post-P04 polish (2026-05-13)**: bot management rewritten to be
+per-bot — host setup screen no longer carries bot controls; the
+lobby's second row holds a `Tier:` cycle + `[+ Add Bot]` button so
+the host picks the pending tier and clicks Add once per bot, with
+each bot keeping its own tier. Per-bot removal via the `Remove`
+button on the bot's row in the player list. New
+`NET_MSG_LOBBY_ADD_BOT` wire (id 35) carries the host-UI client's
+request to the in-process server. Bots now also auto-cast random
+votes on the post-round map vote so matches with humans + bots
+fast-forward as soon as the humans have picked. Bot AI's jet
+behavior is now fuel-aware (10 %–40 % lockout hysteresis) so bots
+no longer mash JET against an empty tank — they wait for the gauge
+to refill and re-engage. Cycle buttons gained directional hit
+regions: left quarter cycles backward regardless of mouse button,
+right quarter cycles forward regardless, middle keeps LMB-fwd /
+RMB-back. Host-setup Map button uses the cycle button now.
+
 **M5 — Maps & content** complete (2026-05-12). P01–P19 in, plus off-roadmap wan-fixes 1–16, plus seven post-P19 follow-up rounds that retired bugs surfaced by paired-window LAN playtests (audio loudnorm wrecking short transients, jetpack/servo masking footsteps, the wan-fixes-3 inv_mass race that broke joining-client physics, the slope-tangent stretch that inflated mechs uphill, the pose-drive feedback loop that stretched remote-mech bones).
 M4 shipped the lobby & matches layer: full game flow
 (title → server browser → lobby → countdown → match → summary →
