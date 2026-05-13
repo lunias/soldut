@@ -56,6 +56,11 @@ typedef struct {
     char        connect_addr[PREFS_ADDR_BYTES];
     float       master_volume;      /* [0.0, 1.0] linear gain; +/- keys at
                                        runtime nudge by 5% and persist. */
+    int         internal_res_h;     /* M6 P03 — line count for the internal
+                                       world+post render target. 0 = match
+                                       window. Defaults to 1080. Falls back to
+                                       the same value in ServerConfig when this
+                                       prefs file is missing. */
 } UserPrefs;
 
 /* Fill `out` with the compile-time defaults. Always succeeds. */

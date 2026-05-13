@@ -82,17 +82,20 @@ bool platform_init(const PlatformConfig *cfg) {
 
     /* raylib's vsync hint must be set before InitWindow.
      *
-     * MSAA_4X smooths the polygon-mech bones, decal edges, and UI
-     * line-art that would otherwise jaggy at any resolution, but is
-     * especially noticeable at 1080p+ window sizes. ~1ms cost on
-     * integrated GPU for our scene complexity.
+     * M6 P03 — MSAA dropped from the backbuffer. The world goes
+     * through a capped internal RT + bilinear upscale + halftone
+     * screen, all of which mask sub-pixel aliasing. The HUD is
+     * axis-aligned rects + bilinear-sampled glyphs (raylib's
+     * SetTextureFilter on the font texture) — neither benefits from
+     * MSAA on the backbuffer. Recovers ~1 ms / frame and ~57 MB of
+     * VRAM at maximised 3440×1440. See
+     * documents/m6/03-perf-4k-enhancements.md §3 Phase 3.
      *
      * HIGHDPI tells raylib to give us a backbuffer at the monitor's
      * physical pixel count on hi-DPI displays (Retina, 4K-scaled
      * Windows). We then use GetScreenHeight() to pick our UI scale
      * — at 4K we want fonts/widgets ~3× the pixel size of 720p. */
-    unsigned flags = FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT |
-                     FLAG_WINDOW_HIGHDPI;
+    unsigned flags = FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI;
     if (cfg->vsync) flags |= FLAG_VSYNC_HINT;
     if (cfg->fullscreen) flags |= FLAG_FULLSCREEN_MODE;
     SetConfigFlags(flags);
@@ -135,8 +138,8 @@ bool platform_init(const PlatformConfig *cfg) {
         LOG_W("platform_init: audio device failed to open; continuing silently");
     }
 
-    LOG_I("platform_init: %dx%d (msaa=4x highdpi), vsync=%d",
-          cfg->window_w, cfg->window_h, cfg->vsync);
+    LOG_I("platform_init: %dx%d (highdpi) internal_h=%d vsync=%d",
+          cfg->window_w, cfg->window_h, cfg->internal_h, cfg->vsync);
     return true;
 }
 
@@ -153,6 +156,25 @@ void platform_begin_frame(PlatformFrame *out) {
     out->render_h = GetRenderHeight();
     out->should_close = WindowShouldClose();
     out->time_seconds = GetTime();
+
+    /* M6 P03 — compute the internal-render-target dims from the cap.
+     * cap <= 0 OR cap > render_h ⇒ 1:1 with the backbuffer (no cap).
+     * Otherwise scale the width to preserve the window aspect ratio
+     * (rounded-to-nearest int). Defensive minimums prevent a 1-pixel
+     * tall RT from a malformed config. */
+    int cap = g_cfg.internal_h;
+    if (out->render_w <= 0 || out->render_h <= 0) {
+        out->internal_w = out->render_w;
+        out->internal_h = out->render_h;
+    } else if (cap <= 0 || cap >= out->render_h) {
+        out->internal_w = out->render_w;
+        out->internal_h = out->render_h;
+    } else {
+        out->internal_h = cap;
+        /* Round-to-nearest, integer math: (a*b + b/2) / b. */
+        out->internal_w = (out->render_w * cap + out->render_h / 2) / out->render_h;
+        if (out->internal_w < 16) out->internal_w = 16;
+    }
 }
 
 void platform_sample_input(ClientInput *out) {

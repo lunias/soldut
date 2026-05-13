@@ -204,7 +204,11 @@ We don't merge regressions on faith. We don't merge optimizations on faith eithe
 ## What we are NOT optimizing for
 
 - **Steam Deck** at v1. We will probably run fine on it; we don't profile it.
-- **8K resolutions**. Internal resolution capped at 1920×1080; UI scales but world doesn't render at higher density.
+- **8K resolutions**. Internal world-render resolution is capped at the
+  `internal_res_h` setting (default 1080 lines, soldut.cfg / soldut-prefs.cfg
+  / `--internal-h` CLI override). World + post-process pass run at the capped
+  height; the result is bilinear-upscaled to the window. HUD draws at window
+  resolution on top, unshaded. See `documents/m6/03-perf-4k-enhancements.md`.
 - **120+ FPS**. We design for 60 FPS lock. If your monitor is 144 Hz, you get 60 FPS sim with 144 Hz interpolated render — perfectly fine.
 - **GPU-bound workloads**. We are CPU-bound by design (lots of small draws, lots of physics). Optimizing the GPU before the CPU is optimizing the wrong thing.
 - **Per-platform CPU intrinsics**. We write portable C. SIMD via auto-vectorization. If we ever need explicit SIMD, we wrap it in `<simd.h>` with platform fallbacks — but we expect not to.

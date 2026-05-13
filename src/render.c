@@ -18,21 +18,28 @@
 
 #include <math.h>
 
-/* M5 P13 — halftone post-process render target + shader.
+/* M5 P13 + M6 P03 — halftone post-process pass over a capped internal RT.
  *
- * Render flow when both are loaded:
- *   1. World draw -> RenderTexture2D `g_post_target`
- *   2. Backbuffer: blit `g_post_target` through `g_halftone_post` shader
- *   3. HUD on top, no shader
+ * Render flow (post-M6 P03):
+ *   1. World draw      -> RenderTexture2D `g_internal_target`  (internal res)
+ *   2. Halftone pass   -> RenderTexture2D `g_post_target`      (internal res)
+ *   3. Bilinear upscale -> backbuffer, aspect-preserving letterbox
+ *   4. HUD on top, no shader, at window resolution
  *
- * Both fall back gracefully:
- *   - Missing shader file → g_halftone_loaded stays false, world draws
- *     directly to the backbuffer (M4 shape).
+ * Internal == window when `internal_h = 0` (shotmode + 1080p windowed)
+ * — the bilinear blit at step 3 becomes a 1:1 copy and the pipeline
+ * is pixel-byte-identical to the pre-P03 shape.
+ *
+ * Fallbacks:
+ *   - Missing shader file → g_halftone_loaded stays false. World still
+ *     draws to g_internal_target at internal res; step 2 is skipped and
+ *     step 3 bilinears the internal_target directly to the backbuffer.
  *   - LoadShader returning the default shader (compile failure) → the
  *     uniform locations come back -1 and we treat it as "not loaded".
  *
- * The RT is recreated on backbuffer-size change (window resize); locations
- * are looked up once at first use. */
+ * Both RTs are recreated on internal-size change (window resize or a
+ * config-driven change between sessions); shader locations are looked
+ * up once at first use. */
 #define HALFTONE_DENSITY 0.30f
 
 static Shader          g_halftone_post = {0};
@@ -47,9 +54,16 @@ static int             g_halftone_loc_hot_zone_count = -1;
 static bool            g_halftone_loaded         = false;
 static bool            g_halftone_load_attempted = false;
 
+/* World render target — receives every world-space draw at internal
+ * resolution. Point-filtered so the halftone pass samples crisp source
+ * pixels. */
+static RenderTexture2D g_internal_target = {0};
+/* Post-process render target — receives the halftone pass output, also
+ * at internal resolution. The backbuffer blit at present-time samples
+ * THIS texture bilinearly when upscaling to the window. */
 static RenderTexture2D g_post_target = {0};
-static int             g_post_target_w = 0;
-static int             g_post_target_h = 0;
+static int             g_internal_target_w = 0;
+static int             g_internal_target_h = 0;
 
 static void halftone_load_once(void) {
     if (g_halftone_load_attempted) return;
@@ -85,25 +99,58 @@ static void halftone_load_once(void) {
           (g_halftone_loc_hot_zones >= 0 ? "ok" : "missing"));
 }
 
-static bool ensure_post_target(int sw, int sh) {
+/* M6 P03 — Ensure both internal RTs exist at (iw, ih). Returns:
+ *   true if g_internal_target is ready (with or without the halftone pass).
+ *   false if iw/ih are invalid or RT allocation failed — caller must skip
+ *         the world+post pipeline entirely.
+ *
+ * `g_post_target` only matters when the halftone shader loaded. If the
+ * shader file is missing, the caller blits g_internal_target straight
+ * to the backbuffer. */
+static bool ensure_internal_targets(int iw, int ih) {
     halftone_load_once();
-    if (!g_halftone_loaded) return false;
-    if (sw <= 0 || sh <= 0) return false;
-    if (g_post_target.id != 0 && g_post_target_w == sw && g_post_target_h == sh) {
+    if (iw <= 0 || ih <= 0) return false;
+    if (g_internal_target.id != 0 && g_post_target.id != 0 &&
+        g_internal_target_w == iw && g_internal_target_h == ih) {
         return true;
     }
-    if (g_post_target.id != 0) UnloadRenderTexture(g_post_target);
-    g_post_target = LoadRenderTexture(sw, sh);
-    if (g_post_target.id == 0) {
-        LOG_E("halftone: LoadRenderTexture(%d,%d) failed; disabling post", sw, sh);
-        g_halftone_loaded = false;
+    if (g_internal_target.id != 0 && g_post_target.id != 0 &&
+        g_internal_target_w == iw && g_internal_target_h == ih &&
+        !g_halftone_loaded) {
+        return true;
+    }
+    /* Size mismatch or first call: re-allocate both. */
+    if (g_internal_target.id != 0) {
+        UnloadRenderTexture(g_internal_target);
+        g_internal_target = (RenderTexture2D){0};
+    }
+    if (g_post_target.id != 0) {
+        UnloadRenderTexture(g_post_target);
+        g_post_target = (RenderTexture2D){0};
+    }
+    g_internal_target = LoadRenderTexture(iw, ih);
+    if (g_internal_target.id == 0) {
+        LOG_E("renderer: internal RT LoadRenderTexture(%d,%d) failed", iw, ih);
         return false;
     }
-    /* Bilinear here would mush the per-pixel halftone screen — keep
-     * point-sample so the dither reads sharp. */
-    SetTextureFilter(g_post_target.texture, TEXTURE_FILTER_POINT);
-    g_post_target_w = sw;
-    g_post_target_h = sh;
+    /* Point-filter so the halftone pass samples crisp source pixels.
+     * The backbuffer-stage blit overrides the filter on g_post_target
+     * to BILINEAR for the upscale; the internal_target stays POINT. */
+    SetTextureFilter(g_internal_target.texture, TEXTURE_FILTER_POINT);
+
+    if (g_halftone_loaded) {
+        g_post_target = LoadRenderTexture(iw, ih);
+        if (g_post_target.id == 0) {
+            LOG_E("halftone: post RT LoadRenderTexture(%d,%d) failed; disabling post", iw, ih);
+            g_halftone_loaded = false;
+        } else {
+            SetTextureFilter(g_post_target.texture, TEXTURE_FILTER_POINT);
+        }
+    }
+    g_internal_target_w = iw;
+    g_internal_target_h = ih;
+    LOG_I("renderer: internal targets sized %dx%d (halftone=%s)",
+          iw, ih, g_halftone_loaded ? "on" : "off");
     return true;
 }
 
@@ -112,6 +159,12 @@ void renderer_post_shutdown(void) {
         UnloadRenderTexture(g_post_target);
         g_post_target = (RenderTexture2D){0};
     }
+    if (g_internal_target.id != 0) {
+        UnloadRenderTexture(g_internal_target);
+        g_internal_target = (RenderTexture2D){0};
+    }
+    g_internal_target_w = 0;
+    g_internal_target_h = 0;
     if (g_halftone_loaded) {
         UnloadShader(g_halftone_post);
         g_halftone_post = (Shader){0};
@@ -134,10 +187,29 @@ void renderer_init(Renderer *r, int sw, int sh, Vec2 follow) {
     r->last_cursor_screen = (Vec2){ sw * 0.5f, sh * 0.5f };
     r->last_cursor_world  = follow;
     r->cam_dt_override    = 0.0f;
+    /* M6 P03 — identity transform until the first renderer_draw_frame
+     * writes the real letterbox numbers in. Stays the identity for
+     * shotmode + 1080p windowed (internal == window). */
+    r->blit_scale = 1.0f;
+    r->blit_dx    = 0.0f;
+    r->blit_dy    = 0.0f;
 }
 
 Vec2 renderer_screen_to_world(const Renderer *r, Vec2 screen) {
-    Vector2 w = GetScreenToWorld2D((Vector2){ screen.x, screen.y }, r->camera);
+    /* M6 P03 — `screen` arrives in window pixels (raw GetMousePosition
+     * from main.c / shotmode). The camera operates in internal-RT
+     * pixels because update_camera writes
+     * `r->camera.offset = internal_w/2, internal_h/2`. Apply the
+     * inverse of the backbuffer letterbox transform to land in
+     * internal coords before handing to raylib's
+     * GetScreenToWorld2D. With blit_scale=1 and dx=dy=0 (shotmode +
+     * 1080p windowed) this is the identity. */
+    float scale = (r->blit_scale > 0.0f) ? r->blit_scale : 1.0f;
+    Vector2 internal_px = {
+        (screen.x - r->blit_dx) / scale,
+        (screen.y - r->blit_dy) / scale,
+    };
+    Vector2 w = GetScreenToWorld2D(internal_px, r->camera);
     return (Vec2){ w.x, w.y };
 }
 
@@ -1302,19 +1374,58 @@ static void draw_world_pass(Renderer *r, World *w, float alpha,
     draw_parallax_near(r->camera, sw, sh);
 }
 
-void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
+void renderer_draw_frame(Renderer *r, World *w,
+                         int internal_w, int internal_h,
+                         int window_w,   int window_h,
                          float alpha, Vec2 local_visual_offset,
                          Vec2 cursor_screen,
                          RendererOverlayFn overlay_cb, void *overlay_user) {
     if (alpha < 0.0f) alpha = 0.0f;
     if (alpha > 1.0f) alpha = 1.0f;
+    if (internal_w <= 0 || internal_h <= 0) {
+        /* Defensive — should never happen since platform_begin_frame
+         * never produces zeros. Skip the frame rather than divide-by-
+         * zero in the letterbox math. */
+        BeginDrawing();
+            ClearBackground(BLACK);
+        EndDrawing();
+        return;
+    }
+    if (window_w <= 0) window_w = internal_w;
+    if (window_h <= 0) window_h = internal_h;
+
+    /* ---- Aspect-preserving letterbox math ------------------------- *
+     * Largest uniform scale that fits the internal RT inside the
+     * window. `dx/dy` centre the upscaled RT — non-zero only when the
+     * internal aspect doesn't match the window aspect (which our
+     * platform_begin_frame avoids by design, but a future config
+     * override might trigger it). */
+    float sx = (float)window_w / (float)internal_w;
+    float sy = (float)window_h / (float)internal_h;
+    float scale = (sx < sy) ? sx : sy;
+    float dw = (float)internal_w * scale;
+    float dh = (float)internal_h * scale;
+    float dx = ((float)window_w - dw) * 0.5f;
+    float dy = ((float)window_h - dh) * 0.5f;
+    r->blit_scale = scale;
+    r->blit_dx    = dx;
+    r->blit_dy    = dy;
+
     float cam_dt = (r->cam_dt_override > 0.0f)
                    ? r->cam_dt_override
                    : (GetFrameTime() > 0 ? GetFrameTime() : 1.0f / 60.0f);
-    update_camera(r, w, sw, sh, cam_dt);
+    update_camera(r, w, internal_w, internal_h, cam_dt);
 
-    /* Cache cursor positions for hud + camera lookahead. */
-    r->last_cursor_screen = cursor_screen;
+    /* Cache cursor positions for HUD + camera lookahead. The conversion
+     * goes window → internal (via blit_* set above) → world (via the
+     * camera in internal coords). `last_cursor_screen` is stored in
+     * internal coords because update_camera reads `last_cursor_world`
+     * only; we keep the field name for ABI continuity. */
+    Vec2 cursor_internal = {
+        (cursor_screen.x - dx) / (scale > 0.0f ? scale : 1.0f),
+        (cursor_screen.y - dy) / (scale > 0.0f ? scale : 1.0f),
+    };
+    r->last_cursor_screen = cursor_internal;
     r->last_cursor_world  = renderer_screen_to_world(r, cursor_screen);
 
     /* Bake any blood drops the latest tick added before we begin the
@@ -1324,22 +1435,44 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
      * BeginDrawing pair we open below. */
     decal_flush_pending();
 
-    bool use_post = ensure_post_target(sw, sh);
-
-    if (use_post) {
-        /* World → off-screen RT. ClearBackground inside BeginTextureMode
-         * targets the RT, not the backbuffer — keeps the post-pass
-         * blend predictable. */
-        BeginTextureMode(g_post_target);
+    bool have_internal = ensure_internal_targets(internal_w, internal_h);
+    if (!have_internal) {
+        /* Worst-case fallback: no internal RT at all. Draw straight
+         * to the backbuffer at window res. Matches the pre-P03 no-
+         * shader shape. */
+        BeginDrawing();
             ClearBackground((Color){12, 14, 18, 255});
-            draw_world_pass(r, w, alpha, local_visual_offset, sw, sh);
-        EndTextureMode();
+            update_camera(r, w, window_w, window_h, 0.0f);
+            draw_world_pass(r, w, alpha, local_visual_offset,
+                            window_w, window_h);
+            hud_draw(w, window_w, window_h, cursor_screen, r->camera);
+            if (overlay_cb) overlay_cb(overlay_user, window_w, window_h);
+            audio_draw_mute_overlay(window_w, window_h);
+        EndDrawing();
+        return;
+    }
 
-        /* Per-frame uniforms. Resolution may have changed since last
-         * frame (window resize); halftone density is constant in P13
-         * but plumbed through SetShaderValue so the M6 config slider
-         * has a place to land. */
-        Vector2 res = { (float)sw, (float)sh };
+    /* (1) World pass → g_internal_target at internal resolution.
+     * ClearBackground inside BeginTextureMode targets the RT, not the
+     * backbuffer — keeps the post-pass blend predictable. */
+    BeginTextureMode(g_internal_target);
+        ClearBackground((Color){12, 14, 18, 255});
+        draw_world_pass(r, w, alpha, local_visual_offset,
+                        internal_w, internal_h);
+    EndTextureMode();
+
+    /* (2) Halftone pass (when the shader is loaded):
+     *     g_internal_target → g_post_target at internal resolution.
+     *
+     * The shader sees `resolution = internal_w/h` — its dither cell
+     * and shimmer frequencies stay tuned for 1080p-class densities
+     * regardless of the player's monitor. Per-fragment work drops
+     * from `window_w * window_h` invocations to `internal_w *
+     * internal_h` — at 3440×1440 maximised that's a 44 % reduction
+     * just for this pass. */
+    bool drew_post = false;
+    if (g_halftone_loaded && g_post_target.id != 0) {
+        Vector2 res = { (float)internal_w, (float)internal_h };
         float   den = HALFTONE_DENSITY;
         if (g_halftone_loc_resolution >= 0)
             SetShaderValue(g_halftone_post, g_halftone_loc_resolution,
@@ -1350,20 +1483,14 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
 
         /* M6 P02 — Heat-shimmer hot zones. Gated on
          * mech_jet_fx_any_active so the uniform set + the shader's
-         * 16-slot loop only fire when at least one plume is on
-         * screen. When no jet is active we zero the array once (on
-         * the first-active-then-idle transition) so the GPU sees a
-         * clean state and the cheap-fast `z.w <= 0.001` early-out
-         * in the shader fires for every slot. */
+         * loop only fire when at least one plume is on screen.
+         *
+         * NOTE: hot-zone xy come from GetWorldToScreen2D against
+         * r->camera, which lives in internal-pixel space — so the
+         * coords are already in the same coord system the shader's
+         * frag_px uses (`fragTexCoord * resolution`). No extra
+         * scaling needed. */
         if (g_halftone_loc_hot_zones >= 0 && g_halftone_loc_jet_time >= 0) {
-            /* M6 P02-perf — pass the actual zone count via the
-             * `jet_hot_zone_count` uniform so the shader's fragment
-             * loop iterates only over real zones. At 4K (8.3M
-             * pixels) the prior MAX-bounded loop paid 133M ops/frame
-             * just to check empty slots; with count=0 the new shader
-             * loop runs 0 times. The conditional uniform push below
-             * still applies so we don't pay shader-setup cost on
-             * idle ticks. */
             /* Skip shimmer in shot mode for deterministic screenshots
              * — the per-frame jet_time uniform would otherwise pull
              * in wall-clock time and tile-noise would walk between
@@ -1374,8 +1501,6 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
                 JetHotZone zones[JET_HOT_ZONE_MAX] = {0};
                 zone_count = mech_jet_fx_collect_hot_zones(
                     w, &r->camera, zones, JET_HOT_ZONE_MAX);
-                /* Only push the filled prefix — saves a few µs of
-                 * uniform copy on every active-jet frame. */
                 if (zone_count > 0) {
                     SetShaderValueV(g_halftone_post,
                                     g_halftone_loc_hot_zones, zones,
@@ -1385,11 +1510,6 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
                 SetShaderValue(g_halftone_post, g_halftone_loc_jet_time,
                                &jt, SHADER_UNIFORM_FLOAT);
             }
-            /* Push count on every frame the shader location exists;
-             * cost is one int upload. Shader's loop bound updates
-             * immediately so an active-then-idle transition stops
-             * shimmer the very next frame without a "zone-zeroing"
-             * pass. */
             if (g_halftone_loc_hot_zone_count >= 0) {
                 SetShaderValue(g_halftone_post,
                                g_halftone_loc_hot_zone_count,
@@ -1397,34 +1517,100 @@ void renderer_draw_frame(Renderer *r, World *w, int sw, int sh,
             }
         }
 
-        BeginDrawing();
-            ClearBackground(BLACK);
+        BeginTextureMode(g_post_target);
+            ClearBackground((Color){0, 0, 0, 0});
             BeginShaderMode(g_halftone_post);
                 /* raylib's render textures come back Y-flipped — pass
-                 * a negative source-rectangle height to flip on draw.
+                 * a negative source-rectangle height to flip on read.
                  * (See [06-rendering-audio.md] "Y-flip gotcha.") */
                 Rectangle src = {
                     0, 0,
-                    (float)g_post_target.texture.width,
-                    -(float)g_post_target.texture.height
+                    (float)g_internal_target.texture.width,
+                    -(float)g_internal_target.texture.height
                 };
-                Vector2   dst = { 0, 0 };
-                DrawTextureRec(g_post_target.texture, src, dst, WHITE);
+                DrawTextureRec(g_internal_target.texture, src,
+                               (Vector2){0, 0}, WHITE);
             EndShaderMode();
-            hud_draw(w, sw, sh, cursor_screen, r->camera);
-            if (overlay_cb) overlay_cb(overlay_user, sw, sh);
-            audio_draw_mute_overlay(sw, sh);
-        EndDrawing();
-    } else {
-        /* Fallback: M4 shape, no post pass. Fires on a fresh checkout
-         * without `assets/shaders/halftone_post.fs.glsl`, or when
-         * LoadRenderTexture failed (low-VRAM / GL-context issue). */
-        BeginDrawing();
-            ClearBackground((Color){12, 14, 18, 255});
-            draw_world_pass(r, w, alpha, local_visual_offset, sw, sh);
-            hud_draw(w, sw, sh, cursor_screen, r->camera);
-            if (overlay_cb) overlay_cb(overlay_user, sw, sh);
-            audio_draw_mute_overlay(sw, sh);
-        EndDrawing();
+        EndTextureMode();
+        drew_post = true;
+    }
+
+    /* (3) Backbuffer: bilinear-upscale the chosen source RT to the
+     * window, aspect-preserving letterbox. Both RTs are point-filtered
+     * for the halftone-source path (step 2) — flip the upscale target
+     * to BILINEAR right before the blit so the upscale is smooth.
+     *
+     * BLACK clear paints the letterbox bars when the internal aspect
+     * doesn't match the window aspect (rare in production, but
+     * possible under a hand-edited soldut.cfg). */
+    Texture2D src_tex = drew_post
+                      ? g_post_target.texture
+                      : g_internal_target.texture;
+    SetTextureFilter(src_tex, TEXTURE_FILTER_BILINEAR);
+
+    /* HUD/world-to-screen consumer (`draw_flag_compass`) expects the
+     * camera to project world coords into WINDOW pixels. Our `r->camera`
+     * lives in INTERNAL pixels — derive a window-space camera by
+     * pre-multiplying the zoom by the upscale and shifting the offset
+     * through the letterbox transform. Identity when internal == window. */
+    Camera2D hud_cam = r->camera;
+    hud_cam.zoom    *= scale;
+    hud_cam.offset.x = r->camera.offset.x * scale + dx;
+    hud_cam.offset.y = r->camera.offset.y * scale + dy;
+
+    BeginDrawing();
+        ClearBackground(BLACK);
+        Rectangle src = {
+            0, 0,
+            (float)src_tex.width,
+            -(float)src_tex.height
+        };
+        Rectangle dst = { dx, dy, dw, dh };
+        DrawTexturePro(src_tex, src, dst, (Vector2){0, 0}, 0.0f, WHITE);
+
+        /* HUD draws at WINDOW resolution on top — sharp text and HUD
+         * geometry regardless of the internal cap. The cursor_screen
+         * passed in is window coords; HUD layout uses window_w/h;
+         * world-to-screen inside the HUD uses the synthesised
+         * `hud_cam` so off-screen indicators (CTF compass) land at the
+         * correct window position. */
+        hud_draw(w, window_w, window_h, cursor_screen, hud_cam);
+        if (overlay_cb) overlay_cb(overlay_user, window_w, window_h);
+        audio_draw_mute_overlay(window_w, window_h);
+
+        /* M6 P03 — opt-in perf overlay (shotmode `perf_overlay on` or
+         * future runtime toggle). Drawn after the HUD so the FPS reads
+         * sharp at window pixels and doesn't get blurred by the
+         * internal-RT upscale. Off by default → existing shot tests
+         * are unaffected. */
+        if (g_shot_perf_overlay) {
+            int fps = GetFPS();
+            const char *line1 = TextFormat("FPS %d", fps);
+            const char *line2 = TextFormat("internal %dx%d",
+                                           internal_w, internal_h);
+            const char *line3 = TextFormat("window   %dx%d",
+                                           window_w, window_h);
+            Color bg = (Color){0, 0, 0, 160};
+            DrawRectangle(8, 8, 200, 70, bg);
+            Color fg = (fps >= 55) ? GREEN
+                     : (fps >= 30) ? YELLOW
+                                   : RED;
+            DrawText(line1, 14, 12, 20, fg);
+            DrawText(line2, 14, 36, 14, RAYWHITE);
+            DrawText(line3, 14, 54, 14, RAYWHITE);
+        }
+    EndDrawing();
+
+    /* M6 P03 — once-per-second SHOT_LOG with the same numbers, gated
+     * the same way as the on-screen overlay so this only fires when
+     * the bench wants it. Rate-limit by frame count (~60 fr/s at 60
+     * Hz; shot mode runs as fast as it can so this rolls faster). */
+    if (g_shot_perf_overlay) {
+        static int s_perf_log_frames = 0;
+        if ((++s_perf_log_frames % 60) == 0) {
+            SHOT_LOG("perf: fps=%d internal=%dx%d window=%dx%d scale=%.3f",
+                     GetFPS(), internal_w, internal_h, window_w, window_h,
+                     (double)scale);
+        }
     }
 }

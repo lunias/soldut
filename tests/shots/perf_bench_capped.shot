@@ -1,0 +1,36 @@
+# perf_bench_capped.shot — M6 P03 perf bench, "internal_h 1080" path.
+#
+# Same scene as perf_bench.shot but with the internal cap on (1080
+# lines). World + post-process rasterise into a 2580×1080 RT; the
+# upscale to the 3440×1440 window is a cheap bilinear blit. The
+# expectation is FPS is materially higher than the no-cap baseline.
+
+window 3440 1440
+seed   2 7
+out    build/shots/perf_bench_capped
+
+internal_h 1080
+perf_overlay on
+
+extra_chassis Heavy   1200 920
+extra_chassis Scout   1300 920
+extra_chassis Sniper  1400 920
+extra_chassis Engineer 1500 920
+
+aim 700 920
+
+at  30 press jet
+at 120 release jet
+at 150 press jet
+at 240 release jet
+at 270 press jet
+at 360 release jet
+at 390 press jet
+at 480 release jet
+
+at  60 shot t060
+at 180 shot t180
+at 300 shot t300
+at 420 shot t420
+at 540 shot t540
+at 600 end

@@ -205,6 +205,9 @@ Picked up alongside the roadmap items (carry-forwards from M1–M4 + design fill
 
 **Goal**: A binary players can reliably download, run, and play.
 
+- [x] **P01 — IK + pose sync** (shipped 2026-05-12; see `documents/m6/01-ik-and-pose-sync.md`)
+- [x] **P02 — Jetpack propulsion FX** (shipped 2026-05-12; see `documents/m6/02-jetpack-propulsion-fx.md`)
+- [x] **P03 — Capped internal render target / "4K" FPS fix** (shipped 2026-05-12; see `documents/m6/03-perf-4k-enhancements.md`; the long-standing internal-resolution cap from `10-performance-budget.md:208` is now real)
 - [ ] Cross-platform builds work on every CI run
 - [ ] macOS code signing + notarization in the release script
 - [ ] Windows build verified on Win10 + Win11

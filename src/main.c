@@ -101,11 +101,30 @@ typedef struct {
     bool        friendly_fire;
     bool        skip_title;
     bool        ff_set;
+    /* M6 P03 — `--internal-h N` overrides soldut.cfg + soldut-prefs.cfg
+     * (the user's persisted choice). -1 = use config/prefs default. 0
+     * disables the cap (render at window resolution). Any positive
+     * value caps internal height to that many lines. */
+    int         internal_h_override;
+    bool        internal_h_set;
+    /* M6 P03 — `--perf-overlay` turns on the renderer's FPS readout
+     * during interactive --test-play / --host so the user can read
+     * FPS off-screen and compare before/after. */
+    bool        perf_overlay;
+    /* M6 P03 — `--window WxH` overrides the hardcoded 1920×1080 spawn
+     * so a perf check can open straight at the maximised resolution
+     * without dragging the window. 0 = leave defaults. */
+    int         window_w_override;
+    int         window_h_override;
+    /* M6 P03 — `--fullscreen` enables raylib FLAG_FULLSCREEN_MODE.
+     * Pair with --window to force a specific monitor resolution. */
+    bool        fullscreen;
 } LaunchArgs;
 
 static void parse_args(int argc, char **argv, LaunchArgs *out) {
     memset(out, 0, sizeof *out);
     out->port = SOLDUT_DEFAULT_PORT;
+    out->internal_h_override = -1;
     snprintf(out->name, sizeof out->name, "player");
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--host") == 0) {
@@ -173,6 +192,26 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
         }
         else if (strcmp(argv[i], "--ff") == 0) {
             out->friendly_fire = true; out->ff_set = true;
+        }
+        /* M6 P03 — render-target cap override. Useful for A/B testing
+         * the post-process fillrate at native vs 1080-capped on a
+         * maximised window. */
+        else if (strcmp(argv[i], "--internal-h") == 0 && i + 1 < argc) {
+            out->internal_h_override = atoi(argv[++i]);
+            out->internal_h_set      = true;
+        }
+        else if (strcmp(argv[i], "--perf-overlay") == 0) {
+            out->perf_overlay = true;
+        }
+        else if (strcmp(argv[i], "--window") == 0 && i + 1 < argc) {
+            int w = 0, h = 0;
+            if (sscanf(argv[++i], "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+                out->window_w_override = w;
+                out->window_h_override = h;
+            }
+        }
+        else if (strcmp(argv[i], "--fullscreen") == 0) {
+            out->fullscreen = true;
         }
         /* M5 P04 — editor F5 test-play. Boots into an offline-solo round
          * on the supplied .lvl file. We force LAUNCH_HOST + skip_title;
@@ -1957,9 +1996,33 @@ int main(int argc, char **argv) {
      * baseline pixel density is now Full HD instead of 720p. Shot-
      * mode tests still launch their own platform_init at 1280×720
      * (src/shotmode.c parses `window` from the script). */
+    /* M6 P03 — pick the internal-render-target height. Precedence:
+     *   --internal-h CLI flag > soldut-prefs.cfg > soldut.cfg > default.
+     * 0 = no cap = render at window resolution; 1080 = the default.
+     * The number is read once at startup; changing it requires a
+     * restart. */
+    int internal_h_choice = game.config.internal_res_h;
+    {
+        UserPrefs ptmp;
+        if (prefs_load(&ptmp, PREFS_PATH)) {
+            internal_h_choice = ptmp.internal_res_h;
+        }
+    }
+    if (args.internal_h_set) {
+        internal_h_choice = args.internal_h_override;
+    }
+    /* Opt-in perf overlay during interactive play. The flag lives on
+     * the renderer side via g_shot_perf_overlay (same path the
+     * shotmode `perf_overlay on` directive uses); we set it directly
+     * here so non-shot launches can opt in too. */
+    if (args.perf_overlay) g_shot_perf_overlay = 1;
+
+    int win_w = args.window_w_override > 0 ? args.window_w_override : 1920;
+    int win_h = args.window_h_override > 0 ? args.window_h_override : 1080;
     PlatformConfig pcfg = {
-        .window_w = 1920, .window_h = 1080,
-        .vsync = true, .fullscreen = false,
+        .window_w = win_w, .window_h = win_h,
+        .vsync = true, .fullscreen = args.fullscreen,
+        .internal_h = internal_h_choice,
         .title = (args.mode == LAUNCH_HOST)   ? "Soldut " SOLDUT_VERSION_STRING " — host"
                : (args.mode == LAUNCH_CLIENT) ? "Soldut " SOLDUT_VERSION_STRING " — client"
                                               : "Soldut " SOLDUT_VERSION_STRING,
@@ -2610,7 +2673,8 @@ int main(int argc, char **argv) {
                             ? game.reconcile.visual_offset
                             : (Vec2){ 0.0f, 0.0f };
             renderer_draw_frame(&rd, &game.world,
-                                pf.render_w, pf.render_h,
+                                pf.internal_w, pf.internal_h,
+                                pf.render_w,   pf.render_h,
                                 (float)(accum / TICK_DT),
                                 visual_off,
                                 (Vec2){ (float)GetMouseX(), (float)GetMouseY() },
@@ -2668,7 +2732,8 @@ int main(int argc, char **argv) {
              * flicker. */
             OverlayCtx ovc = { .game = &game, .ui = &ui };
             renderer_draw_frame(&rd, &game.world,
-                                pf.render_w, pf.render_h,
+                                pf.internal_w, pf.internal_h,
+                                pf.render_w,   pf.render_h,
                                 0.0f, (Vec2){ 0.0f, 0.0f },
                                 (Vec2){ (float)GetMouseX(), (float)GetMouseY() },
                                 draw_summary_overlay, &ovc);

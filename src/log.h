@@ -39,6 +39,15 @@ void log_vmsg(LogLevel level, const char *fmt, va_list ap);
  * reviewing a shot run by reading the log + the contact sheet. */
 extern int g_shot_mode;
 
+/* M6 P03 — opt-in FPS / resolution overlay for bench scripts.
+ *   0  — renderer draws nothing extra (default; existing shot tests
+ *        stay byte-identical to pre-P03).
+ *   1  — renderer draws a small FPS + internal/window readout on
+ *        every frame, and renderer_draw_frame emits a SHOT_LOG line
+ *        once per second carrying the same numbers. Set by the
+ *        shotmode `perf_overlay on` directive. */
+extern int g_shot_perf_overlay;
+
 void log_shot(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 #define SHOT_LOG(...) do { if (g_shot_mode) log_shot(__VA_ARGS__); } while (0)

@@ -18,6 +18,19 @@ typedef struct {
      * rate it would in interactive play, regardless of how fast we
      * render frames (tens of ms each, vs. wall-clock 16 ms). */
     float    cam_dt_override;
+
+    /* M6 P03 — window↔internal mapping. The world + post-process pass
+     * render into a capped-resolution offscreen target; the result is
+     * upscaled to the window with letterboxing if the internal aspect
+     * doesn't match the window. These three values capture the
+     * transform `window_xy = internal_xy * scale + (dx, dy)` so
+     * `renderer_screen_to_world` (and anyone else converting cursor
+     * coords) can run the inverse. Updated every frame in
+     * renderer_draw_frame from the same numbers that drive the blit.
+     * When internal == window (shotmode + 1080p windowed) scale=1,
+     * dx=dy=0 — the conversion is the identity. */
+    float    blit_scale;
+    float    blit_dx, blit_dy;
 } Renderer;
 
 void renderer_init(Renderer *r, int screen_w, int screen_h, Vec2 follow);
@@ -45,7 +58,8 @@ Vec2 renderer_screen_to_world(const Renderer *r, Vec2 screen);
 typedef void (*RendererOverlayFn)(void *user, int screen_w, int screen_h);
 
 void renderer_draw_frame(Renderer *r, World *w,
-                         int screen_w, int screen_h,
+                         int internal_w, int internal_h,
+                         int window_w,   int window_h,
                          float interp_alpha,
                          Vec2 local_visual_offset,
                          Vec2 cursor_screen,

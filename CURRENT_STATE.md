@@ -2806,6 +2806,126 @@ re-runs are byte-identical.
 
 ## Recently fixed
 
+### M6 P03 — Capped internal render target for the "4K" FPS dip (LANDED 2026-05-12)
+
+User-reported FPS dip when maximising the window on a 3440×1440
+ultrawide monitor. `FLAG_WINDOW_HIGHDPI` made `GetRenderWidth/Height`
+return physical pixels, which flowed straight into `g_post_target =
+LoadRenderTexture(sw, sh)` — every world-space draw and the
+halftone+shimmer post-process pass rasterised into a 3440×1440 (4.95
+Mpx) surface every frame, 2.39× the 1920×1080 baseline budget. The
+shimmer pass at 16 active hot zones × 4.95 Mpx wanted ~72 % of the
+mid-range integrated-GPU frame budget on its own.
+
+`documents/10-performance-budget.md:208` had committed to an internal-
+resolution cap at v1 (*"world doesn't render at higher density"*) and
+that commitment was never built. M6 P03 builds it.
+
+**Plan:** `documents/m6/03-perf-4k-enhancements.md` (6-phase
+implementation). Single sentence: world + post-process rasterise into
+a capped-height internal render target (default 1080 lines, width
+derived from window aspect), then a bilinear blit upscales to the
+backbuffer; the HUD draws at window resolution on top, unshaded.
+
+**Implementation seams:**
+  - `ServerConfig.internal_res_h` (`src/config.{c,h}`, default 1080,
+    accepts 0 or 360..4320; parsed as `internal_res_h=` from
+    `soldut.cfg`; alias `render_height=`).
+  - `UserPrefs.internal_res_h` (`src/prefs.{c,h}`, persisted in
+    `soldut-prefs.cfg`; precedence prefs > cfg > built-in default).
+  - `PlatformConfig.internal_h` + `PlatformFrame.internal_w/h`
+    (`src/platform.{c,h}`); `platform_begin_frame` computes
+    `internal_w = round(render_w * internal_h / render_h)` (round-to-
+    nearest, integer math) and exposes both on the per-frame struct.
+  - `renderer_draw_frame` signature changed to
+    `(internal_w, internal_h, window_w, window_h, ...)`. Body
+    rewritten: world → `g_internal_target` at internal res → halftone
+    pass writes to `g_post_target` at internal res → backbuffer blit
+    via `DrawTexturePro` with bilinear filter, aspect-preserving
+    letterbox (`MIN(sw/iw, sh/ih)` scale + centred dst rect, same
+    pattern as raylib's `core_window_letterbox` example). HUD +
+    overlay callbacks + audio overlay draw at window res, unshaded.
+  - Cursor conversion: new `Renderer.blit_scale / blit_dx / blit_dy`
+    capture the backbuffer letterbox transform every frame. The
+    existing `renderer_screen_to_world` (called from
+    `main.c::process_input` and from inside `renderer_draw_frame`)
+    runs the inverse before handing to `GetScreenToWorld2D`, so
+    `ClientInput.aim_x/y` continues to be world-space and aim lands
+    where the cursor visually points. Identity when internal ==
+    window (shotmode + 1080p windowed).
+  - HUD camera: world-to-screen consumers inside `hud_draw` (e.g.
+    `draw_flag_compass`) need a window-space camera. The renderer
+    synthesises `hud_cam = { zoom *= scale, offset = camera.offset *
+    scale + (dx, dy) }` and passes it instead of `r->camera`.
+  - **MSAA dropped** from the backbuffer (`platform.c` no longer
+    sets `FLAG_MSAA_4X_HINT`). The halftone screen masks the
+    sub-pixel aliasing the world had paid 4× cost for; the HUD is
+    axis-aligned rects + bilinear-sampled glyphs neither of which
+    benefit from MSAA. ~57 MB VRAM + ~1 ms / frame back.
+  - Shot-mode infrastructure for benching: new `internal_h N` and
+    `perf_overlay on|off` directives parsed in `shotmode.c`; on-screen
+    FPS readout + per-second `SHOT_LOG perf: fps=N internal=WxH
+    window=WxH scale=S` line both gated on the new
+    `g_shot_perf_overlay` (peer of `g_shot_mode` in `log.{c,h}`).
+  - CLI mirrors of the same controls for interactive verification:
+    `--internal-h N`, `--perf-overlay`, `--window WxH`,
+    `--fullscreen` in `src/main.c`. `--perf-overlay` sets
+    `g_shot_perf_overlay` directly so `--test-play` (which already
+    flips `g_shot_mode`) emits the same SHOT_LOG line into
+    `soldut.log`.
+
+**Shotmode preserves byte-identity.** Existing shot tests
+(`m5_chassis_distinctness`, `m5_weapon_held`, `m5_drift_isolate`,
+`2p_dismember`, paired-process flows in `tests/shots/net/`) default to
+`internal_h = 0` (no cap) → internal RT is 1:1 with the window → the
+pipeline reduces to the pre-P03 shape. Confirmed visually:
+`m5_chassis_distinctness.shot` re-run post-P03 produces the same
+silhouette panel (5 distinct chassis + HUD).
+
+**Measured numbers** (this developer machine, WSL2/WSLg, 3440×1440
+target):
+  - `tests/shots/perf_bench.shot` (4 extra chassis, single jet
+    burst): no-cap 14.3 s wall / ~54 FPS, capped 13.8 s / ~54 FPS.
+  - `tests/shots/perf_stress.shot` (Citadel + 6 extras + sustained
+    Burst plume): no-cap 22.7 s / ~33 FPS, capped 20.9 s / ~33 FPS.
+    **8 % wall-clock win**; FPS rounds the same because the WSLg
+    compositor frame-paces both runs.
+  - Interactive `--test-play assets/maps/reactor.lvl --window
+    3440x1440 --perf-overlay` (10 s sample, soldut.log SHOT_LOG):
+    no-cap 51–55 FPS, capped 52–55 FPS. Effectively identical because
+    GPU isn't the dominant cost in WSL2's bridged Weston path; the
+    fix's intended target is native Windows/Linux where the
+    raster/shader work would otherwise scale with monitor pixels.
+
+**Test-suite status post-fix** (every asserting target re-run):
+  - `test-level-io` 25/25 · `test-pickups` 43/43 · `test-ctf` 52/52 ·
+    `test-snapshot` ok · `test-spawn` ok · `test-prefs` ok ·
+    `test-map-chunks` 21/21 · `test-map-registry` ok ·
+    `test-grapple-ceiling` ok · `test-frag-grenade` 9/9 ·
+    `tests/net/run_3p.sh` 10/10 · `tests/shots/net/run.sh
+    2p_basic` 12/12 · `2p_legs` 12/12 (mech falls from y=1112 to
+    y=1978 then walks left/right) · `2p_dismember` 12/12 ·
+    `test-meet-named` 18/18 · `test-meet-custom` 15/15 ·
+    `test-ctf-editor-flow` 4/4 + 12/12 (the third sub-test
+    `run_ctf_walk_own_flag.sh`'s 3 assertions remain failing as a
+    pre-existing flake — same status as the pre-P03 branch).
+  - Single-process gravity: `m1_big_fall.shot` mech falls from spawn
+    to ground and settles normally.
+
+**New on-disk knobs:**
+  - `internal_res_h=N` in `soldut.cfg` (default 1080).
+  - `internal_res_h=N` line in `soldut-prefs.cfg`.
+
+**New CLI flags:** `--internal-h N`, `--perf-overlay`,
+`--window WxH`, `--fullscreen`.
+
+**New shotmode directives:** `internal_h N`, `perf_overlay on|off`.
+
+**New bench scripts:** `tests/shots/perf_bench.shot`,
+`perf_bench_capped.shot`, `perf_stress.shot`,
+`perf_stress_capped.shot`. All output to `build/shots/perf_*/` with
+PNG screenshots that bake the FPS / internal / window readout.
+
 ### M6 P02-perf — Jet FX FPS regression (FIXED 2026-05-12, post-P02 ship)
 
 User-reported severe FPS degradation when any mech was jetting,
