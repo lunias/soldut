@@ -51,6 +51,14 @@ typedef struct LobbySlot {
 
     /* Chat rate-limit. */
     float        last_chat_time;
+
+    /* Bot fill (M6+) — server-only fields, never on the wire. Clients
+     * see bots as ordinary lobby slots (the encoder ignores these).
+     * `is_bot` flags slots whose `latched_input` is filled each tick
+     * by bot_step instead of by a network peer; `bot_tier` selects the
+     * BotPersonality preset to attach to the spawned mech. */
+    bool         is_bot;
+    uint8_t      bot_tier;
 } LobbySlot;
 
 typedef struct LobbyChatLine {
@@ -119,6 +127,26 @@ int  lobby_find_slot_by_peer(const LobbyState *L, int peer_id);
 int  lobby_find_slot_by_name(const LobbyState *L, const char *name);
 int  lobby_find_slot_by_mech(const LobbyState *L, int mech_id);
 LobbySlot *lobby_slot(LobbyState *L, int slot);
+
+/* Bot-fill helpers (M6+). Slots created by lobby_add_bot_slot have
+ * is_bot=true and peer_id=-1 (same as the host's own slot — the
+ * is_bot field distinguishes them). They count against
+ * MAX_LOBBY_SLOTS and ride the wire to clients just like real peers,
+ * but never have a NetState peer behind them. */
+int  lobby_add_bot_slot(LobbyState *L, int bot_index, uint8_t tier);
+int  lobby_bot_count(const LobbyState *L);
+void lobby_clear_bot_slots(LobbyState *L);
+
+/* Idempotent — makes the bot population match (want, tier). Adds
+ * missing bot slots, removes excess, and rewrites the tier on
+ * existing ones if `tier` changed. Bots are always assigned in
+ * ascending bot-index order so names stay stable across calls.
+ * `team_balance` true alternates RED/BLUE for TDM/CTF; false
+ * leaves the FFA default. Caller marks `dirty` if anything changed
+ * via the standard mutation paths. Safe to call from the lobby UI
+ * tick, bootstrap_host, dedicated_run, and start_round. */
+void lobby_apply_bot_fill(LobbyState *L, int want, uint8_t tier,
+                          bool team_balance);
 
 /* Mutators — these set `dirty` so the change ships on the next broadcast. */
 void lobby_set_loadout(LobbyState *L, int slot, MechLoadout lo);

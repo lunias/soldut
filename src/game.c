@@ -1,4 +1,5 @@
 #include "game.h"
+#include "bot.h"
 #include "config.h"
 #include "log.h"
 #include "lobby.h"
@@ -110,6 +111,11 @@ bool game_init(Game *g) {
     }
     map_cache_init();
 
+    /* Bot system — opaque state; the nav graph is rebuilt every
+     * map_build (from level_arena). bot_system_init zeros minds + the
+     * per-bot RNG salt. */
+    bot_system_init(&g->bots);
+
     /* M5 P08b — populate the runtime map registry from the four
      * code-built defaults plus every assets/maps/<name>.lvl on disk.
      * Must run BEFORE config_load so config.c::map_id_from_name can
@@ -130,6 +136,7 @@ bool game_init(Game *g) {
 void game_shutdown(Game *g) {
     LOG_I("game_shutdown: peak perm=%zu level=%zu frame=%zu",
           g->permanent.peak, g->level_arena.peak, g->frame_arena.peak);
+    bot_system_destroy(&g->bots);
     arena_destroy(&g->permanent);
     arena_destroy(&g->level_arena);
     arena_destroy(&g->frame_arena);

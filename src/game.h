@@ -1,6 +1,7 @@
 #pragma once
 
 #include "arena.h"
+#include "bot.h"
 #include "config.h"
 #include "hash.h"
 #include "input.h"
@@ -127,6 +128,14 @@ typedef struct Game {
      * current session isn't hosting a dedicated child (i.e., pure
      * --connect or LISTEN_HOST mode). */
     ProcHandle    dedicated_proc;
+
+    /* Bot AI system. Server-side state — clients see bot-controlled
+     * mechs as ordinary peers (their inputs come from bot_step writing
+     * mech.latched_input on the host). bot_step runs before every
+     * simulate_step in MATCH_PHASE_ACTIVE on the authoritative side.
+     * The nav graph lives in level_arena and is rebuilt every
+     * map_build. */
+    BotSystem     bots;
 } Game;
 
 bool game_init(Game *g);

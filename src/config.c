@@ -1,5 +1,6 @@
 #include "config.h"
 
+#include "bot.h"
 #include "log.h"
 #include "maps.h"
 
@@ -31,6 +32,8 @@ void config_defaults(ServerConfig *cfg) {
     cfg->map_rotation_count = 1;
     cfg->mode_rotation[0]   = MATCH_MODE_FFA;
     cfg->mode_rotation_count= 1;
+    cfg->bots               = 0;
+    cfg->bot_tier           = 1;        /* Veteran */
     cfg->loaded_from_file   = false;
     cfg->source_path[0]     = '\0';
 }
@@ -139,6 +142,24 @@ static void apply_kv(ServerConfig *cfg, const char *key, char *val) {
             }
         }
         if (written > 0) cfg->map_rotation_count = written;
+    }
+    else if (strcasecmp(key, "bots") == 0 ||
+             strcasecmp(key, "bot_count") == 0) {
+        int n = atoi(val);
+        if (n < 0) n = 0;
+        if (n > 31) n = 31;   /* leave room for the host */
+        cfg->bots = n;
+    }
+    else if (strcasecmp(key, "bot_tier") == 0) {
+        /* Accept names (recruit/veteran/elite/champion) or 0..3. */
+        char first = val[0];
+        if (first >= '0' && first <= '9') {
+            int n = atoi(val);
+            if (n < 0) n = 0; else if (n > 3) n = 3;
+            cfg->bot_tier = n;
+        } else {
+            cfg->bot_tier = (int)bot_tier_from_name(val);
+        }
     }
     else if (strcasecmp(key, "mode_rotation") == 0) {
         char buf[256]; snprintf(buf, sizeof buf, "%s", val);

@@ -321,6 +321,8 @@ void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
         L->setup_score_limit  = g->config.score_limit;
         L->setup_time_limit_s = (int)g->config.time_limit;
         L->setup_friendly_fire= g->config.friendly_fire;
+        L->setup_bots         = g->config.bots;
+        L->setup_bot_tier     = g->config.bot_tier;
         /* Fix CTF defaults that the FFA-default config wouldn't reach.
          * If the user picked CTF on entry, clamp the score limit. */
         if (L->setup_mode == MATCH_MODE_CTF && L->setup_score_limit >= 25) {
@@ -357,7 +359,7 @@ void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
 
     Rectangle panel = (Rectangle){ panel_x - S(16), panel_y - S(16),
                                    panel_w + S(32),
-                                   row_h * 6 + gap * 5 + S(32) };
+                                   row_h * 8 + gap * 7 + S(32) };
     ui_panel_default(&L->ui, panel);
 
     int y = panel_y;
@@ -472,6 +474,51 @@ void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                   L->setup_friendly_fire ? "ON" : "off",
                   true)) {
         L->setup_friendly_fire = !L->setup_friendly_fire;
+    }
+    y += row_h + gap;
+
+    /* ---- Bot fill (count) ---- */
+    ui_draw_text(&L->ui, "Bots", panel_x, y + S(14), 18,
+                 (Color){200, 220, 240, 255});
+    if (ui_button(&L->ui, (Rectangle){panel_x + label_w, y, step_w, row_h},
+                  "-", true) && L->setup_bots > 0) {
+        L->setup_bots--;
+    }
+    Rectangle bval_r = (Rectangle){panel_x + label_w + step_w + S(4), y,
+                                    sval_w, row_h};
+    DrawRectangleRec(bval_r, (Color){20, 24, 32, 255});
+    DrawRectangleLinesEx(bval_r, L->ui.scale, L->ui.panel_edge);
+    char bbuf[32]; snprintf(bbuf, sizeof bbuf, "%d", L->setup_bots);
+    int bw_ = ui_measure(&L->ui, bbuf, 18);
+    ui_draw_text(&L->ui, bbuf,
+                 (int)(bval_r.x + (bval_r.width - bw_) * 0.5f),
+                 (int)(bval_r.y + (bval_r.height - 18*L->ui.scale) * 0.5f),
+                 18, L->ui.text_col);
+    if (ui_button(&L->ui, (Rectangle){panel_x + label_w + step_w + sval_w + S(8),
+                                       y, step_w, row_h}, "+", true) &&
+        L->setup_bots < MAX_LOBBY_SLOTS - 1)
+    {
+        L->setup_bots++;
+    }
+    y += row_h + gap;
+
+    /* ---- Bot tier (cycle button) ---- */
+    ui_draw_text(&L->ui, "Bot tier", panel_x, y + S(14), 18,
+                 (Color){200, 220, 240, 255});
+    Rectangle tier_r = (Rectangle){panel_x + label_w, y, btn_w, row_h};
+    {
+        const char *names[BOT_TIER_COUNT] = {
+            "Recruit", "Veteran", "Elite", "Champion",
+        };
+        int t = L->setup_bot_tier;
+        if (t < 0) t = 0;
+        if (t >= BOT_TIER_COUNT) t = BOT_TIER_COUNT - 1;
+        int step = ui_cycle_button(&L->ui, tier_r, names[t],
+                                   L->setup_bots > 0);
+        if (step != 0) {
+            t = (t + step + BOT_TIER_COUNT) % BOT_TIER_COUNT;
+            L->setup_bot_tier = t;
+        }
     }
     y += row_h + gap;
 
@@ -1204,8 +1251,9 @@ static void player_row(const UIContext *u, Rectangle row, int idx,
                (int)(row.y + row.height * 0.5f), 7.0f * u->scale, rdot);
 
     char name[40];
-    if (s->is_host) snprintf(name, sizeof name, "%s [HOST]", s->name);
-    else            snprintf(name, sizeof name, "%s", s->name);
+    if      (s->is_host) snprintf(name, sizeof name, "%s [HOST]", s->name);
+    else if (s->is_bot)  snprintf(name, sizeof name, "%s",        s->name);
+    else                 snprintf(name, sizeof name, "%s",        s->name);
     ui_draw_text(u, name, (int)row.x + (int)(40 * u->scale), ty,
                  u->font_size, u->text_col);
 
@@ -1225,9 +1273,53 @@ static void player_row(const UIContext *u, Rectangle row, int idx,
                  chip_y + (chip_h - (int)(16 * u->scale)) / 2,
                  16, BLACK);
 
+    /* Bot tier chip — placed on the far right where the [Kick] /
+     * [Ban] buttons live for human rows (suppressed below for bots,
+     * so the slot is free). Per-tier accent color signals difficulty
+     * at a glance:
+     *   Recruit  — pale cyan (low threat)
+     *   Veteran  — green     (baseline)
+     *   Elite    — orange    (sharp)
+     *   Champion — red       (near-frame-perfect)
+     * Skipped entirely for human rows. */
+    if (s->is_bot) {
+        const Color tier_colors[4] = {
+            (Color){ 90, 170, 220, 255},   /* Recruit */
+            (Color){ 90, 200, 120, 255},   /* Veteran */
+            (Color){230, 160,  60, 255},   /* Elite */
+            (Color){220,  80,  80, 255},   /* Champion */
+        };
+        int t = s->bot_tier;
+        if (t < 0) t = 0;
+        if (t > 3) t = 3;
+        /* Right-anchored: same footprint as the two Kick/Ban buttons
+         * combined (2*72 + 8 = 152 px at scale 1). Big enough that
+         * "BOT · Champion" stays inside the chip at every scale. */
+        float bw = 72.0f * u->scale;
+        float bh = row.height - 8.0f * u->scale;
+        float by = row.y + 4.0f * u->scale;
+        float bx_right = row.x + row.width - 8.0f * u->scale;
+        float bx_left  = bx_right - (2.0f * bw + 8.0f * u->scale);
+        Rectangle tc = (Rectangle){ bx_left, by,
+                                    bx_right - bx_left, bh };
+        DrawRectangleRec(tc, tier_colors[t]);
+        DrawRectangleLinesEx(tc, u->scale, (Color){20, 24, 32, 255});
+        char tlabel[24];
+        /* Plain ASCII separator — the vendored TTF doesn't carry the
+         * middle-dot glyph at the sizes we draw at; raylib falls back
+         * to "?" which reads ugly. */
+        snprintf(tlabel, sizeof tlabel, "BOT - %s",
+                 bot_tier_name((BotTier)t));
+        int tw = ui_measure(u, tlabel, u->font_size);
+        ui_draw_text(u, tlabel,
+                     (int)(tc.x + (tc.width  - tw) * 0.5f),
+                     (int)(tc.y + (tc.height - (float)u->font_size * u->scale) * 0.5f),
+                     u->font_size, (Color){12, 18, 22, 255});
+    }
+
     /* Loadout summary. */
     char load[64];
-    snprintf(load, sizeof load, "%s · %s",
+    snprintf(load, sizeof load, "%s / %s",
              chassis_label(s->loadout.chassis_id),
              primary_label(s->loadout.primary_id));
     ui_draw_text(u, load, (int)row.x + (int)(320 * u->scale), ty,
@@ -1242,12 +1334,14 @@ static void player_row(const UIContext *u, Rectangle row, int idx,
     /* P09 — host controls: [Kick] [Ban] on every non-host row when the
      * local player is the host. Click stages the slot in the
      * confirmation-modal state on the lobby UI; the modal itself is
-     * rendered in lobby_screen_run after the list iteration.
+     * rendered in lobby_screen_run after the list iteration. Skipped
+     * for bots (they're not network peers — kick / ban has no
+     * meaning).
      *
      * Sized for click-target legibility (~72×28 at 1× scale). The
      * buttons sit flush with the right edge of the row; layout above
      * leaves a comfortable ~120 px gap after the K/D score column. */
-    if (ctx->host_view && !s->is_host && ctx->ui_state) {
+    if (ctx->host_view && !s->is_host && !s->is_bot && ctx->ui_state) {
         float bw = 72.0f * u->scale;
         float bh = row.height - 8.0f * u->scale;
         float by = row.y + 4.0f * u->scale;

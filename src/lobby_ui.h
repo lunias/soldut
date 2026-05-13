@@ -74,6 +74,8 @@ typedef struct LobbyUIState {
     int        setup_score_limit;
     int        setup_time_limit_s;    /* int seconds for the +/- stepper */
     bool       setup_friendly_fire;
+    int        setup_bots;            /* 0..MAX_LOBBY_SLOTS-1 */
+    int        setup_bot_tier;        /* BotTier */
     bool       setup_initialized;     /* false until first entry → seeds from g->config */
     bool       request_start_host;    /* one-shot: setup confirmed → main.c bootstraps */
 

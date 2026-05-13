@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade test-riot-cannon-sfx test-mech-ik test-pose-compute host-overlay-preview lobby-overlay-preview cook-maps bake bake-all shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade test-riot-cannon-sfx test-mech-ik test-pose-compute host-overlay-preview lobby-overlay-preview bot-tier-preview cook-maps bake bake-all shot \
         debug gdb gdb-host gdb-client valgrind editor \
         assets-palettes assets-process \
         audio-inventory audio-normalize audio-credits test-audio-smoke
@@ -231,6 +231,16 @@ $(BUILD_DIR)/lobby_overlay_preview: tests/lobby_overlay_preview.c $(HEADLESS_OBJ
 lobby-overlay-preview: $(BUILD_DIR)/lobby_overlay_preview
 	mkdir -p build/shots
 	./$(BUILD_DIR)/lobby_overlay_preview
+
+# M6 — bot tier chip legibility preview. Stands up a fake lobby with
+# one human + 4 bots (one per tier) and captures PNGs at 720/1080/1440
+# so the chip text can be checked at every supported display size.
+$(BUILD_DIR)/bot_tier_preview: tests/bot_tier_preview.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/bot_tier_preview.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+bot-tier-preview: $(BUILD_DIR)/bot_tier_preview
+	mkdir -p build/shots
+	./$(BUILD_DIR)/bot_tier_preview
 
 # M5 P07 — CTF runtime: ctf_init_round + ctf_step + ctf_drop_on_death.
 # Builds a synthetic level with a Red/Blue flag pair, exercises pickup /

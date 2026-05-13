@@ -95,6 +95,14 @@ typedef struct ServerConfig {
     MatchModeId mode_rotation[CONFIG_ROTATION_MAX];
     int       mode_rotation_count;
 
+    /* Bot fill (M6+). When the lobby has fewer in-use slots than
+     * `bots`, the host spawns bot slots up to this count at round
+     * start. `bot_tier` selects the difficulty (0=Recruit, 1=Veteran,
+     * 2=Elite, 3=Champion). Default 0 bots; CLI / UI / config can
+     * raise to MAX_LOBBY_SLOTS - 1 (leave room for the host). */
+    int       bots;
+    int       bot_tier;
+
     /* Bookkeeping. */
     bool      loaded_from_file;
     char      source_path[256];
