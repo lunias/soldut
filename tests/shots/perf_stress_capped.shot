@@ -1,0 +1,33 @@
+# perf_stress_capped.shot — M6 P03 heavy bench, "internal_h 1080" path.
+#
+# Mirror of perf_stress.shot with the internal cap on. The world +
+# halftone+shimmer pass rasterise into 2580×1080 (2.79 Mpx); the
+# upscale to the 3440×1440 backbuffer is a cheap bilinear blit.
+
+window 3440 1440
+seed   3 7
+out    build/shots/perf_stress_capped
+map    citadel
+loadout Heavy "Mass Driver" "Frag Grenades" Heavy Burst
+
+internal_h 1080
+perf_overlay on
+
+extra_chassis Heavy    1600 900
+extra_chassis Scout    1900 900
+extra_chassis Sniper   2200 900
+extra_chassis Engineer 2500 900
+extra_chassis Trooper  2800 900
+extra_chassis Heavy    3100 900
+
+aim 2000 900
+
+at 30 press jet
+at 580 release jet
+
+at  60 shot t060
+at 180 shot t180
+at 300 shot t300
+at 420 shot t420
+at 540 shot t540
+at 600 end

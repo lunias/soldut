@@ -800,6 +800,41 @@ WAN polish. Net effect on the trade-off ledger:
 
 ## Rendering kit (P13)
 
+### `FLAG_WINDOW_HIGHDPI` dropped at M6 P03-hotfix; HUD text on 4K monitors with > 100 % DPI scaling now OS-upscaled instead of rendered at native
+
+- **What we did** — `src/platform.c` and `tools/editor/main.c` +
+  `tools/editor/shotmode.c` no longer set `FLAG_WINDOW_HIGHDPI`. The
+  backbuffer is sized at the window's logical pixel count; on
+  HiDPI displays with > 100 % OS DPI scaling, the OS compositor
+  upscales the window to the user's physical pixels (well-defined
+  bilinear-or-better path on every platform we ship to).
+- **Why** — A play-test on a friend's Windows machine with ≈ 192 %
+  DPI scaling showed the title-screen UI shifted off the right edge
+  of the visible window. With HIGHDPI on, GLFW gave us a framebuffer
+  at the monitor's physical pixel count but Windows did NOT scale it
+  down to fit the logical window's client area — content centred at
+  `GetRenderWidth() / 2` landed at framebuffer ≈ 1920, which on the
+  user-visible window (≈ 1999 logical px wide of a 3840-physical
+  framebuffer) appeared shoved to the right with the rest of the
+  text cropped past the right edge. Post-M6 P03 the internal-RT
+  pipeline handles "render at a fixed internal size, blit to window"
+  explicitly, so HIGHDPI was buying us nothing and costing real
+  players correctness.
+- **The cost** — UI text on a true 4K monitor with 200 % DPI is now
+  rendered at logical pixel count (e.g. 1920×1080 framebuffer on a
+  3840×2160 monitor with 200 % scaling) and OS-compositor-upscaled
+  to the display. Reads at the correct size but is bilinear-soft
+  compared to native-pixel rendering. The halftone screen's per-
+  pixel dither was already designed for a 1080-class internal
+  density (see `documents/m6/03-perf-4k-enhancements.md` §1d), so
+  this isn't a regression on the *world* — only the HUD glyphs.
+- **Revisit if** — anyone reports the HUD reads visibly mushy on a
+  HiDPI machine and wants the old behaviour back. The fix is the
+  single line in `src/platform.c` (and the matching pair in
+  `tools/editor/`). A future polish pass could conditionally re-
+  enable HIGHDPI on macOS only (where the compositor DOES scale the
+  framebuffer correctly) and leave Windows on the OS-upscale path.
+
 ### Per-map kit textures: Foundry only ships parallax (P16-partial)
 
 - **What we did** — P13 shipped the runtime: `src/map_kit.{c,h}` loads

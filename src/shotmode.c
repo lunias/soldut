@@ -144,6 +144,20 @@ typedef struct {
     int      contact_cols;
     int      contact_cell_w, contact_cell_h;
 
+    /* M6 P03 — perf bench knobs.
+     *   perf_overlay  — when true, an FPS readout is drawn on top of
+     *                   every rendered frame and the per-frame SHOT_LOG
+     *                   carries fps + internal/window dims. Existing
+     *                   regression shot tests leave this off so their
+     *                   PNGs stay byte-identical.
+     *   internal_h    — explicit internal-render-target cap. Default 0
+     *                   keeps the pre-P03 identity pipeline (internal ==
+     *                   window) so existing shots are unchanged. Bench
+     *                   scripts set it to 1080 (or wherever) to measure
+     *                   the post-P03 reduced fillrate. */
+    bool     perf_overlay;
+    int      internal_h;
+
     int      end_tick;       /* -1 = derive from last event */
 
     /* Networked-shot config (legacy single-process when NETMODE_NONE). */
@@ -296,6 +310,8 @@ static bool parse_script(const char *path, Script *out) {
     out->end_tick = -1;
     out->map_id = -1;       /* P07 — only set when `map <name>` directive parsed */
     out->match_mode = -1;   /* P07 — only set when `mode <name>` directive parsed */
+    out->perf_overlay = false;  /* M6 P03 — see Shot struct comment. */
+    out->internal_h   = 0;       /* M6 P03 — 0 = identity (no cap). */
 
     char line[512];
     int lineno = 0;
@@ -642,6 +658,41 @@ static bool parse_script(const char *path, Script *out) {
             out->contact_cols   = cols;
             out->contact_cell_w = cw;
             out->contact_cell_h = ch;
+        } else if (strcmp(tok, "perf_overlay") == 0) {
+            /* M6 P03 — `perf_overlay on|off`. When on, the renderer draws
+             * a small FPS+resolution readout on every frame AND emits a
+             * SHOT_LOG line once per second with the same values. Bench
+             * scripts opt in; regression scripts leave it off (default)
+             * so their PNGs stay byte-identical. */
+            char val[8] = {0};
+            if (sscanf(rest, "%7s", val) != 1) {
+                LOG_E("shotmode: %s:%d 'perf_overlay' needs on|off", path, lineno);
+                ok = false; continue;
+            }
+            if      (strcmp(val, "on")  == 0) out->perf_overlay = true;
+            else if (strcmp(val, "off") == 0) out->perf_overlay = false;
+            else {
+                LOG_E("shotmode: %s:%d 'perf_overlay' value '%s' not on|off",
+                      path, lineno, val);
+                ok = false;
+            }
+        } else if (strcmp(tok, "internal_h") == 0) {
+            /* M6 P03 — `internal_h N`. Override the default 0 (no cap).
+             * Bench scripts use this to measure the post-P03 internal-RT
+             * fillrate at e.g. 1080 lines while the window stays at the
+             * `window` directive's size. Accepts 0 (identity) and
+             * 360..4320 inclusive. */
+            int n;
+            if (sscanf(rest, "%d", &n) != 1) {
+                LOG_E("shotmode: %s:%d 'internal_h' needs an int", path, lineno);
+                ok = false; continue;
+            }
+            if (n != 0 && (n < 360 || n > 4320)) {
+                LOG_E("shotmode: %s:%d 'internal_h %d' out of range (0 or 360..4320)",
+                      path, lineno, n);
+                ok = false; continue;
+            }
+            out->internal_h = n;
         } else if (strcmp(tok, "network") == 0) {
             char kind[16] = {0};
             int eaten2 = 0;
@@ -1607,6 +1658,10 @@ int shotmode_run(const char *script_path) {
         log_init(log_path);
     }
     g_shot_mode = 1;
+    /* M6 P03 — propagate the opt-in perf-overlay flag. The renderer
+     * reads this per frame; cleared on shotmode exit alongside
+     * g_shot_mode. */
+    g_shot_perf_overlay = s.perf_overlay ? 1 : 0;
 
     LOG_I("shotmode: script=%s window=%dx%d events=%d end_tick=%d",
           script_path, s.window_w, s.window_h, s.event_count, s.end_tick);
@@ -1646,6 +1701,11 @@ int shotmode_run(const char *script_path) {
     PlatformConfig pcfg = {
         .window_w = s.window_w, .window_h = s.window_h,
         .vsync = false, .fullscreen = false,
+        /* M6 P03 — default 0 = identity pipeline (internal==window) so
+         * existing regression shot tests stay byte-identical to pre-P03.
+         * Bench scripts override via the `internal_h N` directive (see
+         * tests/shots/perf_bench.shot). */
+        .internal_h = s.internal_h,
         .title = title_buf,
     };
     if (!platform_init(&pcfg)) {
@@ -2039,8 +2099,15 @@ int shotmode_run(const char *script_path) {
             RendererOverlayFn overlay = NULL;
             if (game.mode == MODE_MATCH)   overlay = match_overlay_draw_thunk;
             if (game.mode == MODE_SUMMARY) overlay = summary_overlay_draw_thunk;
+            int wnd_w = GetScreenWidth(), wnd_h = GetScreenHeight();
+            int int_w = wnd_w, int_h = wnd_h;
+            if (s.internal_h > 0 && s.internal_h < wnd_h) {
+                int_h = s.internal_h;
+                int_w = (wnd_w * int_h + wnd_h / 2) / wnd_h;
+            }
             renderer_draw_frame(&rd_n, &game.world,
-                                GetScreenWidth(), GetScreenHeight(),
+                                int_w, int_h,
+                                wnd_w, wnd_h,
                                 0.0f, (Vec2){0.0f, 0.0f},
                                 cursor, overlay, &octx);
             if (game.mode == MODE_LOBBY) {
@@ -2099,6 +2166,7 @@ int shotmode_run(const char *script_path) {
         free(s.events);
         free(s.lerps);
         g_shot_mode = 0;
+        g_shot_perf_overlay = 0;
         return EXIT_SUCCESS;
     }
 
@@ -2312,8 +2380,15 @@ int shotmode_run(const char *script_path) {
         Vec2 cursor_screen = (aim_mode == AIM_SCREEN)
             ? (Vec2){ mouse_x, mouse_y }
             : (Vec2){ (float)s.window_w * 0.5f, (float)s.window_h * 0.5f };
+        int wnd_w = GetScreenWidth(), wnd_h = GetScreenHeight();
+        int int_w = wnd_w, int_h = wnd_h;
+        if (s.internal_h > 0 && s.internal_h < wnd_h) {
+            int_h = s.internal_h;
+            int_w = (wnd_w * int_h + wnd_h / 2) / wnd_h;
+        }
         renderer_draw_frame(&rd, &game.world,
-                            GetScreenWidth(), GetScreenHeight(),
+                            int_w, int_h,
+                            wnd_w, wnd_h,
                             /*alpha*/ 0.0f,
                             /*local_visual_offset*/ (Vec2){0.0f, 0.0f},
                             cursor_screen,
@@ -2362,5 +2437,6 @@ int shotmode_run(const char *script_path) {
     free(s.events);
     free(s.lerps);
     g_shot_mode = 0;
+    g_shot_perf_overlay = 0;
     return EXIT_SUCCESS;
 }

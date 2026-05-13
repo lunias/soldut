@@ -65,7 +65,8 @@ void prefs_defaults(UserPrefs *out) {
     out->loadout = mech_default_loadout();
     out->team    = MATCH_TEAM_FFA;
     snprintf(out->connect_addr, sizeof out->connect_addr, "127.0.0.1:23073");
-    out->master_volume = PREFS_DEFAULT_VOLUME;
+    out->master_volume  = PREFS_DEFAULT_VOLUME;
+    out->internal_res_h = 1080;  /* M6 P03 — see prefs.h. */
 }
 
 /* ---- key=value parser (lifted from config.c's apply_kv pattern,
@@ -113,6 +114,14 @@ static void apply_kv(UserPrefs *p, const char *key, char *val) {
             LOG_W("prefs: master_volume '%s' out of [0,1] — keeping default", val);
         } else {
             p->master_volume = v;
+        }
+    }
+    else if (strcasecmp(key, "internal_res_h") == 0) {
+        int n = atoi(val);
+        if (n == 0 || (n >= 360 && n <= 4320)) {
+            p->internal_res_h = n;
+        } else {
+            LOG_W("prefs: internal_res_h '%s' out of range (0 or 360..4320) — keeping default", val);
         }
     }
     else {
@@ -187,6 +196,7 @@ bool prefs_save(const UserPrefs *p, const char *path) {
     fprintf(f, "team=%d\n",          p->team);
     fprintf(f, "connect_addr=%s\n",  p->connect_addr);
     fprintf(f, "master_volume=%.2f\n", p->master_volume);
+    fprintf(f, "internal_res_h=%d\n",  p->internal_res_h);
 
     if (fflush(f) != 0 || fclose(f) != 0) {
         LOG_W("prefs: failed to flush %s", tmp);

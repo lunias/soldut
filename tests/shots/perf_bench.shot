@@ -1,0 +1,55 @@
+# perf_bench.shot — M6 P03 perf bench, "no cap" baseline.
+#
+# Opens a 3440×1440 window (the user's ultrawide monitor's physical
+# size) with NO internal-resolution cap so the world + post-process
+# pass rasterise into a 3440×1440 RT every frame. Drives a heavy
+# scene (multiple chassis + held weapons) for ~600 ticks, with the
+# perf overlay on so the rendered PNGs carry FPS + resolution
+# readouts AND the SHOT_LOG fires once a second with the same
+# numbers.
+#
+# Pair with perf_bench_internal_h.shot (internal_h 1080) for the
+# A/B comparison. Both run with vsync OFF (shotmode forces it) so
+# FPS reads the raw GPU/CPU throughput.
+#
+# Watch:  build/shots/perf_bench/perf_bench.log
+#   grep '^.*perf:'  → the SHOT_LOG line per second.
+
+window 3440 1440
+seed   2 7
+out    build/shots/perf_bench
+
+# No cap — internal RT matches window. Pre-P03 shape.
+internal_h 0
+perf_overlay on
+
+# Extra chassis to load the renderer. extra_chassis spawns a
+# stationary mech of the named class at the given world coords.
+extra_chassis Heavy   1200 920
+extra_chassis Scout   1300 920
+extra_chassis Sniper  1400 920
+extra_chassis Engineer 1500 920
+
+aim 700 920
+
+# Spin the local mech's jet on and off a few times so the heat-
+# shimmer hot-zones uniform array fills, then drains, exercising
+# the full post-process cost.
+at  30 press jet
+at 120 release jet
+at 150 press jet
+at 240 release jet
+at 270 press jet
+at 360 release jet
+at 390 press jet
+at 480 release jet
+
+# Capture a few PNG frames at key moments (the perf overlay will be
+# baked into the screenshot, so a quick eyeball at the contact
+# sheet tells you what FPS the run was achieving).
+at  60 shot t060
+at 180 shot t180
+at 300 shot t300
+at 420 shot t420
+at 540 shot t540
+at 600 end

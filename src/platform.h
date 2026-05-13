@@ -42,11 +42,21 @@ typedef struct {
     bool  vsync;
     bool  fullscreen;
     const char *title;
+    /* M6 P03 — line count for the internal world+post render target.
+     *   0     = match window height (no cap; pixel-byte-identical to
+     *           pre-P03 rendering; what shotmode + paired-process
+     *           tests use).
+     *   else  = cap to this many lines. Width is derived to match the
+     *           window aspect ratio (so 3440×1440 → 2580×1080 at
+     *           internal_h=1080). 1080 is the default for interactive
+     *           builds — see documents/m6/03-perf-4k-enhancements.md. */
+    int   internal_h;
 } PlatformConfig;
 
 typedef struct {
     int   window_w, window_h;
-    int   render_w, render_h;
+    int   render_w, render_h;      /* physical backbuffer pixel count */
+    int   internal_w, internal_h;  /* capped render-target dims */
     bool  should_close;
     double time_seconds;
 } PlatformFrame;

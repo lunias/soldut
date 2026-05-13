@@ -5,7 +5,7 @@
 #define SOLDUT_VERSION_MAJOR  0
 #define SOLDUT_VERSION_MINOR  0
 #define SOLDUT_VERSION_PATCH  9
-#define SOLDUT_VERSION_STRING "0.0.9-m6p02"
+#define SOLDUT_VERSION_STRING "0.0.9-m6p03"
 
 /* 'S0LD' — stamped on every connection handshake. Bump on netcode
  * changes. Lineage:

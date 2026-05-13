@@ -79,6 +79,16 @@ typedef struct ServerConfig {
      * the game returns to the lobby for the next match. */
     int         rounds_per_match;
 
+    /* M6 P03 — internal-render-resolution cap (line count). The world
+     * + post-process pass run at this height; the result is bilinear-
+     * upscaled to the window. Honours the original v1 commitment in
+     * documents/10-performance-budget.md:208. 0 means "match window
+     * height" (no cap), useful for shot tests that want pixel-byte-
+     * identical output across runs. Anything between 360 and 4320 is
+     * accepted; anything outside that band logs a warning and falls
+     * back to the default. */
+    int       internal_res_h;
+
     /* Rotations. */
     int       map_rotation [CONFIG_ROTATION_MAX];
     int       map_rotation_count;

@@ -23,6 +23,10 @@ void config_defaults(ServerConfig *cfg) {
     cfg->friendly_fire      = false;
     cfg->auto_start_seconds = 60.0f;
     cfg->rounds_per_match   = 3;
+    /* M6 P03 — default to 1080 so an out-of-the-box install on a 4K /
+     * ultrawide monitor doesn't dip on the world fillrate. The HUD
+     * still renders at the window's physical resolution. */
+    cfg->internal_res_h     = 1080;
     cfg->map_rotation[0]    = MAP_FOUNDRY;
     cfg->map_rotation_count = 1;
     cfg->mode_rotation[0]   = MATCH_MODE_FFA;
@@ -114,6 +118,12 @@ static void apply_kv(ServerConfig *cfg, const char *key, char *val) {
         int n = atoi(val);
         if (n > 0 && n <= 32) cfg->rounds_per_match = n;
         else LOG_W("config: rounds_per_match '%s' out of range (1..32)", val);
+    }
+    else if (strcasecmp(key, "internal_res_h") == 0 ||
+             strcasecmp(key, "render_height")  == 0) {
+        int n = atoi(val);
+        if (n == 0 || (n >= 360 && n <= 4320)) cfg->internal_res_h = n;
+        else LOG_W("config: internal_res_h '%s' out of range (0 or 360..4320)", val);
     }
     else if (strcasecmp(key, "map_rotation") == 0) {
         char buf[256]; snprintf(buf, sizeof buf, "%s", val);

@@ -59,6 +59,8 @@ jobs:
             build/soldut_editor
             assets/fonts
             assets/maps
+            assets/sfx
+            assets/music
             assets/shaders
             assets/sprites
             assets/ui
@@ -88,6 +90,8 @@ jobs:
           mkdir -p build/windows/assets
           cp -r assets/fonts    build/windows/assets/
           cp -r assets/maps     build/windows/assets/
+          cp -r assets/sfx      build/windows/assets/
+          cp -r assets/music    build/windows/assets/
           cp -r assets/shaders  build/windows/assets/
           cp -r assets/sprites  build/windows/assets/
           cp -r assets/ui       build/windows/assets/
@@ -161,6 +165,8 @@ jobs:
             build/soldut_editor
             assets/fonts
             assets/maps
+            assets/sfx
+            assets/music
             assets/shaders
             assets/sprites
             assets/ui

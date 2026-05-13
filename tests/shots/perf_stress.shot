@@ -1,0 +1,40 @@
+# perf_stress.shot — M6 P03 heavy bench, "no cap" baseline.
+#
+# Loads citadel (the largest authored map: 12 grapple anchors, ACID,
+# WIND, 31 pickups, 100+ tiles wide). 10 extra chassis fill the view.
+# Local mech runs Heavy + Burst jetpack and sustains the jet hold so
+# the BURST-class plume is on every frame, exercising the worst-case
+# halftone+shimmer fragment cost.
+#
+# This is the bench that actually loads the GPU. Pair with the
+# perf_stress_capped variant for the A/B.
+
+window 3440 1440
+seed   3 7
+out    build/shots/perf_stress
+map    citadel
+loadout Heavy "Mass Driver" "Frag Grenades" Heavy Burst
+
+internal_h 0
+perf_overlay on
+
+extra_chassis Heavy    1600 900
+extra_chassis Scout    1900 900
+extra_chassis Sniper   2200 900
+extra_chassis Engineer 2500 900
+extra_chassis Trooper  2800 900
+extra_chassis Heavy    3100 900
+
+aim 2000 900
+
+# Sustain the jet through the whole run so the plume fires every
+# tick and the shimmer hot zone stays in the uniform array.
+at 30 press jet
+at 580 release jet
+
+at  60 shot t060
+at 180 shot t180
+at 300 shot t300
+at 420 shot t420
+at 540 shot t540
+at 600 end
