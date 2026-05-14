@@ -68,3 +68,11 @@ struct Level;
  * (src/maps.c) must call it manually after populating `polys` /
  * `poly_count` so the runtime collision pass sees the polygons. */
 LvlResult level_build_poly_broadphase(struct Level *level, struct Arena *arena);
+
+/* Read just the THMB lump from a .lvl on disk. Returns a malloc'd
+ * PNG byte buffer on success (caller free()'s); writes the byte count
+ * into `*out_size`. Returns NULL if the lump is absent, the file
+ * can't be read, or the header is malformed. Lighter than a full
+ * level_load (no arena, no per-section decode); intended for callers
+ * like the lobby vote picker that only need the thumbnail. */
+uint8_t *level_io_read_thumb(const char *path, int *out_size);

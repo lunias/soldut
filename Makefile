@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade test-riot-cannon-sfx test-mech-ik test-pose-compute test-bot-nav test-bot-playtest host-overlay-preview lobby-overlay-preview bot-tier-preview cook-maps bake bake-all shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade test-riot-cannon-sfx test-mech-ik test-pose-compute test-bot-nav test-bot-playtest host-overlay-preview lobby-overlay-preview summary-overlay-preview bot-tier-preview cook-maps cook-thumbs bake bake-all shot \
         debug gdb gdb-host gdb-client valgrind editor \
         assets-palettes assets-process \
         audio-inventory audio-normalize audio-credits test-audio-smoke
@@ -129,6 +129,25 @@ $(BUILD_DIR)/cook_maps: tools/cook_maps/cook_maps.c $(HEADLESS_OBJ) $(RAYLIB_LIB
 
 cook-maps: $(BUILD_DIR)/cook_maps
 	./$(BUILD_DIR)/cook_maps
+
+# cook_thumbs — refresh sidecar `<short>_thumb.png` whenever a .lvl
+# changes. Unlike cook_maps (which rewrites the 8 builtin .lvls),
+# cook_thumbs only reads — safe for the default `make` target. The
+# wildcard captures every .lvl on disk (builtins + editor scratch);
+# pattern rule rebuilds the matching PNG only when stale, so a clean
+# tree generates 8 thumbs and a no-op rebuild stays no-op.
+$(BUILD_DIR)/cook_thumbs: tools/cook_thumbs/cook_thumbs.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tools/cook_thumbs/cook_thumbs.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+LVL_FILES   := $(wildcard assets/maps/*.lvl)
+THUMB_FILES := $(LVL_FILES:.lvl=_thumb.png)
+
+assets/maps/%_thumb.png: assets/maps/%.lvl $(BUILD_DIR)/cook_thumbs
+	./$(BUILD_DIR)/cook_thumbs $<
+
+cook-thumbs: $(THUMB_FILES)
+
+all: $(THUMB_FILES)
 
 # M5 P18 — bake-test harness: headless multi-bot run that drives
 # simulate() for `duration_s` seconds and dumps per-map heatmap + CSVs
@@ -248,6 +267,16 @@ $(BUILD_DIR)/lobby_overlay_preview: tests/lobby_overlay_preview.c $(HEADLESS_OBJ
 lobby-overlay-preview: $(BUILD_DIR)/lobby_overlay_preview
 	mkdir -p build/shots
 	./$(BUILD_DIR)/lobby_overlay_preview
+
+# Summary screen + map-vote thumbnail preview. Captures one shot via
+# the sidecar PNG path and one via the .lvl THMB-lump fallback so a
+# reviewer can verify both code paths render the same picture.
+$(BUILD_DIR)/summary_overlay_preview: tests/summary_overlay_preview.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/summary_overlay_preview.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+summary-overlay-preview: $(BUILD_DIR)/summary_overlay_preview
+	mkdir -p build/shots
+	./$(BUILD_DIR)/summary_overlay_preview
 
 # M6 — bot tier chip legibility preview. Stands up a fake lobby with
 # one human + 4 bots (one per tier) and captures PNGs at 720/1080/1440

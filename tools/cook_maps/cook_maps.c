@@ -27,6 +27,7 @@
 #include "../../src/arena.h"
 #include "../../src/level_io.h"
 #include "../../src/log.h"
+#include "../../src/map_thumb.h"
 #include "../../src/match.h"
 #include "../../src/mech.h"
 #include "../../src/weapons.h"
@@ -1530,17 +1531,27 @@ static void build_citadel(void) {
 /* ============================== DRIVER =============================== */
 /* ===================================================================== */
 
-static void render_thumb(const char *short_name, const Level *L);
-
 static int cook_one(Arena *scratch, Arena *verify_arena,
                     const char *short_name, void (*builder)(void)) {
     builder();
     arena_reset(scratch);
 
+    /* Encode the thumb PNG first so it can ride along inside the .lvl
+     * as a THMB lump — clients that download this map then have the
+     * preview available without a separate transfer. */
+    int thumb_size = 0;
+    unsigned char *thumb_bytes =
+        map_thumb_encode_png(&g_cooker.world.level, &thumb_size);
+    g_cooker.world.level.thumb_png_data = thumb_bytes;
+    g_cooker.world.level.thumb_png_size = thumb_size;
+
     char path[256];
     snprintf(path, sizeof path, "assets/maps/%s.lvl", short_name);
     LvlResult r = level_save(&g_cooker.world, scratch, path);
+    g_cooker.world.level.thumb_png_data = NULL;
+    g_cooker.world.level.thumb_png_size = 0;
     if (r != LVL_OK) {
+        if (thumb_bytes) MemFree(thumb_bytes);
         fprintf(stderr, "cook_maps: %s save failed: %s\n",
                 short_name, level_io_result_str(r));
         return 1;
@@ -1578,7 +1589,23 @@ static int cook_one(Arena *scratch, Arena *verify_arena,
             g_cooker.world.level.pickup_count,
             g_cooker.world.level.ambi_count);
 
-    render_thumb(short_name, &g_cooker.world.level);
+    /* Drop a sidecar PNG so designers + asset-bundle tooling can read
+     * the thumb without parsing .lvl. The lobby UI prefers the
+     * sidecar; the embedded THMB lump is the fallback for downloaded
+     * maps where the sidecar isn't on disk. */
+    {
+        char thumb_path[256];
+        snprintf(thumb_path, sizeof thumb_path,
+                 "assets/maps/%s_thumb.png", short_name);
+        if (thumb_bytes) {
+            SaveFileData(thumb_path, thumb_bytes, thumb_size);
+        } else if (!map_thumb_write_png(&g_cooker.world.level, thumb_path)) {
+            fprintf(stderr, "cook_maps: %s thumb write failed\n", short_name);
+            MemFree(thumb_bytes);
+            return 1;
+        }
+    }
+    if (thumb_bytes) MemFree(thumb_bytes);
     return 0;
 }
 
@@ -1587,100 +1614,6 @@ static void ensure_dir(const char *path) {
     if (mkdir(path, 0755) != 0) {
         /* errno EEXIST is fine. */
     }
-}
-
-/* M5 P18 — generate a 256×144 thumbnail for the lobby vote picker.
- * Quality bar is low (functional, identifiable per the prompt); polish
- * pass is M6. Renders the level into the thumb as tinted blocks for
- * solid tiles + outlined polygons + colored dots for spawns/flags.
- * raylib's Image API gives us pixel + line + rect + circle — we don't
- * have a triangle-fill primitive, so polygons render as wireframe
- * outlines. */
-static void render_thumb(const char *short_name, const Level *L) {
-    const int TW = 256, TH = 144;
-    Image img = GenImageColor(TW, TH, (Color){20, 24, 32, 255});
-
-    float wpx = (float)(L->width  * L->tile_size);
-    float hpx = (float)(L->height * L->tile_size);
-    if (wpx <= 0.0f || hpx <= 0.0f) return;
-    float sx = (float)TW / wpx;
-    float sy = (float)TH / hpx;
-
-    /* Tiles — solid as 90/100/110, ICE as pale blue, DEADLY as red. */
-    for (int ty = 0; ty < L->height; ++ty) {
-        for (int tx = 0; tx < L->width; ++tx) {
-            uint16_t f = L->tiles[ty * L->width + tx].flags;
-            if (!(f & TILE_F_SOLID) && !(f & TILE_F_DEADLY)) continue;
-            Color c = (Color){90, 100, 110, 255};
-            if (f & TILE_F_ICE)    c = (Color){180, 220, 240, 255};
-            if (f & TILE_F_DEADLY) c = (Color){200, 80, 60, 255};
-            int x0 = (int)(tx        * L->tile_size * sx);
-            int y0 = (int)(ty        * L->tile_size * sy);
-            int x1 = (int)((tx + 1)  * L->tile_size * sx);
-            int y1 = (int)((ty + 1)  * L->tile_size * sy);
-            if (x1 - x0 < 1) x1 = x0 + 1;
-            if (y1 - y0 < 1) y1 = y0 + 1;
-            ImageDrawRectangle(&img, x0, y0, x1 - x0, y1 - y0, c);
-        }
-    }
-
-    /* Polygons — wireframe outlines. raylib's Image API doesn't ship a
-     * triangle fill, so designer-readable thumb is outline + label-by-
-     * color. Per-kind palette mirrors the M5 spec colors. */
-    for (int i = 0; i < L->poly_count; ++i) {
-        const LvlPoly *p = &L->polys[i];
-        Color c;
-        switch (p->kind) {
-            case POLY_KIND_SOLID:      c = (Color){120, 130, 140, 255}; break;
-            case POLY_KIND_ICE:        c = (Color){180, 220, 240, 255}; break;
-            case POLY_KIND_DEADLY:     c = (Color){200, 80, 60, 255};   break;
-            case POLY_KIND_ONE_WAY:    c = (Color){120, 120, 160, 255}; break;
-            case POLY_KIND_BACKGROUND: c = (Color){60, 70, 90, 180};    break;
-            default:                   c = (Color){120, 130, 140, 255}; break;
-        }
-        int x0 = (int)(p->v_x[0] * sx), y0 = (int)(p->v_y[0] * sy);
-        int x1 = (int)(p->v_x[1] * sx), y1 = (int)(p->v_y[1] * sy);
-        int x2 = (int)(p->v_x[2] * sx), y2 = (int)(p->v_y[2] * sy);
-        ImageDrawLine(&img, x0, y0, x1, y1, c);
-        ImageDrawLine(&img, x1, y1, x2, y2, c);
-        ImageDrawLine(&img, x2, y2, x0, y0, c);
-    }
-
-    /* Spawns — small team-colored dots. */
-    for (int i = 0; i < L->spawn_count; ++i) {
-        const LvlSpawn *s = &L->spawns[i];
-        Color c = (s->team == 1) ? (Color){220, 80, 80, 255}
-                : (s->team == 2) ? (Color){ 80, 140, 220, 255}
-                                 : (Color){200, 200, 80, 255};
-        int x = (int)(s->pos_x * sx);
-        int y = (int)(s->pos_y * sy);
-        ImageDrawCircle(&img, x, y, 2, c);
-    }
-
-    /* Flags — bigger, brighter team-colored squares. */
-    for (int i = 0; i < L->flag_count; ++i) {
-        const LvlFlag *f = &L->flags[i];
-        Color c = (f->team == 1) ? (Color){240, 50, 50, 255}
-                                 : (Color){ 50, 100, 240, 255};
-        int x = (int)(f->pos_x * sx);
-        int y = (int)(f->pos_y * sy);
-        ImageDrawRectangle(&img, x - 3, y - 3, 7, 7, c);
-    }
-
-    /* Pickups — tiny yellow dots (visual marker only; kind not encoded). */
-    for (int i = 0; i < L->pickup_count; ++i) {
-        const LvlPickup *p = &L->pickups[i];
-        int x = (int)(p->pos_x * sx);
-        int y = (int)(p->pos_y * sy);
-        ImageDrawPixel(&img, x, y,     (Color){200, 200, 80, 255});
-        ImageDrawPixel(&img, x + 1, y, (Color){200, 200, 80, 255});
-        ImageDrawPixel(&img, x, y + 1, (Color){200, 200, 80, 255});
-    }
-
-    char path[256];
-    snprintf(path, sizeof path, "assets/maps/%s_thumb.png", short_name);
-    ExportImage(img, path);
-    UnloadImage(img);
 }
 
 int main(int argc, char **argv) {

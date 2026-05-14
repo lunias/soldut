@@ -83,7 +83,7 @@ zig cc -target $ZIG_TARGET \
     tools/editor/tool.c tools/editor/play.c tools/editor/files.c \
     tools/editor/render.c tools/editor/editor_ui.c \
     tools/editor/validate.c tools/editor/shotmode.c \
-    src/arena.c src/log.c src/hash.c src/ds.c src/level_io.c \
+    src/arena.c src/log.c src/hash.c src/ds.c src/level_io.c src/map_thumb.c \
     third_party/raylib/src/libraylib.a \
     -lopengl32 -lgdi32 -lwinmm \
     -o build/windows/SoldutEditor.exe

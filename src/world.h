@@ -928,6 +928,15 @@ typedef struct Level {
     int       *poly_grid;
     int       *poly_grid_off;
 
+    /* Optional THMB lump payload — raw PNG bytes for the 256×144
+     * preview thumbnail. level_load fills the pointer (into the file
+     * buffer it kept alive on the level_arena) when the .lvl ships
+     * one; level_save emits a THMB lump when set. NULL/0 means the
+     * .lvl predates thumb embedding or the writer chose not to embed.
+     */
+    const uint8_t *thumb_png_data;
+    int            thumb_png_size;
+
     Vec2      ambient_light;       /* unused at M1; placeholder */
     Vec2      gravity;             /* per-tick acceleration */
 } Level;

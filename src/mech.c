@@ -1248,6 +1248,29 @@ void mech_post_physics_anchor(World *w, int mid) {
         if (dy_pelvis >= -0.1f) return;
     }
 
+    /* Ceiling-clamp the upward shove. The kinematic translate below
+     * does NOT collide; raw it would punch the head straight into a
+     * low platform, after which the next-tick collision push-out
+     * fights this anchor every tick and the mech locks in place
+     * (the same "stuck in the ceiling" symptom called out at the
+     * GRAPPLE_MIN_REST_LEN comment above). Sweep upward from the
+     * head and clamp `dy_pelvis` so the head stops just under the
+     * blocking tile/poly. When clamped to zero the mech visibly
+     * stoops under the overhang — correct behavior. */
+    if (dy_pelvis < 0.0f) {
+        int   head_idx = b + PART_HEAD;
+        Vec2  ha = (Vec2){ p->pos_x[head_idx], p->pos_y[head_idx] };
+        Vec2  hb = (Vec2){ ha.x, ha.y + dy_pelvis };
+        float t_hit = 1.0f;
+        if (level_ray_hits(&w->level, ha, hb, &t_hit)) {
+            float seg_len = -dy_pelvis;
+            float t_clamp = t_hit - (PHYSICS_PARTICLE_RADIUS + 0.5f) / seg_len;
+            if (t_clamp < 0.0f) t_clamp = 0.0f;
+            dy_pelvis *= t_clamp;
+            if (fabsf(dy_pelvis) < 0.1f) return;
+        }
+    }
+
     if (dy_pelvis < -1.5f) {
         SHOT_LOG("t=%llu mech=%d anchor anim=%d dy_pelvis=%.2f",
                  (unsigned long long)w->tick, m->id, m->anim_id, dy_pelvis);

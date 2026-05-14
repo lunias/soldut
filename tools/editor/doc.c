@@ -3,7 +3,9 @@
 #include "arena.h"
 #include "level_io.h"
 #include "log.h"
+#include "map_thumb.h"
 
+#include "raylib.h"
 #include "stb_ds.h"
 
 #include <stdlib.h>
@@ -230,12 +232,43 @@ bool doc_save(EditorDoc *d, const char *path) {
     /* Ensure the destination directory exists before fopen. */
     doc_ensure_parent_dir(path);
 
+    /* Encode the thumb once so it can ride inside the .lvl as a THMB
+     * lump AND drop on disk as a sidecar PNG. Sidecar feeds the host's
+     * lobby vote picker directly; THMB lump rides over the wire to
+     * peers that download the map. */
+    int thumb_size = 0;
+    unsigned char *thumb_bytes = map_thumb_encode_png(L, &thumb_size);
+    L->thumb_png_data = thumb_bytes;
+    L->thumb_png_size = thumb_size;
+
     LvlResult r = level_save(w, scr, path);
-    free(w);
+    L->thumb_png_data = NULL;
+    L->thumb_png_size = 0;
     if (r != LVL_OK) {
+        if (thumb_bytes) MemFree(thumb_bytes);
+        free(w);
         LOG_E("editor: doc_save(%s): %s", path, level_io_result_str(r));
         return false;
     }
+
+    /* Sidecar thumbnail next to the .lvl. Non-fatal on failure — the
+     * .lvl saved cleanly and the embedded lump still lets peers see
+     * the preview. */
+    char thumb_path[512];
+    size_t n = strlen(path);
+    if (n >= 4 && strcmp(path + n - 4, ".lvl") == 0
+              && n - 4 < sizeof thumb_path - 12) {
+        memcpy(thumb_path, path, n - 4);
+        memcpy(thumb_path + n - 4, "_thumb.png", 11);
+        if (thumb_bytes) {
+            SaveFileData(thumb_path, thumb_bytes, thumb_size);
+        } else if (!map_thumb_write_png(L, thumb_path)) {
+            LOG_W("editor: thumb write to %s failed", thumb_path);
+        }
+    }
+
+    if (thumb_bytes) MemFree(thumb_bytes);
+    free(w);
     snprintf(d->source_path, sizeof d->source_path, "%s", path);
     d->dirty = false;
     LOG_I("editor: saved %s", path);

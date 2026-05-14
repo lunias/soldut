@@ -114,6 +114,12 @@ typedef struct LobbyUIState {
 
 void lobby_ui_init(LobbyUIState *L);
 
+/* Drop the cached map-thumbnail textures so the next vote-picker
+ * frame reloads them from disk. Used by tests to swap between the
+ * sidecar-PNG fast path and the .lvl THMB-lump fallback path. Real
+ * gameplay never needs this — once a map's thumb loads, it stays. */
+void lobby_ui_clear_thumb_cache(void);
+
 /* wan-fixes-7 — clear session-scoped UI state so the next host /
  * connect attempt starts fresh on the wire side. Preserves player_name
  * + cached loadout/team drafts so the user doesn't re-pick what they

@@ -5,6 +5,7 @@
 #include "world.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ---- Endian sanity ------------------------------------------------ */
@@ -648,6 +649,20 @@ LvlResult level_load(struct World *world, struct Arena *arena,
         }
     }
 
+    /* THMB — optional. Raw PNG bytes for the lobby preview thumbnail.
+     * We don't decode here — just hand a pointer into the arena-owned
+     * file buffer back to callers that want to decode (lobby_ui uses
+     * raylib's LoadImageFromMemory). */
+    {
+        LumpRef ref;
+        if (find_lump(buf, file_size, dir_off, (int)section_count, "THMB", &ref)) {
+            if (ref.size > 0) {
+                L->thumb_png_data = buf + ref.offset;
+                L->thumb_png_size = (int)ref.size;
+            }
+        }
+    }
+
     LOG_I("level: loaded %s (%dx%d, %d polys, %d spawns, %d pickups)",
           path, L->width, L->height, L->poly_count, L->spawn_count, L->pickup_count);
     return LVL_OK;
@@ -691,6 +706,8 @@ LvlResult level_save(const struct World *world, struct Arena *scratch,
     int flag_sz  = L->flag_count    * LVL_FLAG_REC_BYTES;
     int meta_sz  = LVL_META_REC_BYTES;
     int strt_sz  = strt_size;
+    int thmb_sz  = (L->thumb_png_data && L->thumb_png_size > 0)
+                     ? L->thumb_png_size : 0;
 
     /* Always emit TILE / SPWN / META / STRT (required + STRT). Optional
      * sections only get a directory entry if they have records. */
@@ -700,6 +717,7 @@ LvlResult level_save(const struct World *world, struct Arena *scratch,
     if (deco_sz > 0) ++section_count;
     if (ambi_sz > 0) ++section_count;
     if (flag_sz > 0) ++section_count;
+    if (thmb_sz > 0) ++section_count;
 
     int dir_size = section_count * LVL_DIR_ENTRY_BYTES;
     int dir_off  = LVL_HEADER_BYTES;
@@ -715,6 +733,7 @@ LvlResult level_save(const struct World *world, struct Arena *scratch,
     int flag_off = (flag_sz > 0) ? payload_off : 0; payload_off += flag_sz;
     int meta_off = payload_off;             payload_off += meta_sz;
     int strt_off = payload_off;             payload_off += strt_sz;
+    int thmb_off = (thmb_sz > 0) ? payload_off : 0; payload_off += thmb_sz;
 
     int total = payload_off;
     if ((size_t)total > LVL_FILE_MAX_BYTES) return LVL_ERR_TOO_LARGE;
@@ -791,6 +810,13 @@ LvlResult level_save(const struct World *world, struct Arena *scratch,
     w_u32(out + e + DIR_OFF_SIZE,   (uint32_t)strt_sz);
     e += LVL_DIR_ENTRY_BYTES;
 
+    if (thmb_sz > 0) {
+        name_pack(out + e + DIR_OFF_NAME, "THMB");
+        w_u32(out + e + DIR_OFF_OFFSET, (uint32_t)thmb_off);
+        w_u32(out + e + DIR_OFF_SIZE,   (uint32_t)thmb_sz);
+        e += LVL_DIR_ENTRY_BYTES;
+    }
+
     /* Payloads. */
     for (int i = 0; i < tile_n; ++i) {
         encode_tile(out + tile_off + i * LVL_TILE_REC_BYTES, &L->tiles[i]);
@@ -815,6 +841,9 @@ LvlResult level_save(const struct World *world, struct Arena *scratch,
     }
     encode_meta(out + meta_off, &L->meta);
     memcpy(out + strt_off, strt_src, (size_t)strt_sz);
+    if (thmb_sz > 0) {
+        memcpy(out + thmb_off, L->thumb_png_data, (size_t)thmb_sz);
+    }
 
     /* CRC over the whole file with the CRC field as zeros (it already
      * is — we wrote 0 above). */
@@ -830,4 +859,60 @@ LvlResult level_save(const struct World *world, struct Arena *scratch,
 
     LOG_I("level: saved %s (%d bytes, crc=%08x)", path, total, crc);
     return LVL_OK;
+}
+
+/* ---- Light THMB-only reader --------------------------------------- */
+
+uint8_t *level_io_read_thumb(const char *path, int *out_size) {
+    if (out_size) *out_size = 0;
+    if (!path) return NULL;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long flen = ftell(f);
+    if (flen < LVL_HEADER_BYTES || (size_t)flen > LVL_FILE_MAX_BYTES) {
+        fclose(f); return NULL;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+
+    uint8_t *buf = (uint8_t *)malloc((size_t)flen);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)flen, f);
+    fclose(f);
+    if (got != (size_t)flen) { free(buf); return NULL; }
+
+    int file_size = (int)flen;
+    if (buf[HDR_OFF_MAGIC + 0] != LVL_MAGIC0 ||
+        buf[HDR_OFF_MAGIC + 1] != LVL_MAGIC1 ||
+        buf[HDR_OFF_MAGIC + 2] != LVL_MAGIC2 ||
+        buf[HDR_OFF_MAGIC + 3] != LVL_MAGIC3) {
+        free(buf); return NULL;
+    }
+
+    int section_count = (int)r_u32(buf + HDR_OFF_SECTION_COUNT);
+    int dir_off = LVL_HEADER_BYTES;
+    if ((int64_t)dir_off + (int64_t)section_count * LVL_DIR_ENTRY_BYTES
+        > (int64_t)file_size) {
+        free(buf); return NULL;
+    }
+
+    LumpRef ref;
+    if (!find_lump(buf, file_size, dir_off, section_count, "THMB", &ref) ||
+        ref.size == 0) {
+        free(buf); return NULL;
+    }
+    if ((int64_t)ref.offset + (int64_t)ref.size > (int64_t)file_size) {
+        free(buf); return NULL;
+    }
+
+    /* Copy out of the file buffer so the caller doesn't have to keep
+     * the whole .lvl in memory. */
+    uint8_t *thumb = (uint8_t *)malloc(ref.size);
+    if (!thumb) { free(buf); return NULL; }
+    memcpy(thumb, buf + ref.offset, ref.size);
+    free(buf);
+
+    if (out_size) *out_size = (int)ref.size;
+    return thumb;
 }
