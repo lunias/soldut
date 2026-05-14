@@ -1035,6 +1035,58 @@ foot on the floor surface, which is solid by construction.
   combo feels wrong (mid-air ice skating, over-responsive
   trajectory reversal), retune `AIR_ACCEL_PXS2` here.
 
+### Phase 3 — taller jump ✅ shipped
+
+- **Code:** `src/mech.c:151` — `JUMP_IMPULSE_PXS 320 → 480`. Per-chassis
+  `jump_mult` untouched (relative balance was already tuned). Analytical
+  apex 47 → 107 px; analytical airtime 0.60 → 0.89 s. Per-chassis at
+  the new impulse (drag-free): Heavy 0.85 → 77 px, Trooper/Sniper/
+  Engineer 1.00 → 107 px, Scout 1.10 → 130 px.
+
+- **Probe trail (`tests/shots/m6_movement_probe.shot`):** vy/tick at
+  the impulse moment = -8.0 (= 480 / 60 ✓). Measured apex (Trooper,
+  drag-trimmed): pelv y 917.6 → 830.1 = **87.5 px** (vs. ~40 px on
+  Phase 2 — **2.2× taller**). vx held at 4.62 px/tick across the
+  full airborne arc (Phase 2 invariant intact). Airborne horizontal
+  travel on the test-play map's downsloped ground: 287 px to ground-
+  contact (~62 ticks airtime due to the sloped descent extending the
+  arc); flat-ground equivalent ≈ 250 px. Pre-Phase-3 (Phase 2): 190 px.
+
+- **Probe-shot timing tweak:** widened the airborne capture window
+  (apex now lands later, full arc lasts longer). Renamed snapshot
+  labels `jump_t005..t035` → `jump_t007..t047`, moved `landed_t040`
+  (now misleading — mech is still airborne at t=150) to
+  `landed_t062` @ t=170, extended `postland`/`stopped`/`end` markers
+  accordingly. Contact-sheet column count 5 → 4 to keep the layout
+  square.
+
+- **Tests:** `test-mech-ik` ALL PASS, `test-pose-compute` ALL PASS,
+  `test-snapshot` all passed, `tests/shots/net/run.sh 2p_basic`
+  12/12 PASS.
+
+- **Caveats:**
+  - Apex artifact: the probe holds BTN_JUMP for 7 ticks across the
+    gait's bouncy grounded pattern. While the button is held AND
+    `m->grounded` is true on any tick, `apply_jump` fires (it SETs
+    vy each tick; no edge gate). The probe sees jump impulse fire at
+    t=108, t=109, t=110 — three stacked impulses inflate the
+    measured apex above what a single-impulse jump would give. This
+    is Soldat-style spam-jump (intentional) and identical to Phase 2's
+    behavior under the same script, so the 2.2× before/after ratio is
+    apples-to-apples.
+  - Reactor's 96-px pillar archway sits below the analytical 107-px
+    Trooper apex. **Watch in playtest** — Scout at 130 px will
+    definitely headbutt. If problematic, retune to 440 (apex 90 px
+    Trooper / 109 px Scout) or scale the per-chassis jump_mult down
+    for the chassis that headbutt most.
+
+- **Playtest:** pending. **Map-test triad:** Reactor (pillar
+  archway), Catwalk (low overhangs), Citadel (castle ceilings) per
+  the plan's §6 Phase 3 gate.
+- **Next:** if jump height feels right and ceilings are OK,
+  **Phase 4** — jet pack horizontal (§5C). If ceilings are too
+  tight, retune `JUMP_IMPULSE_PXS` here.
+
 ### Resume here when next session starts
 
 1. Read this section (§13) for the running log.
@@ -1043,8 +1095,9 @@ foot on the floor surface, which is solid by construction.
 3. Re-run `make shot SCRIPT=tests/shots/m6_aurora_slope.shot`
    + `make shot SCRIPT=tests/shots/m6_movement_probe.shot`
    + `make test-spawn-geometry` to reproduce the latest baselines.
-4. Wait for user verdict on Phase 2 (air-control) before opening
-   Phase 3 (higher jump).
+4. Wait for user verdict on Phase 3 (taller jump) — including the
+   Reactor/Catwalk/Citadel ceiling check — before opening Phase 4
+   (jet horizontal).
 
 ### Phase 1.2 followup — sync investigation (NOT a Phase 1.x regression)
 

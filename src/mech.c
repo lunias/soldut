@@ -148,7 +148,14 @@ MechLoadout mech_default_loadout(void) {
 
 /* ---- Movement tunables (Soldat-derived; see reference/soldat-constants.md) */
 #define RUN_SPEED_PXS      280.0f
-#define JUMP_IMPULSE_PXS   320.0f
+/* M6 P07 Phase 3 — taller jump (§5B). 320 → 480 px/s impulse takes
+ * apex from 47 px (v²/2g = 320²/2160) to 107 px (480²/2160) — roughly
+ * mech-height, the Soldat-y arc the user asked for. Airtime 0.60 s →
+ * 0.89 s; combined with Phase 2's air-momentum preservation, a running
+ * jump now covers ~280·0.89 = 250 px horizontally vs ~190 px pre-Phase-3.
+ * Per-chassis multipliers (Heavy 0.85 = 77 px apex, Scout 1.10 = 130 px)
+ * are unchanged — relative balance was already tuned. */
+#define JUMP_IMPULSE_PXS   480.0f
 #define JET_THRUST_PXS2    2200.0f
 #define JET_DRAIN_PER_SEC  0.60f
 /* M6 P07 Phase 1 — ground accel rates for the add-toward-target model
