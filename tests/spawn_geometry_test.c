@@ -4,23 +4,23 @@
  *
  * Spawn coords come from each .lvl's SPWN section (LvlSpawn pos_x /
  * pos_y, world-space px). A spawn that lands inside terrain produces
- * a "mech spawned in the floor" bug — the player materializes inside
- * a tile, the next tick's collision push-out shoves them sideways or
- * downward unpredictably.
+ * a "mech spawned in the floor / slope" bug — the player materializes
+ * inside a tile or polygon and the next tick's collision push-out
+ * shoves them sideways unpredictably (or, worse, the bot AI keeps
+ * trying to walk into the same trap, looking permanently stuck).
  *
- * For each spawn we check a small rectangle that approximates the
- * mech's standing footprint:
- *   * pelvis itself (`pos_x`, `pos_y`)
- *   * head sample 52 px above pelvis (Trooper torso_h + neck_h + 8)
- *   * foot sample 36 px below pelvis (Trooper bone_thigh + bone_shin)
- *   * left / right shoulder sample at pelvis ±15 px
+ * For each spawn we sample a rectangle that approximates the mech's
+ * standing footprint (pelvis / head / L+R shoulders) and check each
+ * sample against:
+ *   1. Tile grid via `level_point_solid` (catches tile-fill solids).
+ *   2. Polygon broadphase — for every poly whose tile cell the point
+ *      sits in, run `point_in_tri` against the triangle. Polys with
+ *      kinds SOLID, ICE, and DEADLY block movement; ONE_WAY and
+ *      BACKGROUND are non-blocking and skipped.
  *
- * `level_point_solid` checks both tiles and authored polygons (via
- * the broadphase built by level_build_poly_broadphase). If any of
- * the body samples lands inside a SOLID tile / poly, this test
- * reports the spawn as "embedded" and exits non-zero.
- *
- * Returns 0 on all-clear, 1 on any embedded spawn.
+ * The original validator (tile-only) missed embedded spawns inside
+ * authored slope polygons — caught by playtest as "bot stuck on
+ * aurora's hill spawn."
  */
 
 #include "../src/arena.h"
@@ -29,6 +29,7 @@
 #include "../src/log.h"
 #include "../src/world.h"
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,6 +70,58 @@ static const char *team_name(uint8_t t) {
     }
 }
 
+/* Same barycentric point-in-triangle as src/mech.c::point_in_tri /
+ * src/bot.c::point_in_tri. Duplicated here because both originals are
+ * `static` to their compilation units. */
+static bool point_in_tri(float px, float py,
+                         float ax, float ay,
+                         float bx, float by,
+                         float cx, float cy)
+{
+    float d = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+    if (fabsf(d) < 1e-6f) return false;
+    float u = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / d;
+    float v = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / d;
+    return u >= 0.0f && v >= 0.0f && (u + v) <= 1.0f;
+}
+
+/* Check polygon broadphase at point P. Returns the kind name of the
+ * blocking poly (or NULL if clear). Skips ONE_WAY (you can pass
+ * through from below) and BACKGROUND (decoration). SOLID / ICE /
+ * DEADLY all block movement and trap a spawn. */
+static const char *poly_solid_at(const Level *L, Vec2 P) {
+    if (L->poly_count <= 0 || !L->poly_grid_off) return NULL;
+    int ts = L->tile_size;
+    int tx = (int)(P.x / (float)ts);
+    int ty = (int)(P.y / (float)ts);
+    if (tx < 0 || tx >= L->width || ty < 0 || ty >= L->height) return NULL;
+    int cell = ty * L->width + tx;
+    int s = L->poly_grid_off[cell];
+    int e = L->poly_grid_off[cell + 1];
+    for (int k = s; k < e; ++k) {
+        const LvlPoly *poly = &L->polys[L->poly_grid[k]];
+        switch ((PolyKind)poly->kind) {
+            case POLY_KIND_SOLID:
+            case POLY_KIND_ICE:
+            case POLY_KIND_DEADLY:
+                if (point_in_tri(P.x, P.y,
+                                 (float)poly->v_x[0], (float)poly->v_y[0],
+                                 (float)poly->v_x[1], (float)poly->v_y[1],
+                                 (float)poly->v_x[2], (float)poly->v_y[2])) {
+                    switch ((PolyKind)poly->kind) {
+                        case POLY_KIND_SOLID:  return "SOLID";
+                        case POLY_KIND_ICE:    return "ICE";
+                        case POLY_KIND_DEADLY: return "DEADLY";
+                        default:               return "?";
+                    }
+                }
+                break;
+            default: break;
+        }
+    }
+    return NULL;
+}
+
 static bool validate_spawn(const Level *L, const LvlSpawn *s,
                            const char *map_name, int spawn_idx)
 {
@@ -81,9 +134,20 @@ static bool validate_spawn(const Level *L, const LvlSpawn *s,
         if (level_point_solid(L, p)) {
             fprintf(stderr,
                     "FAIL: %s spawn[%d] team=%s lane=%u — %s sample at "
-                    "(%.0f, %.0f) is INSIDE solid tile/poly\n",
+                    "(%.0f, %.0f) is INSIDE solid TILE\n",
                     map_name, spawn_idx, team_name(s->team), s->lane_hint,
                     SAMPLES[i].label, p.x, p.y);
+            any_embedded = true;
+            ++g_failed_spawns;
+            continue;   /* don't double-report: already failed on tile */
+        }
+        const char *poly_kind = poly_solid_at(L, p);
+        if (poly_kind) {
+            fprintf(stderr,
+                    "FAIL: %s spawn[%d] team=%s lane=%u — %s sample at "
+                    "(%.0f, %.0f) is INSIDE %s polygon\n",
+                    map_name, spawn_idx, team_name(s->team), s->lane_hint,
+                    SAMPLES[i].label, p.x, p.y, poly_kind);
             any_embedded = true;
             ++g_failed_spawns;
         }

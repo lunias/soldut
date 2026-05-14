@@ -317,6 +317,17 @@ $(BUILD_DIR)/spawn_geometry_test: tests/spawn_geometry_test.c $(HEADLESS_OBJ) $(
 test-spawn-geometry: $(BUILD_DIR)/spawn_geometry_test
 	./$(BUILD_DIR)/spawn_geometry_test
 
+# M6 P07 — full simulation-based spawn settle test. For each spawn on
+# each shipped map, create a mech at the spawn coords and run 90 sim
+# ticks; report any spawn whose mech ends up inside solid, falling
+# forever, pushed > 80 px sideways, or never settled. Catches the
+# "bot stuck on spawn" class that the static geometry test misses.
+$(BUILD_DIR)/spawn_settle_test: tests/spawn_settle_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/spawn_settle_test.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+test-spawn-settle: $(BUILD_DIR)/spawn_settle_test
+	./$(BUILD_DIR)/spawn_settle_test
+
 # M5 P08 — synth_map writes a .lvl on disk for the map-share end-to-end
 # test. Used by tests/net/run_map_share.sh; standalone build target so
 # CI can bake it before invoking the wrapper.

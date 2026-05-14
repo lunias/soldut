@@ -213,8 +213,22 @@ void simulate_step(World *w, float dt) {
              * is never set, so any_foot_grounded returns false and
              * the build_pose gait wrap is skipped. Setting both
              * sides explicitly every tick is idempotent and
-             * self-heals. */
-            float target_inv_mass = (i == local_id) ? 1.0f : 0.0f;
+             * self-heals.
+             *
+             * M6 P07 — DEAD remote mechs get inv_mass=1 too. With
+             * inv_mass=0 the Verlet ragdoll never runs, so a dead
+             * remote mech's bones stay frozen at the last alive
+             * pose and rigid-translate around with the snapshot
+             * pelvis — visible as a "stick-figure corpse" instead
+             * of a proper ragdoll. With inv_mass=1, gravity +
+             * dismembered-constraint deactivation produce a true
+             * ragdoll on the client side; snapshot_interp_remotes
+             * still pulls the whole body to track the server's
+             * pelvis (relative bone shape preserved by the rigid
+             * translate). Bones may drift a few pixels from the
+             * server's authoritative ragdoll due to FP determinism,
+             * but both sides clearly LOOK like a ragdoll. */
+            float target_inv_mass = (i == local_id || !m->alive) ? 1.0f : 0.0f;
             for (int part = 0; part < PART_COUNT; ++part) {
                 pp->inv_mass[m->particle_base + part] = target_inv_mass;
             }
