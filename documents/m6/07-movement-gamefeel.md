@@ -991,6 +991,51 @@ foot on the floor surface, which is solid by construction.
 4. Wait for user verdict on the latest phase (pose) before opening
    Phase 2 (air-control).
 
+### Phase 1.2 followup — sync investigation (NOT a Phase 1.x regression)
+
+User reported that client mechs look jittery/shaking and that the
+jet pack "doesn't work the same" between host and client. Built two
+new probes and bisected against `63ad669^` (parent of Phase 1):
+
+- `tests/shots/m6_idle_baseline.shot` — single-player, no input,
+  default tutorial. Mech is rock-solid still through 240 ticks. So
+  Phase 1.x does NOT inject phantom velocity in single-player.
+- `tests/shots/net/2p_sync_aurora.{host,client}.shot` — paired
+  burst test on aurora's flat plain. Host walks RIGHT + jets;
+  client (placed via host's `peer_spawn 1 ...` 200 px to the right)
+  observes via `burst client_t from 200 to 460 every 6`. Both mechs
+  fit in each window's camera so frames can be compared 1:1.
+
+What the burst frames show on Phase 1.2:
+  - **Position desync.** At world tick 320: host's view of itself
+    at (2906, 2712) v=0 (settled); client's view of host at
+    (2510, 2714) v=4.17 (still walking right). ~400 px lag.
+    Eventually closes but never matches the host's actual position.
+  - **Jet-plume "desync"** is just the position lag manifesting
+    visually — the plume DOES draw at the host's actual jet moment,
+    but the client renders the host at an OLD position where the
+    jet hadn't started yet.
+
+**Bisect verdict (`tests/shots/net/run.sh 2p_motion`):**
+  - Pre-Phase-1 (`63ad669^`): client lag = 498 px at t=460
+  - Phase 1.2:                client lag = 507 px at t=460
+  - Identical magnitude (within snapshot noise). The lag is
+    **PRE-EXISTING** and unrelated to the movement-tuning work in
+    this branch.
+
+**Likely root cause** (not investigated further this pass): the
+client's interp clock arming + ring lerp in
+`snapshot_interp_remotes` either uses a stale clock or the
+snapshots arrive too slowly under shotmode's per-tick pump. The
+intended `INTERP_DELAY_MS = 100ms` (~6 ticks) explains ~30 px of
+lag at RUN_SPEED, not 500 px. Worth its own debugging round
+outside the movement branch.
+
+**Phase 1.x is clean.** `apply_run_velocity` reads `vx_now =
+pos - prev` from pelvis, which is reconciliation-safe because
+`snapshot_apply` calls `physics_set_velocity_x(vx)` after the
+translate (sets prev = pos - vx).
+
 ---
 
 **End of plan.**
