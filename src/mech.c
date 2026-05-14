@@ -586,17 +586,29 @@ static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, 
         flat = (ny < -0.92f);
     }
 
-    /* M6 P07 Phase 1 — add-toward-target ground move (§5A of
-     * documents/m6/07-movement-gamefeel.md). The OLD code SET the
-     * per-tick velocity to vx_pxs * dt (slope-projected), which
-     * (a) wiped slope momentum the moment the player pressed a
-     * direction at the bottom of a slope, and (b) snapped vx to 0
-     * the instant input was released on flat ground. The NEW model
-     * accel-caps a delta toward an input-driven target velocity, so
-     * external sources can push past the cap and bleed back over
-     * multiple ticks rather than clamping in one. Pelvis is the
-     * canonical body-velocity read; the constraint solver pulls all
-     * 16 parts to the same per-tick velocity in steady state. */
+    /* M6 P07 Phase 1 — Sonic-style ground move (§5A). Run input is a
+     * SPEED CAP that the body lerps toward at one of three accel rates;
+     * external sources (slopes, dashes, recoil) can push past the cap
+     * and friction bleeds the excess back over multiple ticks. Two key
+     * properties baked in here that the first cut of Phase 1 missed:
+     *
+     *   1. CAP, not target — when the velocity component along the
+     *      input direction is already >= the input cap (sliding down
+     *      a slope, post-dash, post-recoil), do NOTHING. Letting the
+     *      lerp pull the body DOWN to the cap is what wiped slope
+     *      momentum on flat ground after a slide.
+     *
+     *   2. Tangent-aligned delta — apply the per-tick velocity change
+     *      ONLY along the slope tangent. A normal-axis component
+     *      (which the per-component cap of v0 produced on diagonal
+     *      slopes) lifts the foot off the slope, the foot loses
+     *      contact, grounded flips false, and apply_run_velocity
+     *      enters the air branch. Net effect: the body "collapses"
+     *      mid-climb. Tangent-only push keeps the foot planted.
+     *
+     * Pelvis is the canonical body-velocity read — the constraint
+     * solver pulls all 16 parts to the same per-tick velocity in
+     * steady state. */
     int pelv = m->particle_base + PART_PELVIS;
     float vx_now = p->pos_x[pelv] - p->prev_x[pelv];
     float vy_now = p->pos_y[pelv] - p->prev_y[pelv];
@@ -605,51 +617,51 @@ static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, 
     if (vx_pxs > 0.0f) input_dir = +1.0f;
     if (vx_pxs < 0.0f) input_dir = -1.0f;
 
-    float target_vx_pertick;
-    float target_vy_pertick;
-    float rate_pxs2;
-
     if (input_dir == 0.0f) {
-        /* No input on slope: return — gravity-along-tangent and the
+        /* No input on slope: return — gravity-along-tangent + the
          * per-contact friction in physics.c::contact_with_velocity
          * drive passive slide. On flat: friction-decel X toward 0;
          * leave Y to gravity / contact resolution. */
         if (!flat) return;
-        target_vx_pertick = 0.0f;
-        target_vy_pertick = vy_now;
-        rate_pxs2 = GROUND_FRICTION_PXS2;
-    } else {
-        /* Tangent is normal rotated 90°, signed by input direction. */
-        float tx = -ny * input_dir;
-        float ty =  nx * input_dir;
-        float speed = fabsf(vx_pxs);
-        target_vx_pertick = tx * speed * dt;
-        target_vy_pertick = ty * speed * dt;
-        /* ACCEL when input matches motion (or starts from rest); the
-         * snappier DECEL fires when input opposes motion, so the
-         * player can flick the opposite direction for a faster reverse
-         * without making steady-state ramp-up any springier. */
-        bool opposing = (vx_now * input_dir) < 0.0f;
-        rate_pxs2 = opposing ? GROUND_DECEL_PXS2 : GROUND_ACCEL_PXS2;
+        float dx = -vx_now;
+        float max_delta_x = GROUND_FRICTION_PXS2 * dt * dt;
+        if (dx >  max_delta_x) dx =  max_delta_x;
+        if (dx < -max_delta_x) dx = -max_delta_x;
+        for (int part = 0; part < PART_COUNT; ++part) {
+            int idx = m->particle_base + part;
+            p->prev_x[idx] -= dx;
+        }
+        return;
     }
 
-    /* Per-component cap (matches §5A pseudocode literally). Magnitude
-     * cap would be marginally tighter on diagonal slopes; per-component
-     * is simpler and the difference is well under a frame of ramp time. */
-    float dx = target_vx_pertick - vx_now;
-    float dy = target_vy_pertick - vy_now;
-    float max_delta = rate_pxs2 * dt * dt;
-    if (dx >  max_delta) dx =  max_delta;
-    if (dx < -max_delta) dx = -max_delta;
-    if (dy >  max_delta) dy =  max_delta;
-    if (dy < -max_delta) dy = -max_delta;
+    /* Tangent rotated 90° from contact normal, signed by input
+     * direction so it always points "the way the player wants to
+     * go" along the surface. */
+    float tx = -ny * input_dir;
+    float ty =  nx * input_dir;
+    float speed     = fabsf(vx_pxs);
+    float vt_target = speed * dt;                       /* px/tick along tangent */
+    float vt_now    = vx_now * tx + vy_now * ty;        /* signed scalar */
 
-    /* Apply uniformly to every body particle, matching the old SET
-     * path's "all parts move together" semantic. The slope-tangent Y
-     * push goes to every particle (not just the lower chain) — splitting
-     * it stretches the body over a long held-run climb because 12
-     * relaxation iterations don't fully converge against a per-tick
-     * velocity injection on a 6-link chain. */
+    /* Above the cap in the input direction → input does nothing. The
+     * existing contact friction (physics.c:contact_with_velocity) is
+     * the only thing that bleeds excess speed back toward the cap. */
+    if (vt_now >= vt_target) return;
+
+    /* Below the cap. ACCEL when motion is in input direction (or at
+     * rest); DECEL (snappier) when motion opposes input — flick the
+     * opposite direction for a fast reverse without springing the
+     * steady-state ramp. */
+    bool opposing = (vt_now < 0.0f);
+    float rate_pxs2 = opposing ? GROUND_DECEL_PXS2 : GROUND_ACCEL_PXS2;
+    float vt_delta  = vt_target - vt_now;       /* > 0 by construction */
+    float max_delta = rate_pxs2 * dt * dt;
+    if (vt_delta > max_delta) vt_delta = max_delta;
+
+    /* Tangent-aligned delta — feet stay on the slope, body climbs /
+     * descends along the surface, no normal-axis push. */
+    float dx = vt_delta * tx;
+    float dy = vt_delta * ty;
     for (int part = 0; part < PART_COUNT; ++part) {
         int idx = m->particle_base + part;
         p->prev_x[idx] -= dx;
