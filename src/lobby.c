@@ -408,7 +408,14 @@ void lobby_reset_round_stats(LobbyState *L) {
         L->slots[i].team_kills     = 0;
         L->slots[i].longest_streak = 0;
         L->slots[i].current_streak = 0;
-        L->slots[i].ready          = false;
+        /* Bots are set ready=true at slot creation ("bots never block
+         * ready-up") and have no UI to flip themselves back; clearing
+         * their ready flag between rounds strands a solo human player
+         * because lobby_all_ready waits on bot slots that nobody can
+         * toggle. */
+        if (!L->slots[i].is_bot) {
+            L->slots[i].ready      = false;
+        }
     }
     L->dirty = true;
 }
