@@ -6,14 +6,17 @@
 # (gated on g_shot_mode), and apply_jump emits a SHOT_LOG when the jump
 # impulse fires.
 #
-# Expected (with current tunables):
+# Expected (post Phase 2 — air add-toward-target):
 #   RUN_SPEED_PXS = 280, JUMP_IMPULSE_PXS = 320, GRAVITY = 1080 px/s²,
-#   AIR_CONTROL = 0.35.
+#   AIR_ACCEL_PXS2 = 1680 (~10 frames to RUN_SPEED in air, ~0.6× ground).
 #   Apex height = 320² / (2·1080) ≈ 47 px above ground.
 #   Time to apex = 320 / 1080 ≈ 0.30 s ≈ 18 ticks at 60 Hz.
 #   Full airborne window ≈ 36 ticks.
-#   Air-run velocity = 280 × 0.35 = 98 px/s.
-#   Horizontal travel in air with right held = 98 × 0.60 s ≈ 59 px.
+#   Running jump: horizontal momentum preserved at the ground→air boundary
+#   because input is a CAP (not a target). vx decays only via the
+#   universal 0.99/tick drag — ~3.15 px/tick by tick 140 from ~4.17 at
+#   the jump moment. Horizontal travel in air with right held ≈ 100-110 px
+#   (vs ~52 px under the pre-Phase-2 AIR_CONTROL=0.35 SET-velocity clamp).
 
 window 1280 720
 seed 1 0
@@ -25,11 +28,18 @@ aim 1100 600
 at  20 shot stand_t020
 at  40 shot stand_t040
 
-# (b) Start running right, jump 30 ticks in.
+# (b) Start running right, jump 30 ticks in. Hold BTN_JUMP across a
+# 6-tick window — `tap` is single-tick and the running gait briefly
+# lifts feet off the ground every 5-6 ticks; a 1-tick press can miss
+# the grounded=1 window. The jump path (`mech.c:1022`) only fires
+# when `(in.buttons & BTN_JUMP) && grounded` are both true on the
+# same tick, but it's edge-effectively-single-shot once the mech
+# leaves the ground (so the hold doesn't double-jump).
 at  60 press right
 at  80 shot run_t020
 at 100 shot run_t040
-at 110 tap  jump
+at 108 press jump
+at 115 release jump
 at 115 shot jump_t005
 at 120 shot jump_t010
 at 125 shot jump_t015

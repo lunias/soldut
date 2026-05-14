@@ -151,7 +151,6 @@ MechLoadout mech_default_loadout(void) {
 #define JUMP_IMPULSE_PXS   320.0f
 #define JET_THRUST_PXS2    2200.0f
 #define JET_DRAIN_PER_SEC  0.60f
-#define AIR_CONTROL        0.35f
 /* M6 P07 Phase 1 — ground accel rates for the add-toward-target model
  * (§5A of documents/m6/07-movement-gamefeel.md). Run input is a SPEED
  * CAP that the body lerps toward at one of three rates; external sources
@@ -160,6 +159,13 @@ MechLoadout mech_default_loadout(void) {
 #define GROUND_ACCEL_PXS2     2800.0f /* ~6 frames to RUN_SPEED from rest */
 #define GROUND_DECEL_PXS2     4666.0f /* ~4 frames to zero from RUN_SPEED, input opposed */
 #define GROUND_FRICTION_PXS2  1400.0f /* ~12 frames to zero from RUN_SPEED on flat, no input */
+/* M6 P07 Phase 2 — air accel for the same add-toward-target model
+ * (§5A/§5D). Single rate (no separate decel) — flipping LEFT mid-air
+ * from a RUN_SPEED dash reverses over ~20 frames (Soldat-feel: you can
+ * nudge mid-jet but you can't instantly reverse). Replaces the
+ * pre-Phase-2 SET-velocity AIR_CONTROL=0.35 clamp that wiped 65 % of
+ * horizontal momentum the instant the feet left the ground. */
+#define AIR_ACCEL_PXS2        1680.0f /* ~10 frames to RUN_SPEED in air, ~0.6× ground accel */
 #define BINK_DECAY_PER_SEC 1.8f       /* exponential decay for aim_bink */
 #define BINK_MAX           0.35f      /* clamp; ~20° */
 #define SCOUT_DASH_PXS     720.0f
@@ -559,11 +565,49 @@ static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, 
     ParticlePool *p = &w->particles;
 
     if (!grounded) {
-        /* Air control: keep the existing horizontal-only behavior. */
-        float vx_per_tick = vx_pxs * dt * AIR_CONTROL;
+        /* M6 P07 Phase 2 — air control via add-toward-target with cap
+         * (§5A/§5D). Same CAP-not-target invariant as the ground branch:
+         * if the body is already moving at >= RUN_SPEED in the input
+         * direction (running jump, slope-launch, recoil), input does
+         * NOTHING — only PHYSICS_VELOCITY_DAMP (0.99/tick) bleeds excess
+         * back down. Replaces the pre-Phase-2 SET-velocity clamp that
+         * wiped 65 % of horizontal momentum at the ground→air boundary
+         * and produced "jumps kill your forward motion" feel.
+         *
+         * Horizontal-only — gravity drives vy, jet adds vy, jump sets
+         * vy. The air branch never touches the Y component.
+         *
+         * Caller only invokes apply_run_velocity in air when an input
+         * is held (`grounded && !moving` gate excludes air+no-input),
+         * so vx_pxs != 0 here in practice. Defensive return for 0. */
+        if (vx_pxs == 0.0f) return;
+
+        int pelv = m->particle_base + PART_PELVIS;
+        float vx_now = p->pos_x[pelv] - p->prev_x[pelv];
+
+        float input_dir = (vx_pxs > 0.0f) ? +1.0f : -1.0f;
+        float vx_cap    = fabsf(vx_pxs) * dt;       /* px/tick, unsigned */
+        float v_in_dir  = input_dir * vx_now;       /* signed component along input */
+
+        /* Above the cap in the input direction → input does nothing.
+         * External sources (slope-launched jump, dash, recoil) keep
+         * their excess momentum; only universal drag erodes it. */
+        if (v_in_dir >= vx_cap) return;
+
+        /* Below cap. Single accel rate — accelerating-from-rest and
+         * reversing-against-motion both use AIR_ACCEL_PXS2. (Ground
+         * has a separate decel rate to make flick-reverses snappier
+         * on the ground; in air the lower rate IS the air-control
+         * inertia we want.) */
+        float vx_target = input_dir * vx_cap;
+        float vx_delta  = vx_target - vx_now;
+        float max_delta = AIR_ACCEL_PXS2 * dt * dt;
+        if (vx_delta >  max_delta) vx_delta =  max_delta;
+        if (vx_delta < -max_delta) vx_delta = -max_delta;
+
         for (int part = 0; part < PART_COUNT; ++part) {
             int idx = m->particle_base + part;
-            physics_set_velocity_x(p, idx, vx_per_tick);
+            p->prev_x[idx] -= vx_delta;
         }
         return;
     }

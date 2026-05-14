@@ -980,6 +980,61 @@ foot on the floor surface, which is solid by construction.
     visual bot test (host with `--bots`, shot client observer with
     `network connect`). Deferred to next pass if it shows up.
 
+### Phase 2 — air-control add-toward-target ✅ shipped
+
+- **Code:** `src/mech.c::apply_run_velocity` air branch — replaced
+  SET-velocity (`vx_per_tick = vx_pxs · dt · AIR_CONTROL`) with the
+  same accel-capped lerp model as the ground branch. New constant
+  `AIR_ACCEL_PXS2 = 1680` (~10 frames to RUN_SPEED in air, 0.6×
+  ground accel). `AIR_CONTROL = 0.35` deleted per philosophy rule 8
+  ("no abstraction we cannot delete in an afternoon") + the plan
+  doc's anti-pattern list ("no backwards-compat shim"). Same
+  CAP-not-target invariant as the ground branch: when `v_in_dir >=
+  vx_cap` (running jump, slope-launch, recoil pushing past
+  RUN_SPEED in the input direction) the air branch returns without
+  doing anything; only `PHYSICS_VELOCITY_DAMP` (0.99/tick) bleeds
+  excess. Single accel rate in air (no separate decel) — flicking
+  the opposite direction mid-jet reverses over ~20 frames, which
+  is the Soldat-y inertia we want.
+
+- **Probe trail (`tests/shots/m6_movement_probe.shot`):**
+  Pre-Phase-2: vx clamped to 1.56 px/tick (94 px/s = `280·0.35·dt`)
+  immediately after foot-lift; **horizontal travel in airborne
+  window ≈ 52 px**. Post-Phase-2: vx steady at 4.62 px/tick
+  (277 px/s — at the cap, drag-trimmed); **horizontal travel in
+  airborne window ≈ 190 px (3.6× improvement)**.
+
+- **Probe-shot fix:** `tap jump` (single-tick BTN_JUMP press)
+  changed to `press jump @ 108 / release jump @ 115`. The running
+  gait briefly lifts feet off the ground every 5-6 ticks; the
+  jump path (`mech.c:1022`) only fires when
+  `(in.buttons & BTN_JUMP) && grounded` are both true on the same
+  tick. A 1-tick press can miss the grounded=1 window when Phase 2
+  preserves enough momentum across gait foot-lifts to shift the
+  bouncy grounded pattern relative to baseline. The 6-tick hold is
+  effectively single-shot (once airborne, the check fails until
+  next landing) so no double-jump risk.
+
+- **Tests:** `test-mech-ik` ALL PASS, `test-pose-compute` ALL PASS,
+  `test-snapshot` all passed, `tests/shots/net/run.sh 2p_basic` 12/12
+  PASS, `tests/net/run.sh` 13/13 PASS, slope shot
+  `m6_aurora_slope.shot` slope-launched slide still reaches vx=
+  -11.45 px/tick (245 % of RUN_SPEED cap — no regression in
+  slope-momentum preservation).
+- **Pre-existing FAIL (not Phase 2):** `test-spawn-geometry` reports
+  `slipstream.lvl spawn[6]/[7]` head samples at (640, 484) /
+  (2560, 484) inside SOLID polygon. Verified by `git stash` —
+  identical failure on `3626e36` (parent of Phase 2). The Phase 1.2
+  spawn fix from `742c0ad` and the `3626e36` mech-clipping fix
+  covered FEET clipping but missed HEADs in this corner. Tracked
+  for a future spawn-fix pass.
+
+- **Playtest:** pending.
+- **Next:** if jump feel is right, **Phase 3** — higher jump
+  (`JUMP_IMPULSE_PXS 320 → 480`, apex 47 → 107 px). If jump+jet
+  combo feels wrong (mid-air ice skating, over-responsive
+  trajectory reversal), retune `AIR_ACCEL_PXS2` here.
+
 ### Resume here when next session starts
 
 1. Read this section (§13) for the running log.
@@ -988,8 +1043,8 @@ foot on the floor surface, which is solid by construction.
 3. Re-run `make shot SCRIPT=tests/shots/m6_aurora_slope.shot`
    + `make shot SCRIPT=tests/shots/m6_movement_probe.shot`
    + `make test-spawn-geometry` to reproduce the latest baselines.
-4. Wait for user verdict on the latest phase (pose) before opening
-   Phase 2 (air-control).
+4. Wait for user verdict on Phase 2 (air-control) before opening
+   Phase 3 (higher jump).
 
 ### Phase 1.2 followup — sync investigation (NOT a Phase 1.x regression)
 
