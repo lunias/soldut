@@ -694,6 +694,16 @@ void audio_apply_for_level(const Level *L) {
     audio_set_ambient_loop(ambient_path);
 }
 
+void audio_apply_for_title(void) {
+    /* Mirror of audio_apply_for_level but with NULL paths — stops and
+     * unloads both the music stream and the ambient loop sample.
+     * audio_set_*_for_map(NULL) is idempotent (no-op when nothing's
+     * loaded) so this is safe to call from any leave path even if
+     * the bot user never entered a match in this session. */
+    audio_set_music_for_map(NULL);
+    audio_set_ambient_loop(NULL);
+}
+
 void audio_set_music_for_map(const char *path) {
     /* No-op when nothing changed (cheap guard for round-loop reuse on
      * the same map). */

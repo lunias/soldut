@@ -2338,6 +2338,7 @@ int main(int argc, char **argv) {
              * so the next host attempt re-publishes the user's
              * cached loadout. */
             lobby_ui_reset_session(&ui);
+            audio_apply_for_title();
             game.local_slot_id = -1;
             game.world.local_mech_id = -1;
             game.world.authoritative = false;
@@ -2617,6 +2618,7 @@ int main(int argc, char **argv) {
                 /* wan-fixes-7 — see comment in the connection-lost
                  * handler above. */
                 lobby_ui_reset_session(&ui);
+                audio_apply_for_title();
                 game.local_slot_id = -1;
                 game.offline_solo  = false;
             }
@@ -2809,6 +2811,7 @@ int main(int argc, char **argv) {
                     net_close(&game.net);
                     net_shutdown();
                     lobby_ui_reset_session(&ui);
+                    audio_apply_for_title();
                     game.mode = MODE_TITLE;
                     game.offline_solo = false;
                 }
@@ -2868,6 +2871,7 @@ int main(int argc, char **argv) {
                 game.match.rounds_per_match = game.config.rounds_per_match;
                 /* wan-fixes-7 — re-publish loadout on next session. */
                 lobby_ui_reset_session(&ui);
+                audio_apply_for_title();
                 game.local_slot_id = -1;
                 game.offline_solo  = false;
             }
