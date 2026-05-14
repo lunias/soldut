@@ -842,13 +842,97 @@ read of the code.
 
 ---
 
-**End of plan.** When you start the next session:
+## 13 — Implementation log (this branch, m6-movement-tuning)
 
-1. Read this file fully.
-2. Confirm you're on branch `m6-movement-tuning`.
-3. Read the four code paths cited in §3 — read them, don't skim.
-4. Run the probe shot once to set a pre-change visual baseline.
-5. Open Phase 1 by adding the new accel/decel constants alongside
-   `RUN_SPEED_PXS` in `src/mech.c:150`.
-6. Rewrite `apply_run_velocity` per §5A.
-7. Build, probe, ask the user to playtest, commit.
+Each entry: commit sha, what shipped, playtest verdict, what's next.
+Append a new entry after every pass so the next session can resume
+from the bottom of this log without rediscovering context.
+
+### Phase 1 — `63ad669` (2026-05-14) ✅ shipped
+
+- **Code:** `src/mech.c::apply_run_velocity` ground branch — replaced
+  SET-velocity with a per-component lerp-toward-target. Constants
+  `GROUND_ACCEL_PXS2=2800`, `GROUND_DECEL_PXS2=4666`,
+  `GROUND_FRICTION_PXS2=1400`. Air branch untouched (Phase 2).
+- **Probe trail:** release-skid 4.6→0 in 1 tick → 3.7→0.01 over
+  ~10 ticks (visible coast).
+- **Playtest:** "side-to-side fine, release skid fine. Slope:
+  collapses going up, stuck at slope→flat boundary, no momentum
+  carry, transition doesn't transfer velocity."
+- **Next:** Phase 1.1 — fix slope behavior.
+
+### Phase 1.1 — `fbda156` (2026-05-14) ✅ shipped
+
+- **Code:** Two fixes layered on Phase 1, same function:
+  1. **Above-cap guard** — when `vt_now >= vt_target`, return early
+     (input is a CAP, not a target). v1 was lerp-toward-target which
+     bled slope momentum back to RUN_SPEED.
+  2. **Tangent-aligned delta** — per-component cap on (dx, dy)
+     produced a normal-axis push that lifted the foot off the slope
+     mid-climb. New code projects the per-tick delta onto the slope
+     tangent only.
+- **Aurora trail:** climb the west hill (640→1024) in ~120 ticks;
+  pelvis vx steady at ~3.8 climbing.
+- **Playtest:** "Better. Sliding down feels alright. Walking up the
+  ramp the body is not upright — looks like the mech is collapsing /
+  diving forward. Want it to look like walking up the ramp."
+- **Next:** Phase 1.2 — slope-aware pose so the body reads upright
+  while feet plant on the slope.
+
+### Phase 1.2 — slope-aware foot placement, body stays upright ✅ shipped
+
+- **Code:**
+  - `src/mech_ik.h` — added `ground_normal` to `PoseInputs` (averaged
+    foot contact normal; `(0, 0)` = airborne / unknown → flat
+    fallback).
+  - `src/mech_ik.c::pose_compute` ANIM_RUN — replaced fixed
+    `foot_y_ground = lhip.y + chain` with slope-aware
+    `foot.y = hip.y + chain + fx * slope_dydx`. Stride stays
+    horizontal so the body reads as gravity-upright; one leg extends
+    and one compresses to track the slope. Flat-ground
+    (`ground_normal = (0, -1)`) collapses to the original formula
+    (zero `slope_dydx`).
+  - `src/simulate.c` — pass averaged foot contact normal into
+    `PoseInputs`.
+  - `src/shotmode.c` — new `no_parallax` directive (single token, no
+    value): zeros `g_map_kit.parallax_*.id` after world build so
+    movement-tuning shots don't have parallax obscuring the mech
+    silhouette. `draw_parallax_layer` already early-outs on
+    `tex.id == 0`.
+  - `tests/shots/m6_aurora_slope.shot` — new shot driving the climb
+    + descent + walk-back on aurora's west hill.
+- **Aurora trail (post-fix):** climb to peak in ~120 ticks
+  (730 → 956 → 1080 px x); descent picks up ~5.4 px/tick from
+  gravity-along-tangent + the above-cap guard preserving it.
+- **Tests:** `test-mech-ik` ALL PASS, `test-pose-compute` ALL PASS,
+  `tests/shots/net/run.sh 2p_basic` 12/12 PASS, flat-ground probe
+  trail unchanged (verified bit-for-bit vs. Phase 1.1).
+- **Caveats:**
+  - Remote mechs on a pure client run kinematically (`inv_mass = 0`),
+    so the local `contact_*_q` slots never update and their
+    `ground_normal` defaults to flat. Cosmetic difference vs. the
+    host's view on slopes — bones still in correct positions because
+    the snapshot drives pelvis directly, just leg pose is flat-ground
+    on the spectator view. Track as a follow-up if the user notices.
+  - Sliding down the slope still cycles the RUN gait (legs walking)
+    rather than a dedicated SLIDE pose. Not addressed here; deferred
+    if the user reports it.
+- **Playtest:** pending.
+- **Next:** if pose feels right, **Phase 2** — air-control
+  add-toward-target (per §6 Phase 2). If pose still wrong, retune
+  here.
+
+### Resume here when next session starts
+
+1. Read this section (§13) for the running log.
+2. `git log --oneline main..HEAD` to confirm the commits above are
+   on the branch.
+3. Re-run `make shot SCRIPT=tests/shots/m6_aurora_slope.shot`
+   + `make shot SCRIPT=tests/shots/m6_movement_probe.shot` to
+   reproduce the latest visual.
+4. Wait for user verdict on the latest phase before opening the
+   next one.
+
+---
+
+**End of plan.**

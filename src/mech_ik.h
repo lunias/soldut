@@ -57,6 +57,13 @@ typedef struct PoseInputs {
      * grapple_anchor when grapple_state == GRAPPLE_ATTACHED. */
     uint8_t  grapple_state;    /* GrappleState; GRAPPLE_IDLE = no effect */
     Vec2     grapple_anchor;   /* used when state == GRAPPLE_ATTACHED */
+
+    /* M6 P07 Phase 1.2 — averaged foot contact normal (points "up out
+     * of the surface"; flat = (0, -1)). Used by ANIM_RUN to rotate the
+     * stride and leg-drop onto the slope plane so feet plant on the
+     * slope tangent instead of trailing in the air below a vertical
+     * body. (0, 0) is treated as airborne / unknown → flat fallback. */
+    Vec2     ground_normal;
 } PoseInputs;
 
 /* Output: world-space position for every PART_*. 16 entries. */

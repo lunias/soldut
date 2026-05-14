@@ -158,6 +158,11 @@ typedef struct {
     bool     perf_overlay;
     int      internal_h;
 
+    /* M6 P07 — when true, zero out g_map_kit.parallax_*.id after world
+     * build so the renderer's draw_parallax_layer early-outs. Useful
+     * for movement-tuning shots where parallax obscures the mech. */
+    bool     no_parallax;
+
     int      end_tick;       /* -1 = derive from last event */
 
     /* Networked-shot config (legacy single-process when NETMODE_NONE). */
@@ -312,6 +317,7 @@ static bool parse_script(const char *path, Script *out) {
     out->match_mode = -1;   /* P07 — only set when `mode <name>` directive parsed */
     out->perf_overlay = false;  /* M6 P03 — see Shot struct comment. */
     out->internal_h   = 0;       /* M6 P03 — 0 = identity (no cap). */
+    out->no_parallax  = false;  /* M6 P07 — see Shot struct comment. */
 
     char line[512];
     int lineno = 0;
@@ -693,6 +699,11 @@ static bool parse_script(const char *path, Script *out) {
                 ok = false; continue;
             }
             out->internal_h = n;
+        } else if (strcmp(tok, "no_parallax") == 0) {
+            /* M6 P07 — `no_parallax` (no value). After world build,
+             * zero g_map_kit.parallax_*.id so draw_parallax_layer
+             * early-outs. Used by movement-tuning shots. */
+            out->no_parallax = true;
         } else if (strcmp(tok, "network") == 0) {
             char kind[16] = {0};
             int eaten2 = 0;
@@ -2190,6 +2201,13 @@ int shotmode_run(const char *script_path) {
         game.world.camera_target = (Vec2){ s.spawn_x, s.spawn_y };
         game.world.camera_smooth = (Vec2){ s.spawn_x, s.spawn_y };
         LOG_I("shotmode: spawn_at %.1f %.1f", s.spawn_x, s.spawn_y);
+    }
+
+    if (s.no_parallax) {
+        g_map_kit.parallax_far.id  = 0;
+        g_map_kit.parallax_mid.id  = 0;
+        g_map_kit.parallax_near.id = 0;
+        LOG_I("shotmode: no_parallax — parallax layers disabled");
     }
 
     Renderer rd;

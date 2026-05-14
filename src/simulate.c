@@ -331,6 +331,21 @@ void simulate_step(World *w, float dt) {
             };
             Vec2 aim_dir = mech_aim_dir(w, m->id);
 
+            /* M6 P07 Phase 1.2 — averaged foot contact normal for
+             * slope-aware ANIM_RUN pose. (0, 0) when both feet have no
+             * fresh contact data → pose_compute treats as airborne /
+             * flat fallback. Remote mechs on the client run
+             * kinematically (inv_mass = 0), so collide_map_one_pass
+             * skips them and their contact_*_q stays at zero — they
+             * pose as flat-ground. Visible cosmetic difference on
+             * slopes vs the host's view; tracked as a follow-up. */
+            int lf = b + PART_L_FOOT;
+            int rf = b + PART_R_FOOT;
+            Vec2 ground_normal = (Vec2){
+                (w->particles.contact_nx_q[lf] + w->particles.contact_nx_q[rf]) / 254.0f,
+                (w->particles.contact_ny_q[lf] + w->particles.contact_ny_q[rf]) / 254.0f,
+            };
+
             PoseInputs in = (PoseInputs){
                 .pelvis         = pelvis,
                 .aim_dir        = aim_dir,
@@ -345,6 +360,7 @@ void simulate_step(World *w, float dt) {
                 .foregrip_world = NULL,
                 .grapple_state  = m->grapple.state,
                 .grapple_anchor = m->grapple.anchor_pos,
+                .ground_normal  = ground_normal,
             };
 
             /* Two-handed foregrip IK target: derived from the visible

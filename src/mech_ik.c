@@ -252,15 +252,35 @@ void pose_compute(const PoseInputs *in, PoseBones out) {
     Vec2 rhip = out[PART_R_HIP];
 
     if (in->anim_id == ANIM_RUN) {
-        /* §7.7 — RUN gait. Constants match build_pose so the gait
-         * shape stays the same. Phase is normalized into [0, 1) before
-         * splitting the foot pair 180° apart in the cycle. */
+        /* §7.7 — RUN gait. Phase 1.2 (M6 P07): slope-aware FOOT Y only.
+         * The body stays gravity-upright; stride stays horizontal. On
+         * a slope, each foot's vertical drop from hip is computed by
+         * intersecting the slope plane with a vertical line at foot.x
+         * (assuming hip is at chain length above the slope). One leg
+         * extends, one compresses — like a person walking up a ramp.
+         *
+         * The flat-ground case (ground_normal = (0, -1)) collapses to
+         * the original foot_y_ground = hip + chain. */
         const float STRIDE  = 28.0f;
         const float LIFT_H  = 9.0f;
-        float foot_y_ground = lhip.y + ch->bone_thigh + ch->bone_shin;
-        float dir   = in->facing_left ? -1.0f : 1.0f;
-        float front =  STRIDE * 0.5f * dir;
-        float back  = -STRIDE * 0.5f * dir;
+
+        /* ground_normal of (0, 0) → airborne / unknown → flat fallback. */
+        float nx = in->ground_normal.x;
+        float ny = in->ground_normal.y;
+        float nlen = sqrtf(nx * nx + ny * ny);
+        if (nlen < 0.5f) {
+            nx = 0.0f; ny = -1.0f;
+        } else {
+            nx /= nlen; ny /= nlen;
+        }
+        /* dy/dx of the slope surface. tangent CCW from normal = (-ny, nx);
+         * slope dy/dx = nx / -ny. Flat (0, -1) → 0. 30° upward-right
+         * (-0.5, -0.866) → -0.577 (going right makes y decrease = up). */
+        float slope_dydx = (ny < -1e-3f) ? (nx / -ny) : 0.0f;
+        float chain      = ch->bone_thigh + ch->bone_shin;
+        float dir        = in->facing_left ? -1.0f : 1.0f;
+        float front      =  STRIDE * 0.5f * dir;
+        float back       = -STRIDE * 0.5f * dir;
 
         float p_l = in->gait_phase;
         if (p_l < 0.0f)  p_l -= floorf(p_l);
@@ -270,22 +290,28 @@ void pose_compute(const PoseInputs *in, PoseBones out) {
 
         Vec2 lfoot, rfoot;
         if (p_l < 0.5f) {
-            /* Stance: foot slides back along ground. */
-            float u = p_l * 2.0f;
-            lfoot = (Vec2){ lhip.x + front + (back - front) * u, foot_y_ground };
+            /* Stance: foot slides back along ground (horizontal). */
+            float u  = p_l * 2.0f;
+            float fx = front + (back - front) * u;
+            lfoot = (Vec2){ lhip.x + fx, lhip.y + chain + fx * slope_dydx };
         } else {
-            /* Swing: foot lifts in an arc, comes back to front. */
-            float u = (p_l - 0.5f) * 2.0f;
-            lfoot = (Vec2){ lhip.x + back + (front - back) * u,
-                            foot_y_ground - LIFT_H * sinf(u * PI) };
+            /* Swing: foot lifts in arc, comes back to front. */
+            float u  = (p_l - 0.5f) * 2.0f;
+            float fx = back + (front - back) * u;
+            lfoot = (Vec2){ lhip.x + fx,
+                            lhip.y + chain + fx * slope_dydx
+                                - LIFT_H * sinf(u * PI) };
         }
         if (p_r < 0.5f) {
-            float u = p_r * 2.0f;
-            rfoot = (Vec2){ rhip.x + front + (back - front) * u, foot_y_ground };
+            float u  = p_r * 2.0f;
+            float fx = front + (back - front) * u;
+            rfoot = (Vec2){ rhip.x + fx, rhip.y + chain + fx * slope_dydx };
         } else {
-            float u = (p_r - 0.5f) * 2.0f;
-            rfoot = (Vec2){ rhip.x + back + (front - back) * u,
-                            foot_y_ground - LIFT_H * sinf(u * PI) };
+            float u  = (p_r - 0.5f) * 2.0f;
+            float fx = back + (front - back) * u;
+            rfoot = (Vec2){ rhip.x + fx,
+                            rhip.y + chain + fx * slope_dydx
+                                - LIFT_H * sinf(u * PI) };
         }
 
         Vec2 lknee, rknee;

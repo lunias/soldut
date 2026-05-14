@@ -1,0 +1,51 @@
+# M6 P07 — aurora west-hill walk-up probe.
+#
+# Aurora's west hill (build_aurora in tools/cook_maps/cook_maps.c) is a
+# 30° upward-right slope that runs from world x=640 (base, y=2752) to
+# x=1024 (peak, y=2528) — 12 tiles wide, 7 tiles tall. The slope is an
+# authored polygon (POLY_KIND_SOLID triangle), not tile-fill.
+#
+# This shot drops the player at the base, holds RIGHT to walk uphill,
+# captures pose every ~30 ticks. Used to repro and validate fixes for
+# the "legs trail behind, body collapses" bug from Phase 1.1 playtest.
+#
+# Parallax disabled (no_parallax) so aurora's mountain backdrop
+# doesn't obscure the leg / pose silhouette.
+
+window 1280 720
+seed 1 0
+out build/shots/m6_aurora_slope
+map aurora
+no_parallax
+spawn_at 720 2700
+aim 1500 2400
+
+# Settle on the floor at the slope base.
+at  60 shot t060_landed
+
+# Hold RIGHT — walk uphill.
+at  90 press right
+at 120 shot t120_climb_30
+at 150 shot t150_climb_60
+at 180 shot t180_climb_90
+at 210 shot t210_climb_120
+at 240 shot t240_climb_150
+at 270 shot t270_climb_180
+
+# Release near the peak; should settle without falling backward.
+at 280 release right
+at 320 shot t320_settle
+
+# Now walk back DOWN the same slope (LEFT). Should be easy with gravity.
+at 340 press left
+at 370 shot t370_descend_30
+at 400 shot t400_descend_60
+at 430 shot t430_descend_90
+
+# Release; let gravity + flat-ground friction settle.
+at 460 release left
+at 520 shot t520_bottom
+
+contact_sheet sheet cols 4
+
+at 580 end
