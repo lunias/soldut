@@ -787,6 +787,12 @@ int main(int argc, char **argv) {
         bot_attach(&bot_sys, mech_id, tier, (uint64_t)i * 0xBF58476D1CE4E5B9uLL);
     }
 
+    /* M6 P05 Phase 5 — assign CTF team roles. The game flow normally
+     * does this via main.c::start_round; the bake harness has its
+     * own attach loop and needs the call mirrored here. No-op for
+     * FFA. */
+    bot_assign_team_roles(&bot_sys, &g.world);
+
     fprintf(stdout,
             "bake[%s]: %d bots (tier=%s), %d s, mode=%s, map=%dx%d, %d spawns, "
             "%d pickups, %d polys, %d flags, %d nav nodes\n",

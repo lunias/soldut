@@ -62,6 +62,13 @@ typedef struct BotPersonality {
     float   flag_priority;        /* 0..1 weight on flag goals (CTF) */
     float   grapple_priority;     /* 0..1 weight on using grapple for vertical reach */
     float   aggression;           /* 0..1; biases pursue vs retreat */
+    /* M6 P05 Phase 4 — aggression-based retreat. When `bot_aggression`
+     * falls below this threshold the bot breaks engagement and seeks
+     * cover near a healing pickup. Recruit's threshold is 0.0 so it
+     * never retreats (it's the bad-on-purpose tier; retreating would
+     * just make Recruits never fight). Champion's stays above 0.30 so
+     * even high-skill bots disengage when very hurt. */
+    float   retreat_threshold;
     uint8_t knows_full_map;       /* false → only nearby nodes become routes */
     uint8_t uses_powerups;        /* false → ignores POWERUP_* spawners */
 } BotPersonality;
@@ -81,6 +88,20 @@ typedef enum {
     BOT_GOAL_RETREAT       = 9,
     BOT_GOAL_COUNT,
 } BotGoal;
+
+/* M6 P05 Phase 5 — CTF team-role coordination. Assigned at round
+ * start and on flag-state transitions; the strategy scorer multiplies
+ * each goal's score by a role-specific weight (table in `bot.c`). */
+typedef enum {
+    BOT_ROLE_NONE      = 0,
+    BOT_ROLE_ATTACKER  = 1,
+    BOT_ROLE_DEFENDER  = 2,
+    BOT_ROLE_FLOATER   = 3,
+    BOT_ROLE_CARRIER   = 4,
+    BOT_ROLE_COUNT,
+} BotTeamRole;
+
+const char *bot_team_role_name(BotTeamRole r);
 
 const char *bot_goal_name(BotGoal g);
 
@@ -125,8 +146,27 @@ typedef struct BotMind {
      * so they look "stuck on JET" forever. */
     bool            jet_locked_out;
     uint8_t         pad2[3];
+    /* M6 P05 Phase 2 — cover-aware engagement positioning. When the
+     * enemy is out of LOS, tactic_engage runs a BFS for a position
+     * that CAN see them, plans a path there, and caches the result so
+     * subsequent ticks reuse the path. Refresh every ~2 s (or on
+     * enemy change). */
+    int16_t         engagement_node;
+    int16_t         engagement_for_enemy;
+    uint64_t        engagement_node_tick;
+    /* M6 P05 Phase 4 — aggression tracking. `last_hp_observed` is set
+     * on every strategy tick; when it drops we mark `last_hurt_tick`
+     * which the aggression formula consumes for the "recently hurt →
+     * low aggression" term. */
+    float           last_hp_observed;
+    uint64_t        last_hurt_tick;
+    /* M6 P05 Phase 5 — CTF team role. Stamped at round start and on
+     * flag-state transitions by `bot_assign_team_roles`. */
+    uint8_t         team_role;            /* BotTeamRole */
+    uint8_t         pad3[3];
     pcg32_t         rng;
 } BotMind;
+
 
 /* ---- Bot system ----------------------------------------------------- */
 
@@ -194,6 +234,17 @@ void bot_default_loadout_for_tier(int bot_index, BotTier tier,
 const char *bot_name_for_index(int bot_index, BotTier tier,
                                char *buf, int cap);
 
+/* Bot-system-wide role (re)assignment. Called at round start (after
+ * lobby_spawn_round_mechs) and on flag-state transitions or bot
+ * death/team-comp change. Operates over the bots already attached to
+ * `bs`; does nothing in non-CTF modes. */
+void bot_assign_team_roles(BotSystem *bs, const World *w);
+
 /* Diagnostic helpers (used by bake/test scaffolding + hud overlays). */
 int  bot_nav_node_count(const BotSystem *bs);
 bool bot_nav_node_pos  (const BotSystem *bs, int node_id, Vec2 *out);
+
+/* M6 P05 Phase 1 — visibility precompute diagnostics. */
+int  bot_nav_visibility_edge_count(const BotSystem *bs);
+bool bot_nav_node_sees             (const BotSystem *bs, int src, int target);
+int  bot_nav_reach_count           (const BotSystem *bs);

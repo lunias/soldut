@@ -386,12 +386,18 @@ static void broadcast_new_fires(Game *g) {
 /* Server: ship CTF flag state when ctf transitions have flipped the
  * dirty bit. Single broadcast per tick at most — coalesces same-tick
  * pickup+capture pairs. ctf operations themselves don't broadcast;
- * keeping that here means ctf.c stays independent of net.c. */
+ * keeping that here means ctf.c stays independent of net.c.
+ *
+ * M6 P05 Phase 5 — also re-assigns CTF team roles on every flag
+ * transition. Carrier override happens at strategy-tick time, but
+ * defender / attacker assignments can churn between rounds without
+ * needing a fresh round_start. */
 static void broadcast_flag_state_if_dirty(Game *g) {
     if (g->net.role != NET_ROLE_SERVER) return;
     if (!g->world.flag_state_dirty) return;
     net_server_broadcast_flag_state(&g->net, &g->world);
     g->world.flag_state_dirty = false;
+    bot_assign_team_roles(&g->bots, &g->world);
 }
 
 /* Server: drain pickup-state events queued by pickup_step /
@@ -670,6 +676,10 @@ static void start_round(Game *g) {
         bot_attach(&g->bots, s->mech_id, (BotTier)s->bot_tier,
                    (uint64_t)i * 0xBF58476D1CE4E5B9uLL);
     }
+    /* M6 P05 Phase 5 — assign CTF team roles after every bot is
+     * attached. Per-team round-robin: 2 attackers / 1 defender / 1
+     * floater. */
+    bot_assign_team_roles(&g->bots, &g->world);
 
     /* P05 — populate spawner pool from the level's PICK records and
      * spawn any practice-dummy mechs. Server-side; clients call the
@@ -2328,6 +2338,7 @@ int main(int argc, char **argv) {
              * so the next host attempt re-publishes the user's
              * cached loadout. */
             lobby_ui_reset_session(&ui);
+            audio_apply_for_title();
             game.local_slot_id = -1;
             game.world.local_mech_id = -1;
             game.world.authoritative = false;
@@ -2607,6 +2618,7 @@ int main(int argc, char **argv) {
                 /* wan-fixes-7 — see comment in the connection-lost
                  * handler above. */
                 lobby_ui_reset_session(&ui);
+                audio_apply_for_title();
                 game.local_slot_id = -1;
                 game.offline_solo  = false;
             }
@@ -2799,6 +2811,7 @@ int main(int argc, char **argv) {
                     net_close(&game.net);
                     net_shutdown();
                     lobby_ui_reset_session(&ui);
+                    audio_apply_for_title();
                     game.mode = MODE_TITLE;
                     game.offline_solo = false;
                 }
@@ -2858,6 +2871,7 @@ int main(int argc, char **argv) {
                 game.match.rounds_per_match = game.config.rounds_per_match;
                 /* wan-fixes-7 — re-publish loadout on next session. */
                 lobby_ui_reset_session(&ui);
+                audio_apply_for_title();
                 game.local_slot_id = -1;
                 game.offline_solo  = false;
             }

@@ -13,15 +13,45 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-13** (M6 P04 post-merge polish — lobby bot UX
-rewrite + fuel-aware jet). **Added** three new entries: "Bot jet
-fuel lockout is a hard 10/40 % hysteresis (M6 P04+)", "Bot map vote
-is uniform-random across the 3 cards (M6 P04+)", and
+Last updated: **2026-05-13** (M6 P05 — bot AI improvements). **Added**
+four new entries:
+
+- "Bot nav arc-aware JET reach trusts a 800-px-peak two-segment
+  approximation (M6 P05)" — under "Bot AI". The bot doesn't simulate
+  parabolic physics for reach feasibility; we iterate two-segment ray
+  casts from start → high midpoint → end at increasing peak heights.
+  Most pillar/wall traversals work but some non-convex polygon shapes
+  still false-reject.
+- "1v1 PASS rate is 26/32 cells (M6 P05)" — after a cook_maps
+  iteration pass (Reactor archway, Catwalk elevated ramps, Crossfire
+  shorter stubs, Citadel partition passage) + JET-assist in the bot
+  motor, 1v1 60-s bake produces > 0 fires on 26/32 (tier × map)
+  cells, up from 11/32 baseline (2.4× improvement). All 8 maps pass
+  at Elite + Champion; 6 maps pass at every tier. Remaining 6 cells
+  are tier-specific awareness/engagement-picker artifacts, not nav
+  topology bugs.
+- "Weapon engagement profile numbers are educated guesses, not data-
+  derived (M6 P05)" — `g_weapon_profiles[]` ships with hand-picked
+  optimal/effective ranges. The plan's "calibrate against measured
+  fires-per-kill" workflow needs an iter9/iter10 follow-up sweep with
+  the post-P05 AI to find equilibrium values.
+- "Bot retreat doesn't actually deny ENGAGE; it competes via score
+  multiplier (M6 P05)" — `bot_aggression < 0.30` damps engage score
+  by 0.20× rather than zeroing it. If `score_engage * 0.2` still
+  beats `score_retreat`, the bot keeps fighting. This is intentional
+  for graceful degradation but means Heavy with full ammo + 5 % HP
+  may still trade shots with a Light.
+
+**Deleted** "Mass Driver is matrix-dominant; not retuned this pass
+(M6 P04)" — Phase 6 retuned to fire_rate_sec 1.25 / aoe_radius 140.
+Iter9 matrix shows MD kill total dropped from 76 → 66 (closer to the
+55-kill median).
+
+Previously: **2026-05-13** (M6 P04 post-merge polish — lobby bot UX
+rewrite + fuel-aware jet). Added three entries: "Bot jet fuel
+lockout is a hard 10/40 % hysteresis (M6 P04+)", "Bot map vote is
+uniform-random across the 3 cards (M6 P04+)", and
 "`NET_MSG_LOBBY_ADD_BOT` is additive, no protocol bump (M6 P04+)".
-**Note**: pre-existing `host_view = role == NET_ROLE_SERVER` bug
-fixed (the host UI runs as NET_ROLE_CLIENT after wan-fixes-16, so
-the old check never fired in real play). No trade-off entry —
-that's a defect we shipped accidentally, not a deliberate compromise.
 
 Previously: **2026-05-13** (M6 P04 — map balance pass + bot AI
 hardening). **Added** four new entries: "M5 map geometry deviates
@@ -2110,29 +2140,21 @@ WAN polish. Net effect on the trade-off ledger:
     of the cook_maps output and edit from there, OR re-cook from
     the M5 spec and re-iterate.
 
-### Mass Driver is matrix-dominant; not retuned this pass
+### Mass Driver matrix-dominance retired by Phase 6 (M6 P05)
 
-- **What we did** — The iter7 loadout matrix (320 cells × 60 s ×
-  Champion) shows Mass Driver as the top weapon by kills (76,
-  next-closest is Rail Cannon at 67) and the top weapon by
-  efficiency (27 fires per kill, vs. 246 for Auto-Cannon and 4833
-  for Riot Cannon). It wins outright on Slipstream, Concourse,
-  Crossfire and ties on Catwalk. We left the weapon stats unchanged.
-- **Why** — One bake run with one seed at one tier is a *signal*,
-  not a verdict. Tuning weapon balance from bot-vs-bot data risks
-  optimizing for behaviors that don't transfer to human play (bots
-  cluster at pickups, which is exactly the situation Mass Driver's
-  AOE punishes — humans space out). Real-player playtest data needs
-  to confirm before we touch `g_weapons[].fire_rate_sec` or
-  `aoe_radius`. The lever options when we DO tune: `fire_rate_sec`
-  0.7 → 1.0, OR `aoe_radius` 96 → 72 px, OR both at half magnitude.
-- **Revisit when** —
-  - Real-player playtest reports "Mass Driver feels overpowered."
-  - A second bake-iteration with a higher bot tier (M6+ trained
-    policy) re-confirms the dominance.
-  - We want the matrix to have *no* clear top weapon — the
-    "everything is equally viable" balance pillar from
-    [`documents/00-vision.md`](documents/00-vision.md).
+- **What we did at M6 P04** — left Mass Driver unchanged on the
+  argument that one bake seed at one tier isn't a real signal.
+- **What changed at M6 P05** — Phase 6 of `documents/m6/05-bot-ai-
+  improvements.md` applied option C from the plan: fire_rate_sec
+  1.10 → 1.25 (-12 %), aoe_radius 160 → 140 (-13 %). Iter9 30-sec
+  matrix at Champion: MD dropped 76 → 66 kills, closer to the
+  55-kill median (Plasma Cannon is now top at 75, Rail Cannon next
+  at 57).
+- **Why kept in TRADE_OFFS** — bot-derived tuning is still a *signal*
+  not a verdict, and we tuned anyway. If real-player playtest reports
+  "Mass Driver feels underpowered" we should revert. Per the plan's
+  Open Question 4, this was a guess between options A/B/C; revert is
+  cheap (two numbers in `src/weapons.c`).
 
 ### Bot opportunistic-fire scan radius is `1.6 × awareness`, a magic constant
 
@@ -2262,6 +2284,124 @@ WAN polish. Net effect on the trade-off ledger:
   - We start versioning the protocol — assigning a semantic
     version, not just a 4-byte tag. Then each additive change
     can bump a minor version without forcing a major.
+
+---
+
+## Bot AI improvements (M6 P05)
+
+### Bot nav arc-aware JET reach is a 2-segment ray approximation
+
+- **What we did** — `jet_arc_clear()` in `src/bot.c` tests JET reach
+  feasibility by casting two straight-line rays through an iterative
+  midpoint peak — 200 px above the higher endpoint, walking up in
+  100-px steps to 800 px. If any peak height produces clear rays in
+  both directions, the JET reach is added. We don't simulate the
+  actual parabolic arc that a jetting bot would fly.
+- **Why** — A true parabolic feasibility check would need iterative
+  trajectory integration with mech mass + jet thrust + gravity at
+  the build step. That's complex code we'd run once per pair of nav
+  nodes (~50 k pair tests on Citadel). The two-segment approximation
+  has the same algorithmic shape as the floor-corridor check and
+  costs ~7 ray casts in the worst case. False positives (claimed
+  JET reach the bot can't physically fly) are caught by the
+  stuck-detector flipping the bot off after 4 s; false negatives
+  (rejected JET reach the bot COULD fly) are absorbed by the
+  `bfs_closest_reachable` fallback.
+- **Revisit when** —
+  - A specific map's bots are visibly stuck cycling between two
+    nodes connected by a JET edge that arc-clear claims is feasible.
+    Add a `BOT_NAV_DUMP=1` re-run and inspect the rejected edges.
+  - We add a "bot replay debugger" that records bot inputs and lets
+    us scrub through a stuck moment; that would let us validate
+    arc-clear vs. physical trajectory empirically.
+
+### 1v1 PASS rate is 26/32 cells (was 32/32 target)
+
+- **What we did** — Iterated the 8 cook_maps to make 1v1 bot play work:
+  pillar archway on Reactor, partition passage on Citadel, elevated
+  ramps everywhere (so floor walks pass beneath them), shorter cover
+  stubs on Crossfire. Added JET-assist in the bot motor (pulses
+  BTN_JET on upward path hops ≥ 24 px). After iteration: 26 of 32
+  (tier × map) cells produce > 0 fires in 60-s 1v1 bake (was 11/32
+  in the M6 P04 baseline — 2.4× improvement). All 8 maps pass at
+  Elite + Champion; 6 maps pass at every tier.
+- **Cells that still fail (6 of 32)**:
+    - **Foundry Recruit + Veteran** — Foundry's mid-map cover wall
+      (5 tiles tall, cols 49-50) blocks low-tier bots; only Elite +
+      Champion's wider awareness sees past it.
+    - **Concourse Recruit + Veteran** — Same pattern: 100×60 atrium
+      is wider than the 500/900 px low-tier awareness radii.
+    - **Aurora Elite + Champion** — Phase 2's engagement-node picker
+      consistently chooses an unreachable mountain peak; the bots
+      try to JET there and stall.
+    - **Crossfire Champion** — Phase 2 picks a high engagement node
+      (rail-cannon perch above sky bridge) that needs sustained JET
+      the chassis can't deliver in one fuel cycle.
+- **Why** — The remaining failures are tier-specific awareness
+  artifacts (Recruit/Veteran can't see across wide maps) and
+  engagement-picker overshoot (Elite/Champion's larger awareness
+  picks aggressive targets, sometimes inside geometry the bot can't
+  reach). They're orthogonal to nav topology; the maps themselves
+  are correctly traversable for the average tier.
+- **Revisit when** —
+  - User reports specific 1v1 stuck moments. Run with `BOT_TRACE=1`
+    on the failing map+tier to see what node the bot is targeting.
+  - We add a "reachability filter" to Phase 2's `nav_pick_position`
+    so the engagement node must be in the bot's connected component
+    via A* (currently the geometric/visibility filter only).
+  - Low-tier awareness scaling proves an issue in playtest; we may
+    want to bump Recruit awareness 500 → 700 if humans miss them
+    engaging.
+
+### Weapon engagement profile numbers are guesses, not data-derived
+
+- **What we did** — `g_weapon_profiles[WEAPON_COUNT]` in `src/bot.c`
+  ships with hand-picked optimal_range_px / effective_range_px /
+  ideal_strafe_px / prefers_high values. The plan §4.3 suggested
+  calibrating against `documents/04-combat.md` ranges and the iter7
+  matrix's measured fires-per-kill; we used the doc ranges as a
+  starting point but didn't iterate.
+- **Why** — The Phase 6 Mass Driver retune produced one matrix delta
+  (76 → 66 kills); a full per-weapon calibration would need 8
+  iterations of the matrix sweep, each running 320 cells × 60s ×
+  Champion = ~5h of bake compute. That's a separate doc/PR.
+- **Revisit when** —
+  - A matrix sweep shows any weapon's kill total drifting more than
+    ±15 % from the median.
+  - Real-player playtest reports a weapon "feels wrong at X range"
+    that disagrees with the bot's behavior at that range.
+  - We want the bot to teach players the weapon's optimal range
+    (an Elite bot strafing at 1100 px with Rail Cannon should LOOK
+    like a sniper, not a brawler).
+
+### Bot retreat doesn't deny ENGAGE; it damps the score
+
+- **What we did** — When `bot_aggression < 0.30`, score_engage gets
+  multiplied by 0.2× (and score_retreat gets boosted to 0.95 ×
+  (1 - agg/threshold)). The damping is per-tick — if engage at full
+  score was 0.6, the post-damp is 0.12; retreat at full is 0.95. So
+  retreat wins, usually. But a Heavy with full ammo + an LOS-clear
+  enemy at 200 px can still produce engage * 0.2 = ~0.18, which
+  beats retreat * (1 - 0.30/0.30) = 0 if HP hovers RIGHT at the
+  threshold.
+- **Why** — A hard "ENGAGE prohibited when hurt" rule made bots feel
+  passive in early Phase 4 prototypes. The 0.2× damp lets a bot in
+  desperation still trade shots — which is what a real player at
+  10 % HP with a primed weapon would do. The fallback is that
+  opportunistic-fire fires anyway if an enemy is LOS-clear within
+  awareness, so the bot is never silent when an enemy walks up to
+  it during retreat.
+- **Revisit when** —
+  - User reports "Recruit bots ignore the retreat threshold" — that's
+    the personality.aggression baseline (set to 0.30 for Recruit) +
+    the 0.2× damp, which when multiplied with the tier baseline
+    leaves the engage score competitive. Trade-off explicitly: the
+    Veteran/Elite/Champion bots retreat cleanly; Recruit was
+    designed not to retreat at all anyway (retreat_threshold = 0).
+  - We add a kill-feed-event-driven aggression boost — bot just got
+    a kill, briefly inflate aggression so the bot pushes the next
+    enemy. Currently aggression only DECAYS toward 1.0 over 2 s
+    after damage.
 
 ---
 

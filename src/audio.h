@@ -207,6 +207,12 @@ void audio_music_stop(void);
 struct Level;
 void audio_apply_for_level(const struct Level *L);
 
+/* Stop + unload match audio (music + ambient). Call this when leaving
+ * a match back to the title screen — without it the round's music
+ * keeps playing on the title screen because nothing else triggers
+ * an unload. SFX bus stays live so UI sounds still play. */
+void audio_apply_for_title(void);
+
 /* Ambient loops. Small samples that retrigger when their playback
  * ends (raylib's Sound has no built-in looping). */
 void audio_set_ambient_loop(const char *path);
