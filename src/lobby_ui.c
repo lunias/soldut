@@ -13,12 +13,14 @@
 #include "match.h"
 #include "mech.h"
 #include "net.h"
+#include "platform.h"
 #include "ui.h"
 #include "version.h"
 #include "weapons.h"
 
 #include "../third_party/raylib/src/raylib.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2569,4 +2571,34 @@ void match_overlay_draw(Game *g, int sw, int sh) {
                           (float)y + (h - tv.y) * 0.5f },
                (float)sz, (float)sz / 10.0f,
                (Color){220, 230, 240, 255});
+
+    /* M6 P07 — pre-round countdown overlay. Big number in the screen
+     * center counts 3 → 2 → 1 → "GO!" while inputs are locked. Lets
+     * the player survey the terrain from their spawn and gives the
+     * snapshot stream a beat to settle before combat starts. */
+    if (g->match.phase == MATCH_PHASE_COUNTDOWN) {
+        float remaining = g->match.countdown_remaining;
+        if (remaining < 0.0f) remaining = 0.0f;
+        char big[16];
+        if (remaining > 0.0f) {
+            int   n = (int)ceilf(remaining);
+            if (n < 1) n = 1;
+            if (n > 99) n = 99;     /* defensive cap; countdown is always 1..3 */
+            snprintf(big, sizeof big, "%d", n);
+        } else {
+            snprintf(big, sizeof big, "GO!");
+        }
+        Font fnt = ui_font_for(UI_FONT_DISPLAY);
+        if (fnt.texture.id == 0) fnt = GetFontDefault();
+        float font_px = 240.0f * sc;        /* huge — centered */
+        float spacing = font_px / 12.0f;
+        Vector2 sz_v = MeasureTextEx(fnt, big, font_px, spacing);
+        float bx = (float)sw * 0.5f - sz_v.x * 0.5f;
+        float by = (float)GetScreenHeight() * 0.5f - sz_v.y * 0.5f;
+        /* Soft drop shadow + bright fill — readable on any backdrop. */
+        DrawTextEx(fnt, big, (Vector2){ bx + 4.0f * sc, by + 4.0f * sc },
+                   font_px, spacing, (Color){0, 0, 0, 200});
+        DrawTextEx(fnt, big, (Vector2){ bx, by },
+                   font_px, spacing, (Color){240, 240, 200, 255});
+    }
 }

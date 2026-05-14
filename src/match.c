@@ -2,6 +2,7 @@
 
 #include "lobby.h"
 #include "log.h"
+#include "world.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -27,7 +28,7 @@ void match_init(MatchState *m, MatchModeId mode, int score_limit,
     m->score_limit      = (score_limit > 0) ? score_limit : 25;
     m->time_limit       = (time_limit > 0.0f) ? time_limit : 600.0f;
     m->time_remaining   = m->time_limit;
-    m->countdown_default= 5.0f;
+    m->countdown_default= 3.0f;     /* M6 P07 — 3 s pre-round survey window */
     m->summary_default  = 15.0f;
     m->friendly_fire    = friendly_fire;
     m->winner_team      = MATCH_TEAM_NONE;
@@ -47,6 +48,13 @@ void match_begin_countdown(MatchState *m, float countdown_seconds) {
           (double)m->countdown_remaining, match_mode_name(m->mode),
           m->score_limit, (double)m->time_limit);
     match_shot_log_phase("begin_countdown", m);
+}
+
+void match_lock_inputs(World *w) {
+    if (!w) return;
+    for (int i = 0; i < w->mech_count; ++i) {
+        w->mechs[i].latched_input.buttons = 0;
+    }
 }
 
 void match_begin_round(MatchState *m) {

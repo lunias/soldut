@@ -2048,6 +2048,10 @@ int shotmode_run(const char *script_path) {
                     game.world.mechs[game.world.local_mech_id].aim_world = aim;
                 }
                 if (game.net.role == NET_ROLE_CLIENT) {
+                    /* M6 P07 — input gate during pre-round countdown. */
+                    if (game.match.phase == MATCH_PHASE_COUNTDOWN) {
+                        match_lock_inputs(&game.world);
+                    }
                     simulate_step(&game.world, TICK_DT);
                     /* P03: same as main.c — pull remote mechs to the
                      * interpolated server position after physics. The
@@ -2064,6 +2068,10 @@ int shotmode_run(const char *script_path) {
                     net_client_send_input(&game.net, nin);
                     reconcile_tick_smoothing(&game.reconcile);
                 } else {
+                    /* M6 P07 — input gate during pre-round countdown. */
+                    if (game.match.phase == MATCH_PHASE_COUNTDOWN) {
+                        match_lock_inputs(&game.world);
+                    }
                     simulate_step(&game.world, TICK_DT);
                 }
                 break;

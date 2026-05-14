@@ -325,18 +325,28 @@ static void build_foundry(void) {
              t2w(54), floor_y,
              t2w(51), floor_y);
 
-    /* ---- Spawns — 8 total, FFA round-robin from lane_hint. Even
-     * indices left side, odd right, so successive spawns avoid telefrag. */
-    const int spawn_plat = plat_top - 40;
-    const int spawn_floor = floor_y - 40;
-    push_spawn(t2w(15),     spawn_plat,  1, 1, 0);
-    push_spawn(t2w(W - 15), spawn_plat,  2, 1, 1);
-    push_spawn(t2w(18),     spawn_plat,  1, 1, 2);
-    push_spawn(t2w(W - 18), spawn_plat,  2, 1, 3);
-    push_spawn(t2w(25),     spawn_floor, 1, 1, 4);
-    push_spawn(t2w(W - 25), spawn_floor, 2, 1, 5);
-    push_spawn(t2w(35),     spawn_floor, 1, 1, 6);
-    push_spawn(t2w(W - 35), spawn_floor, 2, 1, 7);
+    /* ---- Spawns — 16 total, spread along the full map width so the
+     * max-min-distance picker has room to separate FFA players.
+     * Hill polys live at tiles 49-54, so floor spawns stay below 46
+     * and above 55 to avoid embedding. */
+    const int spawn_plat  = plat_top  - 40;
+    const int spawn_floor = floor_y   - 40;
+    push_spawn(t2w(10),     spawn_plat,  1, 1, 0);
+    push_spawn(t2w(W - 10), spawn_plat,  2, 1, 1);
+    push_spawn(t2w(15),     spawn_plat,  1, 1, 2);
+    push_spawn(t2w(W - 15), spawn_plat,  2, 1, 3);
+    push_spawn(t2w(20),     spawn_plat,  1, 1, 4);
+    push_spawn(t2w(W - 20), spawn_plat,  2, 1, 5);
+    push_spawn(t2w(8),      spawn_floor, 1, 1, 6);
+    push_spawn(t2w(W - 8),  spawn_floor, 2, 1, 7);
+    push_spawn(t2w(20),     spawn_floor, 1, 1, 8);
+    push_spawn(t2w(W - 20), spawn_floor, 2, 1, 9);
+    push_spawn(t2w(28),     spawn_floor, 1, 1, 10);
+    push_spawn(t2w(W - 28), spawn_floor, 2, 1, 11);
+    push_spawn(t2w(36),     spawn_floor, 1, 1, 12);
+    push_spawn(t2w(W - 36), spawn_floor, 2, 1, 13);
+    push_spawn(t2w(45),     spawn_floor, 0, 1, 14);   /* center-left, FFA */
+    push_spawn(t2w(W - 45), spawn_floor, 0, 1, 15);   /* center-right, FFA */
 
     /* ---- Pickups (12 — per brief) ---- */
     const int floor_pick = floor_y - 16;
@@ -616,16 +626,28 @@ static void build_reactor(void) {
              t2w(87),         floor_y - 96,      /* bottom-right 96 px above floor */
              flank_right_end, floor_y - 96);     /* bottom-left 96 px above floor */
 
-    /* ---- Spawns — TDM-friendly (red on left, blue on right). ---- */
+    /* ---- Spawns — 16 total. TDM-friendly (red on left, blue on
+     * right) plus FFA-friendly central / overlook positions for the
+     * max-min picker to spread out the lobby. ---- */
     const int spawn_floor = floor_y - 40;
+    const int spawn_flank = t2w(H - 12) - 40;
+    const int spawn_over  = t2w(H - 22) - 40;
     push_spawn(t2w(6),       spawn_floor, 1, 1, 0);
     push_spawn(t2w(W - 6),   spawn_floor, 2, 1, 1);
     push_spawn(t2w(10),      spawn_floor, 1, 1, 2);
     push_spawn(t2w(W - 10),  spawn_floor, 2, 1, 3);
-    push_spawn(t2w(20),      t2w(H - 12) - 40, 1, 1, 4);     /* flank platform */
-    push_spawn(t2w(W - 20),  t2w(H - 12) - 40, 2, 1, 5);
-    push_spawn(t2w(28),      t2w(H - 22) - 40, 1, 1, 6);     /* overlook */
-    push_spawn(t2w(W - 28),  t2w(H - 22) - 40, 2, 1, 7);
+    push_spawn(t2w(20),      spawn_flank, 1, 1, 4);     /* flank platform */
+    push_spawn(t2w(W - 20),  spawn_flank, 2, 1, 5);
+    push_spawn(t2w(28),      spawn_over,  1, 1, 6);     /* overlook */
+    push_spawn(t2w(W - 28),  spawn_over,  2, 1, 7);
+    push_spawn(t2w(15),      spawn_floor, 1, 1, 8);
+    push_spawn(t2w(W - 15),  spawn_floor, 2, 1, 9);
+    push_spawn(t2w(40),      spawn_floor, 0, 1, 10);    /* mid floor, FFA */
+    push_spawn(t2w(W - 40),  spawn_floor, 0, 1, 11);
+    push_spawn(t2w(48),      spawn_floor, 0, 1, 12);    /* center, FFA */
+    push_spawn(t2w(W - 48),  spawn_floor, 0, 1, 13);
+    push_spawn(t2w(34),      spawn_flank, 0, 1, 14);    /* flank-inner */
+    push_spawn(t2w(W - 34),  spawn_flank, 0, 1, 15);
 
     /* ---- Pickups (16 — per brief) ---- */
     const int floor_pick = floor_y - 16;

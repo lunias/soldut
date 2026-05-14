@@ -1492,12 +1492,24 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
         net_poll(&game.net, &game, dt);
         host_match_flow_step(&game, (float)dt);
 
-        if (game.match.phase == MATCH_PHASE_ACTIVE) {
+        /* M6 P07 — sim during COUNTDOWN as well as ACTIVE so mechs
+         * settle visibly at their spawn instead of snapping back from
+         * client-side prediction. Bot AI is skipped during countdown
+         * (bots shouldn't think yet) and `match_lock_inputs` zeroes
+         * every mech's button state so neither players nor bots can
+         * move; aim is preserved so the rifle still points. */
+        if (game.match.phase == MATCH_PHASE_ACTIVE ||
+            game.match.phase == MATCH_PHASE_COUNTDOWN)
+        {
             sim_accum += dt;
             while (sim_accum >= TICK_DT) {
-                /* Bot AI runs first so each bot's latched_input is
-                 * ready when simulate_step consumes it. */
-                bot_step(&game.bots, &game.world, &game, (float)TICK_DT);
+                if (game.match.phase == MATCH_PHASE_COUNTDOWN) {
+                    match_lock_inputs(&game.world);
+                } else {
+                    /* Bot AI runs first so each bot's latched_input is
+                     * ready when simulate_step consumes it. */
+                    bot_step(&game.bots, &game.world, &game, (float)TICK_DT);
+                }
                 simulate_step(&game.world, (float)TICK_DT);
                 sim_accum -= TICK_DT;
             }
@@ -2821,6 +2833,11 @@ int main(int argc, char **argv) {
                     if (game.world.local_mech_id >= 0) {
                         game.world.mechs[game.world.local_mech_id].latched_input = in;
                     }
+                    /* M6 P07 — gate input during pre-round countdown
+                     * (client side mirrors what the server is doing). */
+                    if (game.match.phase == MATCH_PHASE_COUNTDOWN) {
+                        match_lock_inputs(&game.world);
+                    }
                     profile_zone_begin(PROF_SIM_STEPS);
                     simulate_step(&game.world, (float)TICK_DT);
                     profile_zone_end(PROF_SIM_STEPS);
@@ -2869,12 +2886,22 @@ int main(int argc, char **argv) {
                     }
                     /* Host-with-UI / offline-solo: bot AI runs server-
                      * side too. Skipped on pure clients (the host's
-                     * latched_input wins on the wire). */
-                    if (game.world.authoritative) {
+                     * latched_input wins on the wire). Also skipped
+                     * during pre-round countdown — bots stay still
+                     * along with the players. */
+                    if (game.world.authoritative &&
+                        game.match.phase != MATCH_PHASE_COUNTDOWN)
+                    {
                         profile_zone_begin(PROF_BOT_STEPS);
                         bot_step(&game.bots, &game.world, &game,
                                  (float)TICK_DT);
                         profile_zone_end(PROF_BOT_STEPS);
+                    }
+                    /* M6 P07 — input gate during countdown. Aim is
+                     * preserved (rifle still points where the cursor
+                     * is) but movement / fire / jet are inert. */
+                    if (game.match.phase == MATCH_PHASE_COUNTDOWN) {
+                        match_lock_inputs(&game.world);
                     }
                     profile_zone_begin(PROF_SIM_STEPS);
                     simulate_step(&game.world, (float)TICK_DT);
