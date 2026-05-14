@@ -75,14 +75,20 @@ static const Weapon g_weapons[WEAPON_COUNT] = {
         .name = "Mass Driver",
         .klass = WEAPON_CLASS_PRIMARY,
         .fire = WFIRE_PROJECTILE,
-        .damage = 220.0f, .fire_rate_sec = 1.10f, .reload_sec = 3.00f,
+        /* M6 P05 Phase 6 — balance pass. Iter7 matrix had MD at 76 kills,
+         * 9 more than the next-best Rail Cannon (67). The AOE-on-low-fire-rate
+         * combo dominated the bot's "group fight at a pickup" pattern.
+         * Option C from the plan §4.6: 50/50 split between fire-rate
+         * slowdown and AOE shrink. fire_rate_sec 1.10 → 1.25 (-12 %),
+         * aoe_radius 160 → 140 (-13 %). */
+        .damage = 220.0f, .fire_rate_sec = 1.25f, .reload_sec = 3.00f,
         .mag_size = 1, .range_px = 4096.0f,
         .recoil_impulse = 5.5f, .bink = 0.10f, .self_bink = 0.04f,
         .muzzle_offset = 28.0f,
         .projectile_kind = PROJ_ROCKET,
         .projectile_speed_pxs = 850.0f, .projectile_life_sec = 5.0f,
         .projectile_drag = 0.0f, .projectile_grav_scale = 0.0f,
-        .aoe_radius = 160.0f, .aoe_damage = 130.0f, .aoe_impulse = 70.0f,
+        .aoe_radius = 140.0f, .aoe_damage = 130.0f, .aoe_impulse = 70.0f,
     },
     [WEAPON_PLASMA_CANNON] = {
         .name = "Plasma Cannon",

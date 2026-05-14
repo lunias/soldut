@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade test-riot-cannon-sfx test-mech-ik test-pose-compute host-overlay-preview lobby-overlay-preview bot-tier-preview cook-maps bake bake-all shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade test-riot-cannon-sfx test-mech-ik test-pose-compute test-bot-nav test-bot-playtest host-overlay-preview lobby-overlay-preview bot-tier-preview cook-maps bake bake-all shot \
         debug gdb gdb-host gdb-client valgrind editor \
         assets-palettes assets-process \
         audio-inventory audio-normalize audio-credits test-audio-smoke
@@ -177,6 +177,23 @@ $(BUILD_DIR)/pose_compute_test: tests/pose_compute_test.c $(HEADLESS_OBJ) $(RAYL
 
 test-pose-compute: $(BUILD_DIR)/pose_compute_test
 	./$(BUILD_DIR)/pose_compute_test
+
+# M6 P05 Phase 1 — per-node visibility precompute (asserts symmetry +
+# nonzero edge counts on every shipped map). Drives Phase 2's cover-
+# aware engagement positioning.
+$(BUILD_DIR)/bot_nav_test: tests/bot_nav_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/bot_nav_test.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+test-bot-nav: $(BUILD_DIR)/bot_nav_test
+	./$(BUILD_DIR)/bot_nav_test
+
+# M6 P05 — networked-bot smoke test. Hosts ./soldut with 4 elite bots,
+# connects one observing client, asserts on log milestones across the
+# host + client (bot nav build, CTF role assignment, snapshot sync,
+# no crashes). Functional end-to-end check for the future-debug case
+# where the user is running playtests with bots on the wire.
+test-bot-playtest: soldut
+	bash tests/net/run_bot_playtest.sh
 
 # wan-fixes-8 — user-prefs persistence (soldut-prefs.cfg). Round-trips
 # a UserPrefs, exercises hand-edited cfg parsing + comment stripping +

@@ -1,3 +1,10 @@
+/* _POSIX_C_SOURCE for clock_gettime — used to instrument the cold
+ * visibility build so the 30 ms / map budget breach (M6 P05 Phase 1)
+ * shows up in the bot_nav log line instead of silently. */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "bot.h"
 
 #include "arena.h"
@@ -16,7 +23,9 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /*
  * Bot AI — Quake III-style layered classical AI on 2D Verlet mechs.
@@ -41,13 +50,38 @@
 #define BOT_STRATEGY_INTERVAL    6      /* every 6 ticks = ~10 Hz */
 #define BOT_NAV_MAX_NODES        512
 #define BOT_NAV_MAX_REACH        4096   /* ~8 per node */
+/* M6 P05 Phase 1 — per-node visibility precompute. Stored as a
+ * full N×N bitset; we tried kNN-with-mask first (plan §4.1) but on
+ * cover-heavy maps with engagement distance > kNN's effective radius
+ * (~500 px on dense graphs) the data was sparse and Phase 2's "find
+ * a node FROM WHICH I can see X" query returned -1 too often. A flat
+ * bitset costs 32 KB at the 512-node cap (BOT_NAV_MAX_NODES² / 8) and
+ * gives O(1) symmetric lookups for every pair within VIS_MAX_PX.
+ *
+ * The 2400 px prune covers all in-map engagement distances on the
+ * shipped maps (Citadel-wide = 5120 px; bots only need to see ~half
+ * the map to find an engagement path). On 200-node maps the build
+ * does ~6 k ray casts ≈ 25 ms — within the plan's 30 ms budget. */
+#define BOT_VIS_MAX_PX           2400.0f
+#define BOT_VIS_BITSET_BYTES     ((BOT_NAV_MAX_NODES * BOT_NAV_MAX_NODES) / 8)
 #define BOT_NAV_FLOOR_SAMPLE_T   3      /* one column every 3 tiles (96 px) — denser than the
                                          * documented 128 px so big maps still have a useful
                                          * node count without blowing past BOT_NAV_MAX_NODES */
-#define BOT_NAV_REACH_MAX_PX     280.0f /* candidate-pair pruning radius */
+#define BOT_NAV_REACH_MAX_PX     280.0f /* walk/jump candidate-pair pruning radius */
+#define BOT_NAV_JET_MAX_PX       700.0f /* JET reach prune — wider so the nav graph
+                                         * stays connected across cover-heavy maps
+                                         * (Reactor pillar, Concourse columns).
+                                         * M6 P05 — pre-P05 was stuck on 280 with
+                                         * the rest, which left 480 px platform-to-
+                                         * pillar gaps unbridged. 700 px covers
+                                         * Reactor's flank → pillar-top hop (576 px). */
 #define BOT_NAV_JUMP_DH_MAX_PX   40.0f  /* max vertical rise a JUMP reach can cover */
 #define BOT_NAV_JUMP_DX_MAX_PX   160.0f
-#define BOT_NAV_GRAPPLE_MAX_PX   300.0f
+#define BOT_NAV_GRAPPLE_MAX_PX   400.0f /* bumped 300→400 to chain pillar-spanning grapples */
+#define BOT_NAV_JET_DH_MAX_PX    360.0f /* max JET rise — covers Reactor bowl→pillar-top
+                                         * (~320 px) + Concourse atrium→catwalk hops.
+                                         * Bot has 1.2 s fuel ≈ 1500 px theoretical max
+                                         * rise; 360 is generous but bounded. */
 #define BOT_PATH_REPLAN_PX       96.0f
 #define BOT_STUCK_TICKS          (BOT_TICK_HZ * 1)
 
@@ -74,6 +108,7 @@ static const BotPersonality g_bot_tier_table[BOT_TIER_COUNT] = {
         .flag_priority         = 0.10f,
         .grapple_priority      = 0.00f,
         .aggression            = 0.30f,
+        .retreat_threshold     = 0.0f,       /* never retreats — Recruit is the "bad" tier */
         .knows_full_map        = 0,
         .uses_powerups         = 0,
     },
@@ -88,6 +123,7 @@ static const BotPersonality g_bot_tier_table[BOT_TIER_COUNT] = {
         .flag_priority         = 0.50f,
         .grapple_priority      = 0.15f,
         .aggression            = 0.55f,
+        .retreat_threshold     = 0.25f,
         .knows_full_map        = 1,
         .uses_powerups         = 0,
     },
@@ -102,6 +138,7 @@ static const BotPersonality g_bot_tier_table[BOT_TIER_COUNT] = {
         .flag_priority         = 0.75f,
         .grapple_priority      = 0.45f,
         .aggression            = 0.75f,
+        .retreat_threshold     = 0.30f,
         .knows_full_map        = 1,
         .uses_powerups         = 1,
     },
@@ -116,6 +153,7 @@ static const BotPersonality g_bot_tier_table[BOT_TIER_COUNT] = {
         .flag_priority         = 1.00f,
         .grapple_priority      = 0.85f,
         .aggression            = 0.95f,
+        .retreat_threshold     = 0.30f,
         .knows_full_map        = 1,
         .uses_powerups         = 1,
     },
@@ -160,6 +198,83 @@ const char *bot_goal_name(BotGoal g) {
         default:                      return "?";
     }
 }
+
+const char *bot_team_role_name(BotTeamRole r) {
+    switch (r) {
+        case BOT_ROLE_ATTACKER: return "attacker";
+        case BOT_ROLE_DEFENDER: return "defender";
+        case BOT_ROLE_FLOATER:  return "floater";
+        case BOT_ROLE_CARRIER:  return "carrier";
+        default:                 return "none";
+    }
+}
+
+/* M6 P05 Phase 5 — per-role score multipliers, indexed [role][goal].
+ * The strategy scorer multiplies each goal's raw score by the entry
+ * before picking the winner. Carrier's row reflects "I'm holding the
+ * flag — run home, don't fight." */
+static const float g_role_goal_mult[BOT_ROLE_COUNT][BOT_GOAL_COUNT] = {
+    [BOT_ROLE_NONE] = {
+        [BOT_GOAL_IDLE]          = 1.0f,
+        [BOT_GOAL_ENGAGE]        = 1.0f,
+        [BOT_GOAL_REPOSITION]    = 1.0f,
+        [BOT_GOAL_PURSUE_PICKUP] = 1.0f,
+        [BOT_GOAL_GRAB_FLAG]     = 1.0f,
+        [BOT_GOAL_RETURN_FLAG]   = 1.0f,
+        [BOT_GOAL_DEFEND_FLAG]   = 1.0f,
+        [BOT_GOAL_CHASE_CARRIER] = 1.0f,
+        [BOT_GOAL_CAPTURE]       = 1.0f,
+        [BOT_GOAL_RETREAT]       = 1.0f,
+    },
+    [BOT_ROLE_ATTACKER] = {
+        [BOT_GOAL_IDLE]          = 1.0f,
+        [BOT_GOAL_ENGAGE]        = 1.0f,
+        [BOT_GOAL_REPOSITION]    = 1.0f,
+        [BOT_GOAL_PURSUE_PICKUP] = 1.0f,
+        [BOT_GOAL_GRAB_FLAG]     = 1.5f,
+        [BOT_GOAL_RETURN_FLAG]   = 1.0f,
+        [BOT_GOAL_DEFEND_FLAG]   = 0.3f,
+        [BOT_GOAL_CHASE_CARRIER] = 1.0f,
+        [BOT_GOAL_CAPTURE]       = 1.5f,
+        [BOT_GOAL_RETREAT]       = 1.0f,
+    },
+    [BOT_ROLE_DEFENDER] = {
+        [BOT_GOAL_IDLE]          = 1.0f,
+        [BOT_GOAL_ENGAGE]        = 1.0f,
+        [BOT_GOAL_REPOSITION]    = 0.7f,
+        [BOT_GOAL_PURSUE_PICKUP] = 0.8f,
+        [BOT_GOAL_GRAB_FLAG]     = 0.3f,
+        [BOT_GOAL_RETURN_FLAG]   = 1.4f,
+        [BOT_GOAL_DEFEND_FLAG]   = 1.6f,
+        [BOT_GOAL_CHASE_CARRIER] = 1.3f,
+        [BOT_GOAL_CAPTURE]       = 0.3f,
+        [BOT_GOAL_RETREAT]       = 1.0f,
+    },
+    [BOT_ROLE_FLOATER] = {
+        [BOT_GOAL_IDLE]          = 1.0f,
+        [BOT_GOAL_ENGAGE]        = 1.2f,
+        [BOT_GOAL_REPOSITION]    = 1.0f,
+        [BOT_GOAL_PURSUE_PICKUP] = 1.1f,
+        [BOT_GOAL_GRAB_FLAG]     = 0.7f,
+        [BOT_GOAL_RETURN_FLAG]   = 1.2f,
+        [BOT_GOAL_DEFEND_FLAG]   = 0.7f,
+        [BOT_GOAL_CHASE_CARRIER] = 1.0f,
+        [BOT_GOAL_CAPTURE]       = 0.7f,
+        [BOT_GOAL_RETREAT]       = 1.0f,
+    },
+    [BOT_ROLE_CARRIER] = {
+        [BOT_GOAL_IDLE]          = 1.0f,
+        [BOT_GOAL_ENGAGE]        = 0.3f,
+        [BOT_GOAL_REPOSITION]    = 0.6f,
+        [BOT_GOAL_PURSUE_PICKUP] = 0.7f,
+        [BOT_GOAL_GRAB_FLAG]     = 0.0f,
+        [BOT_GOAL_RETURN_FLAG]   = 0.0f,
+        [BOT_GOAL_DEFEND_FLAG]   = 0.0f,
+        [BOT_GOAL_CHASE_CARRIER] = 0.0f,
+        [BOT_GOAL_CAPTURE]       = 2.0f,
+        [BOT_GOAL_RETREAT]       = 1.2f,
+    },
+};
 
 /* Loadout variety. Mix a handful of chassis + primaries by index so a
  * bot fight looks varied. */
@@ -251,6 +366,12 @@ struct BotNav {
     float       level_w_px;
     float       level_h_px;
     int         tile_size;
+    /* M6 P05 Phase 1 — per-node visibility, full N×N bitset indexed as
+     * `vis_bits[(src * BOT_NAV_MAX_NODES + target) >> 3]`. Symmetric by
+     * construction (LOS rays are direction-agnostic). 32 KB at the
+     * 512-node cap, regardless of actual node count. */
+    uint8_t     vis_bits[BOT_VIS_BITSET_BYTES];
+    int         vis_edge_count;       /* upper-triangle edge count; logged + diagnostic */
 };
 
 /* Per-cell spatial-hash bucket for nearest-node queries. The grid is a
@@ -527,6 +648,72 @@ static bool body_corridor_clear(const Level *L, Vec2 from, Vec2 to) {
     return true;
 }
 
+/* Floor-walk corridor — ONLY checks tile-wall obstacles, ignores
+ * slope polygons. Used for floor-to-floor WALK between same-y nodes
+ * where the line might pass through a slope poly's interior (a
+ * walkable ramp the bot climbs over). A tile wall (e.g., Concourse
+ * cover column) is a hard block; a slope poly is not.
+ *
+ * Samples a tile every 16 px along the line, checks TILE_F_SOLID at
+ * body height (-24 px from foot). If any tile is solid wall, the
+ * path is blocked. */
+static bool floor_walk_clear_tiles_only(const Level *L, Vec2 from, Vec2 to) {
+    int steps = (int)(fabsf(to.x - from.x) / 16.0f);
+    if (steps < 1) steps = 1;
+    float ts = (float)L->tile_size;
+    for (int i = 0; i <= steps; ++i) {
+        float u = (float)i / (float)steps;
+        float x = from.x + u * (to.x - from.x);
+        float y = from.y + u * (to.y - from.y);
+        /* Sample at three heights — head (-40), pelvis (-24), foot (-4).
+         * Each must NOT be in a solid tile. (Foot at -4 is just above
+         * the surface the nodes sit on; -8 would graze.) */
+        float ys[3] = { y - 40.0f, y - 24.0f, y - 4.0f };
+        for (int k = 0; k < 3; ++k) {
+            int tx = (int)(x / ts);
+            int ty = (int)(ys[k] / ts);
+            if (tx >= 0 && tx < L->width && ty >= 0 && ty < L->height) {
+                if (level_flags_at(L, tx, ty) & TILE_F_SOLID) return false;
+            }
+        }
+    }
+    return true;
+}
+
+/* JET reach feasibility — model the parabolic trajectory as two line
+ * segments via a high midpoint peak. The straight-line test that
+ * `body_corridor_clear` does is correct for WALK / JUMP / FALL where
+ * the bot stays close to the line, but a JET can arc UP-AND-OVER an
+ * intervening obstacle (pillar, ceiling beam) and a straight-line
+ * ray would false-reject every such hop.
+ *
+ * Peak height: starts at higher_y - 200 px and walks up in 100-px
+ * steps to higher_y - 800 px. If any step's two rays are clear, the
+ * arc is feasible. This iterative approach handles intervening
+ * obstacles of unpredictable shape — pillars with overhangs (Reactor),
+ * ceiling beams (Concourse), etc. — without baking specific
+ * geometric assumptions into the test. 800 px peak is well within
+ * fuel budget (1.2 s × 2200 px/s² thrust ≈ 1500 px theoretical max).
+ *
+ * Endpoints are offset by -8 px (head clearance) — same convention as
+ * body_corridor_clear so we don't graze the surfaces the nodes sit on. */
+static bool jet_arc_clear(const Level *L, Vec2 from, Vec2 to) {
+    float t;
+    float peak_x = (from.x + to.x) * 0.5f;
+    float higher_y = (from.y < to.y) ? from.y : to.y;
+    Vec2 a = (Vec2){ from.x, from.y - 8.0f };
+    Vec2 b = (Vec2){ to.x,   to.y   - 8.0f };
+    for (float dh = 200.0f; dh <= 800.0f; dh += 100.0f) {
+        float peak_y = higher_y - dh;
+        if (peak_y < 8.0f) peak_y = 8.0f;
+        Vec2 peak = (Vec2){ peak_x, peak_y };
+        if (level_ray_hits(L, a, peak, &t)) continue;
+        if (level_ray_hits(L, peak, b, &t)) continue;
+        return true;
+    }
+    return false;
+}
+
 /* Returns BotReachKind + cost (ms) when a reachability from `a` to `b`
  * exists for our mech, or -1 (no reach). */
 static int classify_reach(const Level *L, const BotNavNode *a, const BotNavNode *b,
@@ -538,9 +725,38 @@ static int classify_reach(const Level *L, const BotNavNode *a, const BotNavNode 
     float dx = b->pos.x - a->pos.x;
     float dy = b->pos.y - a->pos.y;
     float dist = sqrtf(dx*dx + dy*dy);
+    /* Three-tier prune:
+     *   - close pairs (<= 280 px): all reach kinds (WALK/JUMP/FALL/JET/GRAPPLE)
+     *   - jet/grapple pairs (<= 560 px): JET (if vertical clear) + GRAPPLE (if LOS)
+     *   - beyond: no reach
+     * The JET prune is wider than M6 P04's flat 280 because cover-heavy
+     * maps (Reactor pillar, Concourse columns) leave 400-500 px air
+     * gaps between platforms that the bot can physically jet across. */
+    if (dist > BOT_NAV_JET_MAX_PX) return -1;
     if (dist > BOT_NAV_REACH_MAX_PX) {
-        /* Only GRAPPLE can reach beyond the standard prune, and only up
-         * to GRAPPLE_MAX_REST_LEN. */
+        /* Mid-range — JET (parabolic arc) or long FALL (straight down)
+         * or GRAPPLE (straight LOS). Same 4.0× JET cost multiplier as
+         * close-range JET (above); see that block's comment. */
+        if (dy < -BOT_NAV_JUMP_DH_MAX_PX && dy >= -BOT_NAV_JET_DH_MAX_PX) {
+            if (jet_arc_clear(L, a->pos, b->pos)) {
+                float rise = -dy;
+                float fuel_frac = rise / 200.0f;
+                if (fuel_frac > 1.0f) fuel_frac = 1.0f;
+                *out_fuel_q8 = (uint8_t)(fuel_frac * 255.0f);
+                uint32_t cost = (uint32_t)(dist * 4.0f * 1000.0f / BOT_RUN_SPEED_PXS);
+                if (cost > 65000u) cost = 65000u;
+                *out_cost_ms = (uint16_t)cost;
+                return BOT_REACH_JET;
+            }
+        }
+        /* Long FALL — corridor must be clear; covers pillar-top →
+         * bowl-floor descents (Reactor: 320 px) that the close-range
+         * branch's prune locks out. */
+        if (dy > 32.0f && body_corridor_clear(L, a->pos, b->pos)) {
+            *out_cost_ms = (uint16_t)(fabsf(dx) * 0.9f * 1000.0f / BOT_RUN_SPEED_PXS);
+            if (*out_cost_ms < 1) *out_cost_ms = 1;
+            return BOT_REACH_FALL;
+        }
         if (dist <= BOT_NAV_GRAPPLE_MAX_PX) {
             float t;
             if (!level_ray_hits(L, a->pos, b->pos, &t)) {
@@ -551,13 +767,42 @@ static int classify_reach(const Level *L, const BotNavNode *a, const BotNavNode 
         return -1;
     }
 
-    /* WALK: same Y (within ±8 px), body corridor clear, both on floor. */
-    if ((a->flags & BOT_NODE_F_ON_FLOOR) && (b->flags & BOT_NODE_F_ON_FLOOR) &&
-        fabsf(dy) <= 8.0f)
-    {
-        if (body_corridor_clear(L, a->pos, b->pos)) {
-            *out_cost_ms = (uint16_t)(dist * 1000.0f / BOT_RUN_SPEED_PXS);
-            return BOT_REACH_WALK;
+    /* WALK: both on a floor surface, and either roughly co-planar
+     * (|dy| <= 16 px — flat ground) OR climbing a slope no steeper
+     * than ~50° (|dy| <= 1.2 × |dx|, capped at 120 px absolute). The
+     * slope clause is the M6 P05 fix — pre-P05 a 30° bowl floor
+     * (Reactor, Citadel) produced node-pairs with |dy| ≈ 110 px
+     * between 96-px-spaced columns; the 8-px WALK threshold rejected
+     * every one, leaving the nav graph disconnected across slopes.
+     *
+     * Corridor check rules:
+     *   - Flat WALK always runs body_corridor_clear. Adjacent flat
+     *     floor-nodes can have wall stubs between them (Concourse
+     *     cover columns 2 tiles wide fall between 96-px sample
+     *     columns); skipping the corridor check would false-accept
+     *     reach-through-wall edges.
+     *   - Adjacent SLOPE WALK skips the corridor check because the
+     *     ray at -8/-40 above the line clips through the slope poly
+     *     itself when descending — both endpoints lie on the slope's
+     *     surface, so the path is walkable by construction. */
+    if ((a->flags & BOT_NODE_F_ON_FLOOR) && (b->flags & BOT_NODE_F_ON_FLOOR)) {
+        float dy_abs = fabsf(dy);
+        float dx_abs = fabsf(dx);
+        bool same_level = dy_abs <= 16.0f;
+        /* M6 P05 — slope WALK ratio 1.2 → 1.8 (~61°). Matches the M5
+         * P02 "mech walks slopes up to 60°" spec. Pre-P05 we capped at
+         * ~50° which rejected the 60° slide-slopes that Catwalk
+         * (post-fix) and Citadel use deliberately. The cap on absolute
+         * |dy| stays at 200 px so we don't accept "long vertical
+         * scramble" edges across structural gaps. */
+        bool slope      = dy_abs > 16.0f && dy_abs <= dx_abs * 1.8f && dy_abs <= 200.0f;
+        if (same_level || slope) {
+            float adjacent_px = (float)(BOT_NAV_FLOOR_SAMPLE_T * L->tile_size) * 1.5f;
+            bool can_skip_corridor = slope && (dx_abs <= adjacent_px);
+            if (can_skip_corridor || body_corridor_clear(L, a->pos, b->pos)) {
+                *out_cost_ms = (uint16_t)(dist * 1000.0f / BOT_RUN_SPEED_PXS);
+                return BOT_REACH_WALK;
+            }
         }
     }
 
@@ -579,14 +824,24 @@ static int classify_reach(const Level *L, const BotNavNode *a, const BotNavNode 
         }
     }
 
-    /* JET: target above. Fuel ∝ rise — required_fuel = clamp((rise/200), 0..1). */
-    if (dy < -BOT_NAV_JUMP_DH_MAX_PX && dy >= -200.0f) {
-        if (body_corridor_clear(L, a->pos, b->pos)) {
+    /* JET: target above. Fuel ∝ rise — required_fuel = clamp((rise/200), 0..1).
+     * Use the arc-aware feasibility test so the bot can jet UP and
+     * OVER intervening cover (Reactor pillar etc.).
+     *
+     * Cost multiplier 4.0× — JET is physically harder than WALK
+     * (fuel-cycling, lockout hysteresis) so A* should prefer floor
+     * walks when they exist. Pre-P05 we used 1.4× which let A* pick
+     * elaborate JET-flank-traversal paths over straight-line floor
+     * walks on Reactor; the bot would then get stuck partway up. */
+    if (dy < -BOT_NAV_JUMP_DH_MAX_PX && dy >= -BOT_NAV_JET_DH_MAX_PX) {
+        if (jet_arc_clear(L, a->pos, b->pos)) {
             float rise = -dy;
             float fuel_frac = rise / 200.0f;
             if (fuel_frac > 1.0f) fuel_frac = 1.0f;
             *out_fuel_q8 = (uint8_t)(fuel_frac * 255.0f);
-            *out_cost_ms = (uint16_t)(dist * 1.4f * 1000.0f / BOT_RUN_SPEED_PXS);
+            uint32_t cost = (uint32_t)(dist * 4.0f * 1000.0f / BOT_RUN_SPEED_PXS);
+            if (cost > 65000u) cost = 65000u;
+            *out_cost_ms = (uint16_t)cost;
             return BOT_REACH_JET;
         }
     }
@@ -617,7 +872,7 @@ static void build_reachabilities(struct BotNav *nv, const Level *L) {
             const BotNavNode *b = &nv->nodes[j];
             /* Cheap prune by Manhattan distance. */
             float manh = fabsf(b->pos.x - a->pos.x) + fabsf(b->pos.y - a->pos.y);
-            if (manh > BOT_NAV_GRAPPLE_MAX_PX * 1.5f) continue;
+            if (manh > BOT_NAV_JET_MAX_PX * 1.4f) continue;
 
             uint16_t cost_ms = 0;
             uint8_t  fuel_q8 = 0;
@@ -637,6 +892,181 @@ static void build_reachabilities(struct BotNav *nv, const Level *L) {
             a->reach_count++;
         }
     }
+}
+
+/* ---- Per-node visibility precompute (M6 P05 Phase 1) ---------------- */
+
+/* Bit index for the (src, target) pair in BotNav.vis_bits.
+ * Symmetric: vis_bit_idx(a, b) and vis_bit_idx(b, a) are different
+ * indexes; the build sets both. */
+static inline int vis_bit_idx(int src, int target) {
+    return src * BOT_NAV_MAX_NODES + target;
+}
+
+static inline void vis_set(struct BotNav *nv, int src, int target) {
+    int b = vis_bit_idx(src, target);
+    nv->vis_bits[b >> 3] |= (uint8_t)(1u << (b & 7));
+}
+
+static inline bool vis_get(const struct BotNav *nv, int src, int target) {
+    int b = vis_bit_idx(src, target);
+    return (nv->vis_bits[b >> 3] >> (b & 7)) & 1u;
+}
+
+/* True if `target_id` is visible from `src` per the precomputed bitset.
+ * O(1) — one branch + a byte load. Symmetric. */
+static bool nav_node_sees(const struct BotNav *nv, int src, int target_id) {
+    if (!nv) return false;
+    if (src < 0 || src >= nv->node_count) return false;
+    if (target_id < 0 || target_id >= nv->node_count) return false;
+    if (src == target_id) return true;
+    return vis_get(nv, src, target_id);
+}
+
+/* Iterate all visible nodes from `src`. Used by Phase 5's defender
+ * placement — find an angle that watches multiple incoming nodes. */
+typedef void (*BotVisCb)(int target_id, void *user);
+static void nav_visit_visible(const struct BotNav *nv, int src,
+                              BotVisCb cb, void *user)
+{
+    if (!nv || !cb) return;
+    if (src < 0 || src >= nv->node_count) return;
+    for (int j = 0; j < nv->node_count; ++j) {
+        if (j == src) continue;
+        if (vis_get(nv, src, j)) cb(j, user);
+    }
+}
+
+static void build_visibility(struct BotNav *nv, const Level *L) {
+    int N = nv->node_count;
+    nv->vis_edge_count = 0;
+    memset(nv->vis_bits, 0, sizeof nv->vis_bits);
+
+    float max_d2 = BOT_VIS_MAX_PX * BOT_VIS_MAX_PX;
+    for (int i = 0; i < N; ++i) {
+        Vec2 a = nv->nodes[i].pos;
+        for (int j = i + 1; j < N; ++j) {
+            Vec2 b = nv->nodes[j].pos;
+            float dx = b.x - a.x, dy = b.y - a.y;
+            float d2 = dx*dx + dy*dy;
+            if (d2 > max_d2) continue;
+            float ray_t;
+            if (level_ray_hits(L, a, b, &ray_t)) continue;
+            vis_set(nv, i, j);
+            vis_set(nv, j, i);
+            nv->vis_edge_count++;
+        }
+    }
+}
+
+/* ---- Position picker (M6 P05 Phase 2) ------------------------------- */
+
+typedef enum {
+    BOT_POS_ENGAGE = 0,   /* node from which `target_node` IS visible */
+    BOT_POS_COVER  = 1,   /* node from which `target_node` is NOT visible */
+    BOT_POS_FLANK  = 2,   /* engage node ≥60° off the line src→target */
+} BotPosQuery;
+
+/* Flat scan over the nav graph for the best node matching the query.
+ *
+ *   - ENGAGE: visible from candidate → target_node, score by
+ *     proximity to the weapon's preferred stand-off range.
+ *   - COVER:  NOT visible from candidate → target_node, score by
+ *     closeness (we want to BREAK LOS quickly, not run to the moon).
+ *   - FLANK:  visible to target AND ≥ 60° off the source's bearing
+ *     toward target (so the shot comes from an unexpected angle).
+ *
+ * `max_walk_dist_px` is an EUCLIDEAN limit — the actual path is
+ * planned via A* downstream. Setting it to 0 or negative disables the
+ * limit (use the whole map). Cost: O(N) per call (where N is node
+ * count, ~200 worst case) with an extra 32-slot scan inside
+ * `nav_node_sees`; ~6 k ops per query. Caller caches the result so
+ * the per-tick cost is amortised below 100 ns/bot.
+ *
+ * Earlier implementation used a BFS-bounded search; on big cover-heavy
+ * maps (Reactor, Concourse, Citadel) the BFS budget exhausted before
+ * the candidate set had any visible nodes. Flat scan finds the
+ * geometrically-best node and leans on A* to verify reachability. */
+/* `prefers_high` adds an elevation bias for snipers (Rail Cannon's
+ * WeaponEngagementProfile sets this; ignored for other queries). */
+static int nav_pick_position(const struct BotNav *nv,
+                             Vec2 from, int target_node,
+                             BotPosQuery q,
+                             float max_walk_dist_px,
+                             float optimal_range_px,
+                             bool prefers_high)
+{
+    if (!nv || nv->node_count == 0) return -1;
+    if (target_node < 0 || target_node >= nv->node_count) return -1;
+    Vec2 tpos = nv->nodes[target_node].pos;
+    float max_walk_d2 = (max_walk_dist_px > 0.0f)
+                        ? max_walk_dist_px * max_walk_dist_px
+                        : -1.0f;
+
+    int   best       = -1;
+    float best_score = 0.0f;
+
+    for (int i = 0; i < nv->node_count; ++i) {
+        Vec2 cp = nv->nodes[i].pos;
+        float dxw = cp.x - from.x, dyw = cp.y - from.y;
+        float walk_d2 = dxw*dxw + dyw*dyw;
+        if (max_walk_d2 > 0.0f && walk_d2 > max_walk_d2) continue;
+
+        bool sees_target = nav_node_sees(nv, i, target_node);
+        float dxt = tpos.x - cp.x, dyt = tpos.y - cp.y;
+        float to_target = sqrtf(dxt*dxt + dyt*dyt);
+
+        float score = 0.0f;
+        bool  keep  = false;
+        switch (q) {
+            case BOT_POS_ENGAGE: {
+                if (!sees_target) break;
+                keep = true;
+                float off = fabsf(to_target - optimal_range_px);
+                score = 1.0f - clampf(off / 800.0f, 0.0f, 0.9f);
+                /* Modest bonus for being closer to the source so the
+                 * bot doesn't trek across the map when a near-by node
+                 * is equally good. */
+                float walk = sqrtf(walk_d2);
+                score *= 1.0f - clampf(walk / 4000.0f, 0.0f, 0.5f);
+                /* Phase 3 — sniper bias: prefer nodes above the
+                 * target. y is +down on screen, so cp.y < tpos.y - 64
+                 * means we're > 64 px higher than the enemy. */
+                if (prefers_high && cp.y < tpos.y - 64.0f) {
+                    score *= 1.30f;
+                }
+                break;
+            }
+            case BOT_POS_COVER: {
+                if (sees_target) break;
+                keep = true;
+                /* Closer cover wins — break LOS quickly. */
+                score = 1.0f - clampf(to_target / 1200.0f, 0.0f, 0.9f);
+                if (nv->nodes[i].flags & BOT_NODE_F_PICKUP) score += 0.15f;
+                break;
+            }
+            case BOT_POS_FLANK: {
+                if (!sees_target) break;
+                Vec2 tc = (Vec2){ cp.x - tpos.x, cp.y - tpos.y };
+                Vec2 ts = (Vec2){ from.x - tpos.x, from.y - tpos.y };
+                float tcn = sqrtf(tc.x*tc.x + tc.y*tc.y);
+                float tsn = sqrtf(ts.x*ts.x + ts.y*ts.y);
+                if (tcn < 1.0f || tsn < 1.0f) break;
+                float cosang = (tc.x*ts.x + tc.y*ts.y) / (tcn*tsn);
+                if (cosang > 0.5f) break;
+                keep = true;
+                float off = fabsf(to_target - optimal_range_px);
+                score = 1.0f - clampf(off / 800.0f, 0.0f, 0.9f);
+                break;
+            }
+        }
+
+        if (keep && score > best_score) {
+            best_score = score;
+            best       = i;
+        }
+    }
+    return best;
 }
 
 /* ---- A* ------------------------------------------------------------- */
@@ -674,6 +1104,52 @@ static int astar_find_min(const BotPathScratch *s, int N) {
     return best;
 }
 
+/* BFS from `start` for the most goal-proximate node — used as a
+ * fallback target when direct A* to the goal fails (nav graph has
+ * disconnected components and goal is in another). Returns the chosen
+ * node id, or `start` itself if the BFS yields nothing better. */
+static int bfs_closest_reachable(const struct BotNav *nv,
+                                  int start_node, int goal_node)
+{
+    if (!nv || start_node < 0 || goal_node < 0) return start_node;
+    uint8_t visited[BOT_NAV_MAX_NODES];
+    int16_t queue  [BOT_NAV_MAX_NODES];
+    memset(visited, 0, sizeof visited);
+    int qh = 0, qt = 0;
+    queue[qt++] = (int16_t)start_node;
+    visited[start_node] = 1;
+
+    Vec2 gp = nv->nodes[goal_node].pos;
+    int   best   = start_node;
+    float best_d2 = 1e30f;
+    {
+        Vec2 sp = nv->nodes[start_node].pos;
+        float dx = gp.x - sp.x, dy = gp.y - sp.y;
+        best_d2 = dx*dx + dy*dy;
+    }
+
+    while (qh < qt) {
+        int cur = queue[qh++];
+        Vec2 cp = nv->nodes[cur].pos;
+        float dx = gp.x - cp.x, dy = gp.y - cp.y;
+        float d2 = dx*dx + dy*dy;
+        if (d2 < best_d2) {
+            best_d2 = d2;
+            best    = cur;
+        }
+        const BotNavNode *cn = &nv->nodes[cur];
+        for (int k = 0; k < cn->reach_count; ++k) {
+            const BotNavReach *r = &nv->reaches[cn->reach_first + k];
+            int next = r->to_node;
+            if (next < 0 || next >= nv->node_count) continue;
+            if (visited[next]) continue;
+            visited[next] = 1;
+            if (qt < BOT_NAV_MAX_NODES) queue[qt++] = (int16_t)next;
+        }
+    }
+    return best;
+}
+
 /* Plan a path. Writes node ids into mind->path / path_len / path_step.
  * Returns true on success; false if no path exists. */
 static bool bot_plan_path(BotMind *mind, const struct BotNav *nv,
@@ -700,11 +1176,13 @@ static bool bot_plan_path(BotMind *mind, const struct BotNav *nv,
                                           nv->nodes[goal_node].pos);
     s.in_open[start_node] = 1;
 
-    /* Capped expansion budget keeps the worst case bounded. Bumped
-     * 2N→4N so big maps (Citadel, Crossfire) reliably find a path
-     * across the whole graph. With 200 nodes per nav graph the cap
-     * is 800 expansions — at ~50 ns each, that's 40 µs of A* time. */
-    int max_expansions = N * 4;
+    /* Capped expansion budget keeps the worst case bounded. M6 P05
+     * bumped 4N → 12N — big maps with many reach edges (Citadel ~900,
+     * Catwalk ~1200) need more expansions to find a chain across the
+     * graph. At ~50 ns per expansion: 12 × 512 ≈ 300 µs worst case.
+     * Cached path means we only pay this on replan ticks (every 6 ticks
+     * at most), so per-tick amortised cost stays under 100 µs/bot. */
+    int max_expansions = N * 12;
     int found_goal     = 0;
     while (max_expansions-- > 0) {
         int cur = astar_find_min(&s, N);
@@ -791,8 +1269,18 @@ static bool los_clear(const World *w, Vec2 a, Vec2 b) {
     return !level_ray_hits(&w->level, a, b, &t);
 }
 
-static int find_nearest_enemy(const World *w, int mid, float max_range,
-                              MatchModeId mode)
+/* M6 P05 Phase 4 — forward decl for aggression model. Definition
+ * lives further down so it can read mind state fields populated by
+ * the strategy + retreat scoring. */
+static float bot_aggression(const World *w, const BotMind *mind, int mid);
+
+/* Find the nearest enemy within max_range; if require_los is true (the
+ * old M6 P04 behavior) only LOS-clear enemies count. tactic_engage's
+ * fire path passes require_los=true; score_engage passes false so the
+ * goal still gets picked when an enemy is behind cover (Phase 2 then
+ * handles repositioning). */
+static int find_nearest_enemy_ex(const World *w, int mid, float max_range,
+                                  MatchModeId mode, bool require_los)
 {
     const Mech *me = &w->mechs[mid];
     if (!me->alive) return -1;
@@ -804,20 +1292,85 @@ static int find_nearest_enemy(const World *w, int mid, float max_range,
         const Mech *o = &w->mechs[i];
         if (!o->alive) continue;
         if (o->is_dummy) continue;
-        /* Team filtering — same team is not an enemy unless FFA. */
         if (mode != MATCH_MODE_FFA && o->team == me->team) continue;
         Vec2 op = mech_pelvis_pos(w, i);
         float dx = op.x - mp.x, dy = op.y - mp.y;
         float d2 = dx*dx + dy*dy;
         if (d2 >= best_d2) continue;
-        if (!los_clear(w, mp, op)) continue;
+        if (require_los && !los_clear(w, mp, op)) continue;
         best_d2 = d2;
         best = i;
     }
     return best;
 }
 
+static int find_nearest_enemy(const World *w, int mid, float max_range,
+                              MatchModeId mode)
+{
+    return find_nearest_enemy_ex(w, mid, max_range, mode, true);
+}
+
 /* ---- 4. Strategy layer ---------------------------------------------- */
+
+/* ---- Per-weapon engagement profile (M6 P05 Phase 3) ----------------
+ *
+ * Defined high in the strategy section because both score_engage and
+ * tactic_engage read it. Numbers calibrated against
+ * `documents/04-combat.md` ranges and iter7's matrix fires-per-kill
+ * (Riot Cannon's 4 833 was the extreme outlier — its effective range
+ * needs to be much tighter than Weapon.range_px = 800 because pellets
+ * disperse). */
+typedef struct WeaponEngagementProfile {
+    float   optimal_range_px;
+    float   effective_range_px;
+    float   ideal_strafe_px;
+    uint8_t prefers_high;
+} WeaponEngagementProfile;
+
+static const WeaponEngagementProfile g_weapon_profiles[WEAPON_COUNT] = {
+    [WEAPON_PULSE_RIFLE]   = {  600.0f, 1200.0f,  500.0f, 0 },
+    [WEAPON_PLASMA_SMG]    = {  350.0f,  800.0f,  350.0f, 0 },
+    [WEAPON_RIOT_CANNON]   = {  220.0f,  450.0f,  250.0f, 0 },
+    [WEAPON_RAIL_CANNON]   = { 1200.0f, 2400.0f, 1100.0f, 1 },
+    [WEAPON_AUTO_CANNON]   = {  700.0f, 1400.0f,  600.0f, 0 },
+    [WEAPON_MASS_DRIVER]   = {  700.0f, 1600.0f,  600.0f, 0 },
+    [WEAPON_PLASMA_CANNON] = {  600.0f, 1300.0f,  550.0f, 0 },
+    [WEAPON_MICROGUN]      = {  500.0f, 1000.0f,  450.0f, 0 },
+    [WEAPON_SIDEARM]       = {  400.0f,  900.0f,  400.0f, 0 },
+    [WEAPON_BURST_SMG]     = {  350.0f,  700.0f,  350.0f, 0 },
+    [WEAPON_FRAG_GRENADES] = {  350.0f,  700.0f,  350.0f, 0 },
+    [WEAPON_MICRO_ROCKETS] = {  500.0f, 1000.0f,  500.0f, 0 },
+    [WEAPON_COMBAT_KNIFE]  = {   80.0f,  140.0f,   80.0f, 0 },
+    [WEAPON_GRAPPLING_HOOK]= {    0.0f,    0.0f,    0.0f, 0 },
+};
+
+static const WeaponEngagementProfile *weapon_profile_for(int weapon_id) {
+    if ((unsigned)weapon_id >= WEAPON_COUNT) return &g_weapon_profiles[WEAPON_PULSE_RIFLE];
+    return &g_weapon_profiles[weapon_id];
+}
+
+static float weapon_optimal_range_px(int weapon_id) {
+    const WeaponEngagementProfile *p = weapon_profile_for(weapon_id);
+    return (p->optimal_range_px > 0.0f) ? p->optimal_range_px : 600.0f;
+}
+
+static float weapon_ideal_strafe_px(int weapon_id) {
+    const WeaponEngagementProfile *p = weapon_profile_for(weapon_id);
+    return (p->ideal_strafe_px > 0.0f) ? p->ideal_strafe_px : 400.0f;
+}
+
+/* 0..1 score multiplier — score_engage applies this so a Heavy with a
+ * Microgun at 2 km still fires (at 0.15× priority) but a Rail Cannon
+ * Sniper at 1.2 km fires at full priority. */
+static float weapon_range_fit_factor(int weapon_id, float dist_px) {
+    const WeaponEngagementProfile *p = weapon_profile_for(weapon_id);
+    if (p->optimal_range_px <= 0.0f) return 1.0f;
+    if (dist_px <= p->optimal_range_px) return 1.0f;
+    if (dist_px >= p->effective_range_px) return 0.15f;
+    float t = (dist_px - p->optimal_range_px) /
+              (p->effective_range_px - p->optimal_range_px);
+    return 1.0f - t * 0.5f;
+}
 
 typedef struct {
     BotGoal goal;
@@ -917,7 +1470,12 @@ static float score_engage(const World *w, const BotMind *mind, int mid,
                           MatchModeId mode, int *out_target)
 {
     *out_target = -1;
-    int enemy = find_nearest_enemy(w, mid, mind->pers.awareness_radius_px, mode);
+    /* Pre-Phase-2 this required LOS; without it, the goal never
+     * triggered on cover-heavy maps (5/8 in the M6 P05 1v1 baseline).
+     * Now we accept LOS-blocked enemies at a damped score and let
+     * tactic_engage's Phase 2 reposition the bot. */
+    int enemy = find_nearest_enemy_ex(w, mid, mind->pers.awareness_radius_px,
+                                       mode, false);
     if (enemy < 0) return 0.0f;
     *out_target = enemy;
     Vec2 mp = mech_pelvis_pos(w, mid);
@@ -926,11 +1484,30 @@ static float score_engage(const World *w, const BotMind *mind, int mid,
     float d  = sqrtf(dx*dx + dy*dy);
     float close = 1.0f - clampf(d / 1000.0f, 0.0f, 0.8f);
     float health_factor = health_fraction(&w->mechs[mid]);
+    /* LOS-blocked damp — the bot is committing to repositioning, not
+     * firing. The damping is small enough (0.85×) that ENGAGE still
+     * wins over PURSUE_PICKUP / PURSUE_ENEMY for nearby enemies, but
+     * the multiplier keeps LOS-clear cases dominant when they exist. */
+    float los_factor = los_clear(w, mp, ep) ? 1.0f : 0.85f;
+    /* Phase 3 — weapon-fit factor. A Heavy with Microgun at 1800 px
+     * still engages, but at low priority — PURSUE_PICKUP / REPOSITION
+     * will win until the bot closes range. */
+    float weapon_fit = weapon_range_fit_factor(w->mechs[mid].weapon_id, d);
+    /* Phase 4 — aggression damp/boost.
+     *   agg < 0.30 → 0.2× (commit to retreat instead)
+     *   agg > 0.70 → 1.2× (push through PURSUE_PICKUP unless pickup is critical)
+     * In between, scale by personality aggression baseline. The
+     * 0.20×/1.20× knee mirrors Q3's "fight vs flee" gate (plan §3.1). */
+    float agg = bot_aggression(w, mind, mid);
+    float aggression_factor;
+    if (agg < 0.30f)      aggression_factor = 0.20f * mind->pers.aggression;
+    else if (agg > 0.70f) aggression_factor = 1.20f * mind->pers.aggression;
+    else                  aggression_factor = mind->pers.aggression;
     /* Carrier penalty (CTF): we're holding the flag — engage less. */
     if (mode == MATCH_MODE_CTF && ctf_is_carrier(w, mid)) {
-        return close * health_factor * mind->pers.aggression * 0.30f;
+        return close * health_factor * aggression_factor * 0.30f * los_factor * weapon_fit;
     }
-    return close * (0.4f + 0.6f * health_factor) * mind->pers.aggression;
+    return close * (0.4f + 0.6f * health_factor) * aggression_factor * los_factor * weapon_fit;
 }
 
 static float score_pursue_pickup(const World *w, const BotMind *mind,
@@ -1037,14 +1614,60 @@ static float score_return_flag(const World *w, const BotMind *mind, int mid,
     return 0.45f + 0.45f * close * mind->pers.flag_priority;
 }
 
+/* ---- Aggression model (M6 P05 Phase 4) ------------------------------
+ *
+ * Compute a 0..1 "want to fight" score from health, armor, ammo,
+ * personality, and time since last damage. The strategy layer reads
+ * this to gate engage vs retreat — when aggression drops below the
+ * tier's `retreat_threshold`, score_retreat wins. */
+static float bot_aggression(const World *w, const BotMind *mind, int mid) {
+    const Mech *me = &w->mechs[mid];
+    float hp_frac = health_fraction(me);
+    float armor_frac = (me->armor_hp_max > 0.0f)
+                       ? (me->armor_hp / me->armor_hp_max) : 0.5f;
+    if (armor_frac < 0.0f) armor_frac = 0.0f;
+    if (armor_frac > 1.0f) armor_frac = 1.0f;
+    float ammo_frac = (me->ammo_max > 0)
+                      ? ((float)me->ammo / (float)me->ammo_max) : 0.6f;
+    if (ammo_frac > 1.0f) ammo_frac = 1.0f;
+
+    /* Time since last damage. last_hurt_tick updated by the strategy
+     * tick via a `last_hp_observed` delta. The aggression dip lasts
+     * ~2 s; beyond that, recovery is full. */
+    float damage_recency = 1.0f;
+    if (mind->last_hurt_tick != 0) {
+        uint64_t ticks_since = w->tick - mind->last_hurt_tick;
+        const float window = 120.0f;     /* 2 s @ 60 Hz */
+        if ((float)ticks_since < window) {
+            damage_recency = (float)ticks_since / window;
+        }
+    }
+
+    /* Weighted blend — HP is the biggest signal; armor + ammo + recent
+     * damage modulate. Then multiply by personality aggression so the
+     * tier baseline shines through (Recruit ~0.30 baseline even at
+     * full HP). */
+    float blend = 0.55f * hp_frac
+                + 0.20f * armor_frac
+                + 0.10f * ammo_frac
+                + 0.15f * damage_recency;
+    if (blend < 0.0f) blend = 0.0f;
+    if (blend > 1.0f) blend = 1.0f;
+    return blend * mind->pers.aggression;
+}
+
 static float score_retreat(const World *w, const BotMind *mind, int mid)
 {
-    (void)mind;
-    const Mech *me = &w->mechs[mid];
-    float hf = health_fraction(me);
-    if (hf >= 0.30f) return 0.0f;
-    /* Score climbs as HP drops. */
-    return (0.30f - hf) / 0.30f * 0.95f;
+    /* Phase 4 — aggression-based retreat. Score climbs as aggression
+     * drops below the tier's threshold. Recruit (threshold=0) never
+     * retreats. */
+    float threshold = mind->pers.retreat_threshold;
+    if (threshold <= 0.0f) return 0.0f;
+    float agg = bot_aggression(w, mind, mid);
+    if (agg >= threshold) return 0.0f;
+    /* 1.0 at agg=0, falls to 0 at agg=threshold. */
+    float t = 1.0f - (agg / threshold);
+    return t * 0.95f;
 }
 
 /* Pursue the nearest enemy regardless of awareness / LOS. Always scores
@@ -1083,9 +1706,30 @@ static float score_pursue_enemy(const World *w, const BotMind *mind,
     if (e < 0) return 0.0f;
     *out_target = e;
     Vec2 ep = mech_pelvis_pos(w, e);
-    int node = nav_nearest_node(nv, ep, 192.0f, BOT_NODE_F_ON_FLOOR);
-    if (node < 0) node = nav_nearest_node(nv, ep, 384.0f, 0);
-    *out_node = node;
+    Vec2 mp = mech_pelvis_pos(w, mid);
+    /* Pre-M6P05 this targeted the enemy's pelvis-nearest node — which
+     * sends the bot walking straight at whatever cover is between them.
+     * Now we route to an engagement node (Phase 2): a nav node from
+     * which the enemy is LOS-visible, scored by weapon stand-off range.
+     * A* over walking-class reachabilities (downstream from this
+     * scorer) finds the actual path that avoids the cover. */
+    int enemy_node = nav_nearest_node(nv, ep, 192.0f, BOT_NODE_F_ON_FLOOR);
+    if (enemy_node < 0) enemy_node = nav_nearest_node(nv, ep, 384.0f, 0);
+
+    int engage_node = -1;
+    if (enemy_node >= 0) {
+        const WeaponEngagementProfile *wp =
+            weapon_profile_for(w->mechs[mid].weapon_id);
+        engage_node = nav_pick_position(nv, mp, enemy_node,
+                                         BOT_POS_ENGAGE, -1.0f,
+                                         wp->optimal_range_px,
+                                         wp->prefers_high);
+    }
+    /* Fall back to enemy's nav node when no engagement candidate is
+     * visible — same behavior as before, so the worst case doesn't
+     * regress. */
+    int target = (engage_node >= 0) ? engage_node : enemy_node;
+    *out_node = target;
     /* Baseline 0.40 — beats IDLE (0) and pickups the bot doesn't
      * need, but loses to ENGAGE on close LOS-clear shots and to
      * any high-need pickup (low HP / dry ammo). Bumping above this
@@ -1152,6 +1796,28 @@ static GoalPick run_strategy(const World *w, BotMind *mind, int mid,
     float s_pursue = score_pursue_enemy(w, mind, nv, mid, mode,
                                         &pursue_node, &pursue_target);
 
+    /* Phase 5 — role-aware defender goal. score_defend_flag is only
+     * relevant in CTF; outside CTF it returns 0. The defender lingers
+     * near friendly_flag when it's HOME; when an enemy approaches it
+     * the score drops (ENGAGE takes over). */
+    int   defend_node = -1;
+    float s_defend    = 0.0f;
+    if (mode == MATCH_MODE_CTF) {
+        int ff = ctf_friendly_flag_idx(w, mid);
+        if (ff >= 0) {
+            const Flag *fl = &w->flags[ff];
+            if (fl->status == FLAG_HOME) {
+                /* High score for defenders, near-zero for others (role
+                 * mult handles the per-role gating). */
+                s_defend = 0.55f * mind->pers.flag_priority;
+                defend_node = nav_nearest_node(nv, fl->home_pos, 96.0f,
+                                                BOT_NODE_F_FLAG);
+                if (defend_node < 0)
+                    defend_node = nav_nearest_node(nv, fl->home_pos, 192.0f, 0);
+            }
+        }
+    }
+
     /* Candidate goals: pick best. */
     struct { BotGoal g; float s; int tm; int tn; } cands[] = {
         { BOT_GOAL_ENGAGE,        s_engage,  eng_target,   -1          },
@@ -1160,14 +1826,24 @@ static GoalPick run_strategy(const World *w, BotMind *mind, int mid,
         { BOT_GOAL_CAPTURE,       s_cap,     -1,           cap_node    },
         { BOT_GOAL_CHASE_CARRIER, s_chase,   chase_target, -1          },
         { BOT_GOAL_RETURN_FLAG,   s_return,  -1,           return_node },
+        { BOT_GOAL_DEFEND_FLAG,   s_defend,  -1,           defend_node },
         { BOT_GOAL_RETREAT,       s_retreat, -1,           pickup_node },
         { BOT_GOAL_REPOSITION,    s_pursue,  pursue_target,pursue_node },
     };
     int n = (int)(sizeof cands / sizeof cands[0]);
+    /* Apply per-role multipliers. CARRIER applies when this bot is
+     * currently the flag carrier (ctf_is_carrier — overrides whatever
+     * `team_role` was assigned at round start). */
+    int role = mind->team_role;
+    if (mode == MATCH_MODE_CTF && ctf_is_carrier(w, mid)) {
+        role = BOT_ROLE_CARRIER;
+    }
+    if (role < 0 || role >= BOT_ROLE_COUNT) role = BOT_ROLE_NONE;
     for (int i = 0; i < n; ++i) {
         if (cands[i].s <= 0.0f) continue;
-        if (cands[i].s > best_score) {
-            best_score = cands[i].s;
+        float weighted = cands[i].s * g_role_goal_mult[role][cands[i].g];
+        if (weighted > best_score) {
+            best_score = weighted;
             best.goal  = cands[i].g;
             best.target_mech = cands[i].tm;
             best.target_node = cands[i].tn;
@@ -1298,6 +1974,13 @@ static void tactic_path_follow(BotMind *mind, const struct BotNav *nv,
     if (mind->path_reach_kind == BOT_REACH_JET && np.y < pelv.y - 12.0f) {
         out->want_jet = true;
     }
+    /* M6 P05 — slope-climb JET assist. When the next path hop is up
+     * by at least 24 px and the bot is grounded, pulse JET to help
+     * the climb. Motor's fuel-hysteresis gives a natural duty cycle
+     * — bot pulses, fuel drops, JET locks out, regens, repeat. */
+    if (np.y < pelv.y - 24.0f && w->mechs[mid].grounded) {
+        out->want_jet = true;
+    }
     /* JUMP reach: leading-edge jump request when pelvis is approaching
      * the take-off X. */
     if (mind->path_reach_kind == BOT_REACH_JUMP && np.y < pelv.y - 8.0f) {
@@ -1343,19 +2026,113 @@ static void tactic_engage(BotMind *mind, const struct BotNav *nv,
     /* Health-low retreat: don't fire forward when we're rotating away. */
     float hf = health_fraction(&w->mechs[mid]);
 
-    if (los && hf > 0.20f) {
-        out->want_fire = true;
-    } else if (!los) {
-        /* No LOS — close distance by walking toward the enemy. */
+    if (los) {
+        if (hf > 0.20f) out->want_fire = true;
+        /* Invalidate the engagement-node cache the moment we acquire
+         * LOS — we don't want to keep walking past the enemy once they
+         * become visible. */
+        mind->engagement_node = -1;
+    } else {
+        /* No LOS — Phase 2: walk to a position that DOES have LOS.
+         * Cached per-mind; refresh every 2 s or on enemy change. */
+        if (nv && nv->node_count > 0) {
+            uint64_t cache_age = w->tick - mind->engagement_node_tick;
+            bool fresh = mind->engagement_for_enemy == (int16_t)enemy_id &&
+                         mind->engagement_node >= 0 &&
+                         mind->engagement_node < nv->node_count &&
+                         cache_age < 120;   /* 2 s @ 60 Hz */
+
+            if (!fresh) {
+                int target_node = nav_nearest_node(nv, ep, 256.0f,
+                                                    BOT_NODE_F_ON_FLOOR);
+                if (target_node < 0)
+                    target_node = nav_nearest_node(nv, ep, 512.0f, 0);
+                int eng_node = -1;
+                if (target_node >= 0) {
+                    const WeaponEngagementProfile *wp =
+                        weapon_profile_for(w->mechs[mid].weapon_id);
+                    eng_node = nav_pick_position(nv, mp, target_node,
+                                                  BOT_POS_ENGAGE, 1200.0f,
+                                                  wp->optimal_range_px,
+                                                  wp->prefers_high);
+                }
+                mind->engagement_node      = (int16_t)eng_node;
+                mind->engagement_for_enemy = (int16_t)enemy_id;
+                mind->engagement_node_tick = w->tick;
+
+                /* Plan a path so the bot follows walls / jumps / jets
+                 * instead of pushing into the cover that blocked LOS. */
+                if (eng_node >= 0) {
+                    int start = nav_nearest_node(nv, mp, 256.0f,
+                                                  BOT_NODE_F_ON_FLOOR);
+                    if (start < 0)
+                        start = nav_nearest_node(nv, mp, 512.0f, 0);
+                    if (start >= 0 && start != eng_node) {
+                        bot_plan_path(mind, nv, start, eng_node);
+                    } else if (start == eng_node) {
+                        /* Already at the engagement node but LOS still
+                         * blocked — likely a pose-vs-node mismatch.
+                         * Step toward the enemy as a fallback. */
+                        mind->path_len = 0;
+                    }
+                }
+            }
+
+            if (mind->engagement_node >= 0 &&
+                mind->engagement_node < nv->node_count &&
+                mind->path_len > 0)
+            {
+                /* Follow the path; same trigger logic as
+                 * tactic_path_follow (including the M6 P05 slope-climb
+                 * JET-assist for any upward hop ≥ 24 px). */
+                advance_path(mind, nv, mp);
+                int cur = bot_current_target_node(mind);
+                if (cur >= 0) {
+                    Vec2 np = nv->nodes[cur].pos;
+                    out->move_target = np;
+                    if (mind->path_reach_kind == BOT_REACH_JET &&
+                        np.y < mp.y - 12.0f)
+                    {
+                        out->want_jet = true;
+                    }
+                    if (np.y < mp.y - 24.0f && w->mechs[mid].grounded) {
+                        out->want_jet = true;
+                    }
+                    if (mind->path_reach_kind == BOT_REACH_JUMP &&
+                        np.y < mp.y - 8.0f)
+                    {
+                        if (w->mechs[mid].grounded &&
+                            w->tick - mind->last_jump_tick > 12)
+                        {
+                            out->want_jump = true;
+                        }
+                    }
+                    return;
+                }
+            }
+            if (mind->engagement_node >= 0 &&
+                mind->engagement_node < nv->node_count)
+            {
+                /* No path / path exhausted — head straight to the
+                 * engagement node. */
+                Vec2 np = nv->nodes[mind->engagement_node].pos;
+                out->move_target = np;
+                if (np.y < mp.y - 64.0f) out->want_jet = true;
+                return;
+            }
+        }
+        /* Last-resort fallback (no nav, or no engagement node found) —
+         * old M6 P04 behavior. */
         out->move_target = ep;
-        /* If they're above, lean on jet. */
         if (ep.y < mp.y - 64.0f) out->want_jet = true;
         return;
     }
 
-    /* Strafe / advance: a small lateral offset based on tick parity. */
+    /* (LOS clear from here.) Strafe / advance — keep the stand-off
+     * around the weapon's preferred range. Phase 3 substitutes the
+     * weapon-specific ideal_strafe_px; pre-Phase-3 it's 400 px. */
     float side = ((w->tick / 30) & 1u) ? 1.0f : -1.0f;
-    float ideal_dist = 400.0f;
+    float ideal_dist = weapon_ideal_strafe_px(w->mechs[mid].weapon_id);
     float dx = ep.x - mp.x;
     float ddx = (fabsf(dx) > ideal_dist + 60.0f)
                 ? (dx > 0 ? 80.0f : -80.0f)
@@ -1386,9 +2163,10 @@ static void tactic_engage(BotMind *mind, const struct BotNav *nv,
             out->want_grapple_release = true;
         }
     }
-
-    (void)nv;
 }
+
+/* (Phase 3 engagement profile table + helpers live at the top of the
+ * strategy section above.) */
 
 static void tactic_pursue_node(BotMind *mind, const struct BotNav *nv,
                                const World *w, int mid, BotWants *out)
@@ -1411,7 +2189,42 @@ static void tactic_pursue_node(BotMind *mind, const struct BotNav *nv,
 static void tactic_retreat(BotMind *mind, const struct BotNav *nv,
                            const World *w, int mid, BotWants *out)
 {
+    /* Phase 4 — pick a cover node (NOT visible from the nearest enemy)
+     * and route there, biased toward health/armor pickups for "chain
+     * retreat-and-heal." Aim stays on the nearest enemy so the bot
+     * still fires opportunistically through any LOS-clear moment. */
+    Vec2 mp = mech_pelvis_pos(w, mid);
+    MatchModeId mode = (MatchModeId)w->match_mode_cached;
+    int enemy = find_nearest_enemy_ex(w, mid, 2400.0f, mode, false);
+    if (!nv || nv->node_count == 0 || enemy < 0) {
+        tactic_pursue_node(mind, nv, w, mid, out);
+        return;
+    }
+    Vec2 ep = mech_pelvis_pos(w, enemy);
+    int enemy_node = nav_nearest_node(nv, ep, 192.0f, BOT_NODE_F_ON_FLOOR);
+    if (enemy_node < 0) enemy_node = nav_nearest_node(nv, ep, 384.0f, 0);
+    if (enemy_node < 0) {
+        tactic_pursue_node(mind, nv, w, mid, out);
+        return;
+    }
+    int cover_node = nav_pick_position(nv, mp, enemy_node, BOT_POS_COVER,
+                                        -1.0f, 0.0f, false);
+    if (cover_node >= 0) {
+        mind->goal_target_node = (int16_t)cover_node;
+        int start = nav_nearest_node(nv, mp, 256.0f, BOT_NODE_F_ON_FLOOR);
+        if (start < 0) start = nav_nearest_node(nv, mp, 512.0f, 0);
+        if (start >= 0 && start != cover_node) {
+            if (!bot_plan_path(mind, nv, start, cover_node)) {
+                int fb = bfs_closest_reachable(nv, start, cover_node);
+                if (fb != start) bot_plan_path(mind, nv, start, fb);
+            }
+        }
+    }
     tactic_pursue_node(mind, nv, w, mid, out);
+    /* Aim toward the enemy in case LOS opens up — opportunistic-fire
+     * fires automatically. */
+    Vec2 chest = (Vec2){ ep.x, ep.y - 24.0f };
+    out->aim_target = chest;
 }
 
 /* ---- 6. Motor ------------------------------------------------------- */
@@ -1591,6 +2404,12 @@ void bot_system_reset_minds(BotSystem *bs) {
         bs->minds[i].stuck_since_tick = 0;
         bs->minds[i].stuck_last_x = 0.0f;
         bs->minds[i].reaction_ticks_remaining = 0;
+        bs->minds[i].engagement_node = -1;
+        bs->minds[i].engagement_for_enemy = -1;
+        bs->minds[i].engagement_node_tick = 0;
+        bs->minds[i].last_hp_observed = 0.0f;
+        bs->minds[i].last_hurt_tick = 0;
+        bs->minds[i].team_role = BOT_ROLE_NONE;
     }
     bs->count = 0;
     bs->nav   = NULL;     /* nav is level-arena owned; caller reset that arena */
@@ -1625,7 +2444,13 @@ int bot_system_build_nav(BotSystem *bs, const Level *level, Arena *arena) {
     /* Snap spawn / pickup / flag nodes onto the nearest floor sample by
      * lowering them to the surface. (Designers place pickups one tile
      * above floor; the nav build will pull them down so paths land at
-     * the same row as the WALK strip.) */
+     * the same row as the WALK strip.)
+     *
+     * Snap success → OR in BOT_NODE_F_ON_FLOOR. Pre-P05 we left the
+     * flag clear, which made the WALK reach classifier reject every
+     * pickup→floor pair (its precondition is "both on floor") even
+     * though the pickup was now AT floor height. That left pickup
+     * nodes only JUMP/JET-reachable, fragmenting big maps. */
     for (int i = 0; i < nv->node_count; ++i) {
         BotNavNode *n = &nv->nodes[i];
         if (n->flags & BOT_NODE_F_ON_FLOOR) continue;
@@ -1635,6 +2460,7 @@ int bot_system_build_nav(BotSystem *bs, const Level *level, Arena *arena) {
         for (int d = 0; d < 8; ++d) {
             if (tile_is_floor_top(level, tx, ty + d)) {
                 n->pos.y = (ty + d) * (float)ts - 2.0f;
+                n->flags |= BOT_NODE_F_ON_FLOOR;
                 break;
             }
         }
@@ -1646,9 +2472,33 @@ int bot_system_build_nav(BotSystem *bs, const Level *level, Arena *arena) {
 
     build_reachabilities(nv, level);
 
+    /* Visibility precompute can dominate cold map build on big maps —
+     * time it so the budget breach (>30 ms) shows up as a WARN, not a
+     * silent regression. */
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    build_visibility(nv, level);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double vis_ms = (double)(t1.tv_sec - t0.tv_sec) * 1000.0 +
+                    (double)(t1.tv_nsec - t0.tv_nsec) * 1e-6;
+
     bs->nav = nv;
-    LOG_I("bot_nav: built %d nodes, %d reachabilities on %dx%d map",
-          nv->node_count, nv->reach_count, level->width, level->height);
+    LOG_I("bot_nav: built %d nodes, %d reachabilities, %d visibility edges on %dx%d map (vis=%.2f ms)",
+          nv->node_count, nv->reach_count, nv->vis_edge_count,
+          level->width, level->height, vis_ms);
+
+    if (getenv("BOT_NAV_DUMP")) {
+        for (int i = 0; i < nv->node_count; ++i) {
+            const BotNavNode *n = &nv->nodes[i];
+            fprintf(stderr, "NODE %d pos=(%.0f,%.0f) flags=0x%x reach=%d..%d\n",
+                    i, n->pos.x, n->pos.y, n->flags,
+                    n->reach_first, n->reach_first + n->reach_count);
+            for (int k = 0; k < n->reach_count; ++k) {
+                const BotNavReach *r = &nv->reaches[n->reach_first + k];
+                fprintf(stderr, "  -> %d kind=%d cost=%d\n", r->to_node, r->kind, r->cost_ms);
+            }
+        }
+    }
     return nv->node_count;
 }
 
@@ -1664,6 +2514,12 @@ void bot_attach(BotSystem *bs, int mech_id, BotTier tier, uint64_t seed_salt) {
     m->goal_target_mech   = -1;
     m->goal_target_node   = -1;
     m->seen_enemy_id      = -1;
+    m->engagement_node    = -1;
+    m->engagement_for_enemy = -1;
+    m->engagement_node_tick = 0;
+    m->last_hp_observed   = 0.0f;
+    m->last_hurt_tick     = 0;
+    m->team_role          = BOT_ROLE_NONE;
     pcg32_seed(&m->rng,
                (bs->seed ^ ((uint64_t)mech_id << 16) ^ seed_salt),
                (uint64_t)(mech_id + 1) * 2654435761uLL);
@@ -1698,6 +2554,90 @@ bool bot_nav_node_pos(const BotSystem *bs, int node_id, Vec2 *out) {
     return true;
 }
 
+int bot_nav_visibility_edge_count(const BotSystem *bs) {
+    if (!bs || !bs->nav) return 0;
+    return bs->nav->vis_edge_count;
+}
+
+bool bot_nav_node_sees(const BotSystem *bs, int src, int target) {
+    if (!bs || !bs->nav) return false;
+    return nav_node_sees(bs->nav, src, target);
+}
+
+int bot_nav_reach_count(const BotSystem *bs) {
+    if (!bs || !bs->nav) return 0;
+    return bs->nav->reach_count;
+}
+
+/* M6 P05 Phase 5 — assign team roles by per-team round-robin.
+ *
+ * For each team independently, walk the in_use bot slots and assign:
+ *   slot 0 → ATTACKER, 1 → DEFENDER, 2 → ATTACKER, 3 → FLOATER, 4+ →
+ *   round-robin (2A : 1D : 1F target ratio).
+ *
+ * Bots that are currently carrying the flag override to CARRIER at
+ * strategy-tick time, so the assignment here doesn't need to track
+ * the carrier explicitly. */
+void bot_assign_team_roles(BotSystem *bs, const World *w) {
+    if (!bs || !w) return;
+    /* Per-team counters so we round-robin within each team. */
+    int per_team_seen[3] = {0, 0, 0};
+    for (int i = 0; i < MAX_MECHS; ++i) {
+        BotMind *mind = &bs->minds[i];
+        if (!mind->in_use) continue;
+        int mid = mind->mech_id;
+        if (mid < 0 || mid >= w->mech_count) continue;
+        int team = w->mechs[mid].team;
+        if (team < 0 || team >= 3) team = 0;
+        int idx = per_team_seen[team]++;
+        /* 4-bot default split per the plan §4.5: 2 attackers, 1
+         * defender, 1 floater. Idx 0,2,...= attacker; idx 1 = defender;
+         * idx 3,7,... = floater. */
+        int role;
+        switch (idx % 4) {
+            case 0: role = BOT_ROLE_ATTACKER; break;
+            case 1: role = BOT_ROLE_DEFENDER; break;
+            case 2: role = BOT_ROLE_ATTACKER; break;
+            default: role = BOT_ROLE_FLOATER; break;
+        }
+        mind->team_role = (uint8_t)role;
+    }
+    LOG_I("bot_assign_team_roles: assigned %d/%d/%d slots on teams 0/1/2",
+          per_team_seen[0], per_team_seen[1], per_team_seen[2]);
+}
+
+/* tactic_defend_flag — stand near the friendly flag at a node that
+ * has LOS to common approach angles. Phase 5. */
+static void tactic_defend_flag(BotMind *mind, const struct BotNav *nv,
+                                const World *w, int mid, BotWants *out)
+{
+    int ff = ctf_friendly_flag_idx(w, mid);
+    if (ff < 0) {
+        tactic_pursue_node(mind, nv, w, mid, out);
+        return;
+    }
+    Vec2 flag_pos = w->flags[ff].home_pos;
+    Vec2 mp = mech_pelvis_pos(w, mid);
+    /* If we're already within 200 px of the flag and have LOS to a
+     * spawn-side approach, hold position. Otherwise pursue the
+     * defend_node. */
+    float dx = flag_pos.x - mp.x, dy = flag_pos.y - mp.y;
+    float d2 = dx*dx + dy*dy;
+    if (d2 < 200.0f * 200.0f) {
+        /* Hold — aim at the most likely approach angle (toward enemy
+         * flag, which is where attackers come from). */
+        int ef = ctf_enemy_flag_idx(w, mid);
+        Vec2 approach = flag_pos;
+        if (ef >= 0) approach = w->flags[ef].home_pos;
+        Vec2 dir = (Vec2){ approach.x - mp.x, approach.y - mp.y };
+        out->aim_target = (Vec2){ mp.x + dir.x * 0.5f, mp.y + dir.y * 0.5f };
+        out->move_target = mp;
+        return;
+    }
+    /* Walk to the defend node. */
+    tactic_pursue_node(mind, nv, w, mid, out);
+}
+
 /* The big per-tick step. */
 void bot_step(BotSystem *bs, World *w, struct Game *g, float dt) {
     (void)dt;
@@ -1728,6 +2668,16 @@ void bot_step(BotSystem *bs, World *w, struct Game *g, float dt) {
             ((w->tick + (uint64_t)mid) % BOT_STRATEGY_INTERVAL == 0) ||
             (mind->last_strategy_tick == 0);
         if (strategy_now) {
+            /* Phase 4 — observe HP delta. If we've taken damage since
+             * the last strategy tick, mark `last_hurt_tick` so the
+             * aggression formula's "recently hurt" term decays from 0
+             * to 1 over the next ~2 s. */
+            float hp_now = m->health;
+            if (mind->last_hp_observed > 0.0f && hp_now < mind->last_hp_observed - 1.0f) {
+                mind->last_hurt_tick = w->tick;
+            }
+            mind->last_hp_observed = hp_now;
+
             int prev_target = mind->goal_target_mech;
             GoalPick pick = run_strategy(w, mind, mid, bs->nav, mode);
             mind->goal             = (uint8_t)pick.goal;
@@ -1735,6 +2685,29 @@ void bot_step(BotSystem *bs, World *w, struct Game *g, float dt) {
             mind->goal_target_node = (int16_t)pick.target_node;
             mind->last_strategy_tick = w->tick;
             update_reaction(mind, w, prev_target, pick.target_mech);
+            /* SHOT_LOG-style trace (gated on env var for live debugging of
+             * bot strategy decisions; the FAQ for future-Claude playtest
+             * sessions lives in `documents/m6/05-bot-ai-improvements.md`). */
+            if (getenv("BOT_TRACE") && w->tick < 2000 && (w->tick % 30) < 6) {
+                Vec2 mp = mech_pelvis_pos(w, mid);
+                int eng = mind->engagement_node;
+                fprintf(stderr, "t=%llu mid=%d goal=%s tm=%d tn=%d pl=%d score=%.3f pos=%.0f,%.0f eng=%d stuck=%d\n",
+                        (unsigned long long)w->tick, mid, bot_goal_name(pick.goal),
+                        pick.target_mech, pick.target_node, (int)mind->path_len,
+                        mind->goal_score_cached, mp.x, mp.y, eng,
+                        (mind->stuck_since_tick > 0) ? (int)(w->tick - mind->stuck_since_tick) : 0);
+                if (mid == 0) {
+                    fprintf(stderr, "  path[0..%d]: ", (int)mind->path_len);
+                    for (int pi = 0; pi < mind->path_len && pi < 10; ++pi) {
+                        int nd = mind->path[pi];
+                        if (nd >= 0 && nd < bs->nav->node_count) {
+                            Vec2 npos = bs->nav->nodes[nd].pos;
+                            fprintf(stderr, "%d(%.0f,%.0f) ", nd, npos.x, npos.y);
+                        }
+                    }
+                    fprintf(stderr, "\n");
+                }
+            }
 
             /* Plan path when the goal involves a target node. */
             if (pick.target_node >= 0 && bs->nav && bs->nav->node_count > 0) {
@@ -1751,11 +2724,27 @@ void bot_step(BotSystem *bs, World *w, struct Game *g, float dt) {
                         mind->path_reach_kind = BOT_REACH_WALK;
                     } else {
                         if (!bot_plan_path(mind, bs->nav, start, pick.target_node)) {
-                            /* No path — wander toward target_node directly. */
-                            mind->path_len = 1;
-                            mind->path[0]  = (int16_t)pick.target_node;
-                            mind->path_step = 0;
-                            mind->path_reach_kind = BOT_REACH_WALK;
+                            /* Goal is in a disconnected component. Fall
+                             * back to the most goal-proximate REACHABLE
+                             * node from start, so the bot still makes
+                             * progress toward the enemy instead of
+                             * wandering into geometry. */
+                            int fallback = bfs_closest_reachable(bs->nav,
+                                start, pick.target_node);
+                            if (fallback != start &&
+                                bot_plan_path(mind, bs->nav, start, fallback))
+                            {
+                                /* Path planned to stepping-stone node. */
+                            } else {
+                                if (getenv("BOT_TRACE") && w->tick < 200 && (w->tick % 30) < 6) {
+                                    fprintf(stderr, "ASTAR_FAIL mid=%d start=%d goal=%d\n",
+                                            mid, start, pick.target_node);
+                                }
+                                mind->path_len = 1;
+                                mind->path[0]  = (int16_t)pick.target_node;
+                                mind->path_step = 0;
+                                mind->path_reach_kind = BOT_REACH_WALK;
+                            }
                         }
                     }
                     mind->last_replan_tick = w->tick;
@@ -1808,6 +2797,10 @@ void bot_step(BotSystem *bs, World *w, struct Game *g, float dt) {
             tactic_engage(mind, bs->nav, w, mid, mind->goal_target_mech, &wants);
         } else if (mind->goal == BOT_GOAL_RETREAT) {
             tactic_retreat(mind, bs->nav, w, mid, &wants);
+        } else if (mind->goal == BOT_GOAL_DEFEND_FLAG && bs->nav &&
+                   bs->nav->node_count > 0)
+        {
+            tactic_defend_flag(mind, bs->nav, w, mid, &wants);
         } else if (mind->goal_target_node >= 0 && bs->nav &&
                    mind->goal_target_node < bs->nav->node_count)
         {

@@ -542,13 +542,14 @@ static void build_reactor(void) {
     tile_fill(W - 4, H - 8, W - 2, H - 4, TILE_F_EMPTY);
     tile_fill(W - 4, H - 9, W - 2, H - 8, SOLID);
 
-    /* Central pillar (the reactor core) — narrowed to 4 tiles wide
-     * (was 8) so it reads as a column, not a wall. Cap shortened by
-     * 2 tiles so the flanking-platform sniper line of sight ALMOST
-     * but not quite clears it — you have to step a tile off the
-     * platform to see over. Reactor's intent is "contested center,"
-     * not "wall splits the map." */
-    tile_fill(53, H - 14, 57, H - 4, SOLID);
+    /* M6 P05 — central pillar reshaped to a "hanging core." Pillar tiles
+     * occupy rows 28-34 (y=896-1119) instead of 28-37 — the bottom 3
+     * tiles are cut so bots (and lower-skill humans) can walk straight
+     * under it at floor level via a 96-px-tall corridor. The pillar
+     * still reads as the contested center: snipers on top, fighters
+     * underneath. The window slit at rows 30-31 stays — same LOS line
+     * for snipers, just now there's a walkable arch BELOW too. */
+    tile_fill(53, H - 14, 57, H - 7, SOLID);
 
     /* Pillar viewport — a 2-tile-tall window 1 tile from the top
      * gives ground-level snipers a sliver of LOS across the map
@@ -565,13 +566,13 @@ static void build_reactor(void) {
     tile_fill(78, H - 22, 88, H - 21, SOLID);
 
     /* ---- Slope polygons ---- */
-    const int floor_y     = t2w(H - 4);
-    const int bowl_low    = t2w(H - 3);                  /* 1 tile below floor mark */
-    const int pillar_left  = t2w(53), pillar_right = t2w(57);
-    const int pillar_top   = t2w(H - 14);
-    const int flank_left_top = t2w(38);                  /* right edge of left flank */
-    const int flank_right_top = t2w(72);
-    const int flank_top_y     = t2w(H - 11);
+    const int floor_y         = t2w(H - 4);
+    const int bowl_low        = t2w(H - 3);              /* 1 tile below floor mark */
+    const int pillar_top      = t2w(H - 14);
+    const int flank_top_y     = t2w(H - 12);             /* flank platform TOP (was H-11, that was its bottom) */
+    const int flank_left_end  = t2w(37) + 32;            /* x at end of left flank tile (col 37 inclusive) */
+    const int flank_right_end = t2w(72);                  /* x at start of right flank tile (col 72 inclusive) */
+    (void)pillar_top;
 
     /* Bowl floor — gentle 30° from spawn side toward the pillar base. */
     push_tri(POLY_KIND_SOLID,
@@ -583,25 +584,32 @@ static void build_reactor(void) {
              t2w(W - 4), floor_y,
              t2w(57), floor_y);
 
-    /* 45° pillar-underside overhangs — slope-roof alcove ceiling. */
-    push_tri(POLY_KIND_SOLID,
-             pillar_left,  pillar_top,
-             pillar_left,  pillar_top + t2w(4),
-             pillar_left - t2w(4), pillar_top);
-    push_tri(POLY_KIND_SOLID,
-             pillar_right, pillar_top,
-             pillar_right + t2w(4), pillar_top,
-             pillar_right, pillar_top + t2w(4));
+    /* M6 P05 — pillar-underside overhangs removed. The 4-tile-tall 45°
+     * triangles at each pillar bottom corner served as a visual flourish
+     * ("alcove ceiling") but they cast a 128-px horizontal "shadow"
+     * outside the pillar's tile bounds that JET reach feasibility
+     * couldn't clear via straight-line ray arcs. With them gone the
+     * pillar reads as a clean rectangular column and bots can JET from
+     * either flank platform up to the pillar top. The pillar window
+     * (tiles 53-56 × rows 30-31) still gives ground-to-ground LOS
+     * through the column. */
 
-    /* 45° flanking ramps from bowl floor up to flanking platform. */
+    /* M6 P05 — flanking ramps reshaped to gentle 30° slopes ELEVATED
+     * 96 px above the bowl floor. Pre-P05 was 81° steep AND touched
+     * the floor, which (a) was unwalkable by the mech (>60° limit)
+     * and (b) blocked the bowl-floor nav chain that bots use to
+     * traverse spawn-to-spawn. The 96-px clearance gives bots a
+     * clean floor walk underneath the ramp; the ramp itself stays
+     * visible as the "flank access" route, reachable by JET from
+     * the floor. */
     push_tri(POLY_KIND_SOLID,
-             flank_left_top - t2w(6), floor_y,
-             flank_left_top,          flank_top_y,
-             flank_left_top,          floor_y);
+             t2w(23),         floor_y - 96,      /* bottom-left 96 px above floor */
+             flank_left_end,  flank_top_y,       /* top at left flank's right corner */
+             flank_left_end,  floor_y - 96);     /* bottom-right 96 px above floor */
     push_tri(POLY_KIND_SOLID,
-             flank_right_top,         flank_top_y,
-             flank_right_top + t2w(6), floor_y,
-             flank_right_top,         floor_y);
+             flank_right_end, flank_top_y,       /* top at right flank's left corner */
+             t2w(87),         floor_y - 96,      /* bottom-right 96 px above floor */
+             flank_right_end, floor_y - 96);     /* bottom-left 96 px above floor */
 
     /* ---- Spawns — TDM-friendly (red on left, blue on right). ---- */
     const int spawn_floor = floor_y - 40;
@@ -886,31 +894,30 @@ static void build_catwalk(void) {
     const int cw2_top = t2w(H - 42);
     const int cw3_top = t2w(H - 54);
 
-    /* Walkable 45° ramps — give the ground route a way up to cw1 at
-     * both ends, plus a center ramp from cw1 to cw2 and another from
-     * cw2 to cw3. Ground players can walk the whole vertical stack
-     * if they're patient; they're slow (45° uphill at <50% speed) so
-     * jetting is still faster. */
-    /* Floor → cw1 left ramp (cols 16..20). */
+    /* M6 P05 — floor-to-cw1 ramps + slide-slopes ELEVATED 96 px above
+     * floor so they don't block the bowl-floor nav chain. Geometry
+     * stays as the M5 P18 "walk the whole stack" design; the floor
+     * underneath is now continuous so bots traverse spawn-to-spawn
+     * at floor level. Climbers JET up onto the ramp's bottom edge
+     * and walk up from there. */
+    /* Floor → cw1 left ramp: cols 15..30, top at cw1, bottom 96 px above floor. */
     push_tri(POLY_KIND_SOLID,
-             t2w(16), floor_y, t2w(20), cw1_top, t2w(20), floor_y);
-    /* Floor → cw1 right ramp (cols 100..104). */
+             t2w(15), floor_y - 96, t2w(30), cw1_top, t2w(30), floor_y - 96);
+    /* Floor → cw1 right ramp (mirror). */
     push_tri(POLY_KIND_SOLID,
-             t2w(100), cw1_top, t2w(104), floor_y, t2w(100), floor_y);
-    /* cw1 → cw2 left ramp (cols 50..55). */
+             t2w(W - 30), cw1_top, t2w(W - 15), floor_y - 96, t2w(W - 30), floor_y - 96);
+    /* cw1 → cw2 left ramp (cols 50..55) — doesn't touch floor, keep as-is. */
     push_tri(POLY_KIND_SOLID,
              t2w(50), cw1_top, t2w(55), cw2_top, t2w(55), cw1_top);
-    /* cw2 → cw3 ramp (cols 60..64). */
+    /* cw2 → cw3 ramp (cols 60..64) — doesn't touch floor, keep as-is. */
     push_tri(POLY_KIND_SOLID,
              t2w(60), cw2_top, t2w(64), cw3_top, t2w(64), cw2_top);
 
-    /* 60° slide slopes — fast downhill traversal back to the floor.
-     * From cw1 left end straight down to floor (cols 22..27, rise of
-     * 12 tiles). */
+    /* Slide-slopes from cw1 back to floor — elevated 96 px above floor. */
     push_tri(POLY_KIND_SOLID,
-             t2w(22), cw1_top, t2w(27), floor_y, t2w(27), cw1_top);
+             t2w(35), cw1_top, t2w(50), floor_y - 96, t2w(50), cw1_top);
     push_tri(POLY_KIND_SOLID,
-             t2w(93), cw1_top, t2w(98), floor_y, t2w(93), floor_y);
+             t2w(W - 50), cw1_top, t2w(W - 35), floor_y - 96, t2w(W - 50), floor_y - 96);
 
     /* 45° angled overhead struts — 4 small triangles hanging from the
      * ceiling band, each acting as a jet-redirect surface. */
@@ -1224,10 +1231,15 @@ static void build_crossfire(void) {
     const int sky_row = H - 26;
     tile_fill(W / 2 - 12, sky_row, W / 2 + 12, sky_row + 1, SOLID);
 
-    /* Flank-tunnel mid-alcove rooms cut as 2-tile cover stubs sitting
-     * on the floor — clean shapes that won't trap bots. */
-    tile_fill(W / 2 - 28, H - 7, W / 2 - 24, H - 4, SOLID);
-    tile_fill(W / 2 + 24, H - 7, W / 2 + 28, H - 4, SOLID);
+    /* M6 P05 — flank cover stubs shortened to 2 tiles tall (was 3).
+     * 3-tile (96 px) stubs had their top at y=1696 — INSIDE the
+     * mech's body Y-range (head at y=1712 for a bot with pelvis at
+     * the spawn floor), so bots collided and couldn't walk past.
+     * 2-tile (64 px) stubs top at y=1728 leaves the mech's head
+     * 16 px of clearance. Stubs still provide visual cover for
+     * shooting angles without blocking ground traversal. */
+    tile_fill(W / 2 - 28, H - 6, W / 2 - 24, H - 4, SOLID);
+    tile_fill(W / 2 + 24, H - 6, W / 2 + 28, H - 4, SOLID);
 
     /* Central-high jetpack alcoves cut into the sky-bridge underside. */
     tile_fill(W / 2 - 8, H - 30, W / 2 - 4, H - 26, TILE_F_EMPTY);
@@ -1239,16 +1251,18 @@ static void build_crossfire(void) {
     const int floor_y   = t2w(H - 4);
     const int flag_y    = t2w(flag_plat_top_row);
 
-    /* 30° entry ramps from central floor up to each base's flag
-     * platform — 8-tile run, ~5-tile rise. */
+    /* M6 P05 — entry ramps elevated 96 px above floor so the bowl
+     * floor stays continuous for spawn-to-spawn bot traversal. The
+     * ramps still serve as walkable approaches to each flag platform;
+     * climbers JET up onto the ramp from the floor. */
     push_tri(POLY_KIND_SOLID,
              t2w(base_w),       flag_y,
-             t2w(base_w + 10),  floor_y,
-             t2w(base_w),       floor_y);
+             t2w(base_w + 10),  floor_y - 96,
+             t2w(base_w),       floor_y - 96);
     push_tri(POLY_KIND_SOLID,
-             t2w(W - base_w - 10), floor_y,
+             t2w(W - base_w - 10), floor_y - 96,
              t2w(W - base_w),      flag_y,
-             t2w(W - base_w),      floor_y);
+             t2w(W - base_w),      floor_y - 96);
 
     /* 45° angled struts above central mid (3). */
     push_tri(POLY_KIND_SOLID,
@@ -1370,7 +1384,9 @@ static void build_citadel(void) {
     /* RED castle interior — flag room (west) + resupply (east). */
     tile_fill(4,  H - 20, 12, H - 4, TILE_F_EMPTY);   /* flag room */
     tile_fill(14, H - 20, 22, H - 4, TILE_F_EMPTY);   /* resupply room */
-    tile_fill(12, H - 8, 14, H - 4, SOLID);            /* partition with floor-level passage */
+    /* M6 P05 — partition's floor-level passage (cook had this as solid
+     * which trapped bots in the flag room; comment said "passage"). */
+    tile_fill(12, H - 8, 14, H - 4, TILE_F_EMPTY);   /* floor-level passage */
     /* Castle entrance — 4-tile-wide opening in east wall at floor. */
     tile_fill(22, H - 8, 26, H - 4, TILE_F_EMPTY);
     tile_fill(22, H - 9, 26, H - 8, SOLID);
@@ -1379,7 +1395,7 @@ static void build_citadel(void) {
     tile_fill(W - 2 - castle_w, H - 22, W - 2, H - 4, SOLID);
     tile_fill(W - 12, H - 20, W - 4,  H - 4, TILE_F_EMPTY);
     tile_fill(W - 22, H - 20, W - 14, H - 4, TILE_F_EMPTY);
-    tile_fill(W - 14, H - 8, W - 12, H - 4, SOLID);
+    tile_fill(W - 14, H - 8, W - 12, H - 4, TILE_F_EMPTY);  /* floor-level passage */
     tile_fill(W - 26, H - 8, W - 22, H - 4, TILE_F_EMPTY);
     tile_fill(W - 26, H - 9, W - 22, H - 8, SOLID);
 
@@ -1407,15 +1423,19 @@ static void build_citadel(void) {
              t2w(W - 2 - castle_w - 4), floor_y,
              t2w(84), floor_y);
 
-    /* 60° castle outer slopes (the plaza-facing rampart). */
+    /* M6 P05 — castle outer slopes elevated 96 px above floor so the
+     * plaza floor stays continuous for spawn-to-spawn bot traversal.
+     * (Original was 77° steep AND touched floor — bots couldn't
+     * physically walk it and it blocked floor nav.) Climbers JET up
+     * to the ramp's bottom edge. */
     push_tri(POLY_KIND_SOLID,
              t2w(2 + castle_w),     castle_top,
-             t2w(2 + castle_w + 4), floor_y,
-             t2w(2 + castle_w),     floor_y);
+             t2w(2 + castle_w + 4), floor_y - 96,
+             t2w(2 + castle_w),     floor_y - 96);
     push_tri(POLY_KIND_SOLID,
-             t2w(W - 2 - castle_w - 4), floor_y,
+             t2w(W - 2 - castle_w - 4), floor_y - 96,
              t2w(W - 2 - castle_w),     castle_top,
-             t2w(W - 2 - castle_w),     floor_y);
+             t2w(W - 2 - castle_w),     floor_y - 96);
 
     /* 6 grapple-anchor struts spread across the plaza at varied
      * heights — fewer than the original 12, but still enough for the
