@@ -770,13 +770,37 @@ static void apply_jet_force(World *w, const Mech *m, float thrust_pxs2, float dt
         w->mechs[m->id].last_jet_pulse_tick = w->tick;
     }
 
-    /* Run-input sign for ceiling-tangent direction selection. The
-     * latched_input tells us which way the player is leaning; when
-     * jetting against an angled overhang we redirect the upward thrust
-     * sideways along the ceiling tangent in that direction. */
+    /* Run-input sign for ceiling-tangent direction selection AND
+     * the Phase 4 horizontal jet component. The latched_input tells
+     * us which way the player is leaning; when jetting against an
+     * angled overhang we redirect the upward thrust sideways along
+     * the ceiling tangent, and (Phase 4) we ALSO add a sideways jet
+     * push to every particle so JET+RIGHT covers horizontal ground. */
     float run_sign = 0.0f;
     if (m->latched_input.buttons & BTN_LEFT)  run_sign = -1.0f;
     if (m->latched_input.buttons & BTN_RIGHT) run_sign = +1.0f;
+
+    /* M6 P07 Phase 4 — horizontal jet thrust (§5C). When L/R is held
+     * while jetting, add lateral push at 50 % of vertical thrust
+     * magnitude. Pure JET (no L/R) stays vertical-only — preserves
+     * the "just climb" verb. Applied unconditionally on every
+     * particle, including those flagged CEILING, so a player can
+     * scoot horizontally along the underside of an overhang at full
+     * sideways speed (vertical thrust is the only thing the ceiling
+     * eats). Uses the same scale + ceiling-taper as fy — at full
+     * taper (head_y < 24 px) we've already returned, so by the time
+     * fx is computed, scale > 0.
+     *
+     * Note: this stacks ON TOP of Phase 2's air-control accel. Phase 2
+     * lerps vx toward ±RUN_SPEED with input as a CAP; Phase 4's fx
+     * pushes vx PAST the cap. Phase 2's above-cap-in-input-direction
+     * return then keeps the run input from undoing the jet push;
+     * only PHYSICS_VELOCITY_DAMP (0.99/tick) bleeds the excess. So
+     * a Trooper jetting+RIGHT settles into a steady horizontal speed
+     * well above RUN_SPEED — exactly the "jet covers distance" the
+     * user asked for. */
+    float fx = -fy * 0.5f * run_sign;
+              /* run_sign=+1 (RIGHT) → fx > 0 since fy < 0 (up) */
 
     for (int part = 0; part < PART_COUNT; ++part) {
         int idx = m->particle_base + part;
@@ -800,6 +824,8 @@ static void apply_jet_force(World *w, const Mech *m, float thrust_pxs2, float dt
         } else {
             p->pos_y[idx] += fy;
         }
+        /* Phase 4 — horizontal jet, applies regardless of ceiling. */
+        p->pos_x[idx] += fx;
     }
 }
 

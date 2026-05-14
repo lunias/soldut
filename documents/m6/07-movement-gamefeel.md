@@ -1087,6 +1087,68 @@ foot on the floor surface, which is solid by construction.
   **Phase 4** — jet pack horizontal (§5C). If ceilings are too
   tight, retune `JUMP_IMPULSE_PXS` here.
 
+### Phase 4 — jet horizontal thrust ✅ shipped
+
+- **Code:** `src/mech.c::apply_jet_force` now reads
+  `m->latched_input.buttons & BTN_LEFT/RIGHT` for both the existing
+  ceiling-tangent direction selection AND a new horizontal thrust
+  component. `fx = -fy · 0.5 · run_sign` adds lateral push at 50 % of
+  vertical thrust magnitude when L/R is held. Pure JET (run_sign=0
+  → fx=0) stays vertical — the "just climb" verb is preserved.
+  Applied to every particle including those flagged CEILING — a
+  player can scoot horizontally along an overhang at full sideways
+  speed even when the ceiling-taper has eaten the vertical thrust.
+
+- **Phase 2 interaction (intended):** Phase 2's air-control caps the
+  run-input contribution at RUN_SPEED. Phase 4's `fx` pushes vx PAST
+  the cap; Phase 2's above-cap-in-input-direction return then keeps
+  the run input from undoing the jet push. Only PHYSICS_VELOCITY_DAMP
+  (0.99/tick) bleeds the excess. So jet+RIGHT settles into a steady
+  horizontal speed well above RUN_SPEED — exactly the "jet covers
+  distance" verb the user asked for.
+
+- **Jet probe (`tests/shots/m6_movement_jet.shot`, new):** two
+  scenarios captured in sequence.
+  - **(a) Pure JET (t=40-65):** vx stays at ~0 px/tick throughout
+    the jet hold (0.2 px drift at landing settle — terrain). **Pure
+    JET stays vertical-only.**
+  - **(b) JET + RIGHT (t=220-265, 45 ticks of jet hold):** pelv
+    moves from (803.8, 1111.3) → (1237.3, 754.1) = **433 px right,
+    357 px up**. Peak velocity (13.96, -12.90) px/tick =
+    (838 px/s right, 774 px/s up) — roughly 45° diagonal at ~3×
+    RUN_SPEED lateral. Pre-Phase-4 (capped at RUN_SPEED by Phase 2):
+    would have been 45·4.67 = 210 px right. **Phase 4 ~2× lateral
+    range during jet.**
+
+- **Tests:** `test-mech-ik` ALL PASS, `test-pose-compute` ALL PASS,
+  `test-snapshot` all passed, `tests/shots/net/run.sh 2p_basic`
+  12/12 PASS, `tests/shots/net/run_frag_grenade.sh` 9/9 PASS,
+  running-jump probe (`m6_movement_probe.shot`) bit-identical to
+  Phase 3 baseline (pelv=(614.2, 917.6) at t=108 jump, apex
+  (721.2, 829.9) at t=131) — Phase 4 only touches the jet path.
+
+- **Caveats:**
+  - **Lateral speed at peak ≈ 838 px/s (~3× RUN_SPEED).** This may
+    be in the "fly-spam too far" zone the plan warns about; if
+    playtest reports jet feels OP for traversal, reduce the 0.5
+    multiplier to 0.3-0.4 (yields 2-2.5× RUN_SPEED lateral). Tune
+    here, not by recapping Phase 2.
+  - **CTF carrier balance** (§8 risk 6): carrier already halves
+    `thrust_pxs2`, so both fy AND fx halve for carriers — they get
+    half-up, half-sideways. Symmetric penalty. Probably fine; flag
+    for CTF playtest.
+  - **Bot AI** (§8 risk 4): bots use BTN_JET via the same
+    `mech_step_drive` path. They may now drift sideways while
+    jetting (whichever direction they're facing). Bake-test
+    informational only — re-run if behavior looks off.
+
+- **Playtest:** pending. **Test grid:** open arena (verify
+  lateral speed feels right), Reactor pillars (vertical climbs
+  still work), CTF flag chase (carrier penalty effective).
+- **Next:** if jet feel is right, **Phase 5** — slope-momentum
+  verification + retune (likely no code change; just measure).
+  If jet is too fast, retune the 0.5 multiplier here.
+
 ### Resume here when next session starts
 
 1. Read this section (§13) for the running log.
@@ -1094,10 +1156,10 @@ foot on the floor surface, which is solid by construction.
    on the branch.
 3. Re-run `make shot SCRIPT=tests/shots/m6_aurora_slope.shot`
    + `make shot SCRIPT=tests/shots/m6_movement_probe.shot`
+   + `make shot SCRIPT=tests/shots/m6_movement_jet.shot`
    + `make test-spawn-geometry` to reproduce the latest baselines.
-4. Wait for user verdict on Phase 3 (taller jump) — including the
-   Reactor/Catwalk/Citadel ceiling check — before opening Phase 4
-   (jet horizontal).
+4. Wait for user verdict on Phase 4 (jet horizontal) before
+   opening Phase 5 (slope verification).
 
 ### Phase 1.2 followup — sync investigation (NOT a Phase 1.x regression)
 
