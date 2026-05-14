@@ -1149,6 +1149,60 @@ foot on the floor surface, which is solid by construction.
   verification + retune (likely no code change; just measure).
   If jet is too fast, retune the 0.5 multiplier here.
 
+### Phase 5 — slope-momentum measurement ✅ shipped (no code change)
+
+Per the plan §6 Phase 5 — "probably no code changes; this is a
+measurement pass confirming slope-down then run-out produces speeds
+> RUN_SPEED that decay toward RUN_SPEED over a measurable window."
+
+- **Probe (`tests/shots/m6_movement_slope.shot`, new):** spawn at
+  the top of aurora's west hill (30° slope, peak at (1024, 2516)),
+  hold LEFT to slide+run downhill, keep LEFT held through the
+  slope→flat transition. Measure vx during the slope descent, at
+  the transition, and on the flat run-out.
+
+- **Measurement — active slide (LEFT held):**
+  - On the slope, vx oscillates between -5 and -6 px/tick =
+    1.1-1.3× RUN_SPEED. Phase 1.1's above-cap guard lets
+    gravity-along-tangent push past the input cap; input still
+    pulls toward the cap when it dips below.
+  - At slope→flat transition (around t=90-101): vx briefly stays
+    at -4.7 to -4.9 px/tick (1.0-1.05× RUN_SPEED), then settles
+    to the RUN_SPEED cap of -4.667 px/tick.
+  - Carry window on flat: ~5 ticks at ~5 % over cap. The flat-
+    contact friction (0.92/tick tangential, `src/physics.c:365`)
+    is what's bleeding the slope excess; input-cap-not-target
+    keeps run input from snapping the velocity down faster.
+
+- **Measurement — impact slide (no input, existing
+  `m6_aurora_slope.shot`):** mech free-falls onto the slope at
+  spawn, peaks at vx = -11.45 px/tick (2.45× RUN_SPEED). At the
+  slope→flat transition (t=10→t=11): vx drops -5.71 → -2.83
+  px/tick in one tick. This larger-than-friction drop is the
+  constraint-solver impact loss as the foot transitions between
+  contact-normal regimes; it predates this branch and the user
+  already approved its feel in the Phase 1.1 playtest verdict.
+
+- **Verdict:** Phase 1.1's above-cap invariant holds — slope
+  momentum > RUN_SPEED persists on flat for a measurable window
+  (~5 ticks at 1.05×). The carry is subtle on 30° slopes because
+  flat friction (0.92/tick) is strong relative to the modest slope-
+  gravity contribution. **No code change in Phase 5.** If the
+  user reports slope advantage feels too subtle, the tuning lever
+  is `floor friction (flat)` in `src/physics.c:365` — bumping from
+  0.92 → ~0.96 gives ~4× longer carry window (15-20 ticks of
+  visible excess), at the cost of slower release-decel on flat.
+
+- **Tests:** mech-ik / pose / snapshot / 2p_basic — unchanged from
+  Phase 4 (no code touched).
+
+- **Playtest:** N/A — measurement-only ship.
+- **Next:** **Phase 6** — recoil + dash momentum compatibility
+  check. Phase 1/2 changes should give Scout's BTN_DASH a
+  cumulative effect for free (720 px/s > RUN_SPEED, above-cap
+  guard preserves the dash spike, friction grinds it down). Visual
+  via the probe shot.
+
 ### Resume here when next session starts
 
 1. Read this section (§13) for the running log.
@@ -1157,9 +1211,10 @@ foot on the floor surface, which is solid by construction.
 3. Re-run `make shot SCRIPT=tests/shots/m6_aurora_slope.shot`
    + `make shot SCRIPT=tests/shots/m6_movement_probe.shot`
    + `make shot SCRIPT=tests/shots/m6_movement_jet.shot`
+   + `make shot SCRIPT=tests/shots/m6_movement_slope.shot`
    + `make test-spawn-geometry` to reproduce the latest baselines.
-4. Wait for user verdict on Phase 4 (jet horizontal) before
-   opening Phase 5 (slope verification).
+4. Phase 5 shipped no code; Phase 6 is the next active phase
+   (recoil + dash momentum check, likely also no code change).
 
 ### Phase 1.2 followup — sync investigation (NOT a Phase 1.x regression)
 
