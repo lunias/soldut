@@ -22,6 +22,7 @@
 #include "platform.h"
 #include "prefs.h"
 #include "proc_spawn.h"
+#include "profile.h"
 #include "reconcile.h"
 #include "render.h"
 #include "shotmode.h"
@@ -123,6 +124,20 @@ typedef struct {
      * config values alone. */
     int         bots_override;
     int         bot_tier_override;
+    /* M6 P06 — perf bench mode.
+     *   --bench <secs>          run an offline-solo round for N seconds,
+     *                           then exit. 0 = disabled.
+     *   --bench-csv <path>      open a per-frame CSV before the loop,
+     *                           close at shutdown. Independent of bench
+     *                           mode — useful for capturing CSVs from
+     *                           interactive play too.
+     *   --bench-map <name>      short-name override for bench scenario
+     *                           (default: reactor).
+     *   --bench-bots <N>        bot count for bench scenario (default 1). */
+    int         bench_secs;
+    char        bench_csv[256];
+    char        bench_map[24];
+    int         bench_bots;
 } LaunchArgs;
 
 static void parse_args(int argc, char **argv, LaunchArgs *out) {
@@ -131,6 +146,10 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
     out->internal_h_override = -1;
     out->bots_override       = -1;
     out->bot_tier_override   = -1;
+    out->bench_secs          = 0;
+    out->bench_bots          = -1;        /* -1 = default (1) */
+    out->bench_map[0]        = '\0';
+    out->bench_csv[0]        = '\0';
     snprintf(out->name, sizeof out->name, "player");
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--host") == 0) {
@@ -263,6 +282,31 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
         else if (strcmp(argv[i], "--time") == 0 && i + 1 < argc) {
             int n = atoi(argv[++i]);
             if (n > 0) out->time_limit_s = n;
+        }
+        /* M6 P06 — perf bench harness. --bench drives an offline-solo
+         * round for N seconds then exits with code 0 on budget hit /
+         * code 1 otherwise; --bench-csv is independent (works for any
+         * launch mode). See documents/m6/06-perf-profiling-and-optimization.md
+         * §4c. */
+        else if (strcmp(argv[i], "--bench") == 0 && i + 1 < argc) {
+            int n = atoi(argv[++i]);
+            if (n < 1) n = 1;
+            if (n > 600) n = 600;
+            out->bench_secs = n;
+            out->mode       = LAUNCH_HOST;
+            out->skip_title = true;
+        }
+        else if (strcmp(argv[i], "--bench-csv") == 0 && i + 1 < argc) {
+            snprintf(out->bench_csv, sizeof out->bench_csv, "%s", argv[++i]);
+        }
+        else if (strcmp(argv[i], "--bench-map") == 0 && i + 1 < argc) {
+            snprintf(out->bench_map, sizeof out->bench_map, "%s", argv[++i]);
+        }
+        else if (strcmp(argv[i], "--bench-bots") == 0 && i + 1 < argc) {
+            int n = atoi(argv[++i]);
+            if (n < 0) n = 0;
+            if (n > 31) n = 31;
+            out->bench_bots = n;
         }
     }
 }
@@ -1987,6 +2031,36 @@ int main(int argc, char **argv) {
     if (args.ff_set) game.config.friendly_fire = args.friendly_fire;
     if (args.bots_override >= 0)     game.config.bots     = args.bots_override;
     if (args.bot_tier_override >= 0) game.config.bot_tier = args.bot_tier_override;
+
+    /* M6 P06 — bench-mode config overrides. --bench forces offline-solo
+     * with N bots on a fixed map; default reactor / 1 bot. Score + time
+     * are picked high enough that the round won't end before --bench
+     * runs out; the wall-clock cutoff in the main loop drives shutdown. */
+    if (args.bench_secs > 0) {
+        int bots = (args.bench_bots >= 0) ? args.bench_bots : 1;
+        game.config.bots         = bots;
+        if (game.config.bot_tier <= 0) game.config.bot_tier = 2; /* veteran */
+        const char *bench_map = args.bench_map[0] ? args.bench_map : "reactor";
+        int mid = map_id_from_name(bench_map);
+        if (mid < 0) {
+            LOG_W("--bench: unknown map '%s', falling back to reactor",
+                  bench_map);
+            mid = map_id_from_name("reactor");
+            if (mid < 0) mid = 0;
+        }
+        game.config.map_rotation[0]     = mid;
+        game.config.map_rotation_count  = 1;
+        game.config.mode                = MATCH_MODE_FFA;
+        game.config.mode_rotation[0]    = MATCH_MODE_FFA;
+        game.config.mode_rotation_count = 1;
+        game.config.score_limit         = 9999;            /* don't end */
+        game.config.time_limit          = (float)(args.bench_secs * 4);
+        game.config.friendly_fire       = true;
+        game.config.auto_start_seconds  = 1;
+        LOG_I("--bench: %ds, map=%s, bots=%d", args.bench_secs,
+              bench_map, bots);
+    }
+
     /* M5 P04 — editor test-play overrides match config: FFA, 60 s round,
      * 1 s auto-start, no networking. Stash the .lvl path on Game so
      * bootstrap_host + start_round can find it. */
@@ -2115,6 +2189,15 @@ int main(int argc, char **argv) {
      * here so non-shot launches can opt in too. */
     if (args.perf_overlay) g_shot_perf_overlay = 1;
 
+    /* M6 P06 — profiler is always-on; CSV is opt-in via --bench-csv.
+     * profile_init zeroes the ring + counters; safe to call before
+     * raylib's GetTime is hot (the first frame's PROF_FRAME starts in
+     * profile_frame_begin below the main loop). */
+    profile_init();
+    if (args.bench_csv[0]) {
+        profile_csv_open(args.bench_csv);
+    }
+
     int win_w = args.window_w_override > 0 ? args.window_w_override : 1920;
     int win_h = args.window_h_override > 0 ? args.window_h_override : 1080;
     PlatformConfig pcfg = {
@@ -2217,8 +2300,11 @@ int main(int argc, char **argv) {
              * `--dedicated PORT` and connects to it locally so both
              * players have identical client paths. test-play needs the
              * in-process listen-server (no UDP collisions with the
-             * user's running game), so it falls back to that path. */
-            bool offline = (args.test_play_lvl[0] != 0);
+             * user's running game), so it falls back to that path.
+             * M6 P06 — bench mode also uses the offline path (no UDP,
+             * deterministic single-process timing). */
+            bool offline = (args.test_play_lvl[0] != 0) ||
+                           (args.bench_secs > 0);
             bool ok;
             if (offline) {
                 ok = bootstrap_host(&game, &args, /*offline*/true);
@@ -2236,6 +2322,12 @@ int main(int argc, char **argv) {
                  * combined with countdown_default below the F5 round-
                  * trip is ~2 frames from launch to MATCH_PHASE_ACTIVE. */
                 lobby_auto_start_arm(&game.lobby, 0.001f);
+            }
+            if (args.bench_secs > 0) {
+                /* Sub-frame countdown so the bench drops into the match
+                 * immediately. */
+                lobby_auto_start_arm(&game.lobby, 0.001f);
+                game.match.countdown_default = 0.001f;
             }
         } else if (args.mode == LAUNCH_LISTEN_HOST) {
             /* Legacy in-process server (server + client in one
@@ -2257,13 +2349,33 @@ int main(int argc, char **argv) {
     PlatformFrame pf = {0};
     double accum = 0.0;
     double last  = GetTime();
+    /* M6 P06 — bench-mode wall-clock cutoff. 0 = unlimited. */
+    double bench_deadline = (args.bench_secs > 0)
+                          ? GetTime() + (double)args.bench_secs
+                          : 0.0;
 
     while (!WindowShouldClose() && game.mode != MODE_QUIT) {
+        profile_frame_begin();
         double now = GetTime();
         double dt  = now - last;
         last = now;
         if (dt > MAX_FRAME_DT) dt = MAX_FRAME_DT;
         accum += dt;
+
+        if (bench_deadline > 0.0 && now >= bench_deadline) {
+            LOG_I("--bench: wall-clock cutoff reached, exiting");
+            game.mode = MODE_QUIT;
+        }
+        /* M6 P06 — keep the local mech immortal during bench mode so
+         * the round doesn't transition to SUMMARY when a bot one-shots
+         * the player. Combat zones (sim / bots) need active matches to
+         * exercise. Setting powerup_godmode_remaining each frame is
+         * sufficient — mech_apply_damage early-outs when it's > 0. */
+        if (args.bench_secs > 0 && game.world.local_mech_id >= 0 &&
+            game.world.local_mech_id < game.world.mech_count) {
+            game.world.mechs[game.world.local_mech_id]
+                .powerup_godmode_remaining = 9999.0f;
+        }
 
         /* M5 P13 — file-watcher poll. Internally rate-limited to
          * 250 ms so this is a single timestamp comparison most frames.
@@ -2307,7 +2419,9 @@ int main(int argc, char **argv) {
         /* Pump network FIRST so inbound inputs / snapshots / lobby
          * messages are visible before this frame's sim ticks. */
         if (game.net.role != NET_ROLE_OFFLINE) {
+            profile_zone_begin(PROF_NET_POLL);
             net_poll(&game.net, &game, dt);
+            profile_zone_end(PROF_NET_POLL);
         }
 
         /* Forced-disconnect detection (kick/ban/timeout). When the
@@ -2692,6 +2806,7 @@ int main(int argc, char **argv) {
             /* Fixed-step simulation. */
             while (accum >= TICK_DT) {
                 ClientInput in;
+                profile_zone_begin(PROF_INPUT);
                 platform_sample_input(&in);
                 in.dt  = (float)TICK_DT;
                 in.seq = (uint16_t)(game.world.tick + 1);
@@ -2700,12 +2815,15 @@ int main(int argc, char **argv) {
                     (Vec2){ in.aim_x, in.aim_y });
                 in.aim_x = cursor_world.x;
                 in.aim_y = cursor_world.y;
+                profile_zone_end(PROF_INPUT);
 
                 if (game.net.role == NET_ROLE_CLIENT) {
                     if (game.world.local_mech_id >= 0) {
                         game.world.mechs[game.world.local_mech_id].latched_input = in;
                     }
+                    profile_zone_begin(PROF_SIM_STEPS);
                     simulate_step(&game.world, (float)TICK_DT);
+                    profile_zone_end(PROF_SIM_STEPS);
                     /* P03: pull remote mechs back to the interpolated
                      * server position. Runs after physics so it
                      * overrides any drift from stale latched_input
@@ -2731,11 +2849,15 @@ int main(int argc, char **argv) {
                          * received data. */
                         double rt = game.net.client_render_time_ms;
                         uint32_t rt_u32 = (rt > 0.0) ? (uint32_t)rt : 0u;
+                        profile_zone_begin(PROF_SNAP_INTERP);
                         snapshot_interp_remotes(&game.world, rt_u32);
+                        profile_zone_end(PROF_SNAP_INTERP);
                     }
+                    profile_zone_begin(PROF_RECONCILE);
                     reconcile_push_input(&game.reconcile, in);
                     net_client_send_input(&game.net, in);
                     reconcile_tick_smoothing(&game.reconcile);
+                    profile_zone_end(PROF_RECONCILE);
                 } else {
                     if (game.world.local_mech_id >= 0) {
                         game.world.mechs[game.world.local_mech_id].latched_input = in;
@@ -2744,10 +2866,14 @@ int main(int argc, char **argv) {
                      * side too. Skipped on pure clients (the host's
                      * latched_input wins on the wire). */
                     if (game.world.authoritative) {
+                        profile_zone_begin(PROF_BOT_STEPS);
                         bot_step(&game.bots, &game.world, &game,
                                  (float)TICK_DT);
+                        profile_zone_end(PROF_BOT_STEPS);
                     }
+                    profile_zone_begin(PROF_SIM_STEPS);
                     simulate_step(&game.world, (float)TICK_DT);
+                    profile_zone_end(PROF_SIM_STEPS);
                 }
 
                 game.input = in;
@@ -2886,10 +3012,28 @@ int main(int argc, char **argv) {
             EndDrawing();
             break;
         }
+
+        profile_frame_end();
     }
 
     LOG_I("soldut shutting down (ran %llu sim ticks)",
           (unsigned long long)game.world.tick);
+
+    /* M6 P06 — bench summary + CSV close. Print before audio/log
+     * shutdown so the summary lands in soldut.log too. */
+    if (args.bench_secs > 0 || args.bench_csv[0]) {
+        profile_print_summary_to_stdout();
+    }
+    profile_csv_close();
+    /* M6 P06 — bench-mode return code: 0 if PROF_FRAME p99 ≤ 16.6 ms,
+     * else 1. The CSV is the authoritative signal — exit code is
+     * convenience for shell-script gating. */
+    int bench_rc = 0;
+    if (args.bench_secs > 0) {
+        bench_rc = profile_p99_under_budget(16.6f) ? 0 : 1;
+        LOG_I("--bench: exit code %d (PROF_FRAME p99 %s 16.6 ms)",
+              bench_rc, bench_rc == 0 ? "<=" : ">");
+    }
 
     /* wan-fixes-9 — if the user closed the window while a dedicated
      * spawn was still polling for its first connect, abort that child
@@ -2909,5 +3053,5 @@ int main(int argc, char **argv) {
     audio_shutdown();
 
     log_shutdown();
-    _exit(EXIT_SUCCESS);
+    _exit(bench_rc == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
 }
