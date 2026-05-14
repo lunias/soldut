@@ -462,30 +462,42 @@ static void collide_map_one_pass(World *w, bool finalize_velocity) {
                     bool from_left  = ppx < minx;
                     bool from_right = ppx > maxx;
 
+                    float d_top = py - miny, d_bot = maxy - py;
+                    float d_lft = px - minx, d_rgt = maxx - px;
+
                     if (from_below && open_down) {
-                        nx = 0; ny = 1; amount = (maxy - py) + r;
+                        nx = 0; ny = 1; amount = d_bot + r;
                     } else if (from_above && open_up) {
-                        nx = 0; ny = -1; amount = (py - miny) + r;
+                        nx = 0; ny = -1; amount = d_top + r;
                     } else if (from_left && open_left) {
-                        nx = -1; ny = 0; amount = (px - minx) + r;
+                        nx = -1; ny = 0; amount = d_lft + r;
                     } else if (from_right && open_right) {
-                        nx = 1; ny = 0; amount = (maxx - px) + r;
-                    } else if (open_up) {
-                        nx = 0; ny = -1; amount = (py - miny) + r;
-                    } else if (open_left) {
-                        nx = -1; ny = 0; amount = (px - minx) + r;
-                    } else if (open_right) {
-                        nx = 1; ny = 0; amount = (maxx - px) + r;
-                    } else if (open_down) {
-                        nx = 0; ny = 1; amount = (maxy - py) + r;
+                        nx = 1; ny = 0; amount = d_rgt + r;
                     } else {
-                        /* Surrounded by solids — fall back to shortest. */
-                        float d_top = py - miny, d_bot = maxy - py;
-                        float d_lft = px - minx, d_rgt = maxx - px;
-                        float min_d = d_top; int axis = 2;
-                        if (d_lft < min_d) { min_d = d_lft; axis = 0; }
-                        if (d_rgt < min_d) { min_d = d_rgt; axis = 1; }
-                        if (d_bot < min_d) { min_d = d_bot; axis = 3; }
+                        /* No directional hint (prev was also inside or
+                         * exactly on the boundary). Pick the SHORTEST
+                         * exit among the open sides. Old code preferred
+                         * open_up first which pushed a foot 32 px
+                         * skyward whenever its center landed on a
+                         * floor tile's right edge (the slope-tile
+                         * transition case — d_rgt = 0 trumps any
+                         * other distance). Shortest-open works for
+                         * both edge-grazes (d_rgt = 0 → push right
+                         * by r) and genuinely-inside cases. Fall
+                         * back to shortest-of-all when no side is
+                         * open. */
+                        float best_d = 1e30f; int axis = -1;
+                        if (open_up    && d_top < best_d) { best_d = d_top; axis = 2; }
+                        if (open_down  && d_bot < best_d) { best_d = d_bot; axis = 3; }
+                        if (open_left  && d_lft < best_d) { best_d = d_lft; axis = 0; }
+                        if (open_right && d_rgt < best_d) { best_d = d_rgt; axis = 1; }
+                        if (axis < 0) {
+                            /* Surrounded by solids — shortest of all. */
+                            best_d = d_top; axis = 2;
+                            if (d_lft < best_d) { best_d = d_lft; axis = 0; }
+                            if (d_rgt < best_d) { best_d = d_rgt; axis = 1; }
+                            if (d_bot < best_d) { best_d = d_bot; axis = 3; }
+                        }
                         switch (axis) {
                             case 0: nx = -1; ny =  0; amount = d_lft + r; break;
                             case 1: nx =  1; ny =  0; amount = d_rgt + r; break;
