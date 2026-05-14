@@ -1,10 +1,3 @@
-/* _POSIX_C_SOURCE for clock_gettime — used to instrument the cold
- * visibility build so the 30 ms / map budget breach (M6 P05 Phase 1)
- * shows up in the bot_nav log line instead of silently. */
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L
-#endif
-
 #include "bot.h"
 
 #include "arena.h"
@@ -2474,13 +2467,13 @@ int bot_system_build_nav(BotSystem *bs, const Level *level, Arena *arena) {
 
     /* Visibility precompute can dominate cold map build on big maps —
      * time it so the budget breach (>30 ms) shows up as a WARN, not a
-     * silent regression. */
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
+     * silent regression. clock() (C89) gives CPU time and is portable
+     * across linux / macos / zig-cc-cross-windows; on a single-thread
+     * build it tracks wall time closely enough for a budget check. */
+    clock_t t0 = clock();
     build_visibility(nv, level);
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    double vis_ms = (double)(t1.tv_sec - t0.tv_sec) * 1000.0 +
-                    (double)(t1.tv_nsec - t0.tv_nsec) * 1e-6;
+    clock_t t1 = clock();
+    double vis_ms = (double)(t1 - t0) * 1000.0 / (double)CLOCKS_PER_SEC;
 
     bs->nav = nv;
     LOG_I("bot_nav: built %d nodes, %d reachabilities, %d visibility edges on %dx%d map (vis=%.2f ms)",
