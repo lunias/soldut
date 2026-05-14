@@ -328,9 +328,15 @@ static void build_foundry(void) {
     /* ---- Spawns — 16 total, spread along the full map width so the
      * max-min-distance picker has room to separate FFA players.
      * Hill polys live at tiles 49-54, so floor spawns stay below 46
-     * and above 55 to avoid embedding. */
-    const int spawn_plat  = plat_top  - 40;
-    const int spawn_floor = floor_y   - 40;
+     * and above 55 to avoid embedding.
+     *
+     * `plat_top` is t2w(H-9) — that's the BOTTOM edge of the
+     * single-row platform tile (row H-10), not the top. Spawn at
+     * `plat_top - 40` lands the pelvis 8 px above the platform TOP
+     * and the foot 24 px INSIDE the platform body. Use the actual
+     * top edge t2w(H-10) for the spawn calc. */
+    const int spawn_plat  = t2w(H - 10) - 40;
+    const int spawn_floor = floor_y     - 40;
     push_spawn(t2w(10),     spawn_plat,  1, 1, 0);
     push_spawn(t2w(W - 10), spawn_plat,  2, 1, 1);
     push_spawn(t2w(15),     spawn_plat,  1, 1, 2);
@@ -482,9 +488,18 @@ static void build_slipstream(void) {
               t2w(12), t2w(6),
               AMBI_WIND, 0.20f, +1.0f, 0.0f);
 
-    /* ---- Spawns ---- */
-    const int spawn_main = main_top  - 40;
-    const int spawn_cat  = catwalk_y - 40;
+    /* ---- Spawns ----
+     *
+     * `main_top` and `catwalk_y` above are misleadingly named — they
+     * use t2w(H-17) / t2w(H-31), which is the BOTTOM edge of the
+     * single-row platform tiles (rows H-18 / H-32). The TOP of those
+     * platforms is t2w(H-18) / t2w(H-32). A spawn at `main_top - 40`
+     * lands the pelvis 8 px above the platform TOP, so the foot
+     * (pelvis + 36 for Trooper, +40 for Heavy) ends up INSIDE the
+     * platform body — visible as "mech stuck in the platform."
+     * Compute spawn relative to the actual platform TOP. */
+    const int spawn_main = t2w(H - 18) - 40;
+    const int spawn_cat  = t2w(H - 32) - 40;
     push_spawn(t2w(10),     spawn_main, 1, 1, 0);
     push_spawn(t2w(W - 10), spawn_main, 2, 1, 1);
     push_spawn(t2w(15),     spawn_main, 1, 1, 2);
@@ -1146,12 +1161,15 @@ static void build_aurora(void) {
      * lands inside the rise — buried in solid. Place the spawn 40 px
      * above the actual rise apex (row H-38) instead. */
     const int peak_spawn      = t2w(H - 38) - 40;
-    /* Hill summit: top of the hill polygon (peak at tile 32 on west,
-     * W-32 on east). 40 px above puts the spawn just above the apex
-     * with clearance. The original `t2w(20), t2w(H-11)-40` placed the
-     * spawn at the BASE x of the hill but at SUMMIT y — i.e., in the
-     * sky 224 px above the floor — and the mech fell to the floor. */
-    const int hill_summit_y   = hill_peak_y - 40;
+    /* Spawning ON the bare apex of the hill polygon was a leg-trap:
+     * the apex is one mathematical point, so feet 12 px to either
+     * side of the spawn x land at different y values (one on the up-
+     * slope, one on the down-slope), and the leg constraint solver
+     * compresses one side into the slope volume. The `LEG_COLLAPSED`
+     * detector in `tests/spawn_settle_test.c` caught it. Repurpose
+     * the two summit spawns as central-floor spawns instead — they
+     * still give the team a "front-line" position different from the
+     * back-rank floor spawns. */
     /* Floor spawns avoid the hill x-ranges (west hill: tiles 20-44,
      * east hill: tiles 116-140). Original tiles 26/34/42 sat inside
      * the west hill volume; the body samples landed inside the slope
@@ -1163,7 +1181,7 @@ static void build_aurora(void) {
     push_spawn(t2w(64),     spawn_floor,    1, 1, 4);   /* was 42 */
     push_spawn(t2w(72),     spawn_floor,    1, 1, 5);   /* was 56 */
     push_spawn(t2w(4),      peak_spawn,     1, 1, 6);   /* mountain alcove */
-    push_spawn(t2w(32),     hill_summit_y,  1, 1, 7);   /* was (20, hill_peak-40) — fell off */
+    push_spawn(t2w(76),     spawn_floor,    1, 1, 7);   /* was hill summit — leg-collapsed on apex */
 
     push_spawn(t2w(W - 12), spawn_floor,    2, 1, 8);
     push_spawn(t2w(W - 18), spawn_floor,    2, 1, 9);
@@ -1172,7 +1190,7 @@ static void build_aurora(void) {
     push_spawn(t2w(W - 64), spawn_floor,    2, 1, 12);  /* was W-42 */
     push_spawn(t2w(W - 72), spawn_floor,    2, 1, 13);  /* was W-56 */
     push_spawn(t2w(W - 4),  peak_spawn,     2, 1, 14);  /* mountain alcove */
-    push_spawn(t2w(W - 32), hill_summit_y,  2, 1, 15);  /* was (W-20, hill_peak-40) — fell off */
+    push_spawn(t2w(W - 76), spawn_floor,    2, 1, 15);  /* was hill summit — leg-collapsed on apex */
 
     /* ---- Pickups (≈26 per brief). ---- */
     const int floor_pick = floor_y - 16;

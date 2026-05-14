@@ -1136,20 +1136,8 @@ static void shot_host_flow(Game *g, float dt) {
                 lobby_auto_start_arm(&g->lobby, g->lobby.auto_start_default);
             }
             if (lobby_tick(&g->lobby, dt)) {
-                match_begin_countdown(&g->match, g->match.countdown_default);
-                if (g->net.role == NET_ROLE_SERVER) {
-                    net_server_broadcast_match_state(&g->net, &g->match);
-                }
-            }
-            lobby_chat_age(&g->lobby, dt);
-            break;
-        }
-        case MATCH_PHASE_COUNTDOWN:
-            if (match_tick(&g->match, dt)) {
-                /* start_round equivalent — inlined from main.c. Mirror
-                 * P07: CTF mode-mask validation, score-limit clamp,
-                 * team auto-balance, ctf_init_round, match_mode_cached.
-                 *
+                /* M6 P07 — round prep happens BEFORE countdown begins.
+                 * Inlined start_round equivalent (mirrors main.c).
                  * Mirrors main.c::start_round — first round derives
                  * map/mode from rotation; subsequent rounds inherit
                  * from begin_next_lobby (which honors the vote winner). */
@@ -1259,7 +1247,7 @@ static void shot_host_flow(Game *g, float dt) {
                 ctf_init_round(&g->world, g->match.mode);
                 g->world.flag_state_dirty = false;
 
-                match_begin_round(&g->match);
+                match_begin_countdown(&g->match, g->match.countdown_default);
                 g->mode = MODE_MATCH;
                 g_shot_kill_processed = g->world.killfeed_count;
                 if (g->net.role == NET_ROLE_SERVER) {
@@ -1270,6 +1258,19 @@ static void shot_host_flow(Game *g, float dt) {
                     if (g->world.flag_count > 0) {
                         net_server_broadcast_flag_state(&g->net, &g->world);
                     }
+                }
+            }
+            lobby_chat_age(&g->lobby, dt);
+            break;
+        }
+        case MATCH_PHASE_COUNTDOWN:
+            if (match_tick(&g->match, dt)) {
+                /* M6 P07 — COUNTDOWN done; flip to ACTIVE and tell
+                 * clients. World is already prepped from when the
+                 * lobby auto-start fired. */
+                match_begin_round(&g->match);
+                if (g->net.role == NET_ROLE_SERVER) {
+                    net_server_broadcast_match_state(&g->net, &g->match);
                 }
             }
             break;

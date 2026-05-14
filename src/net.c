@@ -2707,10 +2707,15 @@ void net_poll(NetState *ns, Game *g, double dt_real) {
             g->lobby.dirty = false;
         }
 
-        /* Snapshot broadcast — only during an active round. Clients in
-         * the lobby don't need world snapshots and broadcasting them
-         * during SUMMARY would tear down the corpses we want frozen. */
-        if (g->match.phase == MATCH_PHASE_ACTIVE) {
+        /* Snapshot broadcast — during ACTIVE, plus COUNTDOWN so the
+         * client sees the spawned mechs in their pre-round positions
+         * (M6 P07: world is now prepped at COUNTDOWN start, not at
+         * COUNTDOWN end). Clients in the lobby don't need world
+         * snapshots, and broadcasting during SUMMARY would tear down
+         * the corpses we want frozen. */
+        if (g->match.phase == MATCH_PHASE_ACTIVE ||
+            g->match.phase == MATCH_PHASE_COUNTDOWN)
+        {
             ns->snapshot_accum += dt_real;
             while (ns->snapshot_accum >= ns->snapshot_interval) {
                 ns->snapshot_accum -= ns->snapshot_interval;

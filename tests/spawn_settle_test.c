@@ -90,8 +90,10 @@ static bool check_spawn(Game *g, int spawn_idx) {
         simulate_step(&g->world, TICK_DT);
     }
 
-    /* Read final pelvis state. */
+    /* Read final pelvis + foot state. */
     int pelv = g->world.mechs[mid].particle_base + PART_PELVIS;
+    int lf   = g->world.mechs[mid].particle_base + PART_L_FOOT;
+    int rf   = g->world.mechs[mid].particle_base + PART_R_FOOT;
     float final_x = g->world.particles.pos_x[pelv];
     float final_y = g->world.particles.pos_y[pelv];
     float prev_x  = g->world.particles.prev_x[pelv];
@@ -101,30 +103,80 @@ static bool check_spawn(Game *g, int spawn_idx) {
     float dx = final_x - spawn_pos.x;
     float dy = final_y - spawn_pos.y;
     float speed = sqrtf(vx * vx + vy * vy);
+    float foot_y_lo = (g->world.particles.pos_y[lf] >
+                       g->world.particles.pos_y[rf])
+                          ? g->world.particles.pos_y[lf]
+                          : g->world.particles.pos_y[rf];
+    float foot_pelv_gap = foot_y_lo - final_y;
 
     bool inside_solid = level_point_solid(&g->world.level,
                                           (Vec2){ final_x, final_y });
+    /* Also check the foot positions — a settled spawn whose feet are
+     * BURIED in a solid tile renders the mech as "stuck halfway
+     * through the platform" even when the pelvis is fine. (Common
+     * cause: the cooker's `*_top` constant for a single-row platform
+     * actually returns the BOTTOM edge of the tile, so spawn at
+     * `top - 40` lands the pelvis 8 px above the platform top and
+     * the foot 24 px INSIDE the platform body.) */
+    bool foot_in_solid =
+        level_point_solid(&g->world.level,
+                          (Vec2){ g->world.particles.pos_x[lf],
+                                  g->world.particles.pos_y[lf] }) ||
+        level_point_solid(&g->world.level,
+                          (Vec2){ g->world.particles.pos_x[rf],
+                                  g->world.particles.pos_y[rf] });
+
+    /* M6 P07 — also reject "leg-collapsed" spawns. The mech is set
+     * up with a pelvis-to-foot rest length of bone_thigh+bone_shin =
+     * 36 px (Trooper). If the foot ends up significantly closer to
+     * the pelvis than the chain length, the mech is squatting /
+     * compressing into the surface — visually "stuck inside the
+     * platform." A 4 px tolerance covers the particle radius push-
+     * out (foot center sits 4 px above the surface). Anything more
+     * compressed (gap < 30 px) is a real spawn-into-platform bug. */
+    const float CHAIN_MIN = 30.0f;
 
     /* Verdict. */
     bool fail = false;
     const char *reason = NULL;
     if (inside_solid) {
         fail = true; reason = "INSIDE_SOLID";
+    } else if (foot_in_solid) {
+        fail = true; reason = "FOOT_IN_SOLID";
     } else if (dy > 200.0f) {
         fail = true; reason = "FELL_TOO_FAR";
     } else if (fabsf(dx) > 80.0f) {
         fail = true; reason = "PUSHED_OUT";
     } else if (speed > 1.5f) {
         fail = true; reason = "NEVER_SETTLED";
+    } else if (foot_pelv_gap < CHAIN_MIN) {
+        fail = true; reason = "LEG_COLLAPSED";
     }
 
     if (fail) {
         fprintf(stderr,
                 "  FAIL spawn[%d] team=%s lane=%u — %s "
-                "(spawn=(%.0f,%.0f) settled=(%.0f,%.0f) Δ=(%.1f,%.1f) v=%.2f)\n",
+                "(spawn=(%.0f,%.0f) settled=(%.0f,%.0f) Δ=(%.1f,%.1f) "
+                "v=%.2f leg_gap=%.1f foot_y=(L%.1f,R%.1f))\n",
                 spawn_idx, team_name(s->team), s->lane_hint, reason,
-                spawn_pos.x, spawn_pos.y, final_x, final_y, dx, dy, speed);
+                spawn_pos.x, spawn_pos.y, final_x, final_y, dx, dy,
+                speed, foot_pelv_gap,
+                g->world.particles.pos_y[lf],
+                g->world.particles.pos_y[rf]);
         ++g_failed_spawns;
+    } else {
+        /* DEBUG: also log every PASS so we can audit foot positions
+         * against the platform tops. Comment out once the spawn audit
+         * is done. */
+        fprintf(stdout,
+                "  ok   spawn[%d] team=%s lane=%u "
+                "spawn=(%.0f,%.0f) settled=(%.0f,%.0f) "
+                "leg_gap=%.1f foot_y=(L%.1f,R%.1f)\n",
+                spawn_idx, team_name(s->team), s->lane_hint,
+                spawn_pos.x, spawn_pos.y, final_x, final_y,
+                foot_pelv_gap,
+                g->world.particles.pos_y[lf],
+                g->world.particles.pos_y[rf]);
     }
     return !fail;
 }

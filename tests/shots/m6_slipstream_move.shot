@@ -1,0 +1,35 @@
+# M6 P07 — slipstream movement-after-countdown test.
+#
+# User reported "stuck in the platform" on slipstream. Validate by:
+#   1. Spawning into slipstream FFA (host).
+#   2. Capturing the spawn (during COUNTDOWN, input locked).
+#   3. After COUNTDOWN releases, hold RIGHT and capture motion.
+#
+# If the mech moves visibly between the press-right frame and the
+# later frames, "stuck" was just the COUNTDOWN input-lock; if it
+# stays put, there's a real spawn-trap to fix.
+
+window 1280 720
+seed 1 0
+out build/shots/m6_slipstream_move
+network host 24710
+name HostA
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+map slipstream
+no_parallax
+
+# Wait through lobby (~60 ticks) + countdown (~60 ticks).
+# COUNTDOWN finishes around tick 120, then ACTIVE.
+at 100 shot pre_countdown
+at 130 shot countdown
+at 160 shot just_active
+at 180 press right
+at 200 shot moving_t20
+at 240 shot moving_t60
+at 280 shot moving_t100
+at 320 release right
+at 340 shot stopped
+
+at 400 end
+
+contact_sheet sheet cols 4 cell 320 180
