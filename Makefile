@@ -51,7 +51,8 @@ ENET_LIB   := third_party/enet/libenet.a
 .PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade test-riot-cannon-sfx test-mech-ik test-pose-compute test-bot-nav test-bot-playtest host-overlay-preview lobby-overlay-preview summary-overlay-preview bot-tier-preview cook-maps cook-thumbs bake bake-all shot \
         debug gdb gdb-host gdb-client valgrind editor \
         assets-palettes assets-process \
-        audio-inventory audio-normalize audio-credits test-audio-smoke
+        audio-inventory audio-normalize audio-credits test-audio-smoke \
+        perf-bench perf-bench-uncapped perf-bench-stress perf-flamegraph
 
 all: $(BIN)
 
@@ -538,6 +539,32 @@ assets-palettes:
 
 assets-process: assets-palettes
 	bash tools/process_assets.sh
+
+# M6 P06 — perf bench targets. Each writes a CSV under build/perf/ and
+# prints a per-zone median/p95/p99/max summary to stdout at shutdown.
+# build/perf/ is gitignored (covered by build/).
+$(BUILD_DIR)/perf:
+	@mkdir -p $(BUILD_DIR)/perf
+
+perf-bench: $(BIN) $(BUILD_DIR)/perf
+	./$(BIN) --bench 30 --bench-csv build/perf/bench.csv \
+	         --perf-overlay --window 3440x1440
+
+# A/B against the cap. internal-h 0 = render at window resolution.
+perf-bench-uncapped: $(BIN) $(BUILD_DIR)/perf
+	./$(BIN) --bench 30 --bench-csv build/perf/bench-uncapped.csv \
+	         --perf-overlay --window 3440x1440 --internal-h 0
+
+# Closer to the v1 32-mech reference scenario.
+perf-bench-stress: $(BIN) $(BUILD_DIR)/perf
+	./$(BIN) --bench 30 --bench-csv build/perf/bench-stress.csv \
+	         --perf-overlay --window 3440x1440 \
+	         --bench-map citadel --bench-bots 8
+
+# perf record + flamegraph. Linux-only; requires perf + brendangregg/FlameGraph
+# on PATH. See tools/perf/README.md.
+perf-flamegraph: $(BIN) $(BUILD_DIR)/perf
+	./tools/perf/flamegraph.sh build/perf/flamegraph.svg
 
 clean:
 	rm -rf $(BUILD_DIR) $(BIN) soldut.exe soldut.log

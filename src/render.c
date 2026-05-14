@@ -12,11 +12,13 @@
 #include "mech_sprites.h"
 #include "particle.h"
 #include "pickup.h"
+#include "profile.h"
 #include "projectile.h"
 #include "weapon_sprites.h"
 #include "weapons.h"
 
 #include <math.h>
+#include <stdio.h>
 
 /* M5 P13 + M6 P03 — halftone post-process pass over a capped internal RT.
  *
@@ -30,16 +32,21 @@
  * — the bilinear blit at step 3 becomes a 1:1 copy and the pipeline
  * is pixel-byte-identical to the pre-P03 shape.
  *
+ * M6 P06 attempted to collapse steps 2 + 3 into a single backbuffer
+ * pass (the halftone shader applied DURING the upscale) — saves one
+ * full-screen `DrawTexturePro` per frame on paper, but the WSL bench
+ * showed PROF_DRAW_POST simply absorbed what PROF_DRAW_BLIT was
+ * paying (the WSLg compositor stall in PROF_PRESENT is the actual
+ * cost, ~15.5 ms / frame at 3440×1440 — not the draw-call boundary).
+ * Net frame win 0.3 ms (within noise), so we kept the two-pass shape
+ * for clarity. Findings recorded in documents/m6/perf-baseline.md.
+ *
  * Fallbacks:
  *   - Missing shader file → g_halftone_loaded stays false. World still
  *     draws to g_internal_target at internal res; step 2 is skipped and
  *     step 3 bilinears the internal_target directly to the backbuffer.
  *   - LoadShader returning the default shader (compile failure) → the
- *     uniform locations come back -1 and we treat it as "not loaded".
- *
- * Both RTs are recreated on internal-size change (window resize or a
- * config-driven change between sessions); shader locations are looked
- * up once at first use. */
+ *     uniform locations come back -1 and we treat it as "not loaded". */
 #define HALFTONE_DENSITY 0.30f
 
 static Shader          g_halftone_post = {0};
@@ -1433,7 +1440,9 @@ void renderer_draw_frame(Renderer *r, World *w,
      * BeginMode2D, and `decal_flush_pending` is itself a BeginTextureMode
      * pair on the splat layer. Run it before any BeginTextureMode /
      * BeginDrawing pair we open below. */
+    profile_zone_begin(PROF_DECAL_FLUSH);
     decal_flush_pending();
+    profile_zone_end(PROF_DECAL_FLUSH);
 
     bool have_internal = ensure_internal_targets(internal_w, internal_h);
     if (!have_internal) {
@@ -1455,11 +1464,13 @@ void renderer_draw_frame(Renderer *r, World *w,
     /* (1) World pass → g_internal_target at internal resolution.
      * ClearBackground inside BeginTextureMode targets the RT, not the
      * backbuffer — keeps the post-pass blend predictable. */
+    profile_zone_begin(PROF_DRAW_WORLD);
     BeginTextureMode(g_internal_target);
         ClearBackground((Color){12, 14, 18, 255});
         draw_world_pass(r, w, alpha, local_visual_offset,
                         internal_w, internal_h);
     EndTextureMode();
+    profile_zone_end(PROF_DRAW_WORLD);
 
     /* (2) Halftone pass (when the shader is loaded):
      *     g_internal_target → g_post_target at internal resolution.
@@ -1472,6 +1483,7 @@ void renderer_draw_frame(Renderer *r, World *w,
      * just for this pass. */
     bool drew_post = false;
     if (g_halftone_loaded && g_post_target.id != 0) {
+        profile_zone_begin(PROF_DRAW_POST);
         Vector2 res = { (float)internal_w, (float)internal_h };
         float   den = HALFTONE_DENSITY;
         if (g_halftone_loc_resolution >= 0)
@@ -1491,10 +1503,7 @@ void renderer_draw_frame(Renderer *r, World *w,
          * frag_px uses (`fragTexCoord * resolution`). No extra
          * scaling needed. */
         if (g_halftone_loc_hot_zones >= 0 && g_halftone_loc_jet_time >= 0) {
-            /* Skip shimmer in shot mode for deterministic screenshots
-             * — the per-frame jet_time uniform would otherwise pull
-             * in wall-clock time and tile-noise would walk between
-             * test runs. */
+            /* Skip shimmer in shot mode for deterministic screenshots. */
             bool any = !g_shot_mode && mech_jet_fx_any_active(w);
             int  zone_count = 0;
             if (any) {
@@ -1521,8 +1530,7 @@ void renderer_draw_frame(Renderer *r, World *w,
             ClearBackground((Color){0, 0, 0, 0});
             BeginShaderMode(g_halftone_post);
                 /* raylib's render textures come back Y-flipped — pass
-                 * a negative source-rectangle height to flip on read.
-                 * (See [06-rendering-audio.md] "Y-flip gotcha.") */
+                 * a negative source-rectangle height to flip on read. */
                 Rectangle src = {
                     0, 0,
                     (float)g_internal_target.texture.width,
@@ -1533,16 +1541,11 @@ void renderer_draw_frame(Renderer *r, World *w,
             EndShaderMode();
         EndTextureMode();
         drew_post = true;
+        profile_zone_end(PROF_DRAW_POST);
     }
 
     /* (3) Backbuffer: bilinear-upscale the chosen source RT to the
-     * window, aspect-preserving letterbox. Both RTs are point-filtered
-     * for the halftone-source path (step 2) — flip the upscale target
-     * to BILINEAR right before the blit so the upscale is smooth.
-     *
-     * BLACK clear paints the letterbox bars when the internal aspect
-     * doesn't match the window aspect (rare in production, but
-     * possible under a hand-edited soldut.cfg). */
+     * window, aspect-preserving letterbox. */
     Texture2D src_tex = drew_post
                       ? g_post_target.texture
                       : g_internal_target.texture;
@@ -1559,6 +1562,7 @@ void renderer_draw_frame(Renderer *r, World *w,
     hud_cam.offset.y = r->camera.offset.y * scale + dy;
 
     BeginDrawing();
+        profile_zone_begin(PROF_DRAW_BLIT);
         ClearBackground(BLACK);
         Rectangle src = {
             0, 0,
@@ -1567,6 +1571,7 @@ void renderer_draw_frame(Renderer *r, World *w,
         };
         Rectangle dst = { dx, dy, dw, dh };
         DrawTexturePro(src_tex, src, dst, (Vector2){0, 0}, 0.0f, WHITE);
+        profile_zone_end(PROF_DRAW_BLIT);
 
         /* HUD draws at WINDOW resolution on top — sharp text and HUD
          * geometry regardless of the internal cap. The cursor_screen
@@ -1574,8 +1579,14 @@ void renderer_draw_frame(Renderer *r, World *w,
          * world-to-screen inside the HUD uses the synthesised
          * `hud_cam` so off-screen indicators (CTF compass) land at the
          * correct window position. */
+        profile_zone_begin(PROF_DRAW_HUD);
         hud_draw(w, window_w, window_h, cursor_screen, hud_cam);
-        if (overlay_cb) overlay_cb(overlay_user, window_w, window_h);
+        profile_zone_end(PROF_DRAW_HUD);
+        if (overlay_cb) {
+            profile_zone_begin(PROF_DRAW_OVERLAY);
+            overlay_cb(overlay_user, window_w, window_h);
+            profile_zone_end(PROF_DRAW_OVERLAY);
+        }
         audio_draw_mute_overlay(window_w, window_h);
 
         /* M6 P03 — opt-in perf overlay (shotmode `perf_overlay on` or
@@ -1591,15 +1602,39 @@ void renderer_draw_frame(Renderer *r, World *w,
             const char *line3 = TextFormat("window   %dx%d",
                                            window_w, window_h);
             Color bg = (Color){0, 0, 0, 160};
-            DrawRectangle(8, 8, 200, 70, bg);
+            /* Tall rect — fits FPS line + window/internal lines + the
+             * 14-zone breakdown column. Width tuned for "draw_overlay
+             * NN.NNms (p99 NN.NN)" without truncation at 12px. */
+            DrawRectangle(8, 8, 320, 80 + 14 * (int)PROF_COUNT + 6, bg);
             Color fg = (fps >= 55) ? GREEN
                      : (fps >= 30) ? YELLOW
                                    : RED;
             DrawText(line1, 14, 12, 20, fg);
             DrawText(line2, 14, 36, 14, RAYWHITE);
             DrawText(line3, 14, 54, 14, RAYWHITE);
+
+            /* M6 P06 — per-zone breakdown column under the FPS line.
+             * 14 zones × one DrawText each ≈ trivial cost; reads sharp
+             * at window pixels because the perf overlay path bypasses
+             * the internal-RT upscale. Skipped on the no-internal
+             * fallback path (which exits early above) — that path is
+             * only hit when ensure_internal_targets fails, which
+             * shouldn't happen in normal play. */
+            int yy = 80;
+            char line[96];
+            for (int z = 0; z < PROF_COUNT; ++z) {
+                snprintf(line, sizeof line, "%-12s %5.2fms (p99 %5.2f)",
+                    profile_zone_name((ProfSection)z),
+                    (double)profile_zone_ms((ProfSection)z),
+                    (double)profile_zone_p99_ms((ProfSection)z));
+                Color c = (z == PROF_FRAME) ? fg : RAYWHITE;
+                DrawText(line, 14, yy, 12, c);
+                yy += 14;
+            }
         }
+        profile_zone_begin(PROF_PRESENT);
     EndDrawing();
+    profile_zone_end(PROF_PRESENT);
 
     /* M6 P03 — once-per-second SHOT_LOG with the same numbers, gated
      * the same way as the on-screen overlay so this only fires when

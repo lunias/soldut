@@ -5,7 +5,23 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-13** (M6 P05 — bot AI improvements: visibility precompute, cover-aware engagement, weapon-range gating, aggression-based retreat, CTF team-role coordination, Mass Driver balance). All six phases of `documents/m6/05-bot-ai-improvements.md` shipped on `bot-ai-improvements`; details:
+Last updated: **2026-05-14** (M6 P06 — perf profiling & baseline). All five phases of `documents/m6/06-perf-profiling-and-optimization.md` walked on `m6-perf-profiling`; the shipped artifacts are the **always-on `src/profile.{c,h}` frame profiler** + `--bench` / `--bench-csv` CLI flags + `make perf-bench{,-uncapped,-stress,-flamegraph}` targets + `tools/perf/flamegraph.sh` + the captured baseline at `documents/m6/perf-baseline.md`. Phase 4 prototyped H10a (collapse halftone shader + upscale into one backbuffer pass, drop `g_post_target`) but the measured WSL win was 0.3 ms (within noise — the WSLg compositor stall in `PROF_PRESENT` absorbed what `PROF_DRAW_BLIT` was paying) AND it broke shot-test byte-identicality, so H10a was reverted.
+
+**The actionable finding:** the user's "30 FPS dips in WSL at 3440×1440" is a WSLg compositor-pacing tax, not a code-side budget breach. Quantified delta in `documents/m6/perf-baseline.md`:
+
+- **WSL 1v1 reactor 3440×1440 capped**: 20.66 ms / 48.4 FPS — `PROF_PRESENT` 15.5 ms + `PROF_DRAW_BLIT` 4.26 ms = 95 % of frame.
+- **Windows native, same scenario**: 10.0 ms / 99.9 FPS — `PROF_PRESENT` 0.08 ms (vsync-absorbed in `PROF_DRAW_WORLD` by the native GL pipeline drain instead).
+- **Stress (citadel + 8 bots, 3440×1440)**: WSL 38.7 FPS / Windows 100 FPS. WSL `DRAW_WORLD` 5.8 ms is real CPU work + within the 8 ms budget; `PROF_PRESENT` 19.4 ms dominates the 25.8 ms frame.
+
+No code change shipped from Phase 4; the .exe production path is healthy (100 FPS at 32-mech-class stress), and the WSL dev-loop tax is outside our process. The user can mitigate by playing at 1920×1080 (80 FPS sustained on WSL) or running the Windows .exe (100+ FPS). The profiler stays in production code — every commit that touches a hot path now has the `--bench-csv` regression check available.
+
+Side effects:
+- New `--bench <secs>` + `--bench-csv <path>` + `--bench-map <name>` + `--bench-bots <N>` CLI flags. Bench mode forces FFA / offline-solo / score 9999 / time 4× the duration, sets the local mech to godmode (so the round doesn't end on first kill and the rolling 256-frame profile window captures active combat), and exits with code 0 if `PROF_FRAME` p99 ≤ 16.6 ms.
+- New `src/profile.{c,h}` ALWAYS-ON. 14 zones (frame / input / sim / bots / net / snap_interp / reconcile / decal_flush / draw_world / draw_post / draw_blit / draw_hud / draw_overlay / present). One `GetTime()` pair per zone, ~30 ns each, 14 × 30 = 420 ns/frame self-cost. The 256-frame ring buffer holds median/p95/p99 for the `--perf-overlay` HUD column + the `--bench-csv` summary block + the once-per-second `SHOT_LOG perf:` line that already shipped in P03 (now extended with per-zone numbers).
+- Perf-overlay extended: when `--perf-overlay` is set, the renderer paints a 14-line per-zone breakdown column under the existing FPS/window/internal lines. Tall rect, sharp at window pixels.
+- Shot mode is unaffected — `g_shot_mode` was already off-by-default and `profile_frame_begin/end` calls live in `main.c` (which shot mode bypasses). Shot tests are byte-identical pre/post; verified on `walk_right.shot` + `2p_dismember` + `2p_legs` paired runs.
+
+Previously: **2026-05-13** (M6 P05 — bot AI improvements: visibility precompute, cover-aware engagement, weapon-range gating, aggression-based retreat, CTF team-role coordination, Mass Driver balance). All six phases of `documents/m6/05-bot-ai-improvements.md` shipped on `bot-ai-improvements`; details:
 
 - **Phase 1 — Per-node visibility precompute.** New `BotNav.vis_bits[]` — a full N×N bitset (32 KB at 512-node cap, `BOT_NAV_MAX_NODES² / 8`) built at `bot_system_build_nav` time. For every pair (i, j) within 2400 px, one `level_ray_hits` cast records LOS into both directions. Sub-3 ms per map on every shipped map (Citadel = 126 nodes, 1435 visible edges, 1.96 ms — well under the 30 ms budget). New API on `bot.h`: `bot_nav_visibility_edge_count`, `bot_nav_node_sees`, `bot_nav_reach_count` (diagnostic). New `make test-bot-nav` (`tests/bot_nav_test.c`) walks every shipped map, asserts > 0 nodes / > 0 visibility edges / symmetric LOS / mix of set+clear pairs — 40+ assertions, all pass.
 
