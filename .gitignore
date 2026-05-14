@@ -56,6 +56,20 @@ assets/maps/**/*.lvl
 !assets/maps/crossfire.lvl
 !assets/maps/citadel.lvl
 
+# Per-map preview thumbnails — generated on build by tools/cook_thumbs
+# from every assets/maps/*.lvl on disk (so editor scratch + test
+# fixtures also get one). Mirror the .lvl tracking policy: ignore by
+# default, allow only the shipped maps' thumbs.
+assets/maps/*_thumb.png
+!assets/maps/foundry_thumb.png
+!assets/maps/slipstream_thumb.png
+!assets/maps/reactor_thumb.png
+!assets/maps/concourse_thumb.png
+!assets/maps/catwalk_thumb.png
+!assets/maps/aurora_thumb.png
+!assets/maps/crossfire_thumb.png
+!assets/maps/citadel_thumb.png
+
 # ComfyUI iteration scratch (P15+). Tracked inputs: workflow JSONs,
 # skeletons, style anchors, crop tables, and the gostek part sheets
 # (tools/comfy/gostek_part_sheets/<chassis>_gostek_v*.png — the

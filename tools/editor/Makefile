@@ -74,7 +74,7 @@ ED_OBJ := $(ED_SRC:%.c=$(BUILD_DIR)/%.o)
 
 # Subset of src/ we link in. Explicitly LISTED (not wildcard) so
 # accidental dependencies on mech/physics/net are caught at link time.
-GAME_SUBSET := arena.c log.c hash.c ds.c level_io.c
+GAME_SUBSET := arena.c log.c hash.c ds.c level_io.c map_thumb.c
 GAME_OBJ    := $(GAME_SUBSET:%.c=$(BUILD_DIR)/src_%.o)
 
 RAYLIB_LIB  := $(TP)/raylib/src/libraylib.a
