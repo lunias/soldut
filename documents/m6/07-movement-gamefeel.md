@@ -1203,18 +1203,74 @@ measurement pass confirming slope-down then run-out produces speeds
   guard preserves the dash spike, friction grinds it down). Visual
   via the probe shot.
 
+### Phase 6 — Scout dash fix + recoil compatibility check ✅ shipped
+
+The plan §6 Phase 6 predicted Scout dash would "work for free"
+with Phase 1's add-toward-target model. **That prediction was
+wrong.** Phase 1 routed Scout dash through `apply_run_velocity`,
+which caps the per-tick delta at `GROUND_ACCEL_PXS2·dt² =
+0.778 px/tick`. A 720 px/s dash needs 12 px/tick of impulse — the
+accel-cap clamps it to 0.778 and the dash effectively does nothing.
+
+- **Bug confirmed (probe `tests/shots/m6_movement_dash.shot`,
+  new):** Scout running RIGHT at vx=5.71 px/tick (cap),
+  tap DASH at t=100. Pre-fix: vx jumps to 6.37 px/tick (+0.66 —
+  a tiny nudge, not a dash). Post-fix: vx jumps to **12.01
+  px/tick** (= 720/60 ✓), then decays through 11.85 → 11.49 →
+  11.08 → 10.52 over the next 5 ticks, still at 9.22 at t=130
+  (30 ticks post-dash), bleeds back to RUN_SPEED cap by t=148.
+  Persistent excess lasts ~45 ticks — the cumulative-boost feel
+  the plan describes.
+
+- **Fix:** Scout dash branch in `mech.c` now does a direct
+  velocity SET (via `physics_set_velocity_x` per particle), same
+  idiom as `apply_jump` — both are edge-triggered one-shot
+  impulses, neither should route through the held-input accel-cap.
+  Phase 1's above-cap-return invariant then preserves the dash
+  spike on subsequent ticks; contact friction grinds it down.
+
+- **Recoil:** no fix needed. `weapons.c` applies recoil as a
+  position offset on R_HAND (`pos_x -= dir.x · recoil_impulse`),
+  not through `apply_run_velocity`. The constraint solver
+  propagates the offset into pelvis velocity via bone constraints;
+  Phase 1's above-cap-return then preserves any pelvis-vx excess
+  above RUN_SPEED until friction bleeds it down. Works for free
+  because recoil sits outside the run-velocity surface.
+
+- **Tests:** `test-mech-ik` ALL PASS, `test-pose-compute` ALL
+  PASS, `test-snapshot` all passed, `tests/shots/net/run.sh
+  2p_basic` 12/12 PASS.
+
+- **Caveat:** the dash spike is now substantial (vx=12 px/tick =
+  720 px/s ≈ 2.6× RUN_SPEED) and persists for 30+ ticks at >2×.
+  If playtest reports Scout dash feels OP, reduce
+  `SCOUT_DASH_PXS` in `mech.c:165` from 720 → ~500 (vx=8.3
+  px/tick, ~1.8× cap, decay-to-cap in ~12 ticks) instead of
+  re-routing through the accel-cap.
+
+- **Playtest:** pending. Scout-specific feel check + verify dash
+  still feels distinct from a regular run.
+- **Next:** **Phase 7** — network sync validation. The new
+  movement code reads `pos - prev` for current velocity and this
+  is the same data the snapshot system encodes. Server and client
+  both run 60 Hz, both run the same code path, so prediction-
+  reconciliation should stay aligned. Test plan: `tests/net/run.sh`,
+  `tests/shots/net/run.sh 2p_basic`, paired-process net tests.
+
 ### Resume here when next session starts
 
 1. Read this section (§13) for the running log.
 2. `git log --oneline main..HEAD` to confirm the commits above are
    on the branch.
-3. Re-run `make shot SCRIPT=tests/shots/m6_aurora_slope.shot`
-   + `make shot SCRIPT=tests/shots/m6_movement_probe.shot`
-   + `make shot SCRIPT=tests/shots/m6_movement_jet.shot`
-   + `make shot SCRIPT=tests/shots/m6_movement_slope.shot`
-   + `make test-spawn-geometry` to reproduce the latest baselines.
-4. Phase 5 shipped no code; Phase 6 is the next active phase
-   (recoil + dash momentum check, likely also no code change).
+3. Re-run all four probe shots + `make test-spawn-geometry` to
+   reproduce baselines:
+   - `tests/shots/m6_movement_probe.shot`
+   - `tests/shots/m6_movement_jet.shot`
+   - `tests/shots/m6_movement_slope.shot`
+   - `tests/shots/m6_movement_dash.shot`
+   - `tests/shots/m6_aurora_slope.shot`
+4. Phase 6 shipped a real fix (Scout dash); Phase 7 (network
+   sync validation) is the next phase per the plan.
 
 ### Phase 1.2 followup — sync investigation (NOT a Phase 1.x regression)
 

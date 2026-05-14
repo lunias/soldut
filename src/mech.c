@@ -988,14 +988,33 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
         }
 
         /* Scout dash: BTN_DASH while grounded gives a one-shot horizontal
-         * burst. (Air dash is a stretch — would need its own cooldown.) */
+         * burst. (Air dash is a stretch — would need its own cooldown.)
+         *
+         * M6 P07 Phase 6 — direct velocity SET, bypasses Phase 1's
+         * accel-cap (§5A). The dash is an edge-triggered one-shot
+         * impulse, not a held input; routing it through
+         * apply_run_velocity caps the per-tick delta at
+         * GROUND_ACCEL_PXS2·dt² = 0.778 px/tick and turns the 720-
+         * px/s spike into a tiny nudge. SET-velocity here matches the
+         * apply_jump idiom (also a one-shot impulse) and gives the
+         * dash a 12-px/tick burst. Phase 1's above-cap-return
+         * invariant then preserves the excess on subsequent ticks
+         * (input cap < vt_now ⇒ no input action) while contact
+         * friction (~0.92/tick tangential on flat) grinds it back
+         * toward RUN_SPEED over 10-15 frames — the cumulative-boost
+         * feel the plan §6 Phase 6 describes. */
         if ((pressed & BTN_DASH) && grounded
             && ch->passive == PASSIVE_SCOUT_DASH) {
-            float vx = m->facing_left ? -SCOUT_DASH_PXS : SCOUT_DASH_PXS;
-            apply_run_velocity(w, m, vx, dt, true);
+            float vx_pxs = m->facing_left ? -SCOUT_DASH_PXS : SCOUT_DASH_PXS;
+            float vx_per_tick = vx_pxs * dt;
+            ParticlePool *pp = &w->particles;
+            for (int part = 0; part < PART_COUNT; ++part) {
+                int idx = m->particle_base + part;
+                physics_set_velocity_x(pp, idx, vx_per_tick);
+            }
             moving = true;
             SHOT_LOG("t=%llu mech=%d scout_dash vx=%.0f",
-                     (unsigned long long)w->tick, mid, vx);
+                     (unsigned long long)w->tick, mid, vx_pxs);
         }
 
         /* Jet handling — varies by jetpack module. */
