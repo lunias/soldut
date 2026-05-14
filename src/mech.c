@@ -152,6 +152,14 @@ MechLoadout mech_default_loadout(void) {
 #define JET_THRUST_PXS2    2200.0f
 #define JET_DRAIN_PER_SEC  0.60f
 #define AIR_CONTROL        0.35f
+/* M6 P07 Phase 1 — ground accel rates for the add-toward-target model
+ * (§5A of documents/m6/07-movement-gamefeel.md). Run input is a SPEED
+ * CAP that the body lerps toward at one of three rates; external sources
+ * (slopes, dashes, recoil) can push past the cap and friction grinds
+ * excess speed back down over multiple ticks instead of clamping in one. */
+#define GROUND_ACCEL_PXS2     2800.0f /* ~6 frames to RUN_SPEED from rest */
+#define GROUND_DECEL_PXS2     4666.0f /* ~4 frames to zero from RUN_SPEED, input opposed */
+#define GROUND_FRICTION_PXS2  1400.0f /* ~12 frames to zero from RUN_SPEED on flat, no input */
 #define BINK_DECAY_PER_SEC 1.8f       /* exponential decay for aim_bink */
 #define BINK_MAX           0.35f      /* clamp; ~20° */
 #define SCOUT_DASH_PXS     720.0f
@@ -560,13 +568,10 @@ static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, 
         return;
     }
 
-    /* Read the average foot contact normal from the previous tick's
-     * contact resolver. We use it for two things: (a) deciding
-     * whether the foot is on a slope, so we know whether to brake
-     * (flat) or let gravity-along-tangent run wild (sloped); (b)
-     * projecting the run input onto the slope tangent so a held run
-     * input climbs/descends along the surface instead of dragging
-     * the body horizontally through it. */
+    /* Average foot contact normal from the previous tick. Used to
+     * decide slope-vs-flat (no-input behavior differs) and to project
+     * the run target onto the slope tangent so a held run input climbs
+     * / descends the surface instead of dragging horizontally through it. */
     int lf = m->particle_base + PART_L_FOOT;
     int rf = m->particle_base + PART_R_FOOT;
     float nx = (p->contact_nx_q[lf] + p->contact_nx_q[rf]) / 254.0f;
@@ -574,7 +579,6 @@ static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, 
     float nlen = sqrtf(nx * nx + ny * ny);
     bool flat;
     if (nlen < 0.5f) {
-        /* No fresh contact data — treat as flat floor. */
         nx = 0.0f; ny = -1.0f;
         flat = true;
     } else {
@@ -582,48 +586,74 @@ static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, 
         flat = (ny < -0.92f);
     }
 
-    /* No-input + flat ground: brake horizontal velocity. On a slope,
-     * skip the braking entirely so gravity-along-tangent + slope-aware
-     * friction can drive passive slide. */
-    if (vx_pxs == 0.0f) {
+    /* M6 P07 Phase 1 — add-toward-target ground move (§5A of
+     * documents/m6/07-movement-gamefeel.md). The OLD code SET the
+     * per-tick velocity to vx_pxs * dt (slope-projected), which
+     * (a) wiped slope momentum the moment the player pressed a
+     * direction at the bottom of a slope, and (b) snapped vx to 0
+     * the instant input was released on flat ground. The NEW model
+     * accel-caps a delta toward an input-driven target velocity, so
+     * external sources can push past the cap and bleed back over
+     * multiple ticks rather than clamping in one. Pelvis is the
+     * canonical body-velocity read; the constraint solver pulls all
+     * 16 parts to the same per-tick velocity in steady state. */
+    int pelv = m->particle_base + PART_PELVIS;
+    float vx_now = p->pos_x[pelv] - p->prev_x[pelv];
+    float vy_now = p->pos_y[pelv] - p->prev_y[pelv];
+
+    float input_dir = 0.0f;
+    if (vx_pxs > 0.0f) input_dir = +1.0f;
+    if (vx_pxs < 0.0f) input_dir = -1.0f;
+
+    float target_vx_pertick;
+    float target_vy_pertick;
+    float rate_pxs2;
+
+    if (input_dir == 0.0f) {
+        /* No input on slope: return — gravity-along-tangent and the
+         * per-contact friction in physics.c::contact_with_velocity
+         * drive passive slide. On flat: friction-decel X toward 0;
+         * leave Y to gravity / contact resolution. */
         if (!flat) return;
-        for (int part = 0; part < PART_COUNT; ++part) {
-            physics_set_velocity_x(p, m->particle_base + part, 0.0f);
-        }
-        return;
+        target_vx_pertick = 0.0f;
+        target_vy_pertick = vy_now;
+        rate_pxs2 = GROUND_FRICTION_PXS2;
+    } else {
+        /* Tangent is normal rotated 90°, signed by input direction. */
+        float tx = -ny * input_dir;
+        float ty =  nx * input_dir;
+        float speed = fabsf(vx_pxs);
+        target_vx_pertick = tx * speed * dt;
+        target_vy_pertick = ty * speed * dt;
+        /* ACCEL when input matches motion (or starts from rest); the
+         * snappier DECEL fires when input opposes motion, so the
+         * player can flick the opposite direction for a faster reverse
+         * without making steady-state ramp-up any springier. */
+        bool opposing = (vx_now * input_dir) < 0.0f;
+        rate_pxs2 = opposing ? GROUND_DECEL_PXS2 : GROUND_ACCEL_PXS2;
     }
 
-    /* Tangent is normal rotated 90°. Sign chosen to match run direction. */
-    float dir = (vx_pxs > 0.0f) ? 1.0f : -1.0f;
-    float tx  = -ny * dir;
-    float ty  =  nx * dir;
+    /* Per-component cap (matches §5A pseudocode literally). Magnitude
+     * cap would be marginally tighter on diagonal slopes; per-component
+     * is simpler and the difference is well under a frame of ramp time. */
+    float dx = target_vx_pertick - vx_now;
+    float dy = target_vy_pertick - vy_now;
+    float max_delta = rate_pxs2 * dt * dt;
+    if (dx >  max_delta) dx =  max_delta;
+    if (dx < -max_delta) dx = -max_delta;
+    if (dy >  max_delta) dy =  max_delta;
+    if (dy < -max_delta) dy = -max_delta;
 
-    float speed = fabsf(vx_pxs);
-    float vt_per_tick_x = tx * speed * dt;
-    float vt_per_tick_y = ty * speed * dt;
-
+    /* Apply uniformly to every body particle, matching the old SET
+     * path's "all parts move together" semantic. The slope-tangent Y
+     * push goes to every particle (not just the lower chain) — splitting
+     * it stretches the body over a long held-run climb because 12
+     * relaxation iterations don't fully converge against a per-tick
+     * velocity injection on a 6-link chain. */
     for (int part = 0; part < PART_COUNT; ++part) {
         int idx = m->particle_base + part;
-        physics_set_velocity_x(p, idx, vt_per_tick_x);
-        /* Apply the slope-tangent Y-velocity to every particle, not
-         * just the lower chain. The original code split this — only
-         * the knees + feet got the Y push, on the theory that the
-         * upper body would "lean naturally" into the slope under
-         * gravity. In practice that asymmetry stretches the body:
-         * while running uphill, the feet + knees climb each tick
-         * (vt_per_tick_y < 0) but the pelvis / chest / head get only
-         * the X component, so the constraint solver has to recover
-         * 2-3 px of vertical separation per tick. 12 relaxation
-         * iterations don't fully converge against a per-tick velocity
-         * injection on a long chain (feet → knees → thighs → pelvis
-         * → chest → head/arms), so the stretch accumulates over a
-         * held-run climb and renders as a visibly growing mech. Going
-         * downhill doesn't show the bug because gravity naturally
-         * pulls the upper body down at the same rate as the climb
-         * tangent. Translating the whole body rigidly along the
-         * tangent solves it; the slight loss of "lean" on a slope is
-         * far less noticeable than the body inflating. */
-        physics_set_velocity_y(p, idx, vt_per_tick_y);
+        p->prev_x[idx] -= dx;
+        p->prev_y[idx] -= dy;
     }
 }
 

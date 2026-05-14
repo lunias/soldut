@@ -1,0 +1,854 @@
+# 07 — Movement gamefeel iteration
+
+---
+
+## ⚠ Orientation — read this first (you are the implementing Claude)
+
+This document is a self-contained plan handed to you to execute in a
+fresh context. The user is hands-on for this one — they will playtest
+each tuning change, give feedback, and we iterate. Branch:
+`m6-movement-tuning` (already created from `main`, ready for you).
+
+### What is already true when you arrive
+
+- **Repository:** `/home/lunias/clones/soldut`. Builds with `make`.
+- **Branch:** `m6-movement-tuning`. Already created from `main` post
+  P06 merge (commit `bbcafaa`). The profiler from P06 is in.
+- **Profiler:** `./soldut --bench 30 --bench-csv …` works for measuring
+  any frame-time regressions you introduce. Use it before and after
+  every tuning change.
+- **Shot tooling:** `make shot SCRIPT=tests/shots/m6_movement_probe.shot`
+  runs the existing movement diagnostic — 14 cells in a contact sheet
+  showing standing → running → jumping → landing. Re-run it after
+  each tuning change for a visual A/B.
+- **`CLAUDE.md`** at repo root is load-bearing. Re-read before
+  changing anything.
+
+### What you do at the start of your session
+
+1. Read this doc end to end.
+2. Re-read `documents/03-physics-and-mechs.md` §"Movement" + §"Pillars".
+   That's the original intent; we're refining feel, not rewriting it.
+3. Read `documents/00-vision.md` pillar 1 ("movement is the
+   protagonist") and pillar 7. Game-feel is the regression bar.
+4. Reproduce the §3 "current movement model" diagnosis by reading the
+   four file:line sites listed there. **Do not start tuning before you
+   can explain in your own words why holding RIGHT during a slope
+   descent kills the slope's momentum.**
+5. Run `make shot SCRIPT=tests/shots/m6_movement_probe.shot` to
+   establish the pre-change baseline visual.
+6. Then start §6 — Phase 1.
+
+### What the user asked for, verbatim
+
+> Multiple people reported that moving side to side is not what they
+> expect, on the ground or in the air. The game should allow players
+> to do things like gain momentum sliding down a slope and then run
+> out from the bottom of the slope quicker, jump higher, more
+> parabolic motion, right now jump and jetpack do not allow you to
+> move very far right / left. On the ground, take some inspiration
+> from sonic the hedgehog. We want the movement to be fun, but still
+> competitive Soldat style at its core.
+
+Stake those goals into the wall:
+
+1. **Slope momentum carries.** Slide down a slope → run off the
+   bottom faster than RUN_SPEED would let you. (Currently: the moment
+   you press a direction at the bottom of the slope, your velocity is
+   clamped to ±RUN_SPEED — momentum lost.)
+2. **Jumps go further horizontally.** Air control + jump apex height
+   currently produce a short, low arc. Want a more parabolic, more
+   committed arc — Soldat-feel, where a running jump throws you
+   meaningfully across the screen.
+3. **Jet pack moves you sideways.** Currently pure vertical thrust;
+   the only horizontal motion in air comes from AIR_CONTROL (33% of
+   ground speed). Jet should pull you in the direction you're holding,
+   not just up.
+4. **Sonic-y ground feel.** Acceleration toward top speed, deceleration
+   when input released, slope acceleration adds to the speed cap.
+   Top speed should be **exceedable** by external sources (slopes,
+   dashes, recoil) and persist until friction grinds it down.
+5. **Soldat-y aerial combat at the core.** Air control responsive
+   enough to dodge a shot mid-jet, but momentum-preserving enough
+   that you can't just hover-strafe. Competitive — every player has
+   the same physics, no random feel.
+
+---
+
+## 1 — Why this matters (philosophy alignment)
+
+- `documents/00-vision.md` pillar 1: *"Movement is the protagonist.
+  The mech is a body, not a hitbox."* If movement feels bad,
+  everything else feels bad.
+- `documents/01-philosophy.md` rule 2: *"Pure functions where
+  possible."* The movement code in `mech.c::apply_run_velocity` /
+  `apply_jump` / `apply_jet_force` is already a clean function-of-
+  inputs surface. Tuning means changing numbers and the
+  velocity-additive-vs-velocity-setting model, not adding state.
+- `documents/01-philosophy.md` rule 7: *"We commit to numbers."*
+  Every change in §6 lands with a measured before/after delta in
+  the commit body. The §6 "playtest checklist" is the contract.
+
+### The Sonic / Soldat tension (the actual design problem)
+
+Sonic and Soldat sit at opposite ends of a momentum spectrum:
+
+- **Sonic** is **terrain-flow**: slopes accelerate the player past
+  their top speed, ground friction is low, jumps preserve the
+  horizontal velocity you had when you left the ground. Air control is
+  weak (Sonic 2's air control is famously tiny). Top speed isn't a
+  cap — it's a *baseline* you exceed via slope/spin-dash.
+- **Soldat** is **aerial-combat**: jet pack rules everything, air
+  control is responsive (you can dodge mid-jet), jumps are tall,
+  recoil-jumps stack with jet for skilled movement. Slopes have
+  some momentum effect but the player's verbs are mostly air-side.
+
+The user wants **Soldat aerial verbs on top of Sonic ground flow.**
+That's a coherent design — the bottom of the player's stack (when
+their feet are on the ground) feels like Sonic; the top of the stack
+(jet, jump, air combat) feels like Soldat. The two transition
+through *momentum preservation across the ground↔air boundary* —
+which is exactly what is broken now.
+
+---
+
+## 2 — Current state: tunables and code map
+
+### Tunable table (READ THIS — these are the levers)
+
+| Name | Value | File:line | Unit | Effect |
+|---|---:|---|---|---|
+| `GRAVITY` | `1080.0f` | `src/level.c:67`, `src/level_io.c:509` | px/s² | World gravity (per-level override possible) |
+| `PHYSICS_VELOCITY_DAMP` | `0.99f` | `src/physics.h:22` | per-tick mult | 1% velocity drag every tick |
+| `PHYSICS_CONSTRAINT_ITERATIONS` | `12` | `src/physics.h:23` | iterations | per-tick relaxation passes |
+| `RUN_SPEED_PXS` | `280.0f` | `src/mech.c:150` | px/s | Base ground run speed |
+| `JUMP_IMPULSE_PXS` | `320.0f` | `src/mech.c:151` | px/s | Vertical impulse (instant) on jump |
+| `JET_THRUST_PXS2` | `2200.0f` | `src/mech.c:152` | px/s² | Continuous upward force while BTN_JET held |
+| `JET_DRAIN_PER_SEC` | `0.60f` | `src/mech.c:153` | fuel/s | Fuel consumption rate |
+| `AIR_CONTROL` | `0.35f` | `src/mech.c:154` | ratio | Air-input is 35% of ground run speed |
+| `SCOUT_DASH_PXS` | `720.0f` | `src/mech.c:157` | px/s | Scout's BTN_DASH burst (ground-only) |
+| floor friction (flat) | `~0.92` | `src/physics.c:365` | per-tick mult | `0.99 - 0.07·|ny|` (max friction at ny=-1) |
+| slope friction (45°) | `~0.94` | same | | |
+| slope friction (60°) | `~0.955` | same | | |
+| ICE override | `0.998` | `src/physics.c:367` | per-tick mult | TILE_F_ICE bypasses slope formula |
+| Jet ceiling taper | 64 → 24 px | `src/mech.c:641-642` | px | Thrust scales to 0 within 24 px of ceiling |
+| `MAX_FRAME_DT` | `0.25` | `src/main.c:58` | seconds | Caps frame dt for the accumulator |
+| Sim Hz | `60` | `src/main.c:56` | Hz | Fixed timestep |
+
+### Per-chassis multipliers (`src/mech.c` near line 38-95)
+
+| Chassis | `run_mult` | `jump_mult` | `jet_mult` | `fuel_max` | `fuel_regen` | `mass_scale` |
+|---|---:|---:|---:|---:|---:|---:|
+| Trooper | 1.00 | 1.00 | 1.00 | 1.00 | 0.20 | 1.00 |
+| Scout | 1.20 | 1.10 | 1.30 | 1.20 | 0.25 | 0.80 |
+| Heavy | 0.85 | 0.85 | 0.80 | 0.85 | 0.15 | 1.40 |
+| Sniper | 0.95 | 1.00 | 1.00 | 1.10 | 0.20 | 0.95 |
+| Engineer | 1.00 | 1.00 | 1.10 | 1.00 | 0.25 | 1.00 |
+
+### Per-armor multipliers (`src/mech.c:110-113`)
+
+| Armor | `run_mult` | `jet_mult` |
+|---|---:|---:|
+| None | 1.00 | 1.00 |
+| Light | 1.00 | 1.00 |
+| Heavy | 0.90 | 0.90 |
+| Reactive | 1.00 | 1.00 |
+
+### Per-jetpack multipliers (`src/mech.c:123-130`)
+
+| Jetpack | `thrust_mult` | `fuel_mult` | Notes |
+|---|---:|---:|---|
+| Baseline | 1.00 | 1.00 | |
+| Standard | 1.10 | 1.20 | Default |
+| Burst | 1.00 | 1.00 | + `boost_thrust_mult` on BTN_DASH |
+| Glide | 0.85 | 0.70 | + `glide_thrust` lift at empty fuel |
+| JumpJet | 0.00 | 1.00 | BTN_JET = re-jump, no continuous thrust |
+
+### Computed game-feel (current tunables — Trooper / Light / Standard)
+
+| Quantity | Formula | Value |
+|---|---|---:|
+| Apex height (standing jump) | v²/(2g) = 320²/(2·1080) | **47 px** |
+| Time to apex | v/g = 320/1080 | **0.30 s** ≈ 18 ticks |
+| Total airtime | 2·(v/g) | **0.60 s** ≈ 36 ticks |
+| Air-input velocity | RUN_SPEED · AIR_CONTROL = 280·0.35 | **98 px/s** |
+| Horizontal travel in air (running jump) | 98 · 0.60 | **59 px** |
+| Horizontal travel at ground RUN speed in same time | 280 · 0.60 | **168 px** |
+| **Air travel as % of ground travel** | 59/168 | **35%** |
+
+For comparison, a running jump in Soldat lands roughly *where the
+player would have been* if they kept running on the ground — i.e.
+~100% horizontal-velocity preservation across the jump. Our current
+35% is what produces the "jump kills your horizontal motion" feel.
+
+### The smoking gun (read this code before tuning anything)
+
+`src/mech.c::apply_run_velocity` lines 550-628. This function is the
+core of the bug.
+
+**Air-control branch** (lines 553-561):
+
+```c
+if (!grounded) {
+    float vx_per_tick = vx_pxs * dt * AIR_CONTROL;
+    for (int part = 0; part < PART_COUNT; ++part) {
+        int idx = m->particle_base + part;
+        physics_set_velocity_x(p, idx, vx_per_tick);
+    }
+    return;
+}
+```
+
+Note `physics_set_velocity_x` — this **sets** the per-tick velocity
+to `vx_pxs · dt · 0.35`, **regardless of what the velocity already
+was.** So:
+
+- Jump up while running RIGHT at 280 px/s. The moment your feet
+  leave the ground, the next tick clamps your X velocity to
+  98 px/s (35% of 280). **Two thirds of your horizontal momentum
+  vanishes the instant you become airborne.**
+- Jet right while moving at 400 px/s (you got there via Scout dash
+  or recoil). Same thing — velocity clamped to 98 px/s.
+
+**Ground-input branch** (lines 596-627): projects the run input
+onto the slope tangent and **sets** velocity tangent-aligned at
+`vx_pxs · dt`:
+
+```c
+float vt_per_tick_x = tx * speed * dt;
+float vt_per_tick_y = ty * speed * dt;
+for (int part = 0; part < PART_COUNT; ++part) {
+    physics_set_velocity_x(p, idx, vt_per_tick_x);
+    physics_set_velocity_y(p, idx, vt_per_tick_y);
+}
+```
+
+So when you've slid down a slope at 450 px/s and press RIGHT at the
+bottom, your X velocity is **set** to 280 px/s — slope momentum
+deleted.
+
+**No-input + flat ground branch** (lines 588-594):
+
+```c
+if (vx_pxs == 0.0f) {
+    if (!flat) return;
+    for (int part = 0; part < PART_COUNT; ++part) {
+        physics_set_velocity_x(p, m->particle_base + part, 0.0f);
+    }
+    return;
+}
+```
+
+Releasing inputs on flat ground **snaps** velocity to 0 — no decel
+curve, no slide. Sonic this is not.
+
+### Other relevant code paths
+
+- **`apply_jump`** (`src/mech.c:630-639`) — sets vy directly to
+  `-jump_pxs · dt`. **Doesn't preserve any existing upward velocity**
+  (you can't double-source a jump by stacking the impulse). Doesn't
+  touch horizontal velocity — so horizontal momentum at the moment of
+  jump *is* preserved by the jump itself, but then immediately wiped
+  by `apply_run_velocity`'s air-control branch on the next tick.
+- **`apply_jet_force`** (`src/mech.c:644-711`) — adds `fy = -thrust ·
+  scale · dt²` to every particle's `pos_y`. **Pure vertical** unless
+  the ceiling-tangent branch fires (only when `PARTICLE_FLAG_CEILING`
+  is set on the particle). No horizontal input is consumed for jet
+  direction.
+- **Gravity** (`src/physics.c:15-53`) — applied per-tick to every
+  particle with `inv_mass > 0`. Default 1080 px/s² = `+0.30 px/tick`
+  vy. This is **5× heavier than Soldat's reference** GRAV ≈ 0.06
+  px/frame (which at 60 Hz works out to ~216 px/s²).
+- **Slope-tangent friction** (`src/physics.c:349-375`) — final
+  iteration of the relaxation loop applies tangential velocity
+  damping at every contact. The friction formula `0.99 - 0.07·|ny|`
+  gives less friction on steeper slopes (good — that's how slopes
+  produce passive slide). But the per-tick velocity damp is *every*
+  tick contact happens, so even on a steep slope you grind down to
+  ~0 if you sit still long enough.
+- **`physics_set_velocity_x` / `_y`** (`src/physics.h:90-95`) — these
+  are inline helpers that overwrite `prev` to produce a given
+  per-tick velocity. They are the "set, don't add" gateway. The
+  whole movement model is built around these.
+
+---
+
+## 3 — Diagnosis: why current movement feels wrong
+
+Five concrete claims, each with a code reference:
+
+1. **Side-to-side is "snappy" because velocity is SET, not added.**
+   `physics_set_velocity_x` (`src/physics.h:90`) overwrites `prev`
+   to produce a target velocity. The input loop calls this every
+   tick the player holds left/right (`mech.c:858-866`). Consequence:
+   no momentum carryover across input changes; no Sonic-like accel
+   curve; the player's max attainable horizontal speed is *exactly*
+   `RUN_SPEED_PXS · run_mult · ar->run_mult`, even on a slope.
+
+2. **Slopes can produce passive slide but pressing a direction
+   wipes it.** Gravity adds 0.30 px/tick downward each tick.
+   Slope-tangent friction (0.92-0.99) leaves some of that as
+   tangent velocity. Sit on a 60° slope with no input — you slide.
+   Press LEFT or RIGHT — `apply_run_velocity` SETs your velocity
+   to ±RUN_SPEED-along-tangent. Slope's momentum gone.
+
+3. **Jumps are short and low.** Apex 47 px, airtime 0.60 s. For
+   a 2D side-scroller running at the M5/M6 zoom (camera follows
+   pelvis, the mech is ~80 px tall on screen at default zoom),
+   that means the player goes up by less than the mech's own
+   height. Soldat-feel wants apex ≈ mech-height to 1.5×
+   mech-height — call it ~80-120 px.
+
+4. **Jet only goes up.** `apply_jet_force` adds straight-vertical
+   `fy` to every particle (`mech.c:708`). No reading of
+   `latched_input` for L/R sign except the ceiling-tangent
+   branch (`mech.c:684-686`), which only fires when the head is
+   already up against an angled ceiling. So in open air, BTN_JET
+   gives you straight-up thrust; the only horizontal motion you
+   can produce mid-jet is via AIR_CONTROL = 98 px/s. Useless for
+   covering distance.
+
+5. **Air control number itself is too low.** Even if we kept the
+   set-velocity model, AIR_CONTROL = 0.35 means the in-air max
+   horizontal velocity is 98 px/s — that's slower than a Soldat
+   walk. Soldat's air-control is roughly equivalent to ~0.6-0.7
+   of ground speed.
+
+### What ISN'T broken
+
+- Gravity at 1080 px/s² **feels heavy but right** for the mech
+  aesthetic; mechs are heavy machines. **Do not lower gravity** as
+  the first move — that lengthens airtime, which compounds with
+  the slow-air-control issue rather than fixing it.
+- Slope-aware friction formula is good. The slope-tangent
+  projection in `apply_run_velocity` is good. The bug is in HOW
+  the projection result is applied (SET not ADD).
+- The Verlet integrator is fine. The constraint solver is fine.
+  Movement tuning is on the input → velocity surface, not on
+  physics internals.
+
+---
+
+## 4 — Reference points
+
+### Soldat constants (approximated; cross-check against
+`reference/soldat-constants.md` if present, otherwise treat these
+as starting points)
+
+| Soldat | Reference value (60 Hz) | Soldut current | Note |
+|---|---:|---:|---|
+| Gravity | ~216 px/s² | 1080 px/s² | Soldut is 5× heavier — keep that |
+| Run speed | ~425 px/s | 280 px/s | Soldut slower; could bump |
+| Jump impulse | ~620 px/s | 320 px/s | **Soldat ~2× higher** |
+| Jet thrust | ~3500 px/s² | 2200 px/s² | Soldat ~60% stronger |
+| Air control | ADD-with-cap, ~0.6× | SET 0.35× | **Different model entirely** |
+
+(These reference numbers are *guides*, not exact targets. The point
+is to show that the Soldat model adds force, has a higher cap, and
+preserves momentum across the ground-air boundary.)
+
+### Sonic physics primer (the canonical reference is the *Sonic
+Physics Guide*)
+
+Sonic 1/2/3 ground physics, in our units:
+
+- **`acc`** (acceleration): velocity is `min(top_speed, vx + acc)`
+  per tick when input held in direction of motion. Sonic has
+  `acc ≈ 168 px/s²` (slow ramp-up — feels weighty).
+- **`dec`** (deceleration when input opposed): `vx - dec` per tick.
+  Sonic has `dec ≈ 1800 px/s²` (sharp braking — feels responsive).
+- **`frc`** (friction when no input on ground): `vx · (1 - frc·dt)`.
+  Sonic `frc ≈ acc` so passive deceleration matches active accel.
+- **`top`** (top speed cap, INPUT only): `vx ≤ top` while accel
+  toward top. **External sources (slopes, springs, dashes) can push
+  vx ABOVE top** and friction grinds it back down.
+- **Slope momentum:** gravity-along-tangent adds to `vx` every tick
+  (gain going down, lose going up). Net result: top of a hill +
+  hold direction = launched off the bottom faster than `top`.
+- **Air physics:** weaker accel (~0.5× ground), no friction (no
+  ground contact), but momentum preserved 100% across jump.
+
+The translation to mechs (this is the design target):
+
+| Param | Proposed start value | Rationale |
+|---|---:|---|
+| ground_accel | `RUN_SPEED / 0.10s = 2800 px/s²` | 6 frames to top speed |
+| ground_decel (opposed) | `RUN_SPEED / 0.06s = 4666 px/s²` | 4 frames to reverse |
+| ground_friction | `RUN_SPEED / 0.20s = 1400 px/s²` | 12 frames to stop on flat |
+| air_accel | `0.6 · ground_accel = 1680 px/s²` | 60% — Soldat-y |
+| top_input_speed (cap on input-accel) | `280 px/s` | unchanged for input feel |
+| slope_accel_gain | gravity·sin(slope) | already implicit via Verlet |
+| jump_impulse | `480 px/s` (50% up from 320) | apex 107 px ≈ mech-height |
+| jet horiz component | `0.5 · JET_THRUST_PXS2` toward input | Soldat-style |
+
+---
+
+## 5 — The design proposal (what we're going to change)
+
+### A. Switch from "set velocity" to "add force toward target"
+
+The single most important change. Replace the SET-velocity model
+with an ADD-toward-target-speed model:
+
+```c
+// Pseudocode for ground move
+float vx_now = pos_x[i] - prev_x[i];   // current per-tick vx
+float vx_target = run_speed * input_dir * dt;
+float vx_delta  = vx_target - vx_now;
+// Cap the per-tick acceleration so the player ramps to top speed
+// over `ground_accel_time` seconds, not in one tick:
+float max_delta = ground_accel * dt * dt;
+if (vx_delta >  max_delta) vx_delta =  max_delta;
+if (vx_delta < -max_delta) vx_delta = -max_delta;
+prev_x[i] -= vx_delta;   // i.e., new_vx = vx_now + vx_delta
+```
+
+Critical property: if `vx_now > vx_target` (you're moving FASTER
+than RUN_SPEED because of a slope or dash), `vx_delta` is **negative
+but capped** — so the slope momentum bleeds off naturally over
+multiple ticks, not instantly. *External sources can push you past
+the cap; input cannot.*
+
+### B. Higher jump
+
+`JUMP_IMPULSE_PXS 320 → 480`. Apex 47 → 107 px. Airtime 0.60 →
+0.89 s. Combined with §A's momentum preservation, a running jump
+now covers ~0.89 × 280 = **250 px** horizontally instead of the
+current 59 px.
+
+### C. Jet pack horizontal thrust
+
+Read `latched_input.buttons & BTN_LEFT/RIGHT` inside
+`apply_jet_force`. Apply a horizontal acceleration component
+toward the held direction at ~50% of vertical thrust. So holding
+JET + RIGHT thrusts up + right; pure JET = up only (preserving
+current behavior for "I just want to climb").
+
+### D. Air control number
+
+`AIR_CONTROL 0.35 → 0.65`. Combined with §A (additive model with
+preservation), this gives Soldat-like responsiveness — you can
+nudge your trajectory mid-jet, but you can't reverse 280 px/s of
+horizontal momentum in a single direction-flick.
+
+### E. Slope friction tuning
+
+Verify slope friction is **enough to bleed off slope momentum
+over time** but **not enough to wipe it in one tick**. Current
+formula `0.99 - 0.07·|ny|` may need recalibration after §A lands.
+
+### F. Decel curve on input release
+
+In §A's model, when `input_dir == 0`, set
+`vx_target = 0` and let the same accel-capped lerp bring you down.
+The "snap-to-0" branch goes away — you skid to a stop over ~10
+ticks on flat ground. Slope: gravity-along-tangent dominates, you
+continue to slide.
+
+### What this proposal explicitly does NOT change
+
+- Gravity (keep 1080 px/s² — mechs are heavy; the heaviness IS
+  the feel).
+- Velocity damp (keep 0.99; that's already light drag).
+- Constraint iterations (keep 12).
+- Per-chassis run/jump/jet multipliers (relative balance is fine).
+- The Verlet integrator (don't touch).
+- Jet ceiling taper (keep — prevents over-ceiling abuse).
+- Jet fuel drain rate (keep, balance later).
+- Slope-tangent projection direction (keep, just stop setting
+  velocity at it — accumulate to it instead).
+
+---
+
+## 6 — Phased implementation plan
+
+Each phase is a single commit. Each commit gets a measured
+before/after delta in its body — pelvis trail from the shot probe,
+plus a one-line "feel" report after the user playtests. Per rule 7
+("we commit to numbers") and the M6 P06 fix-application discipline.
+
+**The user will playtest each phase before the next ships.** Don't
+batch.
+
+### Phase 1 — Add-toward-target ground movement (§5A, ground only)
+
+Goal: pressing RIGHT at the bottom of a slope no longer wipes
+slope momentum.
+
+Touch: `src/mech.c::apply_run_velocity`, ground branch only.
+
+1. Add `ground_accel`, `ground_decel`, `ground_friction` constants
+   alongside `RUN_SPEED_PXS` (with the values from §4).
+2. Rewrite the ground branch to read current vx via
+   `(pos_x[i] - prev_x[i])`, compute target vx (slope-projected as
+   today), compute `delta = target - vx_now`, cap delta by accel,
+   apply delta via `prev_x[i] -= delta`.
+3. No-input branch: `target = (0, 0)`, same accel-capped lerp. On a
+   slope, skip the input-pull (gravity-along-tangent will
+   accelerate you naturally). On flat, apply friction-decel.
+4. Test plan:
+   - `make shot SCRIPT=tests/shots/m6_movement_probe.shot` —
+     visual A/B before/after.
+   - `make shot SCRIPT=tests/shots/m5_slope.shot` — passive slide
+     should still happen; pressing RIGHT at the bottom should now
+     produce a faster run-out than before.
+   - `make test-physics` + `make test-mech-ik` + `make
+     test-pose-compute` must still pass.
+   - Paired `tests/shots/net/run.sh 2p_basic` — bot/remote mechs
+     should still walk normally.
+5. **Playtest gate.** User plays a round, reports feel. Don't
+   move to Phase 2 until user signs off.
+
+### Phase 2 — Add-toward-target air movement (§5A, §5D for air)
+
+Goal: a running jump preserves horizontal momentum; mid-air
+input nudges trajectory rather than snapping to it.
+
+Touch: `src/mech.c::apply_run_velocity`, air branch.
+
+1. Replace the SET-velocity air branch with the same
+   accel-capped lerp model, using `air_accel` and a different
+   (lower) friction.
+2. Bump `AIR_CONTROL` 0.35 → 0.65 (or replace AIR_CONTROL entirely
+   with a separate `air_accel` constant).
+3. Test plan: same as Phase 1. Pay particular attention to the
+   jump panels in `m6_movement_probe.shot` — the airborne distance
+   should clearly grow.
+4. **Playtest gate.** Watch for: jet+air-control combo feels right;
+   no mid-air "ice skating"; can still dodge a shot mid-jet.
+
+### Phase 3 — Higher jump (§5B)
+
+Goal: a jump goes up roughly mech-height (~80-120 px).
+
+Touch: `src/mech.c:151` — `JUMP_IMPULSE_PXS 320 → 480`. Possibly
+also retune per-chassis `jump_mult` to keep the relative balance.
+
+Test plan: probe shot. **Watch for**: head no longer hits ceiling
+on jump in Reactor's pillar archway (96 px tall — at 107 px apex
+you'll headbutt the ceiling on a standing jump there). May need
+to retune to 440 if the headroom is tight on shipped maps.
+
+**Playtest gate.** Reactor + Catwalk + Citadel — confirm the jump
+height feels right and ceilings are not problematic.
+
+### Phase 4 — Jet pack horizontal (§5C)
+
+Goal: holding JET + RIGHT moves you up + right; pure JET stays up.
+
+Touch: `src/mech.c::apply_jet_force` — read
+`m->latched_input.buttons & BTN_LEFT/RIGHT`, add horizontal `fx`
+proportional to thrust.
+
+Test plan:
+- Probe shot (jet+right panels at t=500..540).
+- Re-run `tests/shots/net/run_frag_grenade.sh` — grenade arcs
+  may interact with jet behavior; verify no regressions.
+- Bake test `tools/bake/run_bake.c` — bots already use BTN_JET
+  for pathing; their behavior may shift if jet now has lateral
+  component. Re-run bot tier verdicts.
+
+**Playtest gate.** User confirms jet-flight feels right (can cover
+distance horizontally while jetting, but doesn't fly-spam too far).
+
+### Phase 5 — Slope momentum verification (§5E)
+
+Goal: slope momentum is *additive* on top of run cap, and friction
+bleeds it gracefully.
+
+Touch: probably no code changes — Phase 1 should already give us
+this for free. Phase 5 is a measurement-only pass that confirms
+slope-down then run-out produces speeds > RUN_SPEED that decay
+toward RUN_SPEED over a measurable window.
+
+If passive slide grinds out too fast or carries too long, retune
+`floor friction (flat)` and the slope coefficient in
+`src/physics.c:365`.
+
+### Phase 6 — Recoil & dash momentum compatibility check
+
+Goal: confirm Scout's BTN_DASH (`SCOUT_DASH_PXS = 720`) and weapon
+recoil now produce *cumulative* speed boosts instead of clamped-by-
+cap speeds.
+
+The Phase 1/2 changes make this work for free IF
+`SCOUT_DASH_PXS > RUN_SPEED_PXS`, which it is (720 > 280). With
+the additive model, a Scout dash adds 720 px/s, then ground
+friction bleeds it down toward 280 over ~12 frames. Should feel
+*great*.
+
+Test plan: visual via probe shot; bake regression for Scout bots.
+
+### Phase 7 — Network sync validation
+
+Goal: confirm none of the movement changes break client-server
+position prediction or remote-mech interpolation.
+
+This is the trickiest non-feel risk. The new movement code reads
+`pos - prev` to compute current velocity, which is the same data
+the snapshot system encodes via `pos` + `prev_*` per particle.
+But the SERVER's tick rate is 60 Hz and the CLIENT's prediction
+runs at 60 Hz from the same code, so prediction-reconciliation
+should remain aligned.
+
+Test plan:
+- `tests/net/run.sh` — 3-process basic connectivity
+- `tests/net/run_3p.sh` — 3 players over the wire
+- `tests/shots/net/run.sh 2p_basic` — paired byte-identical (paired
+  shots may DIFFER post-tuning because movement is different; the
+  comparison goal is that host and client see the SAME diff, not
+  that the diff is zero relative to pre-tuning).
+- `make test-frag-grenade` — paired-dedi explosion sync.
+
+If any paired-process tests show *host-vs-client divergence* (not
+post-tuning frame-byte diff, but the SHAPE of the divergence
+between host and client logs/PNGs), stop and fix before any other
+phase moves.
+
+### Phase 8 — Update CURRENT_STATE.md + commit body for the merged work
+
+Goal: leave the next session a clear record of what was tuned and
+why. Per `documents/01-philosophy.md` rule 10 + the M6 P06 commit
+pattern.
+
+- Update CURRENT_STATE.md "Tunables (current values)" table with
+  the new constants.
+- Update `documents/03-physics-and-mechs.md` §"Movement" if the
+  shipping numbers diverge meaningfully from the spec.
+- Open the PR with a SUMMARY of each phase's playtest verdict
+  attached.
+
+---
+
+## 7 — How to test (the harness)
+
+### The bench harness (already shipped in M6 P06)
+
+```bash
+./soldut --bench 20 --bench-csv build/perf/movement-after.csv \
+         --window 1920x1080
+```
+
+The CSV will tell you if movement changes induced a frame-time
+regression (they shouldn't — the changes are velocity-arithmetic
+inside the existing tick).
+
+### The movement probe shot (added in this session)
+
+```bash
+make shot SCRIPT=tests/shots/m6_movement_probe.shot
+```
+
+Produces `build/shots/m6_movement_probe/probe_sheet.png` — 14 cells
+showing standing → running → jumping → landing → post-land →
+stopped. Re-run after each phase and visually compare.
+
+**The probe captures the running-jump scenario only.** Add more
+probe shots for slope + jet as needed in the corresponding phase.
+Suggested:
+- `tests/shots/m6_movement_slope.shot` — slope descent → flat run-out
+- `tests/shots/m6_movement_jet.shot` — jet + horizontal hold
+
+(Templates: copy `m6_movement_probe.shot` and edit the inputs +
+spawn_at + tick layout.)
+
+### The user playtest (the only gate that matters)
+
+After each phase, the user plays a real round (single-player + 1
+bot is enough). Report:
+
+- "Side-to-side feels [right / floaty / snappy]"
+- "Jumps feel [right / short / too tall]"
+- "Jet feels [right / sluggish / OP]"
+- "Slope momentum carries [yes / no / too much]"
+
+If feel is right, ship the phase. If not, retune (don't add new
+mechanisms; just adjust the numbers from §5).
+
+---
+
+## 8 — Risks and watch-fors
+
+1. **Network desync.** Server and client both run the same
+   movement code, so as long as the inputs match (which they do —
+   `NET_MSG_INPUT` is unchanged), positions converge via the same
+   physics. Phase 7 has the regression sweep. If a problem shows
+   up, the most likely culprit is the velocity read
+   `(pos_x[i] - prev_x[i])` differing between server (running
+   physics) and client (running predict over latched_input) — but
+   that's the SAME read both sides do today for snapshot encoding,
+   so this should be safe.
+
+2. **Collision tunneling at higher speeds.** §5B (higher jump) and
+   §5A (slope momentum) both raise the maximum per-tick particle
+   velocity. The Verlet integrator already does a swept-collision
+   ray check (`physics.c:74-104`) so tunneling should be caught —
+   but if you see body parts ending up inside walls after a fast
+   slope descent, the swept check may need a tighter epsilon.
+
+3. **Pose drift under high velocity.** The procedural pose
+   (M6 P01) writes bone positions kinematically each tick. At
+   higher velocities the per-tick translation is larger, which
+   means a momentary mismatch between the pose-computed bone
+   position and the pre-physics particle position is larger. This
+   could surface as visible "pop" on landing. Verify with the
+   probe sheet — look at the t005-t030 frames during the jump for
+   any limb-flicker.
+
+4. **Bot AI regression.** Bots use BTN_LEFT/RIGHT/JUMP/JET via the
+   same `mech_step_drive` path; if movement tuning makes bots
+   walk through walls or fall off ledges they used to handle, the
+   bake test (`tools/bake/run_bake.c`) will catch it. Run
+   `make bake-all` after Phase 4.
+
+5. **Tile-collision contact normals.** `apply_run_velocity` reads
+   `contact_nx_q / contact_ny_q` to detect slopes. With higher
+   velocities, the contact normal from the previous tick may be
+   one tick more stale — i.e., on a steep transition (60° to 5°
+   slope abrupt boundary), the runner may briefly behave as if
+   still on the 60° tangent for one tick. This is already happens
+   today; just be aware that the *symptom* changes (more visible
+   forward-momentum past the transition).
+
+6. **CTF carrier balance.** §5C (horizontal jet) may make flag
+   carriers harder to catch — the 50% jet thrust penalty
+   (`ctf_is_carrier`, `mech.c:649-651`) still applies, but if
+   that 50%-of-thrust-up has a 50%-of-thrust-sideways component
+   now, the carrier moves laterally faster than before. May need
+   to reduce horizontal-jet contribution for carriers, or boost
+   the carrier penalty.
+
+7. **Heavy chassis at low jump_mult.** Heavy's `jump_mult = 0.85`
+   means after Phase 3 (`JUMP_IMPULSE 320→480`), Heavy jumps at
+   480·0.85 = 408 px/s = apex 77 px. Trooper at 480·1.00 = apex
+   107 px. Scout at 480·1.10 = apex 130 px. Verify these feel
+   right — Scout shouldn't be touching the 96-px archway every
+   jump.
+
+---
+
+## 9 — Where this work lives
+
+- **Branch:** `m6-perf-profiling` was just merged. Switch to (and
+  stay on) **`m6-movement-tuning`**, which was created from main
+  post-merge.
+- **One PR per phase.** Don't batch. The user is in the loop
+  between phases.
+- **Commit messages:** per the M6 P06 pattern. Format:
+
+  ```
+  M6 P07 Phase N — short title
+  
+  <2-4 sentence summary of what changed and why>
+  
+  Measured (probe shot, pelvis-x delta over ticks 110-150):
+    before: <number>
+    after:  <number>
+  
+  Playtest verdict (Y/N + 1 sentence): "<feel>"
+  
+  Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+  ```
+
+- **No new shipped doc** beyond updates to CURRENT_STATE.md and
+  03-physics-and-mechs.md. This plan doc itself stays — but at
+  the end of the iteration, mark each phase with a one-line
+  "LANDED in commit <sha>" so future-Claude can see what shipped.
+
+---
+
+## 10 — Anti-patterns to reject
+
+Per `documents/01-philosophy.md` and what would tank this work:
+
+- **No new state on Mech.** Don't add `vx_smoothed` or
+  `velocity_carryover` fields. The Verlet `prev` already encodes
+  velocity; that's the surface.
+- **No new threading.** Movement is hot per-tick but well within
+  budget (sim p99 ≈ 0.12 ms in profile data). No.
+- **No SIMD.** Per `10-performance-budget.md` SIMD is the LAST
+  resort. Per-particle work in the run loop is 16 × N-mechs ≈
+  256 particles at 32 mechs. Trivial.
+- **No new config knobs in soldut.cfg.** The tunables stay
+  `#define`s in code. Per philosophy rule 9.
+- **No "movement profiles" abstraction.** Don't add `MovementProfile
+  *m = mech_movement_profile(chassis)`. The per-chassis
+  multipliers (`run_mult`, `jump_mult`, `jet_mult`) ARE the
+  parameterization.
+- **No backwards-compat shim.** When you change `apply_run_velocity`
+  to the additive model, change it. Don't leave the SET path
+  behind a flag.
+- **No "while I was in there" refactor of apply_jet_force or
+  apply_jump.** Those touch different verbs; tune them in their
+  own phases.
+- **No feature flag.** `#define MOVEMENT_V2 1` — no. The new
+  movement either ships or doesn't.
+
+---
+
+## 11 — Quick reference: pelvis particle index
+
+Useful when reading the probe-shot log or writing new probe scripts.
+
+```c
+int pelv = m->particle_base + PART_PELVIS;
+float vx = w->particles.pos_x[pelv] - w->particles.prev_x[pelv];  // px/tick
+float vx_per_sec = vx * 60.0f;                                    // px/s
+```
+
+`PART_PELVIS` is the body's anchor — track it for the
+"what's the player's velocity" question.
+
+To get a per-tick pelvis trail in shot mode, add a SHOT_LOG line
+in `mech_step_drive` or `simulate_step`:
+
+```c
+int pelv = m->particle_base + PART_PELVIS;
+SHOT_LOG("move t=%llu mech=%d pos=(%.1f,%.1f) v=(%.1f,%.1f) grounded=%d",
+         (unsigned long long)w->tick, m->id,
+         (double)w->particles.pos_x[pelv], (double)w->particles.pos_y[pelv],
+         (double)(w->particles.pos_x[pelv] - w->particles.prev_x[pelv]) * 60.0,
+         (double)(w->particles.pos_y[pelv] - w->particles.prev_y[pelv]) * 60.0,
+         (int)m->grounded);
+```
+
+`SHOT_LOG` is a no-op outside shot mode, free to leave in.
+
+---
+
+## 12 — Findings from the playtest pass that produced this doc
+(2026-05-14)
+
+What the contact sheet of `m6_movement_probe.shot` shows under the
+*current* (pre-tune) movement model:
+
+- **Standing → running → jumping → landing.** The mech moves
+  horizontally during the airborne window, but the per-tick rate
+  visibly slows the moment the feet leave the ground (the screen
+  scrolls less per frame in jump_t005-t030 than in run_t020-t040).
+  Confirms the AIR_CONTROL = 0.35 clamp is firing.
+- **Landing → continued run.** After landing at t≈148, the
+  player keeps running because BTN_RIGHT was held throughout.
+  But there's NO visible "settle" frame — the mech doesn't keep
+  its airborne velocity briefly; it snaps back to ground RUN_SPEED.
+  Confirms the SET-velocity ground path is the canon.
+- **Stop on release.** At t=220 RIGHT is released; at t=240
+  (`stopped_t020`) the mech is **stopped, not coasting**.
+  Confirms the no-input-on-flat snap-to-0 branch
+  (`apply_run_velocity` line 588-594).
+
+No surprises in the diagnosis. The data confirms the analytical
+read of the code.
+
+---
+
+**End of plan.** When you start the next session:
+
+1. Read this file fully.
+2. Confirm you're on branch `m6-movement-tuning`.
+3. Read the four code paths cited in §3 — read them, don't skim.
+4. Run the probe shot once to set a pre-change visual baseline.
+5. Open Phase 1 by adding the new accel/decel constants alongside
+   `RUN_SPEED_PXS` in `src/mech.c:150`.
+6. Rewrite `apply_run_velocity` per §5A.
+7. Build, probe, ask the user to playtest, commit.
