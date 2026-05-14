@@ -1115,7 +1115,11 @@ static void build_aurora(void) {
 
     /* ---- Spawns — TDM split: 8 red on west, 8 blue on east. ---- */
     const int spawn_floor = floor_y - 40;
-    const int peak_spawn  = peak_top - 40;
+    /* `peak_top` is the top of the peak BODY (row H-35); the rise
+     * sits ABOVE it (row H-38..H-35). A spawn at `peak_top - 40`
+     * lands inside the rise — buried in solid. Place the spawn 40 px
+     * above the actual rise apex (row H-38) instead. */
+    const int peak_spawn  = t2w(H - 38) - 40;
     push_spawn(t2w(12),     spawn_floor, 1, 1, 0);
     push_spawn(t2w(18),     spawn_floor, 1, 1, 1);
     push_spawn(t2w(26),     spawn_floor, 1, 1, 2);

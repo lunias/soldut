@@ -922,16 +922,74 @@ from the bottom of this log without rediscovering context.
   add-toward-target (per §6 Phase 2). If pose still wrong, retune
   here.
 
+### Phase 1.2 — regression sweep + spawn fix ✅ shipped
+
+After Phase 1.2 the user asked for a regression sweep on bots /
+network play and a spawn-point validation (concern: are mechs
+spawning inside terrain?).
+
+**Network sync — pre-existing lag, NOT a regression.** Ran
+`tests/shots/net/run.sh 2p_motion` on Phase 1.2 and on
+`63ad669^` (parent of Phase 1). Both versions show ~500 px lag in
+the client's view of the host's pelvis at t=460 (host at x=1198,
+client sees host at x=691). Same shape, same magnitude. The
+position desync exists on `main` and is unrelated to the movement
+work in this branch. Worth filing as its own bug — likely a
+snapshot rate / interp delay issue — but out of scope for M6 P07.
+
+**Bot bake on aurora — pre-existing FAIL.** `build/bake_runner aurora
+--bots 4 --duration_s 30` returns 0 fires / 0 kills / 1 pickup grab on
+both Phase 1.2 and `63ad669^`. Bots are not engaging on aurora
+regardless of my changes. Aurora's nav graph (`bot_nav`: 111 nodes,
+3382 dead cells per heatmap) is too sparse for the crude wandering
+AI to find enemies. Tracked separately; fixing it is a bot-AI / nav
+job, not a movement job.
+
+**Spawn validation — found and fixed 2 embedded spawns on aurora.**
+New test `tests/spawn_geometry_test.c` (`make test-spawn-geometry`)
+loads every shipped `.lvl` and samples 4 body points per spawn
+(pelvis / head / L+R shoulders) against `level_point_solid`. Foot
+is intentionally not sampled — a properly-placed spawn lands the
+foot on the floor surface, which is solid by construction.
+
+  - `aurora.lvl` spawn[6] (red, lane 6) at world (128, 1720) AND
+    spawn[14] (blue, lane 14) at (4992, 1720) were INSIDE the peak
+    rise. The cooker's `peak_spawn = peak_top - 40` used `peak_top`
+    (top of the peak BODY at row H-35 = y 1760) but the rise sits
+    above the body (rows H-38..H-35 = y 1664..1760). 40 px above
+    `peak_top` lands inside the rise. Fixed by
+    `peak_spawn = t2w(H - 38) - 40` (40 px above the actual apex).
+  - All other 7 maps + `grapple_test.lvl` + `ctf_test.lvl` PASS.
+
+**Tests after fix:**
+  - `test-spawn-geometry` — all 10 maps, 64 body samples, all clear
+  - `test-spawn` / `test-snapshot` / `test-pickups` / `test-ctf` /
+    `test-mech-ik` / `test-pose-compute` — all PASS
+  - `tests/net/run.sh` (3-process basic) — 13/13 PASS
+  - `tests/net/run_3p.sh` (3 players) — 10/10 PASS
+  - `tests/shots/net/run.sh 2p_basic` — 12/12 PASS
+  - bake aurora post-fix — same pre-existing 0-kills FAIL
+
+**What still hurts (pre-existing, separate issues):**
+  - Snapshot position lag on the client view of remote moving mechs
+    (~500 px at full RUN_SPEED). Not a Phase 1.x regression.
+  - Bots on aurora don't engage (nav-blocked). Not a Phase 1.x
+    regression.
+  - Bots reportedly get stuck at slope→tile transitions in the user's
+    playtest. Not reproduced in the shot harness yet — needs a
+    visual bot test (host with `--bots`, shot client observer with
+    `network connect`). Deferred to next pass if it shows up.
+
 ### Resume here when next session starts
 
 1. Read this section (§13) for the running log.
 2. `git log --oneline main..HEAD` to confirm the commits above are
    on the branch.
 3. Re-run `make shot SCRIPT=tests/shots/m6_aurora_slope.shot`
-   + `make shot SCRIPT=tests/shots/m6_movement_probe.shot` to
-   reproduce the latest visual.
-4. Wait for user verdict on the latest phase before opening the
-   next one.
+   + `make shot SCRIPT=tests/shots/m6_movement_probe.shot`
+   + `make test-spawn-geometry` to reproduce the latest baselines.
+4. Wait for user verdict on the latest phase (pose) before opening
+   Phase 2 (air-control).
 
 ---
 

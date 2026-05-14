@@ -307,6 +307,16 @@ $(BUILD_DIR)/spawn_test: tests/spawn_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET
 test-spawn: $(BUILD_DIR)/spawn_test
 	./$(BUILD_DIR)/spawn_test
 
+# M6 P07 — geometric spawn validator. Loads every shipped .lvl and
+# checks each spawn point's body-sample positions against
+# level_point_solid. Catches "mech spawned inside the floor" bugs that
+# the lane-vs-author logic test (test-spawn) doesn't notice.
+$(BUILD_DIR)/spawn_geometry_test: tests/spawn_geometry_test.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/spawn_geometry_test.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+test-spawn-geometry: $(BUILD_DIR)/spawn_geometry_test
+	./$(BUILD_DIR)/spawn_geometry_test
+
 # M5 P08 — synth_map writes a .lvl on disk for the map-share end-to-end
 # test. Used by tests/net/run_map_share.sh; standalone build target so
 # CI can bake it before invoking the wrapper.
