@@ -1038,4 +1038,61 @@ translate (sets prev = pos - vx).
 
 ---
 
+### Phase 1.2 followup #2 — interp clock + out-of-order snapshot fix
+
+User reported the position lag was unacceptable for WAN play. Found
+the root cause and fixed:
+
+**Two real bugs in the network layer (both PRE-EXISTING, not Phase
+1.x regressions, but exposed by the user's WAN play and by my
+diagnostic shot tests):**
+
+1. `client_render_time_ms` arms on the FIRST snapshot the client
+   receives. If that arrives during LOBBY (where world.tick / sim
+   does not advance, hence render_time also stays frozen), the
+   server keeps broadcasting at 60 Hz and pushes
+   `client_latest_server_time_ms` forward while render_time is
+   stuck at the early value. When the client transitions to MATCH,
+   render_time begins advancing at the same rate as server_time,
+   but the entire LOBBY/countdown gap is now baked in as permanent
+   extra lag — visible as "the client renders the host's mech 1-2
+   SECONDS behind where the host actually is."
+
+2. `client_handle_snapshot` processes EVERY decoded snapshot,
+   including out-of-order ones. UDP doesn't guarantee order, so a
+   stale snapshot can push back-in-time data into the per-mech
+   ring AND re-snap the local mech backward (followed by a full
+   input replay against the stale base).
+
+**Fix (src/net.c + src/net.h):**
+
+- `client_handle_snapshot` now drops snapshots whose
+  `server_time_ms < client_latest_server_time_ms` (UDP ordering
+  protection).
+- New helper `net_client_advance_render_clock(ns, dt_ms)` replaces
+  the bare `client_render_time_ms += dt_ms` previously inlined at
+  every call site (main.c + shotmode.c). Strict tracking: each
+  tick, set render_time to MAX(smooth_advance, latest - INTERP).
+  The smooth advance happens in steady state (lag stays at
+  INTERP_DELAY_MS = 100 ms); when a stall resolves or the LOBBY
+  freeze unblocks, render_time snaps forward to the target.
+  Visual cost: remote mechs may teleport forward by a few px on
+  the catch-up, but they never render 1+ second of stale state.
+
+**Death-anim mismatch** (user reported "looks correct on client,
+but not on server"): not addressed by this fix. The cause is
+separate — for dead mechs `pose_compute` is skipped (alive guard),
+the Verlet ragdoll runs independently on host vs client, snapshot
+only carries the pelvis. Limb positions diverge. Fix would need
+either (a) all 16 particles on the wire for dead mechs or (b)
+freeze the local-side ragdoll once the death event is received
+and let snapshot interp drive everything from the pelvis. Tracked
+as a follow-up; out of scope for this pass.
+
+**Tests:**
+  - test-snapshot / test-mech-ik / test-pose-compute — all PASS
+  - tests/shots/net/run.sh 2p_basic — 12/12 PASS
+
+---
+
 **End of plan.**

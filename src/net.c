@@ -1744,6 +1744,14 @@ static void client_handle_snapshot(NetState *ns, const uint8_t *body,
         LOG_W("client: snapshot decode failed (%d bytes)", blen);
         return;
     }
+    /* Drop strictly older snapshots — UDP doesn't guarantee order, and
+     * processing a stale frame would push back-in-time data into the
+     * remote ring AND re-snap the local mech backward (followed by a
+     * full input replay against a stale base). */
+    if (ns->client_render_clock_armed &&
+        snap.header.server_time_ms < ns->client_latest_server_time_ms) {
+        return;
+    }
     /* One-shot log so we can see snapshots are flowing. */
     static int s_logged = 0;
     if (!s_logged) {
@@ -1779,6 +1787,59 @@ static void client_handle_snapshot(NetState *ns, const uint8_t *body,
      * particle pool each sim tick by snapshot_interp_remotes. */
     reconcile_apply_snapshot(&g->reconcile, &g->world, &snap,
                              snap.header.ack_input_seq, 1.0f / 60.0f);
+}
+
+/* Per-tick render-clock advance with adaptive drift correction.
+ *
+ * The naive contract is: `render_time += dt_ms` each sim tick,
+ * matching the server's per-tick server_time advance, so the
+ * INTERP_DELAY_MS gap stays constant. Two things break that:
+ *
+ *   1. The clock arms on the FIRST snapshot the client receives. If
+ *      that arrives during LOBBY (where render_time DOES NOT advance
+ *      because no MATCH simulate_step), the server keeps broadcasting
+ *      and pushing `latest_server_time_ms` forward while render_time
+ *      stays frozen. When the client enters MATCH, render_time and
+ *      server_time advance at the same rate but the entire LOBBY /
+ *      countdown duration is now baked in as permanent extra lag.
+ *      Visible as: client renders the host's mech 1-2 SECONDS behind
+ *      where it actually is.
+ *
+ *   2. WAN jitter or sim-rate skew between client and server lets
+ *      latest_server_time creep ahead of render_time over time.
+ *
+ * Fix: each tick, slew render_time TOWARD the target
+ * `latest_server_time - interp_delay_ms`. When close to the target,
+ * advance at exactly `dt_ms` (smooth motion, the design intent). When
+ * behind, advance up to 1.5x faster to catch up. When ahead (rendering
+ * the future), slow to 0.5x. A hard snap fires only on extreme drift
+ * (> 4 * interp_delay) to bound the worst case. */
+void net_client_advance_render_clock(NetState *ns, double dt_ms) {
+    if (!ns->client_render_clock_armed) return;
+
+    /* The render-time target is `latest_server_time - interp_delay`.
+     * Both render_time and target should advance at the same rate
+     * (one server-tick / one client-tick = one snapshot). Any
+     * misalignment (LOBBY froze the clock, sim-rate skew, packet
+     * burst) shows up as render_time falling behind target.
+     *
+     * Strict tracking: never let render_time fall behind target.
+     * Always advance by AT LEAST `dt_ms`; if that still leaves us
+     * behind target, jump straight to target. The visual effect:
+     * remote mechs may teleport forward by a few px when a stall
+     * resolves, but they're never rendering 1+ second of stale state.
+     * For a competitive WAN game, freshness > perfect smoothness. */
+    double target   = (double)ns->client_latest_server_time_ms
+                    - (double)ns->interp_delay_ms;
+    double smooth   = ns->client_render_time_ms + dt_ms;
+    double new_time = (smooth < target) ? target : smooth;
+
+    if (new_time - ns->client_render_time_ms > dt_ms * 1.5) {
+        SHOT_LOG("net: render_clock catch-up %.0f→%.0f (target=%.0f latest=%u)",
+                 ns->client_render_time_ms, new_time, target,
+                 (unsigned)ns->client_latest_server_time_ms);
+    }
+    ns->client_render_time_ms = new_time;
 }
 
 static void client_handle_kill_event(NetState *ns, const uint8_t *body, int blen, Game *g) {

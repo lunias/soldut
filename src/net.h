@@ -399,6 +399,13 @@ void net_server_broadcast_snapshot(NetState *ns, struct World *w);
  * converted to world space. */
 void net_client_send_input(NetState *ns, ClientInput in);
 
+/* Client-only. Per-tick render-clock advance with drift correction.
+ * Replaces the bare `client_render_time_ms += dt` previously inlined
+ * at every site. Catches the LOBBY-froze-the-clock-while-server-kept-
+ * sending-snapshots case by snapping render_time forward when it
+ * falls more than 2 * interp_delay_ms behind latest_server_time_ms. */
+void net_client_advance_render_clock(NetState *ns, double dt_ms);
+
 /* A kill event — fires reliably so missed packets don't desync the
  * kill feed. wan-fixes-13 — carries flags (headshot/gib/overkill/
  * ragdoll/suicide) + killer + victim names so the client's

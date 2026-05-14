@@ -2050,9 +2050,12 @@ int shotmode_run(const char *script_path) {
                 if (game.net.role == NET_ROLE_CLIENT) {
                     simulate_step(&game.world, TICK_DT);
                     /* P03: same as main.c — pull remote mechs to the
-                     * interpolated server position after physics. */
+                     * interpolated server position after physics. The
+                     * helper handles drift correction (catches the
+                     * LOBBY-froze-the-clock case). */
                     if (game.net.client_render_clock_armed) {
-                        game.net.client_render_time_ms += TICK_DT * 1000.0;
+                        net_client_advance_render_clock(&game.net,
+                                                        TICK_DT * 1000.0);
                         double rt = game.net.client_render_time_ms;
                         uint32_t rt_u32 = (rt > 0.0) ? (uint32_t)rt : 0u;
                         snapshot_interp_remotes(&game.world, rt_u32);

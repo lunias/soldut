@@ -2838,7 +2838,12 @@ int main(int argc, char **argv) {
                      * 0.67 ms/tick = 40 ms/s = client renders ~270 ms
                      * behind server after a few seconds. */
                     if (game.net.client_render_clock_armed) {
-                        game.net.client_render_time_ms += TICK_DT * 1000.0;
+                        /* Helper does the per-tick advance + drift
+                         * correction (catches the LOBBY-froze-the-
+                         * clock case where render_time falls 1-2 sec
+                         * behind the server's broadcast stream). */
+                        net_client_advance_render_clock(&game.net,
+                                                        TICK_DT * 1000.0);
                         /* render_time may be negative early in a
                          * connection (we init it as
                          * `first_snap.server_time - INTERP_DELAY_MS`).
