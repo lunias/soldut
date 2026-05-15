@@ -1456,13 +1456,6 @@ void mech_post_physics_anchor(World *w, int mid) {
     if (dy_pelvis < -1.5f) {
         SHOT_LOG("t=%llu mech=%d anchor anim=%d dy_pelvis=%.2f",
                  (unsigned long long)w->tick, m->id, m->anim_id, dy_pelvis);
-        /* wan-fixes-17 — large anchor pull-back (> 1.5 px in one tick)
-         * is a strong signal that physics pushed the pelvis somewhere
-         * it shouldn't be; the post-physics anchor is yanking it back.
-         * Surface to LOG_W under `--physics-log` so geometry-stuck
-         * post-mortems can localise the affected mech + tick. */
-        PHYS_LOG("physics: anchor t=%llu mech=%d anim=%d dy_pelvis=%.2f",
-                 (unsigned long long)w->tick, m->id, m->anim_id, dy_pelvis);
     }
 
     int up_with_pelvis[] = {

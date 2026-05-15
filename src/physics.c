@@ -510,13 +510,6 @@ static void collide_map_one_pass(World *w, bool finalize_velocity) {
                              "pos=(%.1f,%.1f) prev=(%.1f,%.1f) exit=(%.0f,%.0f)",
                              (unsigned long long)w->tick, i, cx, cy,
                              px, py, ppx, ppy, nx, ny);
-                    /* wan-fixes-17 — promote to production WARN when
-                     * the user enabled `--physics-log` so geometry-
-                     * stuck post-mortems have a fingerprint. */
-                    PHYS_LOG("physics: inside_tile t=%llu particle=%d tile=(%d,%d) "
-                             "pos=(%.1f,%.1f) prev=(%.1f,%.1f) exit=(%.0f,%.0f)",
-                             (unsigned long long)w->tick, i, cx, cy,
-                             px, py, ppx, ppy, nx, ny);
                 }
 
                 if (finalize_velocity) contact_with_velocity(p, i, nx, ny, amount, kind);
