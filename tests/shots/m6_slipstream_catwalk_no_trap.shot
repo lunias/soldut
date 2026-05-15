@@ -1,0 +1,27 @@
+# M6 slipstream-trap-fix — verify Heavy can walk full catwalk after
+# side overhead struts removed. Catwalk surface y=576, Heavy head
+# y=474. Pre-fix the struts at y=448-480 caught the head at x≈700
+# and x≈2496.
+
+window 1280 720
+seed 1 0
+out build/shots/m6_slipstream_catwalk_no_trap
+map slipstream
+no_parallax
+loadout heavy "Microgun" "Burst SMG" Light Standard
+
+# Catwalk top y=576 → spawn pelvis 40 above = 536.
+# Left catwalk: cols 8-28 = x=256-896. Spawn at x=400.
+spawn_at 400 536
+
+at 5   shot stand_t005
+at 30  press right
+at 100 shot walk_t100
+at 200 shot walk_t200
+at 300 shot walk_t300
+at 400 shot walk_t400
+at 500 release right
+
+contact_sheet catwalk_sheet cols 5 cell 320 180
+
+at 540 end

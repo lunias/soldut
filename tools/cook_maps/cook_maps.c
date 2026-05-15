@@ -448,35 +448,35 @@ static void build_slipstream(void) {
     const int main_top   = t2w(H - 17);
     const int catwalk_y  = t2w(H - 31);
     const int basement_ceil = t2w(H - 11);
+    (void)basement_ceil;     /* M6 slipstream-trap-fix — slide chute slopes removed; only kept for the comment. */
 
-    /* 60° basement slide chutes — 4 tiles tall, ~2.5 tiles wide. Left
-     * chute drops from main-floor edge at (28, main_top) down to
-     * (33, basement_ceil) so the surface slope is the hypotenuse. */
-    push_tri(POLY_KIND_SOLID,
-             t2w(28), main_top,
-             t2w(36), basement_ceil,
-             t2w(28), basement_ceil);
-    /* Right chute mirror. */
-    push_tri(POLY_KIND_SOLID,
-             t2w(W - 36), basement_ceil,
-             t2w(W - 28), main_top,
-             t2w(W - 28), basement_ceil);
+    /* M6 slipstream-trap-fix — basement slide chute slopes REMOVED.
+     * Pre-fix, each chute slope was a 60° triangle with bottom edge
+     * flush with basement_ceil (y=1248). A mech walking on basement_
+     * ceil top (y=1216) right next to the chute's outer edge had its
+     * body parts (pelvis y=1176, shoulders y~1142 for Heavy) inside
+     * the chute interior — interior y∈[hypotenuse(x), 1248] —
+     * because the slope's right edge dropped from y=1056 down to
+     * y=1248 right at the carve-out boundary. The constraint solver
+     * pushed the body left, but the bot/player input pushed right,
+     * so the mech wedged. Reproduced visually in the user-supplied
+     * screenshot. The carve-out (empty tile_fill at cols 28-36 and
+     * W-36..W-28) alone is enough for the "drop to basement" effect:
+     * walk off main-floor edge → fall through carve-out → land on
+     * basement floor. The visual slide is gone but no chassis can
+     * wedge in. */
 
-    /* M6 bot-stuck-fix — overhead struts shortened so their lower vertex
-     * is 3 tiles (96 px) above the catwalk surface instead of touching
-     * it. Pre-fix, the strut hypotenuse intercepted any walker's head
-     * from x≈catwalk-corner outward — Sniper bots spawning on the
-     * catwalk wedged in instantly and never moved. The shorter strut
-     * still reads as a "jet redirect" overhang and still collides for
-     * jetters travelling diagonally upward toward it. */
-    push_tri(POLY_KIND_SOLID,
-             t2w(18), t2w(H - 36),
-             t2w(22), t2w(H - 36),
-             t2w(22), t2w(H - 35));
-    push_tri(POLY_KIND_SOLID,
-             t2w(W - 22), t2w(H - 36),
-             t2w(W - 18), t2w(H - 36),
-             t2w(W - 22), t2w(H - 35));
+    /* M6 slipstream-trap-fix — side overhead struts REMOVED. The
+     * earlier shortening (H-32 → H-35, bottom y=480) wasn't enough:
+     * Heavy head on the catwalk (foot y=576, pelvis y=536, head
+     * y=474) still pokes into the strut's interior at x≈700 because
+     * 474 ∈ [448 (top), 480 (bottom-right)]. To clear ALL chassis
+     * heads we'd need bottom_y < 470 (1 tile shrunk further), which
+     * makes the strut a barely-visible 22-px-tall sliver. Cleaner to
+     * just remove. The centerline strut (below) doesn't trap because
+     * the only walkable surface near it is the top beam (y=384,
+     * head y=282) which is well clear of the strut interior. */
+
     push_tri(POLY_KIND_SOLID,
              t2w(48), t2w(H - 40),
              t2w(52), t2w(H - 40),
