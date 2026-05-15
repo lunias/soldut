@@ -1448,15 +1448,70 @@ static void shot_host_flow(Game *g, float dt) {
                         net_server_broadcast_lobby_list (&g->net, &g->lobby);
                     }
                 } else {
-                    /* Inter-round: brief countdown, no lobby. */
+                    /* Inter-round: brief countdown, no lobby. Mirrors
+                     * main.c::advance_to_next_round which goes via
+                     * start_round (full level rebuild + fresh
+                     * lobby_spawn_round_mechs + ROUND_START broadcast).
+                     * Without the full setup the client would never
+                     * exit MODE_SUMMARY into MODE_MATCH for round 2 +,
+                     * and round 2's mech_count would stay at 0 from
+                     * lobby_clear_round_mechs. */
                     LOG_I("match_flow: round %d/%d — continuing match",
                           g->match.rounds_played + 1, g->match.rounds_per_match);
                     lobby_clear_round_mechs(&g->lobby, &g->world);
+                    /* Per-round slot reset — score / kills / deaths /
+                     * team_kills / current_streak. Ready +
+                     * longest_streak persist across rounds within a
+                     * match. Pre-fix, round 2 inherited round 1's
+                     * slot.score (already at the cap) and the FFA
+                     * round-end gate fired the same tick round 2
+                     * began. */
+                    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+                        if (!g->lobby.slots[i].in_use) continue;
+                        LobbySlot *s = &g->lobby.slots[i];
+                        s->score          = 0;
+                        s->kills          = 0;
+                        s->deaths         = 0;
+                        s->team_kills     = 0;
+                        s->current_streak = 0;
+                    }
+                    /* Rebuild level for the next round (vote winner
+                     * already applied to g->match.map_id before
+                     * after_summary returned here). */
+                    arena_reset(&g->level_arena);
+                    map_build((MapId)g->match.map_id, &g->world,
+                              &g->level_arena);
+                    decal_init((int)level_width_px(&g->world.level),
+                               (int)level_height_px(&g->world.level));
+                    maps_refresh_serve_info(map_def(g->match.map_id)->short_name,
+                                            NULL, &g->server_map_desc,
+                                            g->server_map_serve_path,
+                                            sizeof(g->server_map_serve_path));
+                    if (g->net.role == NET_ROLE_SERVER) {
+                        net_server_broadcast_map_descriptor(&g->net,
+                                                            &g->server_map_desc);
+                    }
+                    lobby_spawn_round_mechs(&g->lobby, &g->world,
+                                            g->match.map_id, g->local_slot_id,
+                                            g->match.mode);
+                    pickup_init_round(&g->world);
+                    g->world.pickupfeed_count = 0;
+                    g->world.match_mode_cached = (int)g->match.mode;
+                    ctf_init_round(&g->world, g->match.mode);
+                    g->world.flag_state_dirty = false;
                     match_begin_countdown(&g->match,
                                           g->match.inter_round_countdown_default);
+                    g->mode = MODE_MATCH;
                     if (g->net.role == NET_ROLE_SERVER) {
-                        net_server_broadcast_match_state(&g->net, &g->match);
+                        /* Order: lobby table first so clients have
+                         * mech_id mappings before ROUND_START + the
+                         * snapshot stream. Same as main.c. */
                         net_server_broadcast_lobby_list (&g->net, &g->lobby);
+                        g->lobby.dirty = false;
+                        net_server_broadcast_round_start(&g->net, &g->match);
+                        if (g->world.flag_count > 0) {
+                            net_server_broadcast_flag_state(&g->net, &g->world);
+                        }
                     }
                 }
             }

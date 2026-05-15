@@ -933,6 +933,29 @@ static void advance_to_next_round(Game *g) {
     /* Tear down dead mechs from the previous round. start_round will
      * re-spawn fresh ones. */
     lobby_clear_round_mechs(&g->lobby, &g->world);
+    /* Reset per-round slot stats (score, kills, deaths, team_kills,
+     * current_streak). Without this, round 2 starts with each slot's
+     * round-1 score intact, and the FFA / TDM / CTF score gates fire
+     * IMMEDIATELY because slot.score >= score_limit (or team_score
+     * for TDM/CTF, separately reset in match_begin_round) is already
+     * true. The user-reported symptom was "round 2 starts and ends
+     * the same tick" — that's the score carrying over.
+     *
+     * Ready flags + longest_streak are preserved across rounds — the
+     * READY commitment is for the WHOLE match (lobby_reset_round_stats
+     * called from end_match clears those once we're back at LOBBY).
+     * longest_streak is match-cumulative by design. dirty bit triggers
+     * the next net_poll to ship the cleared LOBBY_LIST to peers. */
+    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+        if (!g->lobby.slots[i].in_use) continue;
+        LobbySlot *s = &g->lobby.slots[i];
+        s->score          = 0;
+        s->kills          = 0;
+        s->deaths         = 0;
+        s->team_kills     = 0;
+        s->current_streak = 0;
+    }
+    g->lobby.dirty = true;
     start_round(g);
 }
 

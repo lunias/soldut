@@ -1,0 +1,40 @@
+# 2p_multi_round — verify round 2 doesn't immediately end after
+# round 1's score cap. The user-reported bug: "first round ends,
+# map vote, then round 2 starts and IMMEDIATELY ends." Pre-fix
+# advance_to_next_round didn't clear per-round slot.score, so the
+# FFA score gate fired the same tick round 2 began.
+#
+# Plan: cfg score_limit=2 + rounds_per_match=3. Host scores 2 kills
+# → round 1 ends → vote-driven summary fast-forward → round 2
+# begins. Round 2 then runs WITHOUT additional kills until the
+# round time-limit or our shot script ends — proving round 2
+# stayed in MATCH_PHASE_ACTIVE rather than ending instantly.
+
+window 1280 720
+out build/shots/net/host_multi_round
+network host 24043
+name HostShooter
+
+spawn_at 600 1100
+peer_spawn 1 800 1100
+
+aim 800 1070
+
+contact_sheet sheet cols 4 cell 320 180
+
+# Round 1.
+at 140 shot t140_r1_start
+at 200 kill_peer 1 0
+at 400 kill_peer 1 0
+at 420 shot t420_r1_summary
+
+# Cast a vote so summary fast-forwards (BOTH sides must vote — see
+# host_match_flow_step's "all voted" gate). Both scripts cast at
+# the same tick.
+at 460 vote_map 0
+
+# Round 2 begins around tick 700 (~520 + 180-tick countdown).
+# Capture a frame WELL inside round 2 to prove it's playing.
+at 1200 shot t1200_r2_playing
+
+at 1400 end
