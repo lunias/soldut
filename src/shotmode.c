@@ -1341,6 +1341,16 @@ static void shot_host_flow(Game *g, float dt) {
             } else if (g->net.role != NET_ROLE_SERVER) {
                 g->world.flag_state_dirty = false;
             }
+            /* Drain match score dirty bit on the host — re-ships
+             * MATCH_STATE so the client's HUD banner picks up team
+             * score updates (CTF captures, TDM kill credit). Same
+             * shape as main.c::broadcast_match_state_if_dirty. */
+            if (g->net.role == NET_ROLE_SERVER && g->match.score_dirty) {
+                net_server_broadcast_match_state(&g->net, &g->match);
+                g->match.score_dirty = false;
+            } else if (g->net.role != NET_ROLE_SERVER) {
+                g->match.score_dirty = false;
+            }
             bool end = false;
             if (g->match.mode == MATCH_MODE_FFA) {
                 for (int i = 0; i < MAX_LOBBY_SLOTS; ++i)

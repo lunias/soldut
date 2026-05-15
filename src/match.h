@@ -85,6 +85,15 @@ typedef struct MatchState {
      * matches, reset to -1 if it stops matching). Host-only state —
      * not on the wire; clients see the round end via ROUND_END. */
     float        solo_warning_remaining;
+
+    /* Server-side dirty bit set whenever team_score changes (CTF
+     * capture or TDM kill credit). main.c's MATCH_PHASE_ACTIVE
+     * broadcaster checks this each tick and re-ships MATCH_STATE so
+     * the client's HUD banner picks up the new score in the same
+     * frame the host sees it; pre-fix, team_score only synced at
+     * ROUND_START / ROUND_END so the client's banner showed "R 0-B 0"
+     * for the entire round. Off the wire — server-only book-keeping. */
+    bool         score_dirty;
 } MatchState;
 
 /* Initialize defaults from a config snapshot. Called once at server

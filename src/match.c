@@ -69,11 +69,14 @@ void match_process_respawns(World *w, MatchState *m, LobbyState *lobby) {
 void match_shot_log_phase(const char *tag, const MatchState *m) {
     if (!m) return;
     SHOT_LOG("match_state: tag=%s phase=%d mode=%d map=%d rounds=%d/%d "
-             "summary=%.2f countdown=%.2f",
+             "summary=%.2f countdown=%.2f team_score=R%d/B%d limit=%d",
              tag ? tag : "?", (int)m->phase, (int)m->mode, m->map_id,
              m->rounds_played, m->rounds_per_match,
              (double)m->summary_remaining,
-             (double)m->countdown_remaining);
+             (double)m->countdown_remaining,
+             m->team_score[MATCH_TEAM_RED],
+             m->team_score[MATCH_TEAM_BLUE],
+             m->score_limit);
 }
 
 void match_init(MatchState *m, MatchModeId mode, int score_limit,
@@ -122,6 +125,7 @@ void match_begin_round(MatchState *m) {
     m->mvp_slot        = -1;
     m->solo_warning_remaining = -1.0f;
     for (int t = 0; t < MATCH_TEAM_COUNT; ++t) m->team_score[t] = 0;
+    m->score_dirty     = false;     /* round-start broadcast already covers t=0 */
     LOG_I("match: round begin (mode=%s, map=%d, limit=%d)",
           match_mode_name(m->mode), m->map_id, m->score_limit);
     match_shot_log_phase("begin_round", m);
@@ -237,6 +241,7 @@ bool match_apply_kill(MatchState *m, LobbyState *lobby,
             if (m->mode == MATCH_MODE_TDM) {
                 if (ks->team >= 0 && ks->team < MATCH_TEAM_COUNT) {
                     m->team_score[ks->team]++;
+                    m->score_dirty = true;
                 }
             }
         }

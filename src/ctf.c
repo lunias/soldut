@@ -152,6 +152,7 @@ static void ctf_capture(struct Game *g, int mi) {
      * the "round ends as soon as I bring the flag back" bug. */
     if (m->team >= 0 && m->team < MATCH_TEAM_COUNT) {
         g->match.team_score[m->team] += 1;
+        g->match.score_dirty = true;
     }
     int slot = lobby_find_slot_by_mech(&g->lobby, mi);
     if (slot >= 0) g->lobby.slots[slot].score += 1;

@@ -444,6 +444,19 @@ static void broadcast_flag_state_if_dirty(Game *g) {
     bot_assign_team_roles(&g->bots, &g->world);
 }
 
+/* When team_score changes mid-round (CTF capture or TDM kill credit),
+ * re-ship MATCH_STATE so the client's HUD banner updates in the same
+ * frame the host's does. Pre-fix, team_score was only synced at
+ * ROUND_START / ROUND_END, and the client's "R N - B M" line froze
+ * at "R 0 - B 0" for the whole round even though the score climbed
+ * on the host. */
+static void broadcast_match_state_if_dirty(Game *g) {
+    if (g->net.role != NET_ROLE_SERVER) return;
+    if (!g->match.score_dirty) return;
+    net_server_broadcast_match_state(&g->net, &g->match);
+    g->match.score_dirty = false;
+}
+
 /* Server: drain pickup-state events queued by pickup_step /
  * pickup_spawn_transient. Each event ships the full spawner record
  * (20 bytes) so clients can both mirror state transitions on level-
@@ -1069,6 +1082,7 @@ static void host_match_flow_step(Game *g, float dt) {
             broadcast_new_pickups(g);
             broadcast_new_explosions(g);
             broadcast_flag_state_if_dirty(g);
+            broadcast_match_state_if_dirty(g);
             /* End on score limit (FFA = any per-player slot >= cap). */
             bool end = false;
             if (g->match.mode == MATCH_MODE_FFA) {

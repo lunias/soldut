@@ -66,6 +66,17 @@ asrt "host logs exactly one round end (no premature end)" \
 asrt "round end winner is RED (team_score 3-0 hits cap)" \
      "grep -qE 'match: round end.*winner_team=1' '$HOST_LOG' 2>/dev/null"
 
+# Client mirrors team_score live — the regression for "score banner
+# at top of screen doesn't update during the round". Each capture
+# fires a MATCH_STATE broadcast and the client logs the decoded
+# state via match_shot_log_phase's rx_match_state tag.
+asrt "client mirrors team_score R1 (after capture 1)" \
+     "grep -qE 'rx_match_state .*team_score=R1/B0' '$CLI_LOG' 2>/dev/null"
+asrt "client mirrors team_score R2 (after capture 2)" \
+     "grep -qE 'rx_match_state .*team_score=R2/B0' '$CLI_LOG' 2>/dev/null"
+asrt "client mirrors team_score R3 (after capture 3, ROUND_END)" \
+     "grep -qE 'team_score=R3/B0' '$CLI_LOG' 2>/dev/null"
+
 # Client must receive ROUND_END broadcast.
 asrt "client received ROUND_END" \
      "grep -q 'ROUND_END' '$CLI_LOG' 2>/dev/null"
