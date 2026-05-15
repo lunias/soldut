@@ -77,6 +77,18 @@
                                          * rise; 360 is generous but bounded. */
 #define BOT_PATH_REPLAN_PX       96.0f
 #define BOT_STUCK_TICKS          (BOT_TICK_HZ * 1)
+/* M6 bot-stuck-fix — when the bot has been stuck (Δx < 0.5 px / tick)
+ * for this long, abandon the current goal. Without this, a bot whose
+ * strategy keeps re-selecting the same unreachable pickup (typical:
+ * gallery pickup that requires more JET fuel than the chassis has) just
+ * loops jet-up → fall back → jet-up forever. 4 s gives the existing
+ * stuck-recovery (jet+jump+wall-flip) a fair shot before the goal is
+ * marked dead. */
+#define BOT_GOAL_ABANDON_TICKS   (BOT_TICK_HZ * 4)
+/* How long an abandoned target stays in the per-mind blacklist —
+ * 10 s is enough that the bot picks a new pickup, walks toward it,
+ * grabs it, then is free to consider the original again. */
+#define BOT_ABANDON_COOLDOWN_TICKS  (BOT_TICK_HZ * 10)
 
 #define BOT_RUN_SPEED_PXS        280.0f
 #define BOT_JET_THRUST_PXS2      2200.0f
@@ -1405,6 +1417,47 @@ static float pickup_need_factor(const Mech *m, const PickupSpawner *s) {
     }
 }
 
+/* M6 bot-stuck-fix — abandoned-target memory. Returns true if `node`
+ * was added to the bot's blacklist within the last cooldown window
+ * (i.e., the strategy/path layer should NOT re-pick it). */
+static bool bot_node_abandoned(const BotMind *mind, uint64_t now_tick, int node)
+{
+    if (node < 0) return false;
+    for (int j = 0; j < 4; ++j) {
+        if (mind->abandoned_nodes[j] == (int16_t)node &&
+            mind->abandoned_until[j] > now_tick) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Add `node` to the per-bot abandonment ring (oldest entry overwritten).
+ * No-op if `node` is already present and current TTL is longer. */
+static void bot_abandon_node(BotMind *mind, uint64_t now_tick, int node)
+{
+    if (node < 0) return;
+    uint64_t until = now_tick + BOT_ABANDON_COOLDOWN_TICKS;
+    /* Refresh existing entry. */
+    for (int j = 0; j < 4; ++j) {
+        if (mind->abandoned_nodes[j] == (int16_t)node) {
+            if (mind->abandoned_until[j] < until) mind->abandoned_until[j] = until;
+            return;
+        }
+    }
+    /* Replace the entry whose TTL expires soonest. */
+    int   victim = 0;
+    uint64_t soonest = mind->abandoned_until[0];
+    for (int j = 1; j < 4; ++j) {
+        if (mind->abandoned_until[j] < soonest) {
+            soonest = mind->abandoned_until[j];
+            victim  = j;
+        }
+    }
+    mind->abandoned_nodes[victim] = (int16_t)node;
+    mind->abandoned_until[victim] = until;
+}
+
 /* Walk the live pickup pool and pick the most attractive AVAILABLE
  * spawner. Returns the spawner index, or -1. Also picks the nearest
  * nav node colocated with that spawner. */
@@ -1434,6 +1487,10 @@ static int pick_best_pickup(const World *w, const BotMind *mind,
              * into the nav (rare — happens if pickup_count > node cap). */
             if (node < 0) node = nav_nearest_node(nv, s->pos, 192.0f, 0);
             if (node < 0) continue;
+            /* Skip pickups whose nav node is currently blacklisted —
+             * recent stuck-driven abandonment for the same chassis
+             * means the bot can't physically reach this one. */
+            if (bot_node_abandoned(mind, w->tick, node)) continue;
             best_score = score;
             best       = i;
             best_node  = node;
@@ -1920,25 +1977,36 @@ static void advance_path(BotMind *mind, const struct BotNav *nv, Vec2 pelv)
 /* Pick a varied reposition target — a node that ISN'T too close to
  * the bot's current position so heatmap coverage actually spreads.
  * Without the min-distance filter the random walk biased toward
- * "stay near spawn" because half the nodes were within a tile. */
-static int pick_reposition_node(const struct BotNav *nv, Vec2 from,
-                                pcg32_t *rng)
+ * "stay near spawn" because half the nodes were within a tile.
+ *
+ * M6 bot-stuck-fix — also filters out the bot's currently-blacklisted
+ * targets (the abandonment ring), so a bot that just gave up on an
+ * unreachable pickup doesn't immediately set the same node as its
+ * reposition goal. */
+static int pick_reposition_node(const struct BotNav *nv, const BotMind *mind,
+                                uint64_t now_tick, Vec2 from, pcg32_t *rng)
 {
     if (!nv || nv->node_count == 0) return -1;
     /* Prefer distant SPAWN or ON_FLOOR nodes (≥ 1200 px away).
      * Successive tries widen the band so big maps still find a
      * target. */
-    int tries = 8;
+    int tries = 16;
     while (tries-- > 0) {
         uint32_t r = pcg32_next(rng) % (uint32_t)nv->node_count;
         const BotNavNode *n = &nv->nodes[r];
         if (!(n->flags & (BOT_NODE_F_SPAWN | BOT_NODE_F_ON_FLOOR))) continue;
+        if (mind && bot_node_abandoned(mind, now_tick, (int)r)) continue;
         float dx = n->pos.x - from.x, dy = n->pos.y - from.y;
         float d2 = dx*dx + dy*dy;
         if (d2 < 1200.0f * 1200.0f) continue;     /* too close */
         return (int)r;
     }
-    /* Fallback: any node, even close. */
+    /* Fallback: any non-blacklisted node (even close). */
+    for (int t = 0; t < 8; ++t) {
+        uint32_t r = pcg32_next(rng) % (uint32_t)nv->node_count;
+        if (!mind || !bot_node_abandoned(mind, now_tick, (int)r))
+            return (int)r;
+    }
     return (int)(pcg32_next(rng) % (uint32_t)nv->node_count);
 }
 
@@ -2403,6 +2471,10 @@ void bot_system_reset_minds(BotSystem *bs) {
         bs->minds[i].last_hp_observed = 0.0f;
         bs->minds[i].last_hurt_tick = 0;
         bs->minds[i].team_role = BOT_ROLE_NONE;
+        for (int j = 0; j < 4; ++j) {
+            bs->minds[i].abandoned_nodes[j] = -1;
+            bs->minds[i].abandoned_until[j] = 0;
+        }
     }
     bs->count = 0;
     bs->nav   = NULL;     /* nav is level-arena owned; caller reset that arena */
@@ -2513,6 +2585,10 @@ void bot_attach(BotSystem *bs, int mech_id, BotTier tier, uint64_t seed_salt) {
     m->last_hp_observed   = 0.0f;
     m->last_hurt_tick     = 0;
     m->team_role          = BOT_ROLE_NONE;
+    for (int j = 0; j < 4; ++j) {
+        m->abandoned_nodes[j] = -1;
+        m->abandoned_until[j] = 0;
+    }
     pcg32_seed(&m->rng,
                (bs->seed ^ ((uint64_t)mech_id << 16) ^ seed_salt),
                (uint64_t)(mech_id + 1) * 2654435761uLL);
@@ -2671,6 +2747,26 @@ void bot_step(BotSystem *bs, World *w, struct Game *g, float dt) {
             }
             mind->last_hp_observed = hp_now;
 
+            /* M6 bot-stuck-fix — abandonment trigger. If the bot's
+             * stuck-since-tick has accumulated past the abandonment
+             * threshold AND the current goal has a target_node, mark
+             * that node as blacklisted, clear the goal score so the
+             * next run_strategy is free to pick something fresh, and
+             * also reset the stuck timer (we're "moving on" mentally
+             * even if we haven't moved yet). */
+            if (mind->stuck_since_tick > 0 &&
+                w->tick - mind->stuck_since_tick > BOT_GOAL_ABANDON_TICKS &&
+                mind->goal_target_node >= 0)
+            {
+                bot_abandon_node(mind, w->tick, mind->goal_target_node);
+                mind->goal_score_cached = 0.0f;
+                mind->goal_target_node  = -1;
+                mind->goal              = BOT_GOAL_IDLE;
+                mind->stuck_since_tick  = 0;
+                mind->path_len          = 0;
+                mind->path_step         = 0;
+            }
+
             int prev_target = mind->goal_target_mech;
             GoalPick pick = run_strategy(w, mind, mid, bs->nav, mode);
             mind->goal             = (uint8_t)pick.goal;
@@ -2747,7 +2843,7 @@ void bot_step(BotSystem *bs, World *w, struct Game *g, float dt) {
              * spawn node so heatmap coverage stays alive in the bake. */
             if (mind->goal == BOT_GOAL_IDLE && bs->nav && bs->nav->node_count > 0) {
                 Vec2 pelv = mech_pelvis_pos(w, mid);
-                int node  = pick_reposition_node(bs->nav, pelv, &mind->rng);
+                int node  = pick_reposition_node(bs->nav, mind, w->tick, pelv, &mind->rng);
                 if (node >= 0) {
                     mind->goal             = BOT_GOAL_REPOSITION;
                     mind->goal_target_node = (int16_t)node;
