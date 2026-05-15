@@ -2811,6 +2811,24 @@ int main(int argc, char **argv) {
                 if (game.match.time_remaining < 0.0f)
                     game.match.time_remaining = 0.0f;
             }
+            /* M6 countdown-fix — same shape, but for countdown_remaining
+             * during the pre-round COUNTDOWN phase. Pre-fix the host
+             * only broadcast match_state at the COUNTDOWN→ACTIVE seam,
+             * so a connecting client received countdown_remaining once
+             * (≈3.0 s) and the value stuck — the user saw "3" frozen
+             * for the entire countdown, never 2 / 1 / GO. shotmode's
+             * shot_client_tick already mirrors this; production play
+             * needs the same. The host's match_state broadcast at
+             * the ACTIVE seam still corrects any drift, but that
+             * correction is the snap to GO!, not the per-second beats. */
+            if (game.net.role == NET_ROLE_CLIENT &&
+                game.match.phase == MATCH_PHASE_COUNTDOWN &&
+                game.match.countdown_remaining > 0.0f)
+            {
+                game.match.countdown_remaining -= (float)dt;
+                if (game.match.countdown_remaining < 0.0f)
+                    game.match.countdown_remaining = 0.0f;
+            }
 
             /* Fixed-step simulation. */
             while (accum >= TICK_DT) {
