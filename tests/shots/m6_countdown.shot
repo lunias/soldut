@@ -1,18 +1,16 @@
-# M6 P07 — pre-round countdown visibility test.
+# M6 countdown-fix — full pre-round 3-2-1-GO sequence visibility test.
 #
-# The new flow: when the lobby auto-start fires, start_round prepares
-# the world (mech spawn, mode = MODE_MATCH) AND enters
-# MATCH_PHASE_COUNTDOWN. Players see the rendered world plus a big
-# "1" / "GO!" number in the screen center; inputs are locked.
-#
-# Burst captures cover the LOBBY → COUNTDOWN → ACTIVE transitions.
-# In shot mode the countdown is forced to 1 s (60 ticks) for
-# iteration speed, so the COUNTDOWN frames sit roughly ticks 120-180
-# (after a 1 s lobby auto-start + the 60-tick countdown). Look for:
-#   * a large "1" centered on screen during COUNTDOWN frames
-#   * a brief "GO!" right at the COUNTDOWN→ACTIVE seam
-#   * the world rendered behind the countdown number, with the
-#     player's mech at its spawn (not moving — input is locked)
+# Uses the new `countdown_seconds 3` directive to extend countdown
+# from the 1s shot-mode default to the interactive 3s. Captures the
+# entire arc so the contact sheet shows:
+#   * "3" through frames at t≈75-130 (after 1s lobby auto-start
+#     fires at t=60 → COUNTDOWN starts ~t=70, "3" visible until ~t=130)
+#   * "2" frames at t≈130-190
+#   * "1" frames at t≈190-250
+#   * "GO!" frames at t≈250-285 (~0.6s linger past phase flip)
+# Numerals should be CRISP (UI_FONT_HUGE 192px atlas, was UI_FONT_DISPLAY
+# 48px → blurry 5x upscale). GO! is gold-pulse, countdown is cream.
+# Both backed by an 8-direction outline so they read on busy backdrops.
 
 window 1280 720
 seed 1 0
@@ -22,9 +20,12 @@ name HostA
 loadout - "Pulse Rifle" "Sidearm" Light Standard
 map slipstream
 no_parallax
+countdown_seconds 3
 
-# Capture the lobby → countdown → active arc.
-burst t from 100 to 260 every 10
+# Cover the full arc — auto_start_seconds defaults to 1s in shot mode
+# so COUNTDOWN starts around t=60. With 3s countdown that runs to
+# ~t=240; GO! lingers ~0.6s = 36 ticks past that.
+burst t from 60 to 290 every 10
 
 at 320 end
 

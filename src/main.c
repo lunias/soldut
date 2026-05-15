@@ -1927,19 +1927,22 @@ static void draw_diag(void *user, int sw, int sh) {
     DrawText("WASD: move/jet  SPACE: jump  LMB: fire  ESC: leave",
              12, sh - 22, 14, GRAY);
 
+    /* M6 countdown-fix — update_match_loading runs FIRST so the
+     * GO!-splash latch (L->go_visible_until) and per-second beep
+     * SFX are armed BEFORE match_overlay_draw consults them. Pre-fix
+     * the order was reversed and the splash had a 1-frame lag at
+     * the COUNTDOWN→ACTIVE edge. */
+    lobby_ui_update_match_loading(ctx->ui, g);
     /* Match score/timer banner. Drawn here (inside the renderer's
      * single Begin/EndDrawing pair) instead of in a second pair —
      * doing two swaps per frame produces a per-other-frame "blank +
      * banner only" present, which reads as flicker. */
-    match_overlay_draw(g, sw, sh);
+    match_overlay_draw(ctx->ui, g, sw, sh);
 
     /* wan-fixes-11 — match-start loading overlay. The MODE_MATCH
      * render path runs this callback inside its own Begin/EndDrawing
      * pair; if local_mech_id hasn't resolved yet, the world is empty
-     * and the user would otherwise see a black/empty frame. We
-     * recompute the flag every frame (cheap) and let the overlay
-     * paint over the empty render. */
-    lobby_ui_update_match_loading(ctx->ui, g);
+     * and the user would otherwise see a black/empty frame. */
     if (ctx->ui->match_loading) {
         match_loading_overlay_draw(ctx->ui, g, sw, sh);
     }

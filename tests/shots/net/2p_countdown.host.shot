@@ -1,19 +1,22 @@
-# Countdown sync test — host. We override auto_start to a longer
-# value (~6 s) and shoot the lobby while the countdown is mid-run
-# so we can compare the host vs client display of "Match starts in
-# N.Ns". The numbers should match within the broadcast window
-# (~0.5 s).
+# M6 countdown-fix — host side. Counts down 3 → 2 → 1 → GO! over a
+# full 3 s window (was 1 s default). Burst captures the entire arc
+# so the side-by-side output can prove host + client see the same
+# integer at the same tick (within snapshot quant).
+#
+# Auto_start_seconds defaults to 1s in shot mode → COUNTDOWN starts
+# around t=60. With countdown_seconds 3 it runs to ~t=240. GO!
+# splash lingers ~36 ticks past phase flip.
 
 window 1280 720
 out build/shots/net/cd_host
 network host 24031
 name HostA
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+map slipstream
+no_parallax
+countdown_seconds 3
 
-# Snapshots throughout the countdown. With auto_start_default = 1 s
-# in shot mode the countdown is short — these scripts are named
-# t-relative-to-arm.
-at  30  shot t30_armed
-at  90  shot t90_mid
-at  120 shot t120_late
-at  240 shot t240_match
-at  500 end
+burst t from 60 to 290 every 10
+contact_sheet sheet cols 6 cell 320 180
+
+at 320 end

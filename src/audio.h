@@ -107,6 +107,14 @@ typedef enum {
     SFX_KILL_FANFARE,              /* local-mech got a kill */
     SFX_DEATH_GRUNT,               /* local-mech died */
 
+    /* M6 countdown-fix — pre-round 3/2/1/GO! cues. Generated tones
+     * (ffmpeg sine). BEEP fires once per integer-second tick (3, 2,
+     * 1); GO fires on the COUNTDOWN→ACTIVE seam. Both played via
+     * audio_play_global on every peer; the wire-synced
+     * countdown_remaining keeps the timing aligned. */
+    SFX_COUNTDOWN_BEEP,
+    SFX_COUNTDOWN_GO,
+
     SFX_COUNT
 } SfxId;
 

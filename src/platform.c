@@ -14,11 +14,17 @@ static PlatformConfig g_cfg;
 Font g_ui_font_body    = {0};
 Font g_ui_font_display = {0};
 Font g_ui_font_mono    = {0};
+Font g_ui_font_huge    = {0};
 bool g_ui_fonts_loaded = false;
 
 Font ui_font_for(UIFontKind kind) {
     if (!g_ui_fonts_loaded) return GetFontDefault();
     switch (kind) {
+        case UI_FONT_HUGE:
+            return (g_ui_font_huge.texture.id    != 0) ? g_ui_font_huge
+                 : (g_ui_font_display.texture.id != 0) ? g_ui_font_display
+                 : (g_ui_font_body.texture.id    != 0) ? g_ui_font_body
+                 : GetFontDefault();
         case UI_FONT_DISPLAY:
             return (g_ui_font_display.texture.id != 0) ? g_ui_font_display
                  : (g_ui_font_body.texture.id    != 0) ? g_ui_font_body
@@ -62,18 +68,25 @@ static void load_ui_fonts(void) {
     g_ui_font_body    = load_font_or_zero("assets/fonts/Atkinson-Hyperlegible-Regular.ttf", 32);
     g_ui_font_display = load_font_or_zero("assets/fonts/VG5000-Regular.otf",                48);
     g_ui_font_mono    = load_font_or_zero("assets/fonts/Steps-Mono-Thin.otf",               32);
+    /* M6 countdown-fix — 192 px atlas for the screen-center countdown
+     * numerals + GO! splash. Renders at ~240 px in interactive play; a
+     * 48 px atlas (UI_FONT_DISPLAY) bilinear-scaled 5× looked muddy. */
+    g_ui_font_huge    = load_font_or_zero("assets/fonts/VG5000-Regular.otf",                192);
     g_ui_fonts_loaded = (g_ui_font_body.texture.id    != 0 ||
                          g_ui_font_display.texture.id != 0 ||
-                         g_ui_font_mono.texture.id    != 0);
+                         g_ui_font_mono.texture.id    != 0 ||
+                         g_ui_font_huge.texture.id    != 0);
 }
 
 static void unload_ui_fonts(void) {
     if (g_ui_font_body.texture.id    != 0) UnloadFont(g_ui_font_body);
     if (g_ui_font_display.texture.id != 0) UnloadFont(g_ui_font_display);
     if (g_ui_font_mono.texture.id    != 0) UnloadFont(g_ui_font_mono);
+    if (g_ui_font_huge.texture.id    != 0) UnloadFont(g_ui_font_huge);
     g_ui_font_body    = (Font){0};
     g_ui_font_display = (Font){0};
     g_ui_font_mono    = (Font){0};
+    g_ui_font_huge    = (Font){0};
     g_ui_fonts_loaded = false;
 }
 

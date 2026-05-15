@@ -163,6 +163,12 @@ typedef struct {
      * for movement-tuning shots where parallax obscures the mech. */
     bool     no_parallax;
 
+    /* M6 countdown-fix — explicit pre-round countdown duration. 0 keeps
+     * the shot-mode default of 1.0s (1-tick GO! visibility); set to
+     * 3.0 (matches interactive default) to capture the full 3-2-1-GO
+     * arc in burst shots. */
+    float    countdown_seconds;
+
     int      end_tick;       /* -1 = derive from last event */
 
     /* Networked-shot config (legacy single-process when NETMODE_NONE). */
@@ -318,6 +324,7 @@ static bool parse_script(const char *path, Script *out) {
     out->perf_overlay = false;  /* M6 P03 — see Shot struct comment. */
     out->internal_h   = 0;       /* M6 P03 — 0 = identity (no cap). */
     out->no_parallax  = false;  /* M6 P07 — see Shot struct comment. */
+    out->countdown_seconds = 0.0f; /* M6 countdown-fix — 0 = keep shot default (1s). */
 
     char line[512];
     int lineno = 0;
@@ -704,6 +711,17 @@ static bool parse_script(const char *path, Script *out) {
              * zero g_map_kit.parallax_*.id so draw_parallax_layer
              * early-outs. Used by movement-tuning shots. */
             out->no_parallax = true;
+        } else if (strcmp(tok, "countdown_seconds") == 0) {
+            /* M6 countdown-fix — `countdown_seconds N`. Override the
+             * shot-mode 1s default so a burst can capture the full
+             * 3-2-1-GO arc (interactive default = 3s). */
+            float n;
+            if (sscanf(rest, "%f", &n) != 1 || n < 0.0f || n > 30.0f) {
+                LOG_E("shotmode: %s:%d 'countdown_seconds' needs a float in [0, 30]",
+                      path, lineno);
+                ok = false; continue;
+            }
+            out->countdown_seconds = n;
         } else if (strcmp(tok, "network") == 0) {
             char kind[16] = {0};
             int eaten2 = 0;
@@ -864,7 +882,8 @@ static void networked_shot_bootstrap(Game *g, const Script *s) {
         g->config.score_limit        = 10;
     }
     g->lobby.auto_start_default  = g->config.auto_start_seconds;
-    g->match.countdown_default   = 1.0f;
+    g->match.countdown_default   = (s->countdown_seconds > 0.0f)
+                                     ? s->countdown_seconds : 1.0f;
     g->match.summary_default     = 4.0f;   /* 15 s default; 4 s for tests */
     g->match.time_limit          = g->config.time_limit;
     g->match.score_limit         = g->config.score_limit;
@@ -1441,7 +1460,13 @@ typedef struct {
 
 static void match_overlay_draw_thunk(void *user, int sw, int sh) {
     ShotOverlayCtx *c = (ShotOverlayCtx *)user;
-    match_overlay_draw(c->game, sw, sh);
+    /* M6 countdown-fix — same ordering as draw_diag in main.c: arm
+     * the GO!-splash latch + per-second beep BEFORE the overlay
+     * render reads it. Otherwise the splash has a 1-frame lag at
+     * the COUNTDOWN→ACTIVE seam (visible in shot mode where every
+     * frame is a fresh PNG). */
+    lobby_ui_update_match_loading(c->ui, c->game);
+    match_overlay_draw(c->ui, c->game, sw, sh);
 }
 
 static void summary_overlay_draw_thunk(void *user, int sw, int sh) {

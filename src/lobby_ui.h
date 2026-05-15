@@ -110,6 +110,18 @@ typedef struct LobbyUIState {
      * overlay first showed. */
     bool       match_loading;
     double     match_loading_t0;
+
+    /* M6 countdown-fix — client-only "what was the last countdown
+     * integer second I rendered?" tracker. -1 = no countdown observed
+     * yet. Used to: (a) play a beep SFX when the integer ticks down
+     * (3, 2, 1) and a longer "GO" tone at the COUNTDOWN→ACTIVE seam,
+     * and (b) latch the GO! splash visible-until time so it lingers
+     * past the same-tick phase flip. Both peers run the same logic
+     * locally (countdown_remaining is on the wire, see match_encode)
+     * so host + client see + hear the same beats at the same moment. */
+    int        countdown_last_int;
+    int        countdown_last_phase;
+    double     go_visible_until;
 } LobbyUIState;
 
 void lobby_ui_init(LobbyUIState *L);
@@ -183,4 +195,4 @@ void summary_screen_run   (LobbyUIState *L, struct Game *g, int sw, int sh);
 
 /* In-match overlay (score / timer at the top of the screen, plus the
  * usual HUD which the existing render path already draws). */
-void match_overlay_draw (struct Game *g, int sw, int sh);
+void match_overlay_draw (LobbyUIState *L, struct Game *g, int sw, int sh);

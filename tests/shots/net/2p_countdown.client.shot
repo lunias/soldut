@@ -1,13 +1,16 @@
-# Countdown sync test — client. Same screenshot ticks as host so
-# we can compare the displayed countdown.
+# M6 countdown-fix — client side. Same burst window as the host so
+# the comparison sheet (run.sh composes side-by-side) shows host
+# and client integer countdowns aligned to the same tick.
 
 window 1280 720
 out build/shots/net/cd_client
 network connect 127.0.0.1:24031
 name ClientB
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+no_parallax
+countdown_seconds 3
 
-at  30  shot t30_armed
-at  90  shot t90_mid
-at  120 shot t120_late
-at  240 shot t240_match
-at  500 end
+burst t from 60 to 290 every 10
+contact_sheet sheet cols 6 cell 320 180
+
+at 320 end
