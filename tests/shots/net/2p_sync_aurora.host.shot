@@ -1,0 +1,49 @@
+# 2p_sync_aurora — HOST. Pairs with 2p_sync_aurora.client.shot.
+#
+# Two mechs on aurora, spawned ~120 px apart at the floor, so both
+# fit in each window's camera at the same time. Both windows take
+# burst screenshots over the same tick window so we can compare
+# host's view to client's view of the same moment.
+#
+# Sequence:
+#   t=200..280  host walks RIGHT (toward client)
+#   t=280..320  host jets straight up (no horizontal input)
+#   t=320..400  host walks RIGHT + jets (running jet)
+#   t=400..460  host releases input (settles back to ground)
+#
+# Burst captures every 6 ticks across the whole window so jitter /
+# jet desync / pose-on-slope artifacts show up frame-by-frame.
+
+window 1280 720
+out build/shots/net/2p_sync_aurora.host
+network host 24500
+name HostA
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+map aurora
+no_parallax
+# Center of aurora's flat plain (tiles 50-110, world x 1600-3520).
+# Floor at y=2752, pelvis at 2712 = 40 px above (matches cooker's
+# spawn_floor placement). Both mechs in the same camera view —
+# `peer_spawn` places the connecting client's mech 200 px to our
+# right (server-authoritative; client's own spawn_at would get
+# overridden by the next snapshot).
+spawn_at 2400 2712
+peer_spawn 1 2600 2712
+aim 3000 2700
+
+# Lobby through countdown lands the round near tick 200.
+at 210 press right
+at 280 release right
+at 280 press jet
+at 320 release jet
+at 320 press right
+at 320 press jet
+at 380 release jet
+at 400 release right
+
+# Burst the entire movement window — host's own view.
+burst host_t from 200 to 460 every 6
+
+at 540 end
+
+contact_sheet host_sheet cols 8 cell 320 180

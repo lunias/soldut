@@ -213,8 +213,22 @@ void simulate_step(World *w, float dt) {
              * is never set, so any_foot_grounded returns false and
              * the build_pose gait wrap is skipped. Setting both
              * sides explicitly every tick is idempotent and
-             * self-heals. */
-            float target_inv_mass = (i == local_id) ? 1.0f : 0.0f;
+             * self-heals.
+             *
+             * M6 P07 — DEAD remote mechs get inv_mass=1 too. With
+             * inv_mass=0 the Verlet ragdoll never runs, so a dead
+             * remote mech's bones stay frozen at the last alive
+             * pose and rigid-translate around with the snapshot
+             * pelvis — visible as a "stick-figure corpse" instead
+             * of a proper ragdoll. With inv_mass=1, gravity +
+             * dismembered-constraint deactivation produce a true
+             * ragdoll on the client side; snapshot_interp_remotes
+             * still pulls the whole body to track the server's
+             * pelvis (relative bone shape preserved by the rigid
+             * translate). Bones may drift a few pixels from the
+             * server's authoritative ragdoll due to FP determinism,
+             * but both sides clearly LOOK like a ragdoll. */
+            float target_inv_mass = (i == local_id || !m->alive) ? 1.0f : 0.0f;
             for (int part = 0; part < PART_COUNT; ++part) {
                 pp->inv_mass[m->particle_base + part] = target_inv_mass;
             }
@@ -331,6 +345,21 @@ void simulate_step(World *w, float dt) {
             };
             Vec2 aim_dir = mech_aim_dir(w, m->id);
 
+            /* M6 P07 Phase 1.2 — averaged foot contact normal for
+             * slope-aware ANIM_RUN pose. (0, 0) when both feet have no
+             * fresh contact data → pose_compute treats as airborne /
+             * flat fallback. Remote mechs on the client run
+             * kinematically (inv_mass = 0), so collide_map_one_pass
+             * skips them and their contact_*_q stays at zero — they
+             * pose as flat-ground. Visible cosmetic difference on
+             * slopes vs the host's view; tracked as a follow-up. */
+            int lf = b + PART_L_FOOT;
+            int rf = b + PART_R_FOOT;
+            Vec2 ground_normal = (Vec2){
+                (w->particles.contact_nx_q[lf] + w->particles.contact_nx_q[rf]) / 254.0f,
+                (w->particles.contact_ny_q[lf] + w->particles.contact_ny_q[rf]) / 254.0f,
+            };
+
             PoseInputs in = (PoseInputs){
                 .pelvis         = pelvis,
                 .aim_dir        = aim_dir,
@@ -345,6 +374,7 @@ void simulate_step(World *w, float dt) {
                 .foregrip_world = NULL,
                 .grapple_state  = m->grapple.state,
                 .grapple_anchor = m->grapple.anchor_pos,
+                .ground_normal  = ground_normal,
             };
 
             /* Two-handed foregrip IK target: derived from the visible

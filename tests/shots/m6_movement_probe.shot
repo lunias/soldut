@@ -1,0 +1,58 @@
+# M6 P07 — movement probe (current behavior baseline).
+#
+# Single experiment: a running jump on flat ground. Measure horizontal
+# distance covered during the airborne window. SHOT_LOG already records
+# per-tick pelvis pos for the local mech via main.c's test-play branch
+# (gated on g_shot_mode), and apply_jump emits a SHOT_LOG when the jump
+# impulse fires.
+#
+# Expected (post Phase 3 — taller jump):
+#   RUN_SPEED_PXS = 280, JUMP_IMPULSE_PXS = 480, GRAVITY = 1080 px/s²,
+#   AIR_ACCEL_PXS2 = 1680.
+#   Apex height = 480² / (2·1080) ≈ 107 px above ground (mech-height).
+#   Time to apex = 480 / 1080 ≈ 0.44 s ≈ 27 ticks at 60 Hz.
+#   Full airborne window ≈ 54 ticks (0.89 s).
+#   Running jump preserves horizontal momentum across ground→air (Phase 2).
+#   Horizontal travel in air with right held ≈ 250 px (Trooper / Light /
+#   Standard chassis). Heavy at jump_mult 0.85 → apex 77 px. Scout at
+#   jump_mult 1.10 → apex 130 px — watch for ceiling clearance on
+#   Reactor's 96 px pillar archway.
+
+window 1280 720
+seed 1 0
+out build/shots/m6_movement_probe
+spawn_at 400 600
+aim 1100 600
+
+# (a) Establish ground state — no input.
+at  20 shot stand_t020
+at  40 shot stand_t040
+
+# (b) Start running right, jump 30 ticks in. Hold BTN_JUMP across a
+# 6-tick window — `tap` is single-tick and the running gait briefly
+# lifts feet off the ground every 5-6 ticks; a 1-tick press can miss
+# the grounded=1 window. The jump path (`mech.c:1022`) only fires
+# when `(in.buttons & BTN_JUMP) && grounded` are both true on the
+# same tick, but it's edge-effectively-single-shot once the mech
+# leaves the ground (so the hold doesn't double-jump).
+at  60 press right
+at  80 shot run_t020
+at 100 shot run_t040
+at 108 press jump
+at 115 release jump
+at 115 shot jump_t007
+at 125 shot jump_t017
+at 135 shot jump_t027
+at 145 shot jump_t037
+at 155 shot jump_t047
+at 170 shot landed_t062
+
+# (c) Keep running through the landing and a few ticks past so the
+# logger captures momentum decay (or lack thereof).
+at 200 shot postland_t030
+at 240 release right
+at 260 shot stopped_t020
+
+contact_sheet probe_sheet cols 4
+
+at 300 end

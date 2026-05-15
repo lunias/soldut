@@ -148,10 +148,31 @@ MechLoadout mech_default_loadout(void) {
 
 /* ---- Movement tunables (Soldat-derived; see reference/soldat-constants.md) */
 #define RUN_SPEED_PXS      280.0f
-#define JUMP_IMPULSE_PXS   320.0f
+/* M6 P07 Phase 3 — taller jump (§5B). 320 → 480 px/s impulse takes
+ * apex from 47 px (v²/2g = 320²/2160) to 107 px (480²/2160) — roughly
+ * mech-height, the Soldat-y arc the user asked for. Airtime 0.60 s →
+ * 0.89 s; combined with Phase 2's air-momentum preservation, a running
+ * jump now covers ~280·0.89 = 250 px horizontally vs ~190 px pre-Phase-3.
+ * Per-chassis multipliers (Heavy 0.85 = 77 px apex, Scout 1.10 = 130 px)
+ * are unchanged — relative balance was already tuned. */
+#define JUMP_IMPULSE_PXS   480.0f
 #define JET_THRUST_PXS2    2200.0f
 #define JET_DRAIN_PER_SEC  0.60f
-#define AIR_CONTROL        0.35f
+/* M6 P07 Phase 1 — ground accel rates for the add-toward-target model
+ * (§5A of documents/m6/07-movement-gamefeel.md). Run input is a SPEED
+ * CAP that the body lerps toward at one of three rates; external sources
+ * (slopes, dashes, recoil) can push past the cap and friction grinds
+ * excess speed back down over multiple ticks instead of clamping in one. */
+#define GROUND_ACCEL_PXS2     2800.0f /* ~6 frames to RUN_SPEED from rest */
+#define GROUND_DECEL_PXS2     4666.0f /* ~4 frames to zero from RUN_SPEED, input opposed */
+#define GROUND_FRICTION_PXS2  1400.0f /* ~12 frames to zero from RUN_SPEED on flat, no input */
+/* M6 P07 Phase 2 — air accel for the same add-toward-target model
+ * (§5A/§5D). Single rate (no separate decel) — flipping LEFT mid-air
+ * from a RUN_SPEED dash reverses over ~20 frames (Soldat-feel: you can
+ * nudge mid-jet but you can't instantly reverse). Replaces the
+ * pre-Phase-2 SET-velocity AIR_CONTROL=0.35 clamp that wiped 65 % of
+ * horizontal momentum the instant the feet left the ground. */
+#define AIR_ACCEL_PXS2        1680.0f /* ~10 frames to RUN_SPEED in air, ~0.6× ground accel */
 #define BINK_DECAY_PER_SEC 1.8f       /* exponential decay for aim_bink */
 #define BINK_MAX           0.35f      /* clamp; ~20° */
 #define SCOUT_DASH_PXS     720.0f
@@ -551,22 +572,57 @@ static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, 
     ParticlePool *p = &w->particles;
 
     if (!grounded) {
-        /* Air control: keep the existing horizontal-only behavior. */
-        float vx_per_tick = vx_pxs * dt * AIR_CONTROL;
+        /* M6 P07 Phase 2 — air control via add-toward-target with cap
+         * (§5A/§5D). Same CAP-not-target invariant as the ground branch:
+         * if the body is already moving at >= RUN_SPEED in the input
+         * direction (running jump, slope-launch, recoil), input does
+         * NOTHING — only PHYSICS_VELOCITY_DAMP (0.99/tick) bleeds excess
+         * back down. Replaces the pre-Phase-2 SET-velocity clamp that
+         * wiped 65 % of horizontal momentum at the ground→air boundary
+         * and produced "jumps kill your forward motion" feel.
+         *
+         * Horizontal-only — gravity drives vy, jet adds vy, jump sets
+         * vy. The air branch never touches the Y component.
+         *
+         * Caller only invokes apply_run_velocity in air when an input
+         * is held (`grounded && !moving` gate excludes air+no-input),
+         * so vx_pxs != 0 here in practice. Defensive return for 0. */
+        if (vx_pxs == 0.0f) return;
+
+        int pelv = m->particle_base + PART_PELVIS;
+        float vx_now = p->pos_x[pelv] - p->prev_x[pelv];
+
+        float input_dir = (vx_pxs > 0.0f) ? +1.0f : -1.0f;
+        float vx_cap    = fabsf(vx_pxs) * dt;       /* px/tick, unsigned */
+        float v_in_dir  = input_dir * vx_now;       /* signed component along input */
+
+        /* Above the cap in the input direction → input does nothing.
+         * External sources (slope-launched jump, dash, recoil) keep
+         * their excess momentum; only universal drag erodes it. */
+        if (v_in_dir >= vx_cap) return;
+
+        /* Below cap. Single accel rate — accelerating-from-rest and
+         * reversing-against-motion both use AIR_ACCEL_PXS2. (Ground
+         * has a separate decel rate to make flick-reverses snappier
+         * on the ground; in air the lower rate IS the air-control
+         * inertia we want.) */
+        float vx_target = input_dir * vx_cap;
+        float vx_delta  = vx_target - vx_now;
+        float max_delta = AIR_ACCEL_PXS2 * dt * dt;
+        if (vx_delta >  max_delta) vx_delta =  max_delta;
+        if (vx_delta < -max_delta) vx_delta = -max_delta;
+
         for (int part = 0; part < PART_COUNT; ++part) {
             int idx = m->particle_base + part;
-            physics_set_velocity_x(p, idx, vx_per_tick);
+            p->prev_x[idx] -= vx_delta;
         }
         return;
     }
 
-    /* Read the average foot contact normal from the previous tick's
-     * contact resolver. We use it for two things: (a) deciding
-     * whether the foot is on a slope, so we know whether to brake
-     * (flat) or let gravity-along-tangent run wild (sloped); (b)
-     * projecting the run input onto the slope tangent so a held run
-     * input climbs/descends along the surface instead of dragging
-     * the body horizontally through it. */
+    /* Average foot contact normal from the previous tick. Used to
+     * decide slope-vs-flat (no-input behavior differs) and to project
+     * the run target onto the slope tangent so a held run input climbs
+     * / descends the surface instead of dragging horizontally through it. */
     int lf = m->particle_base + PART_L_FOOT;
     int rf = m->particle_base + PART_R_FOOT;
     float nx = (p->contact_nx_q[lf] + p->contact_nx_q[rf]) / 254.0f;
@@ -574,7 +630,6 @@ static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, 
     float nlen = sqrtf(nx * nx + ny * ny);
     bool flat;
     if (nlen < 0.5f) {
-        /* No fresh contact data — treat as flat floor. */
         nx = 0.0f; ny = -1.0f;
         flat = true;
     } else {
@@ -582,48 +637,86 @@ static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, 
         flat = (ny < -0.92f);
     }
 
-    /* No-input + flat ground: brake horizontal velocity. On a slope,
-     * skip the braking entirely so gravity-along-tangent + slope-aware
-     * friction can drive passive slide. */
-    if (vx_pxs == 0.0f) {
+    /* M6 P07 Phase 1 — Sonic-style ground move (§5A). Run input is a
+     * SPEED CAP that the body lerps toward at one of three accel rates;
+     * external sources (slopes, dashes, recoil) can push past the cap
+     * and friction bleeds the excess back over multiple ticks. Two key
+     * properties baked in here that the first cut of Phase 1 missed:
+     *
+     *   1. CAP, not target — when the velocity component along the
+     *      input direction is already >= the input cap (sliding down
+     *      a slope, post-dash, post-recoil), do NOTHING. Letting the
+     *      lerp pull the body DOWN to the cap is what wiped slope
+     *      momentum on flat ground after a slide.
+     *
+     *   2. Tangent-aligned delta — apply the per-tick velocity change
+     *      ONLY along the slope tangent. A normal-axis component
+     *      (which the per-component cap of v0 produced on diagonal
+     *      slopes) lifts the foot off the slope, the foot loses
+     *      contact, grounded flips false, and apply_run_velocity
+     *      enters the air branch. Net effect: the body "collapses"
+     *      mid-climb. Tangent-only push keeps the foot planted.
+     *
+     * Pelvis is the canonical body-velocity read — the constraint
+     * solver pulls all 16 parts to the same per-tick velocity in
+     * steady state. */
+    int pelv = m->particle_base + PART_PELVIS;
+    float vx_now = p->pos_x[pelv] - p->prev_x[pelv];
+    float vy_now = p->pos_y[pelv] - p->prev_y[pelv];
+
+    float input_dir = 0.0f;
+    if (vx_pxs > 0.0f) input_dir = +1.0f;
+    if (vx_pxs < 0.0f) input_dir = -1.0f;
+
+    if (input_dir == 0.0f) {
+        /* No input on slope: return — gravity-along-tangent + the
+         * per-contact friction in physics.c::contact_with_velocity
+         * drive passive slide. On flat: friction-decel X toward 0;
+         * leave Y to gravity / contact resolution. */
         if (!flat) return;
+        float dx = -vx_now;
+        float max_delta_x = GROUND_FRICTION_PXS2 * dt * dt;
+        if (dx >  max_delta_x) dx =  max_delta_x;
+        if (dx < -max_delta_x) dx = -max_delta_x;
         for (int part = 0; part < PART_COUNT; ++part) {
-            physics_set_velocity_x(p, m->particle_base + part, 0.0f);
+            int idx = m->particle_base + part;
+            p->prev_x[idx] -= dx;
         }
         return;
     }
 
-    /* Tangent is normal rotated 90°. Sign chosen to match run direction. */
-    float dir = (vx_pxs > 0.0f) ? 1.0f : -1.0f;
-    float tx  = -ny * dir;
-    float ty  =  nx * dir;
+    /* Tangent rotated 90° from contact normal, signed by input
+     * direction so it always points "the way the player wants to
+     * go" along the surface. */
+    float tx = -ny * input_dir;
+    float ty =  nx * input_dir;
+    float speed     = fabsf(vx_pxs);
+    float vt_target = speed * dt;                       /* px/tick along tangent */
+    float vt_now    = vx_now * tx + vy_now * ty;        /* signed scalar */
 
-    float speed = fabsf(vx_pxs);
-    float vt_per_tick_x = tx * speed * dt;
-    float vt_per_tick_y = ty * speed * dt;
+    /* Above the cap in the input direction → input does nothing. The
+     * existing contact friction (physics.c:contact_with_velocity) is
+     * the only thing that bleeds excess speed back toward the cap. */
+    if (vt_now >= vt_target) return;
 
+    /* Below the cap. ACCEL when motion is in input direction (or at
+     * rest); DECEL (snappier) when motion opposes input — flick the
+     * opposite direction for a fast reverse without springing the
+     * steady-state ramp. */
+    bool opposing = (vt_now < 0.0f);
+    float rate_pxs2 = opposing ? GROUND_DECEL_PXS2 : GROUND_ACCEL_PXS2;
+    float vt_delta  = vt_target - vt_now;       /* > 0 by construction */
+    float max_delta = rate_pxs2 * dt * dt;
+    if (vt_delta > max_delta) vt_delta = max_delta;
+
+    /* Tangent-aligned delta — feet stay on the slope, body climbs /
+     * descends along the surface, no normal-axis push. */
+    float dx = vt_delta * tx;
+    float dy = vt_delta * ty;
     for (int part = 0; part < PART_COUNT; ++part) {
         int idx = m->particle_base + part;
-        physics_set_velocity_x(p, idx, vt_per_tick_x);
-        /* Apply the slope-tangent Y-velocity to every particle, not
-         * just the lower chain. The original code split this — only
-         * the knees + feet got the Y push, on the theory that the
-         * upper body would "lean naturally" into the slope under
-         * gravity. In practice that asymmetry stretches the body:
-         * while running uphill, the feet + knees climb each tick
-         * (vt_per_tick_y < 0) but the pelvis / chest / head get only
-         * the X component, so the constraint solver has to recover
-         * 2-3 px of vertical separation per tick. 12 relaxation
-         * iterations don't fully converge against a per-tick velocity
-         * injection on a long chain (feet → knees → thighs → pelvis
-         * → chest → head/arms), so the stretch accumulates over a
-         * held-run climb and renders as a visibly growing mech. Going
-         * downhill doesn't show the bug because gravity naturally
-         * pulls the upper body down at the same rate as the climb
-         * tangent. Translating the whole body rigidly along the
-         * tangent solves it; the slight loss of "lean" on a slope is
-         * far less noticeable than the body inflating. */
-        physics_set_velocity_y(p, idx, vt_per_tick_y);
+        p->prev_x[idx] -= dx;
+        p->prev_y[idx] -= dy;
     }
 }
 
@@ -677,13 +770,37 @@ static void apply_jet_force(World *w, const Mech *m, float thrust_pxs2, float dt
         w->mechs[m->id].last_jet_pulse_tick = w->tick;
     }
 
-    /* Run-input sign for ceiling-tangent direction selection. The
-     * latched_input tells us which way the player is leaning; when
-     * jetting against an angled overhang we redirect the upward thrust
-     * sideways along the ceiling tangent in that direction. */
+    /* Run-input sign for ceiling-tangent direction selection AND
+     * the Phase 4 horizontal jet component. The latched_input tells
+     * us which way the player is leaning; when jetting against an
+     * angled overhang we redirect the upward thrust sideways along
+     * the ceiling tangent, and (Phase 4) we ALSO add a sideways jet
+     * push to every particle so JET+RIGHT covers horizontal ground. */
     float run_sign = 0.0f;
     if (m->latched_input.buttons & BTN_LEFT)  run_sign = -1.0f;
     if (m->latched_input.buttons & BTN_RIGHT) run_sign = +1.0f;
+
+    /* M6 P07 Phase 4 — horizontal jet thrust (§5C). When L/R is held
+     * while jetting, add lateral push at 50 % of vertical thrust
+     * magnitude. Pure JET (no L/R) stays vertical-only — preserves
+     * the "just climb" verb. Applied unconditionally on every
+     * particle, including those flagged CEILING, so a player can
+     * scoot horizontally along the underside of an overhang at full
+     * sideways speed (vertical thrust is the only thing the ceiling
+     * eats). Uses the same scale + ceiling-taper as fy — at full
+     * taper (head_y < 24 px) we've already returned, so by the time
+     * fx is computed, scale > 0.
+     *
+     * Note: this stacks ON TOP of Phase 2's air-control accel. Phase 2
+     * lerps vx toward ±RUN_SPEED with input as a CAP; Phase 4's fx
+     * pushes vx PAST the cap. Phase 2's above-cap-in-input-direction
+     * return then keeps the run input from undoing the jet push;
+     * only PHYSICS_VELOCITY_DAMP (0.99/tick) bleeds the excess. So
+     * a Trooper jetting+RIGHT settles into a steady horizontal speed
+     * well above RUN_SPEED — exactly the "jet covers distance" the
+     * user asked for. */
+    float fx = -fy * 0.5f * run_sign;
+              /* run_sign=+1 (RIGHT) → fx > 0 since fy < 0 (up) */
 
     for (int part = 0; part < PART_COUNT; ++part) {
         int idx = m->particle_base + part;
@@ -707,6 +824,8 @@ static void apply_jet_force(World *w, const Mech *m, float thrust_pxs2, float dt
         } else {
             p->pos_y[idx] += fy;
         }
+        /* Phase 4 — horizontal jet, applies regardless of ceiling. */
+        p->pos_x[idx] += fx;
     }
 }
 
@@ -869,14 +988,33 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
         }
 
         /* Scout dash: BTN_DASH while grounded gives a one-shot horizontal
-         * burst. (Air dash is a stretch — would need its own cooldown.) */
+         * burst. (Air dash is a stretch — would need its own cooldown.)
+         *
+         * M6 P07 Phase 6 — direct velocity SET, bypasses Phase 1's
+         * accel-cap (§5A). The dash is an edge-triggered one-shot
+         * impulse, not a held input; routing it through
+         * apply_run_velocity caps the per-tick delta at
+         * GROUND_ACCEL_PXS2·dt² = 0.778 px/tick and turns the 720-
+         * px/s spike into a tiny nudge. SET-velocity here matches the
+         * apply_jump idiom (also a one-shot impulse) and gives the
+         * dash a 12-px/tick burst. Phase 1's above-cap-return
+         * invariant then preserves the excess on subsequent ticks
+         * (input cap < vt_now ⇒ no input action) while contact
+         * friction (~0.92/tick tangential on flat) grinds it back
+         * toward RUN_SPEED over 10-15 frames — the cumulative-boost
+         * feel the plan §6 Phase 6 describes. */
         if ((pressed & BTN_DASH) && grounded
             && ch->passive == PASSIVE_SCOUT_DASH) {
-            float vx = m->facing_left ? -SCOUT_DASH_PXS : SCOUT_DASH_PXS;
-            apply_run_velocity(w, m, vx, dt, true);
+            float vx_pxs = m->facing_left ? -SCOUT_DASH_PXS : SCOUT_DASH_PXS;
+            float vx_per_tick = vx_pxs * dt;
+            ParticlePool *pp = &w->particles;
+            for (int part = 0; part < PART_COUNT; ++part) {
+                int idx = m->particle_base + part;
+                physics_set_velocity_x(pp, idx, vx_per_tick);
+            }
             moving = true;
             SHOT_LOG("t=%llu mech=%d scout_dash vx=%.0f",
-                     (unsigned long long)w->tick, mid, vx);
+                     (unsigned long long)w->tick, mid, vx_pxs);
         }
 
         /* Jet handling — varies by jetpack module. */

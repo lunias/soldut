@@ -332,6 +332,29 @@ If we want a hint of crowd separation visually, we add a soft "personal space" r
 
 ## Movement (per chassis, parameterized)
 
+> **M6 P07 update (2026-05-14).** Movement underwent a structural
+> tuning pass on the `m6-movement-tuning` branch — Sonic-style
+> ground flow + Soldat-style aerial verbs. The reference framing
+> below still applies; the concrete model and shipping numbers
+> live in [m6/07-movement-gamefeel.md](m6/07-movement-gamefeel.md).
+> Headline changes:
+>
+> - **Run input is a CAP, not a target.** External sources
+>   (slope-gravity, dash, recoil) push velocity past RUN_SPEED;
+>   input only accelerates *toward* the cap. Friction bleeds excess.
+> - **Air control preserves momentum across ground↔air.** Same
+>   add-toward-target lerp model in air as on ground; a running
+>   jump no longer loses 65 % of horizontal speed at takeoff.
+> - **Jet horizontal thrust.** Holding L/R while jetting adds a
+>   50 %-of-vertical lateral push; pure JET stays straight up.
+> - **Scout dash is a direct velocity SET.** One-shot impulse,
+>   bypasses the accel-cap, same idiom as jump.
+> - **Tunables shipping** (see `src/mech.c` for the authoritative
+>   list): `JUMP_IMPULSE_PXS = 480` (was 320), new
+>   `GROUND_ACCEL/DECEL/FRICTION_PXS2`, new `AIR_ACCEL_PXS2`
+>   (replaces `AIR_CONTROL`), `JET_THRUST_PXS2 = 2200` unchanged.
+>   Authoritative table in CURRENT_STATE.md → "Tunables".
+
 Per-tick player-input-driven forces are applied to specific particles before integration:
 
 - **Run** (left/right): apply horizontal force to feet when grounded. Magnitude = `RUNSPEED * chassis.run_mult`. (Reference: Soldat's `RUNSPEED = 0.118` per tick.)

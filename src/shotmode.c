@@ -158,6 +158,11 @@ typedef struct {
     bool     perf_overlay;
     int      internal_h;
 
+    /* M6 P07 — when true, zero out g_map_kit.parallax_*.id after world
+     * build so the renderer's draw_parallax_layer early-outs. Useful
+     * for movement-tuning shots where parallax obscures the mech. */
+    bool     no_parallax;
+
     int      end_tick;       /* -1 = derive from last event */
 
     /* Networked-shot config (legacy single-process when NETMODE_NONE). */
@@ -312,6 +317,7 @@ static bool parse_script(const char *path, Script *out) {
     out->match_mode = -1;   /* P07 — only set when `mode <name>` directive parsed */
     out->perf_overlay = false;  /* M6 P03 — see Shot struct comment. */
     out->internal_h   = 0;       /* M6 P03 — 0 = identity (no cap). */
+    out->no_parallax  = false;  /* M6 P07 — see Shot struct comment. */
 
     char line[512];
     int lineno = 0;
@@ -693,6 +699,11 @@ static bool parse_script(const char *path, Script *out) {
                 ok = false; continue;
             }
             out->internal_h = n;
+        } else if (strcmp(tok, "no_parallax") == 0) {
+            /* M6 P07 — `no_parallax` (no value). After world build,
+             * zero g_map_kit.parallax_*.id so draw_parallax_layer
+             * early-outs. Used by movement-tuning shots. */
+            out->no_parallax = true;
         } else if (strcmp(tok, "network") == 0) {
             char kind[16] = {0};
             int eaten2 = 0;
@@ -1125,20 +1136,8 @@ static void shot_host_flow(Game *g, float dt) {
                 lobby_auto_start_arm(&g->lobby, g->lobby.auto_start_default);
             }
             if (lobby_tick(&g->lobby, dt)) {
-                match_begin_countdown(&g->match, g->match.countdown_default);
-                if (g->net.role == NET_ROLE_SERVER) {
-                    net_server_broadcast_match_state(&g->net, &g->match);
-                }
-            }
-            lobby_chat_age(&g->lobby, dt);
-            break;
-        }
-        case MATCH_PHASE_COUNTDOWN:
-            if (match_tick(&g->match, dt)) {
-                /* start_round equivalent — inlined from main.c. Mirror
-                 * P07: CTF mode-mask validation, score-limit clamp,
-                 * team auto-balance, ctf_init_round, match_mode_cached.
-                 *
+                /* M6 P07 — round prep happens BEFORE countdown begins.
+                 * Inlined start_round equivalent (mirrors main.c).
                  * Mirrors main.c::start_round — first round derives
                  * map/mode from rotation; subsequent rounds inherit
                  * from begin_next_lobby (which honors the vote winner). */
@@ -1248,7 +1247,7 @@ static void shot_host_flow(Game *g, float dt) {
                 ctf_init_round(&g->world, g->match.mode);
                 g->world.flag_state_dirty = false;
 
-                match_begin_round(&g->match);
+                match_begin_countdown(&g->match, g->match.countdown_default);
                 g->mode = MODE_MATCH;
                 g_shot_kill_processed = g->world.killfeed_count;
                 if (g->net.role == NET_ROLE_SERVER) {
@@ -1259,6 +1258,19 @@ static void shot_host_flow(Game *g, float dt) {
                     if (g->world.flag_count > 0) {
                         net_server_broadcast_flag_state(&g->net, &g->world);
                     }
+                }
+            }
+            lobby_chat_age(&g->lobby, dt);
+            break;
+        }
+        case MATCH_PHASE_COUNTDOWN:
+            if (match_tick(&g->match, dt)) {
+                /* M6 P07 — COUNTDOWN done; flip to ACTIVE and tell
+                 * clients. World is already prepped from when the
+                 * lobby auto-start fired. */
+                match_begin_round(&g->match);
+                if (g->net.role == NET_ROLE_SERVER) {
+                    net_server_broadcast_match_state(&g->net, &g->match);
                 }
             }
             break;
@@ -2037,11 +2049,18 @@ int shotmode_run(const char *script_path) {
                     game.world.mechs[game.world.local_mech_id].aim_world = aim;
                 }
                 if (game.net.role == NET_ROLE_CLIENT) {
+                    /* M6 P07 — input gate during pre-round countdown. */
+                    if (game.match.phase == MATCH_PHASE_COUNTDOWN) {
+                        match_lock_inputs(&game.world);
+                    }
                     simulate_step(&game.world, TICK_DT);
                     /* P03: same as main.c — pull remote mechs to the
-                     * interpolated server position after physics. */
+                     * interpolated server position after physics. The
+                     * helper handles drift correction (catches the
+                     * LOBBY-froze-the-clock case). */
                     if (game.net.client_render_clock_armed) {
-                        game.net.client_render_time_ms += TICK_DT * 1000.0;
+                        net_client_advance_render_clock(&game.net,
+                                                        TICK_DT * 1000.0);
                         double rt = game.net.client_render_time_ms;
                         uint32_t rt_u32 = (rt > 0.0) ? (uint32_t)rt : 0u;
                         snapshot_interp_remotes(&game.world, rt_u32);
@@ -2050,6 +2069,10 @@ int shotmode_run(const char *script_path) {
                     net_client_send_input(&game.net, nin);
                     reconcile_tick_smoothing(&game.reconcile);
                 } else {
+                    /* M6 P07 — input gate during pre-round countdown. */
+                    if (game.match.phase == MATCH_PHASE_COUNTDOWN) {
+                        match_lock_inputs(&game.world);
+                    }
                     simulate_step(&game.world, TICK_DT);
                 }
                 break;
@@ -2190,6 +2213,13 @@ int shotmode_run(const char *script_path) {
         game.world.camera_target = (Vec2){ s.spawn_x, s.spawn_y };
         game.world.camera_smooth = (Vec2){ s.spawn_x, s.spawn_y };
         LOG_I("shotmode: spawn_at %.1f %.1f", s.spawn_x, s.spawn_y);
+    }
+
+    if (s.no_parallax) {
+        g_map_kit.parallax_far.id  = 0;
+        g_map_kit.parallax_mid.id  = 0;
+        g_map_kit.parallax_near.id = 0;
+        LOG_I("shotmode: no_parallax — parallax layers disabled");
     }
 
     Renderer rd;

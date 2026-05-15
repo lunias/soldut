@@ -774,6 +774,76 @@ Vec2 map_spawn_point(MapId id, const Level *level, int slot_index,
     return (Vec2){ (float)tx * (float)level->tile_size + 8.0f, floor_y };
 }
 
+Vec2 map_pick_separated_spawn(MapId id, const Level *level,
+                              int team, MatchModeId mode,
+                              const Vec2 *used_positions, int n_used)
+{
+    /* Fallback path: no authored spawns → defer to the lane-table
+     * picker indexed by used count. */
+    if (!level || level->spawn_count <= 0 || !level->spawns) {
+        return map_spawn_point(id, level, n_used, team, mode);
+    }
+
+    /* Collect eligible spawn indices for this team / mode. 64 covers
+     * every shipped map (max 16 spawns / map). */
+    int eligible[64];
+    int e_cap = (int)(sizeof eligible / sizeof eligible[0]);
+    int e_count = 0;
+    for (int i = 0; i < level->spawn_count && e_count < e_cap; ++i) {
+        const LvlSpawn *s = &level->spawns[i];
+        if (mode == MATCH_MODE_FFA ||
+            s->team == 0 ||
+            (int)s->team == team) {
+            eligible[e_count++] = i;
+        }
+    }
+    if (e_count == 0) {
+        const LvlSpawn *s = &level->spawns[0];
+        return (Vec2){ (float)s->pos_x, (float)s->pos_y };
+    }
+
+    /* First spawn of the round: deterministic — lowest lane_hint
+     * among eligibles. Keeps map-rotation start positions stable. */
+    if (n_used == 0 || !used_positions) {
+        int best = eligible[0];
+        for (int i = 1; i < e_count; ++i) {
+            if (level->spawns[eligible[i]].lane_hint <
+                level->spawns[best].lane_hint) {
+                best = eligible[i];
+            }
+        }
+        const LvlSpawn *s = &level->spawns[best];
+        return (Vec2){ (float)s->pos_x, (float)s->pos_y };
+    }
+
+    /* Greedy max-min: among eligibles, pick the spawn whose minimum
+     * distance to any already-used position is the LARGEST. Ties
+     * broken by lane_hint for determinism. */
+    int   best_idx = eligible[0];
+    float best_min = -1.0f;
+    for (int e = 0; e < e_count; ++e) {
+        int idx = eligible[e];
+        const LvlSpawn *s = &level->spawns[idx];
+        float min_d = 1e30f;
+        for (int u = 0; u < n_used; ++u) {
+            float dx = (float)s->pos_x - used_positions[u].x;
+            float dy = (float)s->pos_y - used_positions[u].y;
+            float d2 = dx * dx + dy * dy;
+            if (d2 < min_d) min_d = d2;
+        }
+        if (min_d > best_min ||
+            (min_d == best_min &&
+             level->spawns[idx].lane_hint <
+             level->spawns[best_idx].lane_hint))
+        {
+            best_min = min_d;
+            best_idx = idx;
+        }
+    }
+    const LvlSpawn *s = &level->spawns[best_idx];
+    return (Vec2){ (float)s->pos_x, (float)s->pos_y };
+}
+
 /* ---- M5 P08 — client-side build by descriptor -------------------- */
 
 void map_build_for_descriptor(World *world, Arena *arena,

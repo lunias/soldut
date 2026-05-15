@@ -1,0 +1,17 @@
+# Single-player baseline: no input, no peer, no spawn_at, default
+# tutorial map. Should sit perfectly still after spawn settle.
+# If the pelvis trail shows non-zero velocity past tick ~30 (gravity
+# settle) then something is generating phantom input.
+
+window 1280 720
+seed 1 0
+out build/shots/m6_idle_baseline
+aim 800 600
+
+at  20 shot t020
+at  60 shot t060
+at 100 shot t100
+at 150 shot t150
+at 200 shot t200
+
+at 240 end

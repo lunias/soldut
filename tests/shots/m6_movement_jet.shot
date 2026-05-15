@@ -1,0 +1,60 @@
+# M6 P07 Phase 4 — jet-pack horizontal verification.
+#
+# Two scenarios captured in sequence:
+#   (a) pure JET (no L/R)        — should rise straight up
+#   (b) JET + RIGHT              — should rise up + drift right
+#
+# Phase 4 adds a horizontal jet component at 50 % of vertical thrust
+# magnitude, applied only when BTN_LEFT or BTN_RIGHT is latched. With
+# JET_THRUST_PXS2 = 2200 and dt = 1/60:
+#   fy = -2200 / 3600 = -0.611 px/tick²   (straight up)
+#   fx = +0.5 · |fy| · run_sign           (when L/R held)
+#
+# Phase 2's air branch in apply_run_velocity caps run-input contribution
+# at RUN_SPEED (4.667 px/tick). Phase 4's fx pushes vx past the cap;
+# Phase 2's above-cap return then preserves the excess until drag
+# (0.99/tick) bleeds it down. Steady-state horizontal speed while
+# jetting+RIGHT settles well above RUN_SPEED — the "jet covers
+# distance" the user asked for.
+#
+# Fuel: JET_DRAIN_PER_SEC=0.60, max=1.20, regen ~0.20/s while grounded.
+# Scenario (a) drains 25 ticks worth = 0.25 fuel; scenario (b) drains
+# another 35 ticks worth = 0.35 fuel. Between them we hold neither
+# button and let the mech land + refuel.
+
+window 1920 1080
+seed 1 0
+out build/shots/m6_movement_jet
+spawn_at 800 800
+aim 1500 800
+
+# (a) Settle.
+at  20 shot settled
+
+# (b) Pure JET — straight up, no horizontal drift.
+at  40 press jet
+at  50 shot jet_t010
+at  60 shot jet_t020
+at  65 release jet
+
+# (c) Let the mech fall + land + refuel before scenario (b).
+at 100 shot postjet_t035
+at 200 shot refueled_t135
+
+# (d) JET + RIGHT — diagonal trajectory (up + right).
+at 220 press right
+at 220 press jet
+at 230 shot jetright_t010
+at 240 shot jetright_t020
+at 250 shot jetright_t030
+at 260 shot jetright_t040
+at 265 release jet
+at 265 release right
+
+# (e) Capture descent + landing.
+at 290 shot descending_t025
+at 320 shot landed_t055
+
+contact_sheet jet_sheet cols 4
+
+at 360 end

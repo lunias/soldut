@@ -749,7 +749,15 @@ static void start_round(Game *g) {
      * peer's music + ambient loads, not just the host's. */
     audio_apply_for_level(&g->world.level);
 
-    match_begin_round(&g->match);
+    /* M6 P07 — instead of jumping straight to ACTIVE, prep the round
+     * world (mechs spawned, mode = MATCH) and enter COUNTDOWN. Players
+     * see their spawn + the big "3, 2, 1" overlay; inputs are locked.
+     * The COUNTDOWN→ACTIVE transition (in host_match_flow_step) just
+     * flips the phase and unlocks inputs — no second spawn. */
+    float secs = (g->match.countdown_default > 0.0f)
+                   ? g->match.countdown_default
+                   : 3.0f;
+    match_begin_countdown(&g->match, secs);
     g->mode = MODE_MATCH;
     g_killfeed_processed = g->world.killfeed_count;
 
@@ -769,10 +777,11 @@ static void start_round(Game *g) {
             net_server_broadcast_flag_state(&g->net, &g->world);
         }
     }
-    LOG_I("match_flow: round %d begin (mode=%s map=%s)",
+    LOG_I("match_flow: round %d prep (mode=%s map=%s, %0.1fs countdown)",
           g->round_counter,
           match_mode_name(g->match.mode),
-          map_def(g->match.map_id)->display_name);
+          map_def(g->match.map_id)->display_name,
+          (double)secs);
 }
 
 /* P09 — pick three distinct candidates from g_map_registry that support
@@ -897,22 +906,15 @@ static void end_match(Game *g) {
 }
 
 /* Inter-round transition: the just-finished round wasn't the last in
- * the match, so we go SUMMARY → COUNTDOWN(brief) → ACTIVE without
- * showing the lobby. Score persists. Mech-spawn happens at the
- * COUNTDOWN→ACTIVE edge via start_round. */
+ * the match. Mech-spawn now happens INSIDE start_round (which sets
+ * COUNTDOWN as its terminal phase), so players see "3 2 1" with the
+ * world rendering behind. The COUNTDOWN→ACTIVE edge in
+ * host_match_flow_step just flips the phase. */
 static void advance_to_next_round(Game *g) {
     /* Tear down dead mechs from the previous round. start_round will
      * re-spawn fresh ones. */
     lobby_clear_round_mechs(&g->lobby, &g->world);
-    /* Brief inter-round countdown (default 3 s) so players see "Round
-     * X starts in 3..." instead of an instant snap into the new round. */
-    match_begin_countdown(&g->match, g->match.inter_round_countdown_default);
-    if (g->net.role == NET_ROLE_SERVER) {
-        net_server_broadcast_match_state(&g->net, &g->match);
-        /* lobby_list ships current scores; keep the summary scoreboard
-         * accurate while the countdown ticks. */
-        net_server_broadcast_lobby_list (&g->net, &g->lobby);
-    }
+    start_round(g);
 }
 
 /* SUMMARY → next-phase dispatcher. Decides whether to run another
@@ -1022,29 +1024,12 @@ static void host_match_flow_step(Game *g, float dt) {
                     /* Defensive — re-arm in case the hold above raced. */
                     lobby_auto_start_arm(&g->lobby, 1.5f);
                 } else {
-                    /* Auto-start fired → enter countdown. test-play uses
-                     * a 1 s countdown (set in match.countdown_default at
-                     * startup) so designers' F5 round-trip stays short.
-                     * wan-fixes-5 — cfg.countdown_default also flows
-                     * through match.countdown_default at dedicated_main
-                     * startup, so shot-test cfgs can shrink it without
-                     * touching the test-play path. Single-player skips
-                     * the countdown too — Ready Up should feel instant. */
-                    float secs;
-                    if (sp_instant) {
-                        secs = 0.001f;
-                    } else {
-                        secs = (g->match.countdown_default > 0.0f &&
-                                g->match.countdown_default < 5.0f)
-                                   ? g->match.countdown_default
-                                   : (g->test_play_lvl[0]
-                                        ? g->match.countdown_default
-                                        : 5.0f);
-                    }
-                    match_begin_countdown(&g->match, secs);
-                    if (g->net.role == NET_ROLE_SERVER) {
-                        net_server_broadcast_match_state(&g->net, &g->match);
-                    }
+                    /* M6 P07 — auto-start fires → start_round, which
+                     * spawns mechs, sets mode = MATCH, and enters
+                     * COUNTDOWN. Players see their spawn + the big
+                     * countdown overlay; inputs are locked. The
+                     * COUNTDOWN→ACTIVE edge below just flips phase. */
+                    start_round(g);
                 }
             }
             host_broadcast_countdown_if_changed(g, dt);
@@ -1053,7 +1038,16 @@ static void host_match_flow_step(Game *g, float dt) {
         }
         case MATCH_PHASE_COUNTDOWN:
             if (match_tick(&g->match, dt)) {
-                start_round(g);
+                /* COUNTDOWN done — flip to ACTIVE and broadcast. The
+                 * world is already prepped (start_round did it at
+                 * countdown START), so this is just the phase flip
+                 * + the input unlock that comes for free since
+                 * match_lock_inputs only fires while phase ==
+                 * COUNTDOWN. */
+                match_begin_round(&g->match);
+                if (g->net.role == NET_ROLE_SERVER) {
+                    net_server_broadcast_match_state(&g->net, &g->match);
+                }
             }
             break;
         case MATCH_PHASE_ACTIVE: {
@@ -1492,12 +1486,24 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
         net_poll(&game.net, &game, dt);
         host_match_flow_step(&game, (float)dt);
 
-        if (game.match.phase == MATCH_PHASE_ACTIVE) {
+        /* M6 P07 — sim during COUNTDOWN as well as ACTIVE so mechs
+         * settle visibly at their spawn instead of snapping back from
+         * client-side prediction. Bot AI is skipped during countdown
+         * (bots shouldn't think yet) and `match_lock_inputs` zeroes
+         * every mech's button state so neither players nor bots can
+         * move; aim is preserved so the rifle still points. */
+        if (game.match.phase == MATCH_PHASE_ACTIVE ||
+            game.match.phase == MATCH_PHASE_COUNTDOWN)
+        {
             sim_accum += dt;
             while (sim_accum >= TICK_DT) {
-                /* Bot AI runs first so each bot's latched_input is
-                 * ready when simulate_step consumes it. */
-                bot_step(&game.bots, &game.world, &game, (float)TICK_DT);
+                if (game.match.phase == MATCH_PHASE_COUNTDOWN) {
+                    match_lock_inputs(&game.world);
+                } else {
+                    /* Bot AI runs first so each bot's latched_input is
+                     * ready when simulate_step consumes it. */
+                    bot_step(&game.bots, &game.world, &game, (float)TICK_DT);
+                }
                 simulate_step(&game.world, (float)TICK_DT);
                 sim_accum -= TICK_DT;
             }
@@ -2821,6 +2827,11 @@ int main(int argc, char **argv) {
                     if (game.world.local_mech_id >= 0) {
                         game.world.mechs[game.world.local_mech_id].latched_input = in;
                     }
+                    /* M6 P07 — gate input during pre-round countdown
+                     * (client side mirrors what the server is doing). */
+                    if (game.match.phase == MATCH_PHASE_COUNTDOWN) {
+                        match_lock_inputs(&game.world);
+                    }
                     profile_zone_begin(PROF_SIM_STEPS);
                     simulate_step(&game.world, (float)TICK_DT);
                     profile_zone_end(PROF_SIM_STEPS);
@@ -2838,7 +2849,12 @@ int main(int argc, char **argv) {
                      * 0.67 ms/tick = 40 ms/s = client renders ~270 ms
                      * behind server after a few seconds. */
                     if (game.net.client_render_clock_armed) {
-                        game.net.client_render_time_ms += TICK_DT * 1000.0;
+                        /* Helper does the per-tick advance + drift
+                         * correction (catches the LOBBY-froze-the-
+                         * clock case where render_time falls 1-2 sec
+                         * behind the server's broadcast stream). */
+                        net_client_advance_render_clock(&game.net,
+                                                        TICK_DT * 1000.0);
                         /* render_time may be negative early in a
                          * connection (we init it as
                          * `first_snap.server_time - INTERP_DELAY_MS`).
@@ -2864,12 +2880,22 @@ int main(int argc, char **argv) {
                     }
                     /* Host-with-UI / offline-solo: bot AI runs server-
                      * side too. Skipped on pure clients (the host's
-                     * latched_input wins on the wire). */
-                    if (game.world.authoritative) {
+                     * latched_input wins on the wire). Also skipped
+                     * during pre-round countdown — bots stay still
+                     * along with the players. */
+                    if (game.world.authoritative &&
+                        game.match.phase != MATCH_PHASE_COUNTDOWN)
+                    {
                         profile_zone_begin(PROF_BOT_STEPS);
                         bot_step(&game.bots, &game.world, &game,
                                  (float)TICK_DT);
                         profile_zone_end(PROF_BOT_STEPS);
+                    }
+                    /* M6 P07 — input gate during countdown. Aim is
+                     * preserved (rifle still points where the cursor
+                     * is) but movement / fire / jet are inert. */
+                    if (game.match.phase == MATCH_PHASE_COUNTDOWN) {
+                        match_lock_inputs(&game.world);
                     }
                     profile_zone_begin(PROF_SIM_STEPS);
                     simulate_step(&game.world, (float)TICK_DT);

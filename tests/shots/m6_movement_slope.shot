@@ -1,0 +1,57 @@
+# M6 P07 Phase 5 — slope-momentum carries-onto-flat probe.
+#
+# The user's request, verbatim: "moving side to side ... gain momentum
+# sliding down a slope and then run out from the bottom of the slope
+# quicker." Phase 1.1 baked in the above-cap guard so input is a CAP
+# (not a target): when v_in_dir >= vx_cap the run input does nothing,
+# so slope-launched velocity > RUN_SPEED persists on the slope. This
+# probe checks the slope → flat transition: does the slope-launched
+# momentum carry onto the flat ground, and how fast does friction
+# bleed it back toward RUN_SPEED?
+#
+# Aurora's west hill: 30° slope rising east from world (640, floor_y)
+# to (1024, hill_peak_y). The peak is at y ≈ 2528 (H-11), the floor
+# is at y ≈ 2752 (H-4). Spawning slightly above the peak gives the
+# mech a settled start.
+#
+# Scenario: spawn at top, hold LEFT — mech slides down the slope
+# with active input. Phase 1.1's above-cap guard should let
+# slope-tangent gravity push vt_now well above RUN_SPEED while LEFT
+# is held, then on flat ground the same above-cap guard keeps the
+# input from undoing the excess; only contact-friction (0.92/tick
+# tangential on flat) bleeds it down toward RUN_SPEED.
+
+window 1280 720
+seed 1 0
+out build/shots/m6_movement_slope
+map aurora
+no_parallax
+spawn_at 1020 2516
+aim 100 2500
+
+# (a) Settle.
+at  30 shot settled
+
+# (b) Hold LEFT — slide + active run down the slope.
+at  40 press left
+at  60 shot descent_t020
+at  80 shot descent_t040
+at 100 shot descent_t060
+at 120 shot descent_t080
+at 140 shot descent_t100
+at 160 shot descent_t120
+
+# (c) Keep holding LEFT after the slope ends (transition to flat).
+#     If Phase 1.1's above-cap guard works on flat too, vx stays
+#     above RUN_SPEED briefly; friction (0.92/tick tangential) drags
+#     it back toward the RUN_SPEED cap.
+at 200 shot flat_t160
+at 240 shot flat_t200
+
+# (d) Release; friction-decel to stop.
+at 280 release left
+at 320 shot stopped
+
+contact_sheet sheet cols 4
+
+at 380 end

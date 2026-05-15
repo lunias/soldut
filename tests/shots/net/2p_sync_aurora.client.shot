@@ -1,0 +1,30 @@
+# 2p_sync_aurora — CLIENT. Pairs with 2p_sync_aurora.host.shot.
+#
+# Stationary observer ~120 px to the right of the host's spawn so
+# the host walks INTO the client's camera view. Burst captures over
+# the SAME tick range as the host so frames can be compared 1:1.
+#
+# What we're looking for in the client's burst frames:
+#   * Smooth motion of the host's mech (no jitter / shaking)
+#   * Jet plume appears at the same moment as the host's view
+#   * Slope pose looks like the host's view (legs tracking surface)
+#   * Apex of the running-jet matches the host's apex
+
+window 1280 720
+out build/shots/net/2p_sync_aurora.client
+network connect 127.0.0.1:24500
+name ClientB
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+map aurora
+no_parallax
+# Position is set server-side by the host's `peer_spawn 1 ...`;
+# our local spawn_at would be overridden by the next snapshot.
+aim 2000 2700
+
+# Stay still — no inputs. The camera tracks our stationary mech, and
+# the host walks through frame as it climbs the western slope.
+burst client_t from 200 to 460 every 6
+
+at 540 end
+
+contact_sheet client_sheet cols 8 cell 320 180

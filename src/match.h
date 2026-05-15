@@ -95,6 +95,14 @@ void match_init(MatchState *m, MatchModeId mode, int score_limit,
 /* Begin the pre-round countdown. Snaps into MATCH_PHASE_COUNTDOWN. */
 void match_begin_countdown(MatchState *m, float countdown_seconds);
 
+/* M6 P07 — zero `latched_input.buttons` on every alive mech. Called
+ * each tick during MATCH_PHASE_COUNTDOWN so players (and bots) sit
+ * still at their spawns. Aim, sequence, and dt fields are preserved
+ * so the wire format stays consistent and snapshots still encode aim
+ * direction (rifle pointing). */
+struct World;
+void match_lock_inputs(struct World *w);
+
 /* Begin the actual round. Resets timers, clears team scores, leaves
  * win/MVP unset. Caller is responsible for spawning mechs. */
 void match_begin_round(MatchState *m);

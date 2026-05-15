@@ -1,0 +1,52 @@
+# M6 P07 Phase 6 — Scout dash + recoil momentum compatibility check.
+#
+# Per plan §6 Phase 6: "Phase 1/2 should make Scout dash work for free
+# since SCOUT_DASH_PXS=720 > RUN_SPEED_PXS=280; above-cap guard
+# preserves the dash spike, friction grinds it down toward 280."
+#
+# The plan's "free" prediction assumes the dash adds 720 px/s in one
+# tick. Verify here. With Phase 1's accel-cap GROUND_ACCEL_PXS2=2800
+# limiting per-tick delta to ~0.778 px/tick, a single call to
+# `apply_run_velocity(720, dt, true)` from the dash branch only adds
+# 0.778 px/tick — NOT 12 px/tick (=720 px/s). If so, the dash is
+# clamped by Phase 1 accel rather than spiking through it. Probe will
+# show this.
+#
+# Scenario: spawn Scout, hold RIGHT to run, tap DASH after vx has
+# saturated, measure the pelvis vx at the dash tick and the decay
+# window after.
+
+window 1280 720
+seed 1 0
+out build/shots/m6_movement_dash
+loadout scout - - - -
+spawn_at 400 600
+aim 1100 600
+
+# (a) Settle.
+at  30 shot settled
+
+# (b) Run RIGHT to saturate vx at RUN_SPEED (Scout's run_mult = 1.20
+#     so cap is 280 · 1.20 = 336 px/s = 5.6 px/tick).
+at  40 press right
+at  80 shot running_t040
+at  90 shot running_t050
+
+# (c) Tap DASH — should spike vx well above the run cap (720 · 1.20
+#     = 864 px/s = 14.4 px/tick, if dash bypasses accel-cap).
+at 100 tap dash
+at 102 shot dashed_t002
+at 105 shot dashed_t005
+at 110 shot dashed_t010
+at 115 shot dashed_t015
+at 120 shot dashed_t020
+at 130 shot dashed_t030
+at 145 shot dashed_t045
+
+# (d) Release RIGHT; friction decel.
+at 180 release right
+at 220 shot stopped
+
+contact_sheet sheet cols 4
+
+at 280 end

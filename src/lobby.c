@@ -681,6 +681,13 @@ void lobby_spawn_round_mechs(LobbyState *L, World *world,
     world->local_mech_id      = -1;
     world->dummy_mech_id      = -1;
 
+    /* Greedy max-min-distance picker: each new mech goes to the
+     * eligible spawn farthest from any previously placed one. Stops
+     * the FFA "you spawn next to your opponent" pattern that the old
+     * round-robin (eligible[slot_index % e_count]) produced. */
+    Vec2 picked_positions[MAX_LOBBY_SLOTS];
+    int  n_picked = 0;
+
     int spawned = 0;
     for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
         LobbySlot *s = &L->slots[i];
@@ -690,8 +697,12 @@ void lobby_spawn_round_mechs(LobbyState *L, World *world,
             s->mech_id = -1;
             continue;
         }
-        Vec2 spawn = map_spawn_point((MapId)map_id, &world->level,
-                                     i, s->team, mode);
+        Vec2 spawn = map_pick_separated_spawn((MapId)map_id, &world->level,
+                                              s->team, mode,
+                                              picked_positions, n_picked);
+        if (n_picked < (int)(sizeof picked_positions / sizeof picked_positions[0])) {
+            picked_positions[n_picked++] = spawn;
+        }
         /* Per-slot spawn coordinates — diagnostic only (e2e tests use
          * this to verify F5 test-play picked the .lvl spawn point).
          * SHOT_LOG is a no-op in production play. */

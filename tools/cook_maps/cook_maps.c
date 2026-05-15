@@ -325,18 +325,34 @@ static void build_foundry(void) {
              t2w(54), floor_y,
              t2w(51), floor_y);
 
-    /* ---- Spawns — 8 total, FFA round-robin from lane_hint. Even
-     * indices left side, odd right, so successive spawns avoid telefrag. */
-    const int spawn_plat = plat_top - 40;
-    const int spawn_floor = floor_y - 40;
-    push_spawn(t2w(15),     spawn_plat,  1, 1, 0);
-    push_spawn(t2w(W - 15), spawn_plat,  2, 1, 1);
-    push_spawn(t2w(18),     spawn_plat,  1, 1, 2);
-    push_spawn(t2w(W - 18), spawn_plat,  2, 1, 3);
-    push_spawn(t2w(25),     spawn_floor, 1, 1, 4);
-    push_spawn(t2w(W - 25), spawn_floor, 2, 1, 5);
-    push_spawn(t2w(35),     spawn_floor, 1, 1, 6);
-    push_spawn(t2w(W - 35), spawn_floor, 2, 1, 7);
+    /* ---- Spawns — 16 total, spread along the full map width so the
+     * max-min-distance picker has room to separate FFA players.
+     * Hill polys live at tiles 49-54, so floor spawns stay below 46
+     * and above 55 to avoid embedding.
+     *
+     * `plat_top` is t2w(H-9) — that's the BOTTOM edge of the
+     * single-row platform tile (row H-10), not the top. Spawn at
+     * `plat_top - 40` lands the pelvis 8 px above the platform TOP
+     * and the foot 24 px INSIDE the platform body. Use the actual
+     * top edge t2w(H-10) for the spawn calc. */
+    const int spawn_plat  = t2w(H - 10) - 40;
+    const int spawn_floor = floor_y     - 40;
+    push_spawn(t2w(10),     spawn_plat,  1, 1, 0);
+    push_spawn(t2w(W - 10), spawn_plat,  2, 1, 1);
+    push_spawn(t2w(15),     spawn_plat,  1, 1, 2);
+    push_spawn(t2w(W - 15), spawn_plat,  2, 1, 3);
+    push_spawn(t2w(20),     spawn_plat,  1, 1, 4);
+    push_spawn(t2w(W - 20), spawn_plat,  2, 1, 5);
+    push_spawn(t2w(8),      spawn_floor, 1, 1, 6);
+    push_spawn(t2w(W - 8),  spawn_floor, 2, 1, 7);
+    push_spawn(t2w(20),     spawn_floor, 1, 1, 8);
+    push_spawn(t2w(W - 20), spawn_floor, 2, 1, 9);
+    push_spawn(t2w(28),     spawn_floor, 1, 1, 10);
+    push_spawn(t2w(W - 28), spawn_floor, 2, 1, 11);
+    push_spawn(t2w(36),     spawn_floor, 1, 1, 12);
+    push_spawn(t2w(W - 36), spawn_floor, 2, 1, 13);
+    push_spawn(t2w(45),     spawn_floor, 0, 1, 14);   /* center-left, FFA */
+    push_spawn(t2w(W - 45), spawn_floor, 0, 1, 15);   /* center-right, FFA */
 
     /* ---- Pickups (12 — per brief) ---- */
     const int floor_pick = floor_y - 16;
@@ -472,17 +488,30 @@ static void build_slipstream(void) {
               t2w(12), t2w(6),
               AMBI_WIND, 0.20f, +1.0f, 0.0f);
 
-    /* ---- Spawns ---- */
-    const int spawn_main = main_top  - 40;
-    const int spawn_cat  = catwalk_y - 40;
+    /* ---- Spawns ----
+     *
+     * `main_top` and `catwalk_y` above are misleadingly named — they
+     * use t2w(H-17) / t2w(H-31), which is the BOTTOM edge of the
+     * single-row platform tiles (rows H-18 / H-32). The TOP of those
+     * platforms is t2w(H-18) / t2w(H-32). A spawn at `main_top - 40`
+     * lands the pelvis 8 px above the platform TOP, so the foot
+     * (pelvis + 36 for Trooper, +40 for Heavy) ends up INSIDE the
+     * platform body — visible as "mech stuck in the platform."
+     * Compute spawn relative to the actual platform TOP. */
+    const int spawn_main = t2w(H - 18) - 40;
+    const int spawn_cat  = t2w(H - 32) - 40;
     push_spawn(t2w(10),     spawn_main, 1, 1, 0);
     push_spawn(t2w(W - 10), spawn_main, 2, 1, 1);
     push_spawn(t2w(15),     spawn_main, 1, 1, 2);
     push_spawn(t2w(W - 15), spawn_main, 2, 1, 3);
     push_spawn(t2w(20),     spawn_main, 1, 1, 4);
     push_spawn(t2w(W - 20), spawn_main, 2, 1, 5);
-    push_spawn(t2w(15),     spawn_cat,  1, 1, 6);
-    push_spawn(t2w(W - 15), spawn_cat,  2, 1, 7);
+    /* Catwalk spawns moved 5 tiles inward (to 20 / W-20) — original
+     * tile-15 / W-15 sat too close to the catwalk's edge polys and
+     * the spawn-collision push-out would shove the mech 150+ px
+     * sideways during settle. */
+    push_spawn(t2w(20),     spawn_cat,  1, 1, 6);
+    push_spawn(t2w(W - 20), spawn_cat,  2, 1, 7);
 
     /* ---- Pickups (14 — per brief) ---- */
     const int basement_pick = floor_y - 16;
@@ -612,16 +641,28 @@ static void build_reactor(void) {
              t2w(87),         floor_y - 96,      /* bottom-right 96 px above floor */
              flank_right_end, floor_y - 96);     /* bottom-left 96 px above floor */
 
-    /* ---- Spawns — TDM-friendly (red on left, blue on right). ---- */
+    /* ---- Spawns — 16 total. TDM-friendly (red on left, blue on
+     * right) plus FFA-friendly central / overlook positions for the
+     * max-min picker to spread out the lobby. ---- */
     const int spawn_floor = floor_y - 40;
+    const int spawn_flank = t2w(H - 12) - 40;
+    const int spawn_over  = t2w(H - 22) - 40;
     push_spawn(t2w(6),       spawn_floor, 1, 1, 0);
     push_spawn(t2w(W - 6),   spawn_floor, 2, 1, 1);
     push_spawn(t2w(10),      spawn_floor, 1, 1, 2);
     push_spawn(t2w(W - 10),  spawn_floor, 2, 1, 3);
-    push_spawn(t2w(20),      t2w(H - 12) - 40, 1, 1, 4);     /* flank platform */
-    push_spawn(t2w(W - 20),  t2w(H - 12) - 40, 2, 1, 5);
-    push_spawn(t2w(28),      t2w(H - 22) - 40, 1, 1, 6);     /* overlook */
-    push_spawn(t2w(W - 28),  t2w(H - 22) - 40, 2, 1, 7);
+    push_spawn(t2w(20),      spawn_flank, 1, 1, 4);     /* flank platform */
+    push_spawn(t2w(W - 20),  spawn_flank, 2, 1, 5);
+    push_spawn(t2w(28),      spawn_over,  1, 1, 6);     /* overlook */
+    push_spawn(t2w(W - 28),  spawn_over,  2, 1, 7);
+    push_spawn(t2w(15),      spawn_floor, 1, 1, 8);
+    push_spawn(t2w(W - 15),  spawn_floor, 2, 1, 9);
+    push_spawn(t2w(40),      spawn_floor, 0, 1, 10);    /* mid floor, FFA */
+    push_spawn(t2w(W - 40),  spawn_floor, 0, 1, 11);
+    push_spawn(t2w(48),      spawn_floor, 0, 1, 12);    /* center, FFA */
+    push_spawn(t2w(W - 48),  spawn_floor, 0, 1, 13);
+    push_spawn(t2w(34),      spawn_flank, 0, 1, 14);    /* flank-inner */
+    push_spawn(t2w(W - 34),  spawn_flank, 0, 1, 15);
 
     /* ---- Pickups (16 — per brief) ---- */
     const int floor_pick = floor_y - 16;
@@ -1115,24 +1156,41 @@ static void build_aurora(void) {
 
     /* ---- Spawns — TDM split: 8 red on west, 8 blue on east. ---- */
     const int spawn_floor = floor_y - 40;
-    const int peak_spawn  = peak_top - 40;
-    push_spawn(t2w(12),     spawn_floor, 1, 1, 0);
-    push_spawn(t2w(18),     spawn_floor, 1, 1, 1);
-    push_spawn(t2w(26),     spawn_floor, 1, 1, 2);
-    push_spawn(t2w(34),     spawn_floor, 1, 1, 3);
-    push_spawn(t2w(42),     spawn_floor, 1, 1, 4);
-    push_spawn(t2w(56),     spawn_floor, 1, 1, 5);
-    push_spawn(t2w(4),      peak_spawn,  1, 1, 6);
-    push_spawn(t2w(20),     t2w(H - 11) - 40, 1, 1, 7);    /* west hill summit */
+    /* `peak_top` is the top of the peak BODY (row H-35); the rise
+     * sits ABOVE it (row H-38..H-35). A spawn at `peak_top - 40`
+     * lands inside the rise — buried in solid. Place the spawn 40 px
+     * above the actual rise apex (row H-38) instead. */
+    const int peak_spawn      = t2w(H - 38) - 40;
+    /* Spawning ON the bare apex of the hill polygon was a leg-trap:
+     * the apex is one mathematical point, so feet 12 px to either
+     * side of the spawn x land at different y values (one on the up-
+     * slope, one on the down-slope), and the leg constraint solver
+     * compresses one side into the slope volume. The `LEG_COLLAPSED`
+     * detector in `tests/spawn_settle_test.c` caught it. Repurpose
+     * the two summit spawns as central-floor spawns instead — they
+     * still give the team a "front-line" position different from the
+     * back-rank floor spawns. */
+    /* Floor spawns avoid the hill x-ranges (west hill: tiles 20-44,
+     * east hill: tiles 116-140). Original tiles 26/34/42 sat inside
+     * the west hill volume; the body samples landed inside the slope
+     * polygon and the mech got pushed sideways or stuck on settle. */
+    push_spawn(t2w(12),     spawn_floor,    1, 1, 0);
+    push_spawn(t2w(18),     spawn_floor,    1, 1, 1);
+    push_spawn(t2w(50),     spawn_floor,    1, 1, 2);   /* was 26 */
+    push_spawn(t2w(56),     spawn_floor,    1, 1, 3);   /* was 34 */
+    push_spawn(t2w(64),     spawn_floor,    1, 1, 4);   /* was 42 */
+    push_spawn(t2w(72),     spawn_floor,    1, 1, 5);   /* was 56 */
+    push_spawn(t2w(4),      peak_spawn,     1, 1, 6);   /* mountain alcove */
+    push_spawn(t2w(76),     spawn_floor,    1, 1, 7);   /* was hill summit — leg-collapsed on apex */
 
-    push_spawn(t2w(W - 12), spawn_floor, 2, 1, 8);
-    push_spawn(t2w(W - 18), spawn_floor, 2, 1, 9);
-    push_spawn(t2w(W - 26), spawn_floor, 2, 1, 10);
-    push_spawn(t2w(W - 34), spawn_floor, 2, 1, 11);
-    push_spawn(t2w(W - 42), spawn_floor, 2, 1, 12);
-    push_spawn(t2w(W - 56), spawn_floor, 2, 1, 13);
-    push_spawn(t2w(W - 4),  peak_spawn,  2, 1, 14);
-    push_spawn(t2w(W - 20), t2w(H - 11) - 40, 2, 1, 15);   /* east hill summit */
+    push_spawn(t2w(W - 12), spawn_floor,    2, 1, 8);
+    push_spawn(t2w(W - 18), spawn_floor,    2, 1, 9);
+    push_spawn(t2w(W - 50), spawn_floor,    2, 1, 10);  /* was W-26 */
+    push_spawn(t2w(W - 56), spawn_floor,    2, 1, 11);  /* was W-34 */
+    push_spawn(t2w(W - 64), spawn_floor,    2, 1, 12);  /* was W-42 */
+    push_spawn(t2w(W - 72), spawn_floor,    2, 1, 13);  /* was W-56 */
+    push_spawn(t2w(W - 4),  peak_spawn,     2, 1, 14);  /* mountain alcove */
+    push_spawn(t2w(W - 76), spawn_floor,    2, 1, 15);  /* was hill summit — leg-collapsed on apex */
 
     /* ---- Pickups (≈26 per brief). ---- */
     const int floor_pick = floor_y - 16;
@@ -1288,18 +1346,24 @@ static void build_crossfire(void) {
     for (int i = 0; i < 4; ++i) {
         push_spawn(t2w(4 + i * 5), red_base_spawn, 1, 1, (uint8_t)i);
     }
+    /* Flag-platform spawns must stay within the platform x-range
+     * (tiles 2..base_w=22). Original tile-24 spawn lay PAST the
+     * platform's right edge — the mech spawned in the air above
+     * the floor and fell ~256 px before landing. */
     push_spawn(t2w(6),  red_flag_spawn, 1, 1, 4);
-    push_spawn(t2w(12), red_flag_spawn, 1, 1, 5);
-    push_spawn(t2w(18), red_flag_spawn, 1, 1, 6);
-    push_spawn(t2w(24), red_flag_spawn, 1, 1, 7);
+    push_spawn(t2w(10), red_flag_spawn, 1, 1, 5);
+    push_spawn(t2w(15), red_flag_spawn, 1, 1, 6);
+    push_spawn(t2w(20), red_flag_spawn, 1, 1, 7);   /* was 24 — past platform */
 
     for (int i = 0; i < 4; ++i) {
         push_spawn(t2w(W - 4 - i * 5), blue_base_spawn, 2, 1, (uint8_t)(8 + i));
     }
+    /* Mirror of red flag-platform spawns; same fix for the blue side
+     * (W-24 was past the platform's left edge). */
     push_spawn(t2w(W -  6), blue_flag_spawn, 2, 1, 12);
-    push_spawn(t2w(W - 12), blue_flag_spawn, 2, 1, 13);
-    push_spawn(t2w(W - 18), blue_flag_spawn, 2, 1, 14);
-    push_spawn(t2w(W - 24), blue_flag_spawn, 2, 1, 15);
+    push_spawn(t2w(W - 10), blue_flag_spawn, 2, 1, 13);
+    push_spawn(t2w(W - 15), blue_flag_spawn, 2, 1, 14);
+    push_spawn(t2w(W - 20), blue_flag_spawn, 2, 1, 15);   /* was W-24 — past platform */
 
     /* ---- Pickups (≈26 per brief). ---- */
     const int floor_pick = floor_y - 16;

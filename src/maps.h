@@ -93,6 +93,19 @@ bool map_build_from_path(World *world, Arena *arena, const char *path);
 Vec2 map_spawn_point(MapId id, const Level *level, int slot_index,
                      int team, MatchModeId mode);
 
+/* Greedy max-min-distance spawn picker. Given a list of `n_used`
+ * positions already chosen for previous slots in this round, returns
+ * the eligible spawn (matching team / FFA) that is farthest from any
+ * of them. First call with n_used=0 returns the lowest-lane_hint
+ * eligible spawn (deterministic). Used by lobby_spawn_round_mechs to
+ * avoid the round-robin "you spawn next to your opponent" problem in
+ * FFA where consecutive lobby slots used to pick consecutive (often
+ * adjacent) authored spawns. Falls back to map_spawn_point when the
+ * level has no authored spawns or no eligibles. */
+Vec2 map_pick_separated_spawn(MapId id, const Level *level,
+                              int team, MatchModeId mode,
+                              const Vec2 *used_positions, int n_used);
+
 /* M5 P08 — client-side map build by descriptor. Walks the same
  * resolution order as client_resolve_or_download:
  *   1. assets/maps/<short>.lvl with matching CRC → load

@@ -1,0 +1,31 @@
+# M6 P07 — pre-round countdown visibility test.
+#
+# The new flow: when the lobby auto-start fires, start_round prepares
+# the world (mech spawn, mode = MODE_MATCH) AND enters
+# MATCH_PHASE_COUNTDOWN. Players see the rendered world plus a big
+# "1" / "GO!" number in the screen center; inputs are locked.
+#
+# Burst captures cover the LOBBY → COUNTDOWN → ACTIVE transitions.
+# In shot mode the countdown is forced to 1 s (60 ticks) for
+# iteration speed, so the COUNTDOWN frames sit roughly ticks 120-180
+# (after a 1 s lobby auto-start + the 60-tick countdown). Look for:
+#   * a large "1" centered on screen during COUNTDOWN frames
+#   * a brief "GO!" right at the COUNTDOWN→ACTIVE seam
+#   * the world rendered behind the countdown number, with the
+#     player's mech at its spawn (not moving — input is locked)
+
+window 1280 720
+seed 1 0
+out build/shots/m6_countdown
+network host 24700
+name HostA
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+map slipstream
+no_parallax
+
+# Capture the lobby → countdown → active arc.
+burst t from 100 to 260 every 10
+
+at 320 end
+
+contact_sheet sheet cols 6 cell 320 180
