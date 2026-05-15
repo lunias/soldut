@@ -252,8 +252,18 @@ void ctf_step(struct Game *g, float dt) {
 
         if (flag->status == FLAG_CARRIED) continue;
 
-        /* Touch detection. */
+        /* Touch detection — distance from the mech's chest to the
+         * nearest point on the visible flag staff (a vertical line
+         * segment from `home_pos` up by FLAG_STAFF_HEIGHT_PX, matching
+         * render.c::draw_flag). Authoring the flag's `pos_y` at the
+         * platform surface lets the staff/pennant lie at chest height
+         * automatically — without segment math the chest-to-base
+         * distance was the only test, and maps that placed the base
+         * 50 px below chest height (Crossfire) never fired pickup.
+         * (See FLAG_STAFF_HEIGHT_PX in world.h.) */
         Vec2 fp = ctf_flag_position(w, f);
+        const float staff_top_y = fp.y - FLAG_STAFF_HEIGHT_PX;  /* smaller y = higher on screen */
+        const float staff_bot_y = fp.y;
         const float r2 = FLAG_TOUCH_RADIUS_PX * FLAG_TOUCH_RADIUS_PX;
         for (int mi = 0; mi < w->mech_count; ++mi) {
             Mech *m = &w->mechs[mi];
@@ -261,7 +271,13 @@ void ctf_step(struct Game *g, float dt) {
             if (m->is_dummy)  continue;
             if (m->team == MATCH_TEAM_NONE) continue;
             Vec2 cp = mech_chest_pos(w, mi);
-            float dx = cp.x - fp.x, dy = cp.y - fp.y;
+            float dx = cp.x - fp.x;
+            /* Clamp chest's y onto the staff line segment, then take
+             * Euclidean distance from chest to the clamp point. */
+            float dy;
+            if      (cp.y < staff_top_y) dy = staff_top_y - cp.y;
+            else if (cp.y > staff_bot_y) dy = cp.y - staff_bot_y;
+            else                          dy = 0.0f;
             if (dx * dx + dy * dy > r2) continue;
             ctf_touch(g, f, mi);
             /* If the touch transitioned this flag into CARRIED, stop —

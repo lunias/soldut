@@ -234,6 +234,28 @@ int mech_create(World *w, ChassisId chassis_id, Vec2 spawn, int team, bool is_du
     return mech_create_loadout(w, lo, spawn, team, is_dummy);
 }
 
+/* Fill `out_P` with the pelvis-relative offsets for every skeleton
+ * part on the given chassis. Used by mech_create_loadout (initial
+ * spawn) and mech_respawn (mid-round in-place reset). */
+static void chassis_skeleton_offsets(const Chassis *ch, Vec2 out_P[PART_COUNT]) {
+    out_P[PART_PELVIS]     = (Vec2){ 0,                                    0 };
+    out_P[PART_CHEST]      = (Vec2){ 0,                          -ch->torso_h };
+    out_P[PART_NECK]       = (Vec2){ 0,                -ch->torso_h - ch->neck_h * 0.5f };
+    out_P[PART_HEAD]       = (Vec2){ 0,                -ch->torso_h - ch->neck_h - 8.0f };
+    out_P[PART_L_SHOULDER] = (Vec2){-10,                       -ch->torso_h + 4.0f };
+    out_P[PART_R_SHOULDER] = (Vec2){ 10,                       -ch->torso_h + 4.0f };
+    out_P[PART_L_ELBOW]    = (Vec2){-12,    -ch->torso_h + 4.0f + ch->bone_arm };
+    out_P[PART_R_ELBOW]    = (Vec2){ 12,    -ch->torso_h + 4.0f + ch->bone_arm };
+    out_P[PART_L_HAND]     = (Vec2){-12, -ch->torso_h + 4.0f + ch->bone_arm + ch->bone_forearm };
+    out_P[PART_R_HAND]     = (Vec2){ 12, -ch->torso_h + 4.0f + ch->bone_arm + ch->bone_forearm };
+    out_P[PART_L_HIP]      = (Vec2){-7,                                    0 };
+    out_P[PART_R_HIP]      = (Vec2){ 7,                                    0 };
+    out_P[PART_L_KNEE]     = (Vec2){-8,                          ch->bone_thigh };
+    out_P[PART_R_KNEE]     = (Vec2){ 8,                          ch->bone_thigh };
+    out_P[PART_L_FOOT]     = (Vec2){-9,             ch->bone_thigh + ch->bone_shin };
+    out_P[PART_R_FOOT]     = (Vec2){ 9,             ch->bone_thigh + ch->bone_shin };
+}
+
 int mech_create_loadout(World *w, MechLoadout lo, Vec2 spawn,
                         int team, bool is_dummy)
 {
@@ -249,22 +271,7 @@ int mech_create_loadout(World *w, MechLoadout lo, Vec2 spawn,
 
     /* Skeleton positions, pelvis-relative. (See diagram in mech.h.) */
     Vec2 P[PART_COUNT];
-    P[PART_PELVIS]     = (Vec2){ 0,                                    0 };
-    P[PART_CHEST]      = (Vec2){ 0,                          -ch->torso_h };
-    P[PART_NECK]       = (Vec2){ 0,                -ch->torso_h - ch->neck_h * 0.5f };
-    P[PART_HEAD]       = (Vec2){ 0,                -ch->torso_h - ch->neck_h - 8.0f };
-    P[PART_L_SHOULDER] = (Vec2){-10,                       -ch->torso_h + 4.0f };
-    P[PART_R_SHOULDER] = (Vec2){ 10,                       -ch->torso_h + 4.0f };
-    P[PART_L_ELBOW]    = (Vec2){-12,    -ch->torso_h + 4.0f + ch->bone_arm };
-    P[PART_R_ELBOW]    = (Vec2){ 12,    -ch->torso_h + 4.0f + ch->bone_arm };
-    P[PART_L_HAND]     = (Vec2){-12, -ch->torso_h + 4.0f + ch->bone_arm + ch->bone_forearm };
-    P[PART_R_HAND]     = (Vec2){ 12, -ch->torso_h + 4.0f + ch->bone_arm + ch->bone_forearm };
-    P[PART_L_HIP]      = (Vec2){-7,                                    0 };
-    P[PART_R_HIP]      = (Vec2){ 7,                                    0 };
-    P[PART_L_KNEE]     = (Vec2){-8,                          ch->bone_thigh };
-    P[PART_R_KNEE]     = (Vec2){ 8,                          ch->bone_thigh };
-    P[PART_L_FOOT]     = (Vec2){-9,             ch->bone_thigh + ch->bone_shin };
-    P[PART_R_FOOT]     = (Vec2){ 9,             ch->bone_thigh + ch->bone_shin };
+    chassis_skeleton_offsets(ch, P);
 
     for (int i = 0; i < PART_COUNT; ++i) {
         Vec2 wp = { spawn.x + P[i].x, spawn.y + P[i].y };
@@ -2140,6 +2147,173 @@ void mech_kill(World *w, int mid, int killshot_part, Vec2 dir,
              (unsigned long long)w->tick, mid, killshot_part,
              dir.x, dir.y, impulse, m->dismember_mask,
              weapon_id, killer_mech_id, flags);
+
+    /* Mid-round respawn — arm the per-mech timer for modes that respawn
+     * during the round. CTF needs this: a flag game with no respawn is
+     * a 1v0 spectator session as soon as anyone dies (the user-reported
+     * bug "I kill my opponent and the next round starts"). FFA/TDM
+     * still ride the existing round-end respawn (no timer set), so this
+     * change is scoped to the mode that requires it. The server's
+     * per-tick respawn step in main.c walks all mechs and fires
+     * mech_respawn when world.tick reaches respawn_at_tick. */
+    if (w->authoritative &&
+        (MatchModeId)w->match_mode_cached == MATCH_MODE_CTF)
+    {
+        m->respawn_at_tick = w->tick + RESPAWN_DELAY_TICKS;
+    }
+}
+
+void mech_respawn(World *w, int mid, Vec2 spawn_pos) {
+    if (mid < 0 || mid >= w->mech_count) return;
+    Mech *m = &w->mechs[mid];
+    const Chassis *ch = mech_chassis((ChassisId)m->chassis_id);
+    const Armor   *ar = armor_def(m->armor_id);
+    const Jetpack *jp = jetpack_def(m->jetpack_id);
+
+    /* Re-seat every particle at the chassis rest pose around spawn_pos
+     * — pos AND prev land on the same value so the next Verlet step
+     * reads zero velocity. set_particle also clears flags to
+     * PARTICLE_FLAG_ACTIVE which heals any sleep / inactive bits the
+     * dead body may have accumulated. */
+    Vec2 P[PART_COUNT];
+    chassis_skeleton_offsets(ch, P);
+    for (int i = 0; i < PART_COUNT; ++i) {
+        Vec2 wp = { spawn_pos.x + P[i].x, spawn_pos.y + P[i].y };
+        set_particle(w, m->particle_base + i, wp, 1.0f / ch->mass_scale);
+    }
+
+    /* Heal dismemberment: re-activate every constraint in this mech's
+     * range. The mech's range was set by mech_create_loadout; grapple
+     * constraints live OUTSIDE this range (appended at pool tail) so
+     * we don't touch them. The grapple itself is released below. */
+    for (int i = 0; i < m->constraint_count; ++i) {
+        w->constraints.items[m->constraint_base + i].active = 1;
+    }
+
+    /* Damage decals: zero every ring so the freshly-respawned mech
+     * doesn't ship with last-life's bullet holes. Cleared on every part
+     * up to the limb-decal cap (matches MechLimbDecals storage). */
+    memset(m->damage_decals, 0, sizeof m->damage_decals);
+
+    /* Kill lingering FX_STUMP emitters pinned to this mech. The
+     * emitter's 1.5 s duration is shorter than the 3 s respawn delay,
+     * so in steady-state these should already be dead — but the
+     * blood-spray particles they spawn in their last tick can
+     * outlive the emitter by up to another 1.5 s, and the user
+     * reported the "respawned mech still has smoke coming out of it"
+     * symptom. Belt-and-suspenders: zap any FX_STUMP pinned to this
+     * mech so a future change to RESPAWN_DELAY_TICKS or stump
+     * duration can't reintroduce the bug. Spatial particles
+     * (FX_BLOOD/SMOKE) age out naturally at their world positions —
+     * the respawn picks a fresh spawn point so the old death cloud
+     * doesn't overlap the new body. */
+    {
+        FxPool *pool = &w->fx;
+        for (int fi = 0; fi < pool->count; ++fi) {
+            FxParticle *fp = &pool->items[fi];
+            if (!fp->alive) continue;
+            if (fp->kind == FX_STUMP && fp->pin_mech_id == mid) {
+                fp->alive = 0;
+            }
+        }
+    }
+
+    /* Combat / pose state — fresh as of spawn. */
+    m->alive             = true;
+    m->dismember_mask    = 0;
+    m->health            = m->health_max;
+    m->hp_arm_l          = 80.0f;
+    m->hp_arm_r          = 80.0f;
+    m->hp_leg_l          = 80.0f;
+    m->hp_leg_r          = 80.0f;
+    m->hp_head           = 50.0f;
+    m->armor_hp          = ar->hp;
+    m->armor_charges     = ar->reactive_charges;
+    m->fuel              = m->fuel_max;
+    m->boost_timer       = 0.0f;
+    m->jump_armed        = true;
+    m->hit_flash_timer   = 0.0f;
+    m->recoil_kick       = 0.0f;
+    m->aim_bink          = 0.0f;
+    m->fire_cooldown     = 0.0f;
+    m->reload_timer      = 0.0f;
+    m->charge_timer      = 0.0f;
+    m->spinup_timer      = 0.0f;
+    m->burst_pending_rounds = 0;
+    m->burst_pending_timer  = 0.0f;
+    m->ability_cooldown  = 0.0f;
+    m->sleep_ticks       = 0;
+    m->sleeping          = false;
+    m->grounded          = false;
+    m->air_ticks         = 0;
+    m->anim_id           = 0;
+    m->anim_time         = 0.0f;
+    m->gait_phase_l      = 0.0f;
+    m->gait_phase_r      = 0.5f;
+    m->jet_state_bits    = 0;
+    m->jet_prev_grounded = 0;
+    m->last_fired_slot   = -1;
+    m->last_fired_tick   = 0;
+    m->last_damage_taken = 0.0f;
+    m->last_killshot_weapon = -1;
+    m->respawn_at_tick   = 0;
+
+    /* Reset ammo / weapon to the loadout. Mid-life reloads, BTN_SWAP
+     * state and burst queues all get cleared above; we still respect
+     * the player's primary/secondary picks. active_slot defaults to
+     * primary so the player sees the same start state as round 1. */
+    const Weapon *pw = weapon_def(m->primary_id);
+    const Weapon *sw = weapon_def(m->secondary_id);
+    m->active_slot   = 0;
+    m->ammo_primary  = pw ? pw->mag_size : 0;
+    m->ammo_secondary= sw ? sw->mag_size : 0;
+    m->weapon_id     = m->primary_id;
+    m->ammo          = m->ammo_primary;
+    m->ammo_max      = pw ? pw->mag_size : 0;
+
+    /* Clear pose-driver targets so the next mech_step_drive starts
+     * from a clean slate rather than chasing a stale aim. aim_world is
+     * placed slightly to the right of the new spawn (matches
+     * mech_create_loadout's default; mech_step_drive will overwrite
+     * with latched_input on the first tick). */
+    memset(m->pose_target,   0, sizeof m->pose_target);
+    memset(m->pose_strength, 0, sizeof m->pose_strength);
+    m->aim_world = (Vec2){ spawn_pos.x + 100.0f, spawn_pos.y - 20.0f };
+    m->facing_left = false;
+    m->prev_buttons = 0;
+    m->latched_input = (ClientInput){ 0 };
+
+    /* Grapple — release and re-IDLE (mech_grapple_release is safe on a
+     * fresh IDLE state too; it just bails). Important on a respawn
+     * because a dying carrier may have held a grapple that we want
+     * gone before they get a body again. */
+    mech_grapple_release(w, mid);
+    m->grapple.constraint_idx = -1;
+    m->grapple.anchor_mech    = -1;
+
+    /* Snapshot interp ring — invalidate so the client doesn't bracket
+     * old (pre-respawn) frames against new ones, which would
+     * teleport-lerp across the gap. Server side keeps writing into the
+     * ring as usual; clearing here is harmless either way. */
+    m->remote_snap_head  = 0;
+    m->remote_snap_count = 0;
+    for (int i = 0; i < REMOTE_SNAP_RING; ++i) {
+        m->remote_snap_ring[i].valid = false;
+    }
+
+    /* Lag-comp history — same logic: stale frames against the dead
+     * body's pose would mis-resolve hit tests. */
+    m->lag_hist_head = 0;
+    for (int i = 0; i < LAG_HIST_TICKS; ++i) {
+        m->lag_hist[i] = (BoneHistFrame){ 0 };
+    }
+
+    LOG_I("mech_respawn: id=%d at (%.0f,%.0f)",
+          mid, (double)spawn_pos.x, (double)spawn_pos.y);
+    SHOT_LOG("t=%llu mech=%d respawn at (%.1f,%.1f)",
+             (unsigned long long)w->tick, mid,
+             (double)spawn_pos.x, (double)spawn_pos.y);
+    (void)jp; /* fuel_max already baked at create; nothing else needs jp here */
 }
 
 bool mech_apply_damage(World *w, int mid, int part, float dmg, Vec2 dir,

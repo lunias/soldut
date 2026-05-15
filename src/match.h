@@ -138,6 +138,20 @@ bool match_round_should_end(const MatchState *m);
 struct World;
 bool match_step_solo_warning(MatchState *m, const struct World *w, float dt);
 
+/* Mid-round respawn step — walks every mech with a non-zero
+ * `respawn_at_tick` and rebuilds the ones whose timer has elapsed
+ * (CTF only at v1; FFA / TDM still ride the round-end respawn). The
+ * caller passes a non-NULL lobby on the host so the helper can
+ * respect per-slot team changes that happened mid-death (e.g., the
+ * player switched to spectator while ragdolling); pass NULL on the
+ * single-player shot-mode path, where the mech's own `team` field is
+ * the source of truth. Authoritative-only; clients mirror through
+ * snapshots (alive bit + fresh particle positions + cleared limb
+ * mask). See documents/m5/06-ctf.md §"Respawn" and snapshot.c's
+ * was_alive→now_alive constraint reactivation. */
+void match_process_respawns(struct World *w, MatchState *m,
+                            struct LobbyState *lobby);
+
 /* Mode helpers. */
 const char *match_mode_name(MatchModeId mode);
 MatchModeId match_mode_from_name(const char *name);

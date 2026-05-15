@@ -690,6 +690,13 @@ static void client_handle_flag_state(NetState *ns, const uint8_t *body,
         const Flag *was = &prev_flags[f];
         const Flag *is_ = &g->world.flags[f];
         if (was->status == is_->status) continue;     /* no transition */
+        /* Diagnostic line — paired CTF shot tests grep this on the
+         * CLIENT log to prove the host's flag-state broadcast made the
+         * wire round trip. Free at production runtime (SHOT_LOG
+         * compiles to a no-op outside shot mode). */
+        SHOT_LOG("client_handle_flag_state flag=%d %d->%d carrier=%d",
+                 f, (int)was->status, (int)is_->status,
+                 (int)is_->carrier_mech);
 
         /* Capture: CARRIED → HOME. Globally heard regardless of
          * distance to the scoring base. */
@@ -1162,6 +1169,42 @@ static void server_handle_lobby_add_bot(NetState *ns, NetPeer *p,
     net_server_broadcast_lobby_list(ns, &g->lobby);
     g->lobby.dirty = false;
     LOG_I("server: ADD_BOT slot=%d tier=%s", slot, bot_tier_name((BotTier)tier));
+}
+
+static void server_handle_lobby_bot_team(NetState *ns, NetPeer *p,
+                                         const uint8_t *body, int blen,
+                                         Game *g)
+{
+    if (blen < 2) return;
+    int requester = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
+    if (requester < 0) return;
+    if (!g->lobby.slots[requester].is_host) {
+        LOG_W("server: non-host slot %d tried BOT_TEAM", requester);
+        return;
+    }
+    int target = (int)body[0];
+    int team   = (int)body[1];
+    if (target < 0 || target >= MAX_LOBBY_SLOTS) return;
+    LobbySlot *ts = &g->lobby.slots[target];
+    if (!ts->in_use) return;
+    if (!ts->is_bot) {
+        /* Humans pick their own team via LOBBY_TEAM_CHANGE; the host
+         * doesn't get to flip them. Silently drop. */
+        LOG_W("server: BOT_TEAM target slot=%d isn't a bot", target);
+        return;
+    }
+    if (team != MATCH_TEAM_RED && team != MATCH_TEAM_BLUE) {
+        LOG_W("server: BOT_TEAM bad team=%d (must be RED=1 or BLUE=2)", team);
+        return;
+    }
+    lobby_set_team(&g->lobby, target, team);
+    /* Reship the table immediately so every peer (including the host
+     * UI as a client) sees the change before the next round_start
+     * runs auto-balance. */
+    net_server_broadcast_lobby_list(ns, &g->lobby);
+    g->lobby.dirty = false;
+    LOG_I("server: BOT_TEAM slot=%d team=%d (by host slot=%d)",
+          target, team, requester);
 }
 
 static void server_handle_lobby_kick_or_ban(NetState *ns, NetPeer *p,
@@ -2456,6 +2499,8 @@ static void server_pump_events(NetState *ns, Game *g) {
                         server_handle_lobby_host_setup(ns, p, body, blen, g); break;
                     case NET_MSG_LOBBY_ADD_BOT:
                         server_handle_lobby_add_bot(ns, p, body, blen, g); break;
+                    case NET_MSG_LOBBY_BOT_TEAM:
+                        server_handle_lobby_bot_team(ns, p, body, blen, g); break;
                     case NET_MSG_MAP_REQUEST:
                         server_handle_map_request(ns, p, g, body, blen); break;
                     case NET_MSG_MAP_READY:
@@ -3222,6 +3267,18 @@ void net_client_send_ban(NetState *ns, int target_slot) {
     uint8_t buf[2] = { NET_MSG_LOBBY_BAN, (uint8_t)target_slot };
     enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
                  buf, 2);
+}
+
+void net_client_send_bot_team(NetState *ns, int target_slot, int new_team) {
+    if (!ns || ns->role != NET_ROLE_CLIENT || !ns->connected) return;
+    if (target_slot < 0 || target_slot >= 256) return;
+    uint8_t buf[3] = {
+        NET_MSG_LOBBY_BOT_TEAM,
+        (uint8_t)target_slot,
+        (uint8_t)new_team,
+    };
+    enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
+                 buf, 3);
 }
 
 void net_client_send_host_setup(NetState *ns,

@@ -1,0 +1,40 @@
+# 2p_ctf_pickup — host (RED) walks into the BLUE flag and verifies
+# pickup fires server-side, broadcasts to client. Pairs with
+# 2p_ctf_pickup.client.shot — that test walks the client (BLUE) into
+# the RED flag from the opposite side.
+#
+# Setup: peer_spawn places both mechs right on the OPPOSING team's
+# flag platform (Crossfire flag platforms are at the far left/right
+# of the map). Each player walks INTO their target flag and pickup
+# should fire on the authoritative server.
+#
+# Crossfire flag y: 1520. Flag-platform top: 1536. Mech standing
+# pelvis at platform_top - 36 = 1500, chest at pelvis - 32 = 1468.
+# Vertical chest-to-flag distance: 52 px (currently > FLAG_TOUCH_RADIUS_PX
+# = 36 — REGRESSION if pickup never fires).
+#
+# RED flag at (480, 1520). BLUE flag at (4000, 1520).
+
+window 1280 720
+out build/shots/net/host_ctf_pickup
+network host 24034
+name HostRed
+
+# Park the host right next to BLUE flag (4000, 1520). x=3950 places
+# pelvis 50 px west of the flag staff so we walk RIGHT into it.
+spawn_at 3950 1496
+peer_spawn 1 530 1496
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 140 shot t140_round_start
+at 200 shot t200_settled_near_blue_flag
+
+# Walk right into the flag. RUN_SPEED ~4.6 px/tick — 50 px = 11 ticks.
+at 220 press right
+at 280 release right
+at 250 shot t250_walking_into_flag
+at 290 shot t290_pickup_window
+at 360 shot t360_post_pickup
+
+at 660 end

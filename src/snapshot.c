@@ -602,7 +602,28 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
                   mid, m->chassis_id, (int)e->chassis_id);
         }
         bool was_alive = m->alive;
-        m->alive       = (e->state_bits & SNAP_STATE_ALIVE) != 0;
+        bool now_alive = (e->state_bits & SNAP_STATE_ALIVE) != 0;
+        /* Mid-round respawn: when a mech transitions from dead back
+         * to alive (CTF respawn timer fired on the server), the
+         * client needs to undo the host's death-side state. Call
+         * mech_respawn directly with the snapshot's pelvis position
+         * — same path the server uses, so the skeleton, dismember
+         * state, constraints, damage decals, hit-flash, pinned FX
+         * emitters, and interp ring all reset identically on both
+         * sides. The translate-by-(dx, dy) below then sees dx=dy=0
+         * (pelvis already at new_pelv) and stays put.
+         *
+         * Applies to BOTH the local mech AND remote mechs — pre-fix
+         * the gate `mid != local_mech_id` left the local player's
+         * respawned body wearing the previous life's decals + smoke
+         * trail while remote viewers saw a clean body (the user-
+         * reported sync bug). The local-mech reconcile path doesn't
+         * touch decals / dismember / FX, so the reset is safe. */
+        if (!was_alive && now_alive) {
+            Vec2 new_pelv = (Vec2){ new_px, new_py };
+            mech_respawn(w, mid, new_pelv);
+        }
+        m->alive       = now_alive;
         m->grounded    = (e->state_bits & SNAP_STATE_GROUNDED) != 0;
         m->facing_left = (e->state_bits & SNAP_STATE_FACING_LEFT) != 0;
         m->is_dummy    = (e->state_bits & SNAP_STATE_IS_DUMMY) != 0;

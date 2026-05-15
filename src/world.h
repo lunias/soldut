@@ -455,6 +455,16 @@ typedef struct {
     RemoteSnapBuf remote_snap_ring[REMOTE_SNAP_RING];
     int           remote_snap_head;
     int           remote_snap_count;   /* up to REMOTE_SNAP_RING */
+
+    /* Mid-round respawn target tick. Set by `mech_kill` to
+     * `w->tick + RESPAWN_DELAY_TICKS` for modes that respawn during a
+     * round (currently CTF — see documents/m5/06-ctf.md). The server's
+     * per-tick respawn step in main.c reads this: when `!alive && tick
+     * >= respawn_at_tick && phase == ACTIVE`, it calls `mech_respawn`
+     * with a fresh spawn point. 0 = no pending respawn (FFA/TDM still
+     * uses round-end repawn). Server-authoritative; clients mirror the
+     * alive transition through the existing snapshot path. */
+    uint64_t      respawn_at_tick;
 } Mech;
 
 /* ---- Projectiles (SoA, M3+).
@@ -751,6 +761,16 @@ typedef struct Flag {
 } Flag;
 
 #define FLAG_TOUCH_RADIUS_PX     36.0f
+/* Render-side staff height (see render.c::draw_flag). The touch test
+ * in ctf_step uses this so that the chest can pick up the flag from
+ * ANY point along the visible staff, not just the point at the base.
+ * Without this, maps that author the flag base low on the platform
+ * (chest sits 50+ px above platform top while flag base sits 16 px
+ * above platform top — Crossfire is the example) had pickup that
+ * never fired because chest-to-base distance always exceeded the
+ * touch radius. Keep this number in sync with the render's staff_top
+ * offset. */
+#define FLAG_STAFF_HEIGHT_PX     28.0f
 #define FLAG_AUTO_RETURN_TICKS   (30u * 60u)   /* 30 s @ 60 Hz */
 #define FLAG_CAPTURE_DEFAULT     5             /* score_limit default for CTF */
 

@@ -1358,6 +1358,8 @@ static void apply_chat_send(Game *g, const char *text) {
 
 typedef struct PlayerListCtx {
     const LobbyState *lobby;
+    LobbyState       *lobby_mut;  /* same lobby, writable — host-side mutations */
+    Game             *host_game;  /* same game, writable — for host-only wire sends */
     const int        *order;
     int               n;
     int               mode;       /* MatchModeId — drives team chip text/colour */
@@ -1399,19 +1401,54 @@ static void player_row(const UIContext *u, Rectangle row, int idx,
 
     /* Team chip — only show colour bias for TDM/CTF; FFA gets a
      * neutral gray "FFA" chip so we don't imply a team that doesn't
-     * exist. */
+     * exist. For bot rows in TDM/CTF the host can click the chip to
+     * toggle the bot's team (RED↔BLUE) — bots can't change their own
+     * team from a UI of their own, so the host owns this choice. */
     Color tc = team_color_for_mode(s->team, ctx->mode);
     int chip_x = (int)row.x + (int)(240 * u->scale);
     int chip_y = (int)row.y + (int)(6 * u->scale);
     int chip_w = (int)(64 * u->scale);
     int chip_h = (int)(row.height - 12 * u->scale);
-    DrawRectangle(chip_x, chip_y, chip_w, chip_h, tc);
+    Rectangle chip_r = (Rectangle){ (float)chip_x, (float)chip_y,
+                                    (float)chip_w, (float)chip_h };
+    bool chip_clickable = ctx->host_view && s->is_bot &&
+                          (ctx->mode == MATCH_MODE_TDM ||
+                           ctx->mode == MATCH_MODE_CTF);
+    bool chip_hover = chip_clickable && ui_point_in_rect(u->mouse, chip_r);
+    if (chip_hover) {
+        /* Brighten on hover so the host sees the affordance. */
+        tc.r = (unsigned char)((tc.r > 215) ? 255 : tc.r + 40);
+        tc.g = (unsigned char)((tc.g > 215) ? 255 : tc.g + 40);
+        tc.b = (unsigned char)((tc.b > 215) ? 255 : tc.b + 40);
+    }
+    DrawRectangleRec(chip_r, tc);
+    if (chip_clickable) {
+        DrawRectangleLinesEx(chip_r, u->scale, (Color){ 240, 240, 240, 255 });
+    }
     const char *tn = team_name_for_mode(s->team, ctx->mode);
     int tn_w = ui_measure(u, tn, 16);
     ui_draw_text(u, tn,
                  chip_x + (chip_w - tn_w) / 2,
                  chip_y + (chip_h - (int)(16 * u->scale)) / 2,
                  16, BLACK);
+    if (chip_clickable && chip_hover && u->mouse_pressed && ctx->host_game) {
+        int new_team = (s->team == MATCH_TEAM_RED) ? MATCH_TEAM_BLUE
+                                                   : MATCH_TEAM_RED;
+        /* Post-wan-fixes-16 the host UI runs as NET_ROLE_CLIENT against
+         * the in-process server thread — so a direct lobby_set_team
+         * here mutates the host UI's local copy ONLY, never the
+         * server's canonical lobby. Send over the wire (which the
+         * server validates as "from host slot") so the change reaches
+         * the server, gets re-broadcast to every peer, and shows up
+         * symmetrically on both windows. The native NET_ROLE_SERVER
+         * branch (offline / standalone) goes straight to the lobby
+         * helper. */
+        if (ctx->host_game->net.role == NET_ROLE_CLIENT) {
+            net_client_send_bot_team(&ctx->host_game->net, slot, new_team);
+        } else if (ctx->lobby_mut) {
+            lobby_set_team(ctx->lobby_mut, slot, new_team);
+        }
+    }
 
     /* Bot tier chip — placed to the LEFT of the [Remove] button on
      * the bot row. Per-tier accent color signals difficulty at a
@@ -1913,7 +1950,10 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
      * dedicated binary (no UI). */
     bool host_view = is_host;
     PlayerListCtx pctx = {
-        .lobby = &g->lobby, .order = order, .n = n,
+        .lobby = &g->lobby,
+        .lobby_mut = host_view ? &g->lobby : NULL,
+        .host_game = host_view ? g : NULL,
+        .order = order, .n = n,
         .mode = (int)g->match.mode,
         .ui_state = L,
         .host_view = host_view,

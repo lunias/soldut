@@ -89,6 +89,15 @@ enum {
      * (= current bot count) so names stay stable across hosts.
      * Removal reuses LOBBY_KICK — see server_handle_lobby_kick_or_ban. */
     NET_MSG_LOBBY_ADD_BOT      = 35,    /* host → server (host only)          */
+    /* M6 P04+ — host clicks a bot's team chip to flip RED↔BLUE in TDM
+     * / CTF. Bots can't pick their own team, so the host owns this
+     * choice. Body: 2 bytes (u8 target_slot, u8 new_team). Server
+     * validates sender is host AND target is a bot AND new_team is in
+     * MATCH_TEAM_RED / _BLUE, then mutates the canonical lobby and
+     * re-broadcasts the slot table. (Cosmetic broadcast — the server
+     * already runs auto-balance at round start, but mid-lobby the
+     * host's manual pick stays authoritative until then.) */
+    NET_MSG_LOBBY_BOT_TEAM     = 36,    /* host → server (host only)          */
     NET_MSG_LOBBY_COUNTDOWN    = 30,    /* server → client: auto-start tick   */
     NET_MSG_LOBBY_ROUND_START  = 31,    /* server → client: enter MATCH       */
     NET_MSG_LOBBY_ROUND_END    = 32,    /* server → client: enter SUMMARY     */
@@ -501,6 +510,10 @@ void net_client_send_map_vote   (NetState *ns, int choice /*0/1/2*/);
 void net_client_send_kick       (NetState *ns, int target_slot);
 void net_client_send_add_bot    (NetState *ns, uint8_t tier);
 void net_client_send_ban        (NetState *ns, int target_slot);
+/* Host-only — change a bot slot's team (RED ↔ BLUE) in TDM / CTF.
+ * Server validates sender is host AND target is a bot. A non-host
+ * call is silently dropped server-side. */
+void net_client_send_bot_team   (NetState *ns, int target_slot, int new_team);
 /* wan-fixes-6 — host pushes a mode / map / score / time / ff update
  * to the dedicated server. Server validates the sender is the
  * `slot.is_host == true` peer; non-host sends are silently dropped.

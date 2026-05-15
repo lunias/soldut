@@ -1,0 +1,35 @@
+# 2p_bot_team_sync — client A (host UI, first to connect → is_host=true
+# slot 0). Runs against a `--dedicated PORT` server (mirrors the
+# wan-fixes-16 production path where the "Host Server" UI spawns a
+# server thread and joins as a regular client). Verifies that when
+# the host clicks a bot's team chip in the lobby, the
+# NET_MSG_LOBBY_BOT_TEAM wire message reaches the server, gets
+# validated, mutated into the canonical lobby, and re-broadcast to
+# every peer — pre-fix the click only updated the host UI's local
+# lobby copy.
+
+window 1280 720
+out build/shots/net/dedi/2p_bot_team_sync.client_a
+network connect 127.0.0.1:{{PORT}}
+name HostRed
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 30 shot t30_no_bot_yet
+
+# Host adds a bot (Veteran tier=1). Since both clients connect before
+# any tick fires (client B joins ~0.3 s after A), the bot lands at
+# slot 2: client A=slot 0 (is_host), client B=slot 1, bot=slot 2.
+at 40 add_bot 1
+at 70 shot t70_bot_added_red
+
+# Flip bot (slot 2) RED → BLUE. Drives net_client_send_bot_team —
+# same path the lobby UI's clickable chip uses.
+at 100 bot_team 2 2
+at 130 shot t130_bot_blue
+
+# Flip back BLUE → RED to verify the operation is reversible.
+at 180 bot_team 2 1
+at 210 shot t210_bot_red_again
+
+at 280 end

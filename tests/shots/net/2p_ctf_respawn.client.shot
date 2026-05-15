@@ -1,0 +1,32 @@
+# 2p_ctf_respawn — client (BLUE). Stationary. The host kills our mech
+# via kill_peer at tick 250; we should mirror the death state, then
+# mirror the respawn at tick ~430. Crucial assertions live in the host
+# log; this script just keeps the connection alive and captures
+# frames so the contact sheet shows what the client renders.
+
+window 1280 720
+out build/shots/net/client_ctf_respawn
+network connect 127.0.0.1:24033
+name ClientBlue
+
+spawn_at 800 1100
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 140 shot t140_round_start
+at 200 shot t200_alive_settled
+
+# Host kills us at tick 250. The next snapshot (~30 Hz = ~2 ticks
+# later) flips our local mech to alive=false.
+at 260 shot t260_just_died
+at 320 shot t320_dead_ragdoll
+
+# Pre-respawn snapshot.
+at 425 shot t425_pre_respawn
+
+# Server respawns us at tick 430. Snapshot mirror lands shortly after.
+at 440 shot t440_post_respawn
+at 470 shot t470_respawn_settled
+at 600 shot t600_round_still_active
+
+at 660 end

@@ -66,6 +66,8 @@ typedef enum {
     EV_KICK_MODAL,    /* P09 host-only — show confirmation modal for slot (ax) */
     EV_BAN_MODAL,     /* P09 host-only — show ban confirmation modal for slot (ax) */
     EV_VOTE_MAP,      /* P09 — cast a map vote (ax = choice 0/1/2) */
+    EV_BOT_TEAM,      /* host-only — flip bot's team (ax = slot, ay = team) */
+    EV_ADD_BOT,       /* host-only — send ADD_BOT (ax = BotTier 0..3) */
 } EventKind;
 
 typedef struct {
@@ -555,6 +557,29 @@ static bool parse_script(const char *path, Script *out) {
                 if (args[0]) sscanf(args, "%d", &team);
                 ev.kind = EV_TEAM_CHANGE;
                 ev.ax = (float)team;
+                script_push(out, ev);
+            } else if (strcmp(ev_kind, "bot_team") == 0) {
+                /* "at <tick> bot_team <slot> <team>" — host clicks a
+                 * bot row's team chip to flip RED↔BLUE. Drives the
+                 * same path as the lobby UI: NET_MSG_LOBBY_BOT_TEAM
+                 * over the wire when running as a client (host UI
+                 * post wan-fixes-16), direct lobby_set_team on a
+                 * native server. */
+                int slot = -1, team = MATCH_TEAM_RED;
+                if (args[0]) sscanf(args, "%d %d", &slot, &team);
+                ev.kind = EV_BOT_TEAM;
+                ev.ax = (float)slot;
+                ev.ay = (float)team;
+                script_push(out, ev);
+            } else if (strcmp(ev_kind, "add_bot") == 0) {
+                /* "at <tick> add_bot <tier>" — host clicks the "Add
+                 * Bot" button. Drives net_client_send_add_bot under
+                 * the hood; server adds a bot slot and re-broadcasts
+                 * LOBBY_LIST. */
+                int tier = 1;  /* veteran */
+                if (args[0]) sscanf(args, "%d", &tier);
+                ev.kind = EV_ADD_BOT;
+                ev.ax = (float)tier;
                 script_push(out, ev);
             } else if (strcmp(ev_kind, "flag_carry") == 0) {
                 /* "at <tick> flag_carry <flag_idx>" — force flag
@@ -1297,6 +1322,9 @@ static void shot_host_flow(Game *g, float dt) {
             /* P07 — CTF tick (server only). Same shape as main.c. */
             ctf_step(g, dt);
             shot_apply_new_kills(g);
+            /* Mid-round respawn — mirrors main.c. CTF-only inside
+             * match_process_respawns. */
+            match_process_respawns(&g->world, &g->match, &g->lobby);
             /* Mirror main.c's per-tick fan-out queues. Without these,
              * the client sees no remote HIT_EVENT / FIRE_EVENT /
              * PICKUP_STATE during shot tests — and bugs like the P09
@@ -1882,6 +1910,30 @@ int shotmode_run(const char *script_path) {
                     }
                     break;
                 }
+                case EV_BOT_TEAM: {
+                    int slot = (int)ev->ax;
+                    int team = (int)ev->ay;
+                    if (game.net.role == NET_ROLE_CLIENT) {
+                        net_client_send_bot_team(&game.net, slot, team);
+                        LOG_I("shot: bot_team slot=%d team=%d (sent to host)",
+                              slot, team);
+                    } else if (slot >= 0 && slot < MAX_LOBBY_SLOTS &&
+                               game.lobby.slots[slot].in_use)
+                    {
+                        lobby_set_team(&game.lobby, slot, team);
+                        LOG_I("shot: bot_team slot=%d team=%d (host-direct)",
+                              slot, team);
+                    }
+                    break;
+                }
+                case EV_ADD_BOT: {
+                    int tier = (int)ev->ax;
+                    if (game.net.role == NET_ROLE_CLIENT) {
+                        net_client_send_add_bot(&game.net, (uint8_t)tier);
+                        LOG_I("shot: add_bot tier=%d (sent to host)", tier);
+                    }
+                    break;
+                }
                 case EV_ARM_CARRY: {
                     int fidx = (int)ev->ax;
                     int mid  = (int)ev->ay;
@@ -2368,6 +2420,8 @@ int shotmode_run(const char *script_path) {
             case EV_KICK_MODAL:
             case EV_BAN_MODAL:
             case EV_VOTE_MAP:
+            case EV_BOT_TEAM:
+            case EV_ADD_BOT:
                 /* Single-player has no peers / lobby vote state. */
                 break;
             }
@@ -2423,6 +2477,10 @@ int shotmode_run(const char *script_path) {
          * dirty bit is cleared here without broadcasting (no client
          * to inform in single-player). */
         ctf_step(&game, TICK_DT);
+        /* Mid-round respawn — same gating as main.c. Pass NULL lobby
+         * so the helper uses mech.team directly (no slot mapping in
+         * single-player shot mode). */
+        match_process_respawns(&game.world, &game.match, NULL);
         game.world.flag_state_dirty = false;
         game.input = in;
 

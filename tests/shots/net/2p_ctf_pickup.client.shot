@@ -1,0 +1,27 @@
+# 2p_ctf_pickup — client (BLUE) walks into the RED flag and verifies
+# pickup fires server-side, broadcasts back to client. Pairs with
+# 2p_ctf_pickup.host.shot.
+#
+# RED flag at (480, 1520). Client spawn at x=530, walks LEFT into the
+# flag staff.
+
+window 1280 720
+out build/shots/net/client_ctf_pickup
+network connect 127.0.0.1:24034
+name ClientBlue
+
+spawn_at 530 1496
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 140 shot t140_round_start
+at 200 shot t200_settled_near_red_flag
+
+# Walk LEFT into the RED flag (50 px = 11 ticks of run).
+at 220 press left
+at 280 release left
+at 250 shot t250_walking_into_flag
+at 290 shot t290_pickup_window
+at 360 shot t360_post_pickup
+
+at 660 end

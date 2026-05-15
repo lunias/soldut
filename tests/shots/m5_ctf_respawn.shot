@@ -1,0 +1,46 @@
+# M6 — CTF mid-round respawn flow.
+#
+# Verifies the user-reported bug fix: in CTF, killing a player must NOT
+# end the round; the dead mech respawns after RESPAWN_DELAY_TICKS (180
+# ticks = 3 s at 60 Hz) and play continues. Round-end is gated on
+# capture-score / time-limit only.
+#
+# Local mech (mech_id 0, team RED) gets killed by kill_peer at tick 30.
+# After the 3-second respawn delay it should be alive again at a fresh
+# RED spawn. Match phase must stay ACTIVE the whole time — CTF skips
+# the solo_warning rule entirely so the round doesn't end on first kill.
+
+window 1280 720
+out build/shots/m5_ctf_respawn
+seed 1 2
+
+map crossfire
+mode ctf
+
+# Park the player on a known platform so the pre-kill frame is stable.
+spawn_at 600 950
+
+contact_sheet ctf_respawn cols 4 cell 320 180
+
+# Tick 1: pristine spawn — full HP, alive.
+at 1   shot t01_alive_pre_kill
+
+# Tick 30: kill the local mech via direct mech_kill. Carrier state is
+# irrelevant — we just need the death to arm respawn_at_tick. The next
+# tick the mech is in ragdoll free-fall.
+at 30 kill_peer 0
+at 35  shot t35_just_killed
+at 90  shot t90_dead_ragdoll
+
+# RESPAWN_DELAY_TICKS = 180; arm tick = 30, so respawn lands at tick
+# 210. Match phase should still be MATCH_PHASE_ACTIVE — no round-end.
+at 200 shot t200_pre_respawn
+at 215 shot t215_post_respawn_alive
+at 240 shot t240_settled_after_respawn
+
+# Keep playing past where solo_warning would normally have triggered
+# (3 s after the kill = tick 210; pre-fix the round would have ended
+# at or before this point). 350 well past it.
+at 350 shot t350_round_still_active
+
+at 360 end

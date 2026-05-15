@@ -1056,7 +1056,13 @@ static void host_match_flow_step(Game *g, float dt) {
              * coincide with a flag touch sees the post-touch state.
              * No-op outside CTF rounds. */
             ctf_step(g, dt);
+            /* Mid-round respawn — runs AFTER apply_new_kills below so a
+             * kill on this tick arms `respawn_at_tick` to a future
+             * value, then the timer elapses RESPAWN_DELAY_TICKS later
+             * and this call refreshes the body. CTF-only — see
+             * match_process_respawns for the gating. */
             apply_new_kills(g);
+            match_process_respawns(&g->world, &g->match, &g->lobby);
             broadcast_new_hits(g);
             broadcast_new_fires(g);
             broadcast_new_pickups(g);

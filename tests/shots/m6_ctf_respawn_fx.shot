@@ -1,0 +1,41 @@
+# Reproduce "respawned mech still has smoke" bug. Player takes damage
+# (low limb HP) until smoke is emitting, dies, waits for respawn, and
+# we capture frames around the respawn to see what FX persists.
+#
+# Smoke spawns at limb HP < 30% (simulate.c). To drive this we use a
+# debug "damage" path — but there isn't one in shotmode. So instead
+# we kill the mech with kill_peer which sets HP=0 (limb HP > 30% so
+# no smoke from low-HP gating before death, but FX_STUMP and the
+# 64-particle blood spray from mech_dismember fire on death). Then
+# we wait the 180-tick respawn delay and check the respawned body.
+
+window 1280 720
+out build/shots/m6_ctf_respawn_fx
+seed 1 2
+
+map crossfire
+mode ctf
+
+# Park on the BLUE flag platform — small spawn island so respawn
+# is likely to land back on the same RED platform.
+spawn_at 600 1496
+
+contact_sheet ctf_respawn_fx cols 4 cell 320 180
+
+at 1 shot t01_pristine
+
+# Kill the mech.
+at 30 kill_peer 0
+at 60 shot t60_dying_fx
+at 120 shot t120_ragdoll_settling
+
+# FX_STUMP duration is 1.5s = 90 ticks; FX_BLOOD up to 1.5s.
+# So by tick 30+90+90 = 210, all death FX should be gone.
+at 210 shot t210_pre_respawn_fx_cleared
+
+# Respawn at tick 30 + 180 = 210.
+at 215 shot t215_post_respawn_check
+at 230 shot t230_post_respawn_settled
+at 260 shot t260_post_respawn_late
+
+at 300 end

@@ -1,0 +1,25 @@
+# 2p_ctf_respawn_clean — client (BLUE). The host kills the client's
+# mech, then the client mirrors the respawn 180 ticks later. The
+# CLIENT's own camera follows the client's mech — pre-fix the
+# respawned local body still wore the previous life's damage decals
+# (my snapshot_apply gate was `mid != local_mech_id`).
+
+window 1280 720
+out build/shots/net/client_ctf_respawn_clean
+network connect 127.0.0.1:24035
+name ClientBlue
+
+spawn_at 800 1100
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 140 shot t140_round_start
+at 200 shot t200_alive_settled
+at 260 shot t260_just_died
+at 320 shot t320_dead_ragdoll
+at 425 shot t425_pre_respawn
+at 440 shot t440_post_respawn
+at 470 shot t470_respawn_settled
+at 600 shot t600_round_still_active
+
+at 660 end

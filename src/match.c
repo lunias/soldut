@@ -2,11 +2,69 @@
 
 #include "lobby.h"
 #include "log.h"
+#include "maps.h"
+#include "mech.h"
 #include "world.h"
 
 #include <stdint.h>
 #include <string.h>
 #include <strings.h>
+
+void match_process_respawns(World *w, MatchState *m, LobbyState *lobby) {
+    if (!w || !m) return;
+    if (m->phase != MATCH_PHASE_ACTIVE) return;
+    if (m->mode != MATCH_MODE_CTF) return;          /* CTF-only for now */
+    if (!w->authoritative) return;
+
+    /* Pre-build picked_positions from currently-alive non-dummy mechs
+     * so the spawn picker keeps respawns away from active fighters
+     * (matches the lobby_spawn_round_mechs greedy max-min strategy). */
+    Vec2 picked[MAX_MECHS];
+    int  n_picked = 0;
+    for (int i = 0; i < w->mech_count; ++i) {
+        const Mech *mm = &w->mechs[i];
+        if (!mm->alive)   continue;
+        if (mm->is_dummy) continue;
+        if (n_picked < (int)(sizeof picked / sizeof picked[0])) {
+            picked[n_picked++] = mech_chest_pos(w, i);
+        }
+    }
+
+    for (int mi = 0; mi < w->mech_count; ++mi) {
+        Mech *mm = &w->mechs[mi];
+        if (mm->alive)                          continue;
+        if (mm->is_dummy)                       continue;
+        if (mm->respawn_at_tick == 0)           continue;
+        if (w->tick < mm->respawn_at_tick)      continue;
+        /* Slot is the authority on "what team to respawn into" — a
+         * player can switch to spectator while dead and we honor that
+         * by suppressing the respawn. Shot-mode runs don't set up
+         * lobby slots, so a slot of -1 is normal; fall back to
+         * the mech's own team (the source of truth for combat). */
+        int slot = lobby ? lobby_find_slot_by_mech(lobby, mi) : -1;
+        int spawn_team = mm->team;
+        if (slot >= 0 && lobby) {
+            if (!lobby->slots[slot].in_use) {
+                mm->respawn_at_tick = 0;
+                continue;
+            }
+            spawn_team = lobby->slots[slot].team;
+        }
+        if (spawn_team == MATCH_TEAM_NONE) {
+            /* Spectator — leave the body grounded until they re-pick. */
+            mm->respawn_at_tick = 0;
+            continue;
+        }
+        Vec2 spawn = map_pick_separated_spawn(
+            (MapId)m->map_id, &w->level,
+            spawn_team, m->mode,
+            picked, n_picked);
+        mech_respawn(w, mi, spawn);
+        if (n_picked < (int)(sizeof picked / sizeof picked[0])) {
+            picked[n_picked++] = spawn;
+        }
+    }
+}
 
 void match_shot_log_phase(const char *tag, const MatchState *m) {
     if (!m) return;
@@ -170,7 +228,13 @@ bool match_apply_kill(MatchState *m, LobbyState *lobby,
         } else {
             ks->kills++;
             ks->score++;
-            if (m->mode == MATCH_MODE_TDM || m->mode == MATCH_MODE_CTF) {
+            /* Team-score-per-kill is a TDM-only rule. In CTF the team
+             * score tracks CAPTURES (+5 per capture, see ctf.c), not
+             * kills — adding here would let a streak of frags hit the
+             * capture limit and end the round, which is the
+             * user-reported "I killed my opponent and the next round
+             * started" bug. Per documents/m5/06-ctf.md §"Scoring". */
+            if (m->mode == MATCH_MODE_TDM) {
                 if (ks->team >= 0 && ks->team < MATCH_TEAM_COUNT) {
                     m->team_score[ks->team]++;
                 }
@@ -201,6 +265,17 @@ bool match_round_should_end(const MatchState *m) {
 bool match_step_solo_warning(MatchState *m, const struct World *w, float dt) {
     if (!m || !w) return false;
     if (m->phase != MATCH_PHASE_ACTIVE) {
+        m->solo_warning_remaining = -1.0f;
+        return false;
+    }
+    /* CTF respawns dead players mid-round (see mech_respawn in mech.c)
+     * — the "only one alive" condition fires every time a player dies
+     * before their RESPAWN_DELAY_TICKS elapses, which would end the
+     * CTF round on the FIRST kill rather than after capture-score is
+     * met. Disable solo_warning for CTF entirely so the round runs
+     * out under the existing score-limit / time-limit gates per
+     * documents/m5/06-ctf.md §"Round end". */
+    if (m->mode == MATCH_MODE_CTF) {
         m->solo_warning_remaining = -1.0f;
         return false;
     }
