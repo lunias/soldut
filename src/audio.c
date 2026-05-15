@@ -325,6 +325,10 @@ static const SfxManifestEntry g_sfx_manifest[] = {
     /* --- Death --- */
     { SFX_KILL_FANFARE,      "assets/sfx/kill_fanfare.wav",      3, 0.75f, AUDIO_BUS_SFX },
     { SFX_DEATH_GRUNT,       "assets/sfx/death_grunt.wav",       3, 0.80f, AUDIO_BUS_SFX },
+
+    /* --- M6 countdown-fix — pre-round race-start cues --- */
+    { SFX_COUNTDOWN_BEEP,    "assets/sfx/countdown_beep.wav",    2, 0.65f, AUDIO_BUS_UI  },
+    { SFX_COUNTDOWN_GO,      "assets/sfx/countdown_go.wav",      2, 0.85f, AUDIO_BUS_UI  },
 };
 
 #define SFX_MANIFEST_COUNT  (int)(sizeof g_sfx_manifest / sizeof g_sfx_manifest[0])

@@ -191,6 +191,9 @@ void lobby_ui_init(LobbyUIState *L) {
     L->ban_target_slot  = -1;
     snprintf(L->connect_addr, sizeof L->connect_addr, "127.0.0.1:%u",
              (unsigned)SOLDUT_DEFAULT_PORT);
+    L->countdown_last_int   = -1;
+    L->countdown_last_phase = -1;
+    L->go_visible_until     = 0.0;
 }
 
 void lobby_ui_reset_session(LobbyUIState *L) {
@@ -736,18 +739,22 @@ void host_setup_screen_draw_overlay(LobbyUIState *L, int sw, int sh) {
  * MODE_MATCH render branches. Decides whether the "Loading match…"
  * overlay should be visible right now. Latches the t0 timestamp on
  * the rising edge so the elapsed-time pill counts from when the user
- * first saw the overlay. */
+ * first saw the overlay.
+ *
+ * M6 countdown-fix — also drives the per-second countdown beep + the
+ * GO! splash visibility window. The countdown ticker is on the wire
+ * (match_encode → countdown_remaining as u8 deciseconds) so host +
+ * client cross integer boundaries within ~50 ms of each other; both
+ * peers run this same tick-detection locally. */
 void lobby_ui_update_match_loading(LobbyUIState *L, Game *g) {
     if (!L || !g) return;
     bool active = false;
-    /* Last sliver of countdown — start_round is firing on the host
-     * right about now, ROUND_START is in flight. */
-    if (g->match.phase == MATCH_PHASE_COUNTDOWN &&
-        g->match.countdown_remaining > 0.0f &&
-        g->match.countdown_remaining < 1.0f)
-    {
-        active = true;
-    }
+    /* M6 countdown-fix — DO NOT cover the last second of countdown
+     * with the loading overlay. Pre-fix, "1" was hidden under the
+     * "Loading match..." panel and "GO!" never rendered because the
+     * phase had already flipped to ACTIVE by the time the panel
+     * cleared. The local-mech-missing branch below still covers the
+     * actual "no world to render yet" case. */
     /* We've entered MODE_MATCH but the first snapshot hasn't
      * resolved our local mech yet — render is about to draw an empty
      * world. */
@@ -759,6 +766,53 @@ void lobby_ui_update_match_loading(LobbyUIState *L, Game *g) {
         L->match_loading_t0 = GetTime();
     }
     L->match_loading = active;
+
+    /* M6 countdown-fix — per-second beep + GO! splash latch. Tracks
+     * the integer second the bot/player most recently saw on screen.
+     * When the integer drops (3 → 2, 2 → 1, 1 → 0/GO!) we play a
+     * sound and (for GO!) latch the splash visible window so it
+     * lingers ~0.6 s into the ACTIVE phase. */
+    int phase_now = (int)g->match.phase;
+    int int_now = -1;
+    if (phase_now == MATCH_PHASE_COUNTDOWN) {
+        float remaining = g->match.countdown_remaining;
+        if (remaining < 0.0f) remaining = 0.0f;
+        int_now = (int)ceilf(remaining);
+        if (int_now < 1) int_now = 1;
+    }
+
+    /* Detect "the integer just dropped one notch". Edge cases:
+     *   - First time we observe COUNTDOWN: just record, don't beep
+     *     (otherwise late-joining clients beep mid-countdown).
+     *   - Phase change from COUNTDOWN → anything else: that IS the
+     *     "GO" moment if the previous int was 1.
+     *   - Phase change from anything else → COUNTDOWN (round restart):
+     *     reset the tracker so the next 3 → 2 transition beeps. */
+    if (L->countdown_last_phase != MATCH_PHASE_COUNTDOWN &&
+        phase_now == MATCH_PHASE_COUNTDOWN)
+    {
+        L->countdown_last_int = int_now;   /* arm without beeping the 3 */
+        L->go_visible_until   = 0.0;
+    } else if (L->countdown_last_phase == MATCH_PHASE_COUNTDOWN &&
+               phase_now == MATCH_PHASE_COUNTDOWN &&
+               int_now >= 0 && int_now < L->countdown_last_int)
+    {
+        audio_play_global(SFX_COUNTDOWN_BEEP);
+        SHOT_LOG("countdown: beep at int=%d (was %d) remaining=%.2f",
+                 int_now, L->countdown_last_int,
+                 (double)g->match.countdown_remaining);
+        L->countdown_last_int = int_now;
+    } else if (L->countdown_last_phase == MATCH_PHASE_COUNTDOWN &&
+               phase_now != MATCH_PHASE_COUNTDOWN)
+    {
+        /* COUNTDOWN ended — fire the GO! cue + latch splash visibility. */
+        audio_play_global(SFX_COUNTDOWN_GO);
+        SHOT_LOG("countdown: GO at phase %d → %d",
+                 L->countdown_last_phase, phase_now);
+        L->go_visible_until = GetTime() + 0.6;
+        L->countdown_last_int = -1;
+    }
+    L->countdown_last_phase = phase_now;
 }
 
 void match_loading_overlay_draw(LobbyUIState *L, Game *g, int sw, int sh) {
@@ -2529,7 +2583,7 @@ void summary_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
 
 /* ---- Match overlay (top-of-screen score/timer in MODE_MATCH) ----- */
 
-void match_overlay_draw(Game *g, int sw, int sh) {
+void match_overlay_draw(LobbyUIState *L, Game *g, int sw, int sh) {
     (void)sh;
     /* Recompute scale here; we're not inside a UIContext for the
      * overlay (called from draw_diag). */
@@ -2575,30 +2629,59 @@ void match_overlay_draw(Game *g, int sw, int sh) {
     /* M6 P07 — pre-round countdown overlay. Big number in the screen
      * center counts 3 → 2 → 1 → "GO!" while inputs are locked. Lets
      * the player survey the terrain from their spawn and gives the
-     * snapshot stream a beat to settle before combat starts. */
-    if (g->match.phase == MATCH_PHASE_COUNTDOWN) {
-        float remaining = g->match.countdown_remaining;
-        if (remaining < 0.0f) remaining = 0.0f;
+     * snapshot stream a beat to settle before combat starts.
+     *
+     * M6 countdown-fix:
+     *   - "GO!" splash lingers ~0.6 s after countdown_remaining hits
+     *     0 via L->go_visible_until (latched in
+     *     lobby_ui_update_match_loading on the COUNTDOWN→ACTIVE edge).
+     *     Pre-fix the phase flipped on the same tick remaining hit 0
+     *     so GO! never rendered.
+     *   - Numerals draw from UI_FONT_HUGE (192 px atlas) instead of
+     *     UI_FONT_DISPLAY (48 px) so the 240 px screen-center render
+     *     samples crisp instead of bilinear-blurry.
+     *   - Outer outline + inner fill (was: drop shadow + fill)
+     *     reads cleanly over both bright and dark backdrops. */
+    bool show_countdown = (g->match.phase == MATCH_PHASE_COUNTDOWN &&
+                           g->match.countdown_remaining > 0.0f);
+    bool show_go        = (L && L->go_visible_until > GetTime());
+    if (show_countdown || show_go) {
         char big[16];
-        if (remaining > 0.0f) {
+        if (show_go) {
+            snprintf(big, sizeof big, "GO!");
+        } else {
+            float remaining = g->match.countdown_remaining;
+            if (remaining < 0.0f) remaining = 0.0f;
             int   n = (int)ceilf(remaining);
             if (n < 1) n = 1;
             if (n > 99) n = 99;     /* defensive cap; countdown is always 1..3 */
             snprintf(big, sizeof big, "%d", n);
-        } else {
-            snprintf(big, sizeof big, "GO!");
         }
-        Font fnt = ui_font_for(UI_FONT_DISPLAY);
+        Font fnt = ui_font_for(UI_FONT_HUGE);
         if (fnt.texture.id == 0) fnt = GetFontDefault();
         float font_px = 240.0f * sc;        /* huge — centered */
         float spacing = font_px / 12.0f;
         Vector2 sz_v = MeasureTextEx(fnt, big, font_px, spacing);
         float bx = (float)sw * 0.5f - sz_v.x * 0.5f;
         float by = (float)GetScreenHeight() * 0.5f - sz_v.y * 0.5f;
-        /* Soft drop shadow + bright fill — readable on any backdrop. */
-        DrawTextEx(fnt, big, (Vector2){ bx + 4.0f * sc, by + 4.0f * sc },
-                   font_px, spacing, (Color){0, 0, 0, 200});
+        /* GO! pulses brighter during its 0.6 s window. */
+        Color fill = show_go
+            ? (Color){255, 240, 120, 255}    /* gold pulse */
+            : (Color){240, 240, 200, 255};   /* cream — countdown */
+        /* 8-direction outline so the numeral reads on busy backdrops
+         * (foundry sprites, slipstream catwalk parallax, etc.). */
+        Color outline = (Color){0, 0, 0, 230};
+        float o = 3.0f * sc;
+        const Vector2 dirs[8] = {
+            {-o,-o}, { 0,-o}, { o,-o},
+            {-o, 0},          { o, 0},
+            {-o, o}, { 0, o}, { o, o},
+        };
+        for (int k = 0; k < 8; ++k) {
+            DrawTextEx(fnt, big, (Vector2){ bx + dirs[k].x, by + dirs[k].y },
+                       font_px, spacing, outline);
+        }
         DrawTextEx(fnt, big, (Vector2){ bx, by },
-                   font_px, spacing, (Color){240, 240, 200, 255});
+                   font_px, spacing, fill);
     }
 }

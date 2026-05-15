@@ -146,6 +146,19 @@ mkwav "$K/kenney_sci-fi-sounds/Audio/thrusterFire_003.ogg"           "$SFX/jet_i
 mkwav "$K/kenney_impact-sounds/Audio/impactPlate_heavy_000.ogg"  "$SFX/landing_hard.wav"
 mkwav "$K/kenney_impact-sounds/Audio/impactSoft_medium_000.ogg"  "$SFX/landing_soft.wav"
 
+# M6 countdown-fix — pre-round 3/2/1/GO! cues. Generated with
+# ffmpeg's lavfi sine source (no external CC0 input needed) so the
+# pitches are exact and the result is the canonical race-start
+# "bun bun bun BUUUN" pattern. BEEP is a 0.18 s 880 Hz tone; GO is
+# a longer 0.55 s 1320 Hz tone (5th interval up — reads as the
+# "release" beat).
+ffmpeg -y -loglevel error -f lavfi \
+       -i "sine=frequency=880:duration=0.18,volume=0.6,afade=t=in:st=0:d=0.005,afade=t=out:st=0.13:d=0.05" \
+       -ar 22050 -ac 1 -c:a pcm_s16le "$SFX/countdown_beep.wav"
+ffmpeg -y -loglevel error -f lavfi \
+       -i "sine=frequency=1320:duration=0.55,volume=0.7,afade=t=in:st=0:d=0.005,afade=t=out:st=0.45:d=0.1" \
+       -ar 22050 -ac 1 -c:a pcm_s16le "$SFX/countdown_go.wav"
+
 # ----- Servo loop (1) ----------------------------------------------
 # Continuous mech-presence hum — volume is modulated by velocity at
 # runtime. Source iteration: spaceEngine_000.ogg (5 s engine drone

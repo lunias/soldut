@@ -16,10 +16,14 @@
  * the parts of raylib that work.
  */
 
-/* M5 P13 — TTF fonts. Three faces ship under assets/fonts/:
+/* M5 P13 — TTF fonts. Four faces ship under assets/fonts/:
  *   BODY    — Atkinson Hyperlegible Regular (high-contrast accessible body)
  *   DISPLAY — VG5000 Regular (Velvetyne; map titles, kill-feed flag chips)
  *   MONO    — Steps Mono Thin (Velvetyne; HUD numerics)
+ *   HUGE    — VG5000 Regular at 192 px atlas; only used by full-screen
+ *             countdown numerals (rendered at ~240 px) where DISPLAY's
+ *             48 px atlas blurred when bilinear-upscaled 5×. (M6
+ *             countdown-fix.)
  * `ui_font_for` returns the matching Font when loaded, or raylib's default
  * font as graceful fallback so a fresh checkout without `assets/fonts/`
  * still renders text (just bilinear-blurry like M4). */
@@ -27,12 +31,14 @@ typedef enum {
     UI_FONT_BODY    = 0,
     UI_FONT_DISPLAY = 1,
     UI_FONT_MONO    = 2,
+    UI_FONT_HUGE    = 3,
     UI_FONT_COUNT
 } UIFontKind;
 
 extern Font g_ui_font_body;
 extern Font g_ui_font_display;
 extern Font g_ui_font_mono;
+extern Font g_ui_font_huge;
 extern bool g_ui_fonts_loaded;
 
 Font ui_font_for(UIFontKind kind);
