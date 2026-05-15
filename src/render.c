@@ -1050,7 +1050,10 @@ static void draw_stump_caps(const ParticlePool *p, const Mech *m,
     }
 }
 
-static void draw_mech_sprites(const ParticlePool *p, const ConstraintPool *cp,
+/* `static` dropped at M6 lobby-loadout-preview so `render_draw_mech_preview`
+ * can reuse the sprite path verbatim without touching draw_mech (which
+ * needs a Level for the capsule fallback's ray-clamp). */
+void draw_mech_sprites(const ParticlePool *p, const ConstraintPool *cp,
                               const Mech *m, bool is_local,
                               float alpha, Vec2 visual_offset) {
     const MechSpriteSet *set = &g_chassis_sprites[m->chassis_id];
@@ -1647,5 +1650,104 @@ void renderer_draw_frame(Renderer *r, World *w,
                      GetFPS(), internal_w, internal_h, window_w, window_h,
                      (double)scale);
         }
+    }
+}
+
+/* ---- M6 lobby-loadout-preview --------------------------------------- */
+/* Isolated mech render path used by the lobby's loadout preview modal.
+ * Caller-supplied ParticlePool holds 16 PART_* slots (typically filled
+ * from pose_compute output for the synthetic mech); ConstraintPool may
+ * be empty (bone_constraint_active returns true for unknown pairs, so
+ * all bones render). No Level is referenced — the held-weapon line
+ * fallback uses an unclamped DrawLineEx instead of draw_bone_clamped. */
+
+static void preview_draw_capsules(const ParticlePool *p,
+                                  const ConstraintPool *cp,
+                                  const Mech *m)
+{
+    int b = m->particle_base;
+    Color body = (Color){170, 180, 200, 255};
+    Color edge = (Color){ 30,  40,  60, 255};
+    Color leg_back  = (Color){body.r - 20, body.g - 20, body.b - 20, 255};
+    Color arm_back  = (Color){body.r - 30, body.g - 30, body.b - 30, 255};
+    Vec2 off = (Vec2){0, 0};
+
+    int back_hip   = m->facing_left ? PART_R_HIP   : PART_L_HIP;
+    int back_knee  = m->facing_left ? PART_R_KNEE  : PART_L_KNEE;
+    int back_foot  = m->facing_left ? PART_R_FOOT  : PART_L_FOOT;
+    int front_hip  = m->facing_left ? PART_L_HIP   : PART_R_HIP;
+    int front_knee = m->facing_left ? PART_L_KNEE  : PART_R_KNEE;
+    int front_foot = m->facing_left ? PART_L_FOOT  : PART_R_FOOT;
+    int back_sho   = m->facing_left ? PART_R_SHOULDER : PART_L_SHOULDER;
+    int back_elb   = m->facing_left ? PART_R_ELBOW    : PART_L_ELBOW;
+    int back_hnd   = m->facing_left ? PART_R_HAND     : PART_L_HAND;
+    int frnt_sho   = m->facing_left ? PART_L_SHOULDER : PART_R_SHOULDER;
+    int frnt_elb   = m->facing_left ? PART_L_ELBOW    : PART_R_ELBOW;
+    int frnt_hnd   = m->facing_left ? PART_L_HAND     : PART_R_HAND;
+
+    draw_bone_chk(p, cp, b + back_hip,  b + back_knee, 6.0f, leg_back, 1.0f, off);
+    draw_bone_chk(p, cp, b + back_knee, b + back_foot, 5.5f, leg_back, 1.0f, off);
+    draw_bone_chk(p, cp, b + PART_CHEST, b + PART_PELVIS, 13.0f, body, 1.0f, off);
+    {
+        Vec2 pv = particle_render_pos(p, b + PART_PELVIS, 1.0f);
+        DrawCircleV((Vector2){pv.x, pv.y}, 6.0f, body);
+    }
+    draw_bone_chk(p, cp, b + PART_L_HIP,      b + PART_R_HIP,      10.0f, body, 1.0f, off);
+    draw_bone_chk(p, cp, b + PART_L_SHOULDER, b + PART_R_SHOULDER, 10.0f, body, 1.0f, off);
+    draw_bone_chk(p, cp, b + front_hip,  b + front_knee, 6.5f, body, 1.0f, off);
+    draw_bone_chk(p, cp, b + front_knee, b + front_foot, 6.0f, body, 1.0f, off);
+    draw_bone_chk(p, cp, b + back_sho, b + back_elb, 5.0f, arm_back, 1.0f, off);
+    draw_bone_chk(p, cp, b + back_elb, b + back_hnd, 4.5f, arm_back, 1.0f, off);
+    draw_bone_chk(p, cp, b + PART_CHEST, b + PART_NECK, 7.0f, body, 1.0f, off);
+    {
+        Vec2 head = particle_render_pos(p, b + PART_HEAD, 1.0f);
+        DrawCircleV((Vector2){head.x, head.y}, 9.0f, body);
+        DrawCircleLines((int)head.x, (int)head.y, 9.0f, edge);
+    }
+    draw_bone_chk(p, cp, b + frnt_sho, b + frnt_elb, 5.5f, body, 1.0f, off);
+    draw_bone_chk(p, cp, b + frnt_elb, b + frnt_hnd, 5.0f, body, 1.0f, off);
+}
+
+void render_draw_mech_preview(const Mech *m,
+                              const ParticlePool *p,
+                              const ConstraintPool *cp,
+                              Vec2 aim_dir)
+{
+    if (!m || !p || !cp) return;
+
+    /* Body — sprite path when this chassis has a loaded atlas, else
+     * the simplified capsule fallback above (no Level dependency). */
+    const MechSpriteSet *set = &g_chassis_sprites[m->chassis_id];
+    if (set->atlas.id != 0) {
+        draw_mech_sprites(p, cp, m, /*is_local=*/true,
+                          /*alpha=*/1.0f, (Vec2){0, 0});
+    } else {
+        preview_draw_capsules(p, cp, m);
+    }
+
+    /* Held weapon at R_HAND, rotated by aim_dir. Same look as
+     * draw_held_weapon's primary branch, minus the World dependencies
+     * (last_fired flicker, muzzle-flash burst, invis alpha). */
+    int eff_weapon_id = m->weapon_id;
+    const WeaponSpriteDef *wp  = weapon_sprite_def(eff_weapon_id);
+    const Weapon          *wpn = weapon_def(eff_weapon_id);
+    if (!wp || !wpn) return;
+
+    int b = m->particle_base;
+    Vec2 rh = particle_render_pos(p, b + PART_R_HAND, 1.0f);
+    Color tint = (Color){255, 255, 255, 255};
+
+    if (g_weapons_atlas.id != 0) {
+        float angle = atan2f(aim_dir.y, aim_dir.x) * RAD2DEG;
+        DrawTexturePro(g_weapons_atlas, wp->src,
+                       (Rectangle){ rh.x, rh.y, wp->draw_w, wp->draw_h },
+                       wp->pivot_grip, angle, tint);
+    } else {
+        Vec2 muzzle = {
+            rh.x + aim_dir.x * wp->draw_w * 0.7f,
+            rh.y + aim_dir.y * wp->draw_w * 0.7f,
+        };
+        DrawLineEx((Vector2){rh.x, rh.y}, (Vector2){muzzle.x, muzzle.y},
+                   3.0f, (Color){ 50, 60, 80, 255 });
     }
 }

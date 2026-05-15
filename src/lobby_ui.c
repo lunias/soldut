@@ -194,6 +194,11 @@ void lobby_ui_init(LobbyUIState *L) {
     L->countdown_last_int   = -1;
     L->countdown_last_phase = -1;
     L->go_visible_until     = 0.0;
+
+    /* M6 lobby-loadout-preview — bind the preview's internal particle
+     * pool to its inline buffers + zero anim state. Render target is
+     * created lazily on first open so this is cheap. */
+    loadout_preview_init(&L->lp_state);
 }
 
 void lobby_ui_reset_session(LobbyUIState *L) {
@@ -1108,18 +1113,12 @@ static const char *primary_label(int id) {
     return w ? w->name : "?";
 }
 
-static const int g_primary_choices[]   = {
-    WEAPON_PULSE_RIFLE, WEAPON_PLASMA_SMG, WEAPON_RIOT_CANNON,
-    WEAPON_RAIL_CANNON, WEAPON_AUTO_CANNON, WEAPON_MASS_DRIVER,
-    WEAPON_PLASMA_CANNON, WEAPON_MICROGUN
-};
-static const int g_secondary_choices[] = {
-    WEAPON_SIDEARM, WEAPON_BURST_SMG, WEAPON_FRAG_GRENADES,
-    WEAPON_MICRO_ROCKETS, WEAPON_COMBAT_KNIFE, WEAPON_GRAPPLING_HOOK
-};
-static const int g_armor_choices[]   = { ARMOR_NONE, ARMOR_LIGHT, ARMOR_HEAVY, ARMOR_REACTIVE };
-static const int g_jet_choices[]     = { JET_NONE, JET_STANDARD, JET_BURST, JET_GLIDE_WING, JET_JUMP_JET };
-static const int g_chassis_choices[] = { CHASSIS_TROOPER, CHASSIS_SCOUT, CHASSIS_HEAVY, CHASSIS_SNIPER, CHASSIS_ENGINEER };
+/* M6 lobby-loadout-preview round 2 — the choice arrays + step_in_cycle
+ * helpers that used to power the lobby's five cycle buttons now live in
+ * src/loadout_preview.c (the modal is the single source of loadout
+ * editing). primary_label / chassis_label / armor_label / jet_label
+ * stay because the lobby's loadout-summary panel + player-list rows
+ * still need to render the current selection. */
 
 /* Draw text inside a fixed pixel width, truncating with "..." if the
  * full string overflows. ui_draw_text doesn't clamp — long map blurbs
@@ -1523,6 +1522,20 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
 
     ClearBackground((Color){10, 12, 16, 255});
     sync_loadout_from_server(L, g);
+
+    /* M6 lobby-loadout-preview — when the preview modal is open, the
+     * scrim covers the lobby visually. Suppress click-edges from the
+     * lobby widgets so a click that lands on a cycle-row coordinate
+     * hidden behind the scrim doesn't trigger. The modal restores the
+     * saved edges before it runs at the bottom of this function so
+     * its own input is unaffected. */
+    bool lp_modal_open = loadout_preview_is_open(&L->lp_state);
+    bool saved_mp     = L->ui.mouse_pressed;
+    bool saved_mrp    = L->ui.mouse_right_pressed;
+    if (lp_modal_open) {
+        L->ui.mouse_pressed       = false;
+        L->ui.mouse_right_pressed = false;
+    }
 
     /* ---- P08 — map download progress banner --------------------- *
      * Drawn first (under the title strip) when a download is in
@@ -2029,65 +2042,64 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     }
     ly += row_h + gap;
 
-    /* ---- LOADOUT subheader ---- */
+    /* ---- LOADOUT subheader + summary panel + CHOOSE LOADOUT ----
+     * M6 lobby-loadout-preview round 2 — the per-row cycle buttons
+     * (chassis / primary / secondary / armor / jetpack) moved into the
+     * loadout-preview modal; this column now shows a compact summary
+     * of the current draft plus a single eye-catching button that
+     * opens the modal. One source of truth for loadout editing avoids
+     * the original "two places to change the same thing" UX. */
     ui_draw_text(&L->ui, "LOADOUT", lx, ly - S(2), 18,
                  (Color){200, 220, 240, 255});
     ly += S(28);
 
-    /* wan-fixes-11 — cycle buttons: LMB forward (+1), RMB back (-1).
-     * Arrows on the button edges hint at the directional affordance;
-     * the same gesture stays as the M4-era LMB-only flow for anyone
-     * who never finds the right click.
-     *
-     * wan-fixes-14 — `enabled = !me_ready`. ui_cycle_button's
-     * existing disabled branch paints the row dim + returns 0 so
-     * the loadout draft stays frozen once the user commits. */
-    bool can_edit = !me_ready;
-    int step;
-    step = ui_cycle_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
-                           TextFormat("Chassis: %s", chassis_label(L->lobby_chassis)),
-                           can_edit);
-    if (step != 0) {
-        L->lobby_chassis = step_in_cycle(L->lobby_chassis, g_chassis_choices,
-                                         (int)(sizeof g_chassis_choices / sizeof g_chassis_choices[0]), step);
-        apply_loadout_change(L, g);
-    } ly += row_h + gap;
+    {
+        int summary_h = S(112);
+        Rectangle sum_r = (Rectangle){ lx, ly, lp_w, summary_h };
+        DrawRectangleRec(sum_r, (Color){18, 24, 38, 240});
+        DrawRectangleLinesEx(sum_r, 1.5f, (Color){60, 90, 130, 255});
 
-    step = ui_cycle_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
-                           TextFormat("Primary: %s", primary_label(L->lobby_primary)),
-                           can_edit);
-    if (step != 0) {
-        L->lobby_primary = step_in_cycle(L->lobby_primary, g_primary_choices,
-                                         (int)(sizeof g_primary_choices / sizeof g_primary_choices[0]), step);
-        apply_loadout_change(L, g);
-    } ly += row_h + gap;
+        int sx  = (int)(sum_r.x + S(14));
+        int sy  = (int)(sum_r.y + S(10));
+        ui_draw_text(&L->ui, chassis_label(L->lobby_chassis),
+                     sx, sy, 26, (Color){240, 250, 255, 255});
+        sy += (int)(26.0f * L->ui.scale + S(4));
 
-    step = ui_cycle_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
-                           TextFormat("Secondary: %s", primary_label(L->lobby_secondary)),
-                           can_edit);
-    if (step != 0) {
-        L->lobby_secondary = step_in_cycle(L->lobby_secondary, g_secondary_choices,
-                                           (int)(sizeof g_secondary_choices / sizeof g_secondary_choices[0]), step);
-        apply_loadout_change(L, g);
-    } ly += row_h + gap;
+        char line[160];
+        snprintf(line, sizeof line, "%s  /  %s",
+                 primary_label(L->lobby_primary),
+                 primary_label(L->lobby_secondary));
+        ui_draw_text(&L->ui, line, sx, sy, 15,
+                     (Color){200, 220, 240, 255});
+        sy += (int)(15.0f * L->ui.scale + S(2));
 
-    step = ui_cycle_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
-                           TextFormat("Armor: %s", armor_label(L->lobby_armor)),
-                           can_edit);
-    if (step != 0) {
-        L->lobby_armor = step_in_cycle(L->lobby_armor, g_armor_choices,
-                                       (int)(sizeof g_armor_choices / sizeof g_armor_choices[0]), step);
-        apply_loadout_change(L, g);
-    } ly += row_h + gap;
+        /* ASCII separator - the vendored Atkinson body face is loaded
+         * with raylib's default 95-glyph ASCII set, so U+00B7 (middle
+         * dot) renders as the fallback `?`. Pre-existing lobby strings
+         * elsewhere accept that fallback; the new summary panel uses
+         * plain " / " for consistency with the weapon line above it. */
+        snprintf(line, sizeof line, "%s armor / %s jet",
+                 armor_label(L->lobby_armor),
+                 jet_label(L->lobby_jet));
+        ui_draw_text(&L->ui, line, sx, sy, 14,
+                     (Color){170, 195, 220, 255});
 
-    step = ui_cycle_button(&L->ui, (Rectangle){lx, ly, lp_w, row_h},
-                           TextFormat("Jetpack: %s", jet_label(L->lobby_jet)),
-                           can_edit);
-    if (step != 0) {
-        L->lobby_jet = step_in_cycle(L->lobby_jet, g_jet_choices,
-                                     (int)(sizeof g_jet_choices / sizeof g_jet_choices[0]), step);
-        apply_loadout_change(L, g);
-    } ly += row_h + gap;
+        ly += summary_h + gap;
+    }
+
+    /* Eye-catching cyan-pulse button (distinct from Ready's green) —
+     * this is now the single entry point for loadout selection so the
+     * chrome reads as "the action that matters". Always clickable;
+     * the modal itself disables its cycle buttons while the player
+     * is READY. */
+    {
+        int pv_h = row_h + S(8);
+        Rectangle pv_r = (Rectangle){ lx, ly, lp_w, pv_h };
+        if (loadout_preview_draw_button(&L->lp_state, &L->ui, pv_r, true)) {
+            loadout_preview_open(&L->lp_state);
+        }
+        ly += pv_h + gap;
+    }
 
     /* wan-fixes-11 — Ready button visually distinct from the loadout
      * cycle row above so the player's eye lands on it as the primary
@@ -2319,6 +2331,28 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                 L->kick_target_slot = L->ban_target_slot = -1;
             }
         }
+    }
+
+    /* M6 lobby-loadout-preview — restore the saved click edges so the
+     * modal sees its own input, then render the modal on top of every-
+     * thing else (kick/ban modal included — preview takes z-order
+     * priority). The modal's cycle buttons mutate the lobby_* fields
+     * in place; on any change we mirror the lobby's apply_loadout_change
+     * (push to server + persist to prefs) so the player's selection
+     * survives the same way clicking a lobby cycle button does. */
+    if (lp_modal_open) {
+        L->ui.mouse_pressed       = saved_mp;
+        L->ui.mouse_right_pressed = saved_mrp;
+    }
+    if (loadout_preview_is_open(&L->lp_state)) {
+        bool can_edit_modal = !((g->local_slot_id >= 0)
+            && g->lobby.slots[g->local_slot_id].in_use
+            && g->lobby.slots[g->local_slot_id].ready);
+        bool changed = loadout_preview_update_and_draw(
+            &L->lp_state, &L->ui, sw, sh, dt, can_edit_modal,
+            &L->lobby_chassis, &L->lobby_primary,
+            &L->lobby_secondary, &L->lobby_armor, &L->lobby_jet);
+        if (changed) apply_loadout_change(L, g);
     }
 
     ui_end(&L->ui);

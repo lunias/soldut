@@ -13,7 +13,54 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-13** (M6 P05 — bot AI improvements). **Added**
+Last updated: **2026-05-15** (M6 lobby-loadout-preview). **Added** three
+new entries:
+
+- "Loadout preview exhaust anchors at the feet, not at the chassis
+  nozzle (M6 lobby-loadout-preview)" — under "Lobby UI". The in-game
+  FX path uses `g_chassis_nozzles[chassis_id]` to position each
+  jetpack plume (back-mounted for Trooper/Engineer, hip for Sniper,
+  pelvis-low for Heavy). That works in real play because the camera
+  is wide and the long-tail particle stream extends well past the
+  body silhouette. The preview camera is tight (`zoom ≈ 1.3..5.5`
+  derived from RT height) and the shorter jets — GLIDE_WING's 36 px
+  plume and JUMP_JET's 0 px plume — would otherwise render entirely
+  inside the mech sprite and get painted over. The preview therefore
+  anchors the visible flame near `(pelvis.x + chassis_x_offset,
+  avg(L_FOOT.y, R_FOOT.y) - 4)` and applies a 50 px length floor so
+  every jet's COLOUR is unambiguously visible regardless of the
+  table value. Real gameplay is unchanged. Revisit when the preview
+  modal gains a wider camera (e.g. a portrait/landscape switch) or
+  when chassis nozzle positions are no longer "correct" identity
+  for a jet type.
+
+- "Spider chart UTILITY axis is a hand-tuned per-secondary table, not
+  data-derived (M6 lobby-loadout-preview)" — under "Lobby UI".
+  `secondary_utility()` in `src/loadout_preview.c` returns a fixed
+  0..1 score per `WeaponId`: Grappling Hook 1.00, Frag Grenades 0.75,
+  Micro-Rockets 0.65, Combat Knife 0.55, Burst SMG 0.45, Sidearm
+  0.30. Values come from the design intent in
+  `documents/04-combat.md` §"Secondary roles", NOT from measured
+  fires-per-kill or win-rate data. The other five axes (SPEED /
+  ARMOR / POWER / RANGE / MOBILITY) are derived from `g_chassis`,
+  `g_weapons`, `g_armors`, `g_jetpacks` so they self-calibrate when
+  those tables change. Revisit after M6 P05's bake-test infrastructure
+  produces per-loadout match-outcome data; the table should be
+  replaced with normalised stats from real games.
+
+- "Loadout preview animation cycle has fixed phase durations, no per-
+  player pacing (M6 lobby-loadout-preview)" — under "Lobby UI". The
+  16 s cycle (IDLE-primary 2 s, IDLE-secondary 2 s, WALK 2 s,
+  SPRINT 2 s, JUMP 1.5 s, JET 3 s, CROUCH 1.5 s, PRONE 2 s) loops
+  unconditionally — a player who opens the modal to compare two
+  jetpacks side-by-side sees the JET phase only 3 s out of every 16.
+  Mitigated by the smart-jump-on-cycle behaviour (clicking the
+  jetpack cycle button lands the cycle mid-JET; clicking the
+  secondary lands at IDLE-secondary) so most interactive flows DO
+  see the relevant phase. Revisit if user feedback shows the cycle
+  is too fast (need pause-on-phase) or too slow (skip animations).
+
+Previously: **2026-05-13** (M6 P05 — bot AI improvements). **Added**
 four new entries:
 
 - "Bot nav arc-aware JET reach trusts a 800-px-peak two-segment
