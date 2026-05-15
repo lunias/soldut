@@ -172,6 +172,21 @@ typedef struct BotMind {
      * the next one, then the next" without forgetting the first. */
     int16_t         abandoned_nodes[4];
     uint64_t        abandoned_until[4];   /* world tick at which the entry expires */
+    /* M6 many-bots stuck-fix — meaningful-progress tracker (sampled
+     * once per strategy tick, ~10 Hz). The pre-existing per-tick
+     * `stuck_since_tick` resets the moment pelvis x moves any amount,
+     * which masks the "JET up to unreachable pickup → fall back →
+     * try again" loop: the pelvis bounces through 100s of px each
+     * iteration so it never stays still for the abandonment window.
+     * `progress_anchor_*` snapshots position + tick when we last
+     * saw meaningful progress toward goal_target_node; if we haven't
+     * gotten 96 px closer to the goal in BOT_PROGRESS_STALL_TICKS
+     * (5 s), abandon. */
+    float           progress_anchor_x;
+    float           progress_anchor_y;
+    float           progress_anchor_dist_to_goal;
+    int16_t         progress_anchor_goal_node;
+    uint64_t        progress_anchor_tick;
     pcg32_t         rng;
 } BotMind;
 
@@ -185,6 +200,15 @@ typedef struct BotSystem {
     int            count;
     struct BotNav *nav;           /* allocated from level_arena in bot_system_build_nav */
     uint64_t       seed;
+    /* M6 many-bots fix — combat-famine tracker. `last_kill_count` is
+     * the world.killfeed_count seen on the last bot_step tick;
+     * `famine_anchor_tick` advances each tick the count is unchanged.
+     * As (now - anchor_tick) grows, the strategy's engage / pursue
+     * scores get a multiplicative boost (and awareness radius
+     * widens) so wandering bots are pulled together when no kills
+     * have happened in a while. Reset the moment a kill happens. */
+    int            last_kill_count;
+    uint64_t       famine_anchor_tick;
 } BotSystem;
 
 /* Zero-init the system. Safe to call multiple times. The navigation
