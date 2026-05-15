@@ -269,6 +269,26 @@ void net_set_interp_delay_override(NetState *ns, uint32_t ms) {
     }
 }
 
+void net_set_stats_log_interval(NetState *ns, uint32_t ms) {
+    if (!ns) return;
+    ns->stats_log_interval_s   = (double)ms / 1000.0;
+    ns->stats_log_accum_s      = 0.0;
+    ns->prev_packets_sent      = ns->packets_sent;
+    ns->prev_packets_recv      = ns->packets_recv;
+    ns->prev_bytes_sent_global = ns->bytes_sent;
+    ns->prev_bytes_recv_global = ns->bytes_recv;
+    ns->prev_snapshots_applied = ns->snapshots_applied;
+    for (int i = 0; i < NET_MAX_PEERS; ++i) {
+        ns->peers[i].prev_bytes_sent = ns->peers[i].bytes_sent;
+        ns->peers[i].prev_bytes_recv = ns->peers[i].bytes_recv;
+    }
+    ns->server.prev_bytes_sent = ns->server.bytes_sent;
+    ns->server.prev_bytes_recv = ns->server.bytes_recv;
+    if (ms > 0) {
+        LOG_I("net: NET_STATS dump enabled, interval=%u ms", (unsigned)ms);
+    }
+}
+
 bool net_client_connect(NetState *ns, const char *host, uint16_t port,
                         const char *display_name, Game *g)
 {
@@ -1839,6 +1859,10 @@ static void client_handle_snapshot(NetState *ns, const uint8_t *body,
      * particle pool each sim tick by snapshot_interp_remotes. */
     reconcile_apply_snapshot(&g->reconcile, &g->world, &snap,
                              snap.header.ack_input_seq, 1.0f / 60.0f);
+    /* wan-fixes-17 — periodic NET_STATS reads this to compute
+     * effective snapshot apply rate; if it diverges from the
+     * configured snapshot_hz the link is dropping snapshots. */
+    ns->snapshots_applied++;
 }
 
 /* Per-tick render-clock advance with adaptive drift correction.
@@ -2805,6 +2829,98 @@ void net_poll(NetState *ns, Game *g, double dt_real) {
     } else if (ns->role == NET_ROLE_CLIENT && ns->server.enet_peer) {
         ENetPeer *ep = (ENetPeer *)ns->server.enet_peer;
         ns->server.round_trip_ms = ep->roundTripTime;
+    }
+
+    /* wan-fixes-17 — periodic NET_STATS dump for WAN debugging.
+     * One LOG_I line per active peer + a global summary line each
+     * `stats_log_interval_s`. ENet's packetLoss is a fixed-point
+     * ratio scaled by ENET_PEER_PACKET_LOSS_SCALE (= 1<<16); divide
+     * to get 0..1. KB/s rates are computed from the (current - prev)
+     * delta over the actual elapsed accumulator (slightly > interval
+     * if the polling frame ran long, which keeps the rate honest). */
+    if (ns->stats_log_interval_s > 0.0) {
+        ns->stats_log_accum_s += dt_real;
+        if (ns->stats_log_accum_s >= ns->stats_log_interval_s) {
+            double elapsed = ns->stats_log_accum_s;
+            if (elapsed < 1e-6) elapsed = ns->stats_log_interval_s;
+            ns->stats_log_accum_s = 0.0;
+
+            uint32_t pkts_out = ns->packets_sent - ns->prev_packets_sent;
+            uint32_t pkts_in  = ns->packets_recv - ns->prev_packets_recv;
+            uint32_t bytes_out_g = ns->bytes_sent - ns->prev_bytes_sent_global;
+            uint32_t bytes_in_g  = ns->bytes_recv - ns->prev_bytes_recv_global;
+            ns->prev_packets_sent      = ns->packets_sent;
+            ns->prev_packets_recv      = ns->packets_recv;
+            ns->prev_bytes_sent_global = ns->bytes_sent;
+            ns->prev_bytes_recv_global = ns->bytes_recv;
+
+            uint32_t snaps_applied =
+                ns->snapshots_applied - ns->prev_snapshots_applied;
+            ns->prev_snapshots_applied = ns->snapshots_applied;
+
+            if (ns->role == NET_ROLE_SERVER) {
+                int active = 0;
+                for (int i = 0; i < NET_MAX_PEERS; ++i) {
+                    NetPeer *p = &ns->peers[i];
+                    if (p->state != NET_PEER_ACTIVE) continue;
+                    active++;
+                    ENetPeer *ep = (ENetPeer *)p->enet_peer;
+                    if (ep) {
+                        p->packet_loss_ratio =
+                            (float)ep->packetLoss /
+                            (float)ENET_PEER_PACKET_LOSS_SCALE;
+                    }
+                    uint32_t db_in  = p->bytes_recv - p->prev_bytes_recv;
+                    p->prev_bytes_sent = p->bytes_sent;
+                    p->prev_bytes_recv = p->bytes_recv;
+                    char addr_buf[32];
+                    net_format_addr(p->remote_addr_host, p->remote_port,
+                                    addr_buf, sizeof addr_buf);
+                    LOG_I("NET_STATS server peer=%d slot=%d %s "
+                          "rtt=%u ms loss=%.2f%% recv=%.2f KB/s",
+                          i, p->mech_id, addr_buf,
+                          (unsigned)p->round_trip_ms,
+                          (double)p->packet_loss_ratio * 100.0,
+                          (double)(db_in / 1024.0) / elapsed);
+                }
+                LOG_I("NET_STATS server total peers=%d snap_hz=%u "
+                      "out=%.2f KB/s in=%.2f KB/s "
+                      "pkts_out=%.1f/s pkts_in=%.1f/s",
+                      active, (unsigned)ns->snapshot_hz,
+                      (double)(bytes_out_g / 1024.0) / elapsed,
+                      (double)(bytes_in_g  / 1024.0) / elapsed,
+                      (double)pkts_out / elapsed,
+                      (double)pkts_in / elapsed);
+            } else if (ns->role == NET_ROLE_CLIENT && ns->connected) {
+                NetPeer *p = &ns->server;
+                ENetPeer *ep = (ENetPeer *)p->enet_peer;
+                if (ep) {
+                    p->packet_loss_ratio =
+                        (float)ep->packetLoss /
+                        (float)ENET_PEER_PACKET_LOSS_SCALE;
+                }
+                /* Client uses GLOBAL byte counters: client_pump_events
+                 * increments ns->bytes_sent/recv but never the per-peer
+                 * fields (only the server-pump path does that). With one
+                 * peer that's equivalent. */
+                char addr_buf[32];
+                net_format_addr(p->remote_addr_host, p->remote_port,
+                                addr_buf, sizeof addr_buf);
+                LOG_I("NET_STATS client %s rtt=%u ms loss=%.2f%% "
+                      "out=%.2f KB/s in=%.2f KB/s "
+                      "snaps=%.1f/s (cfg=%u Hz) "
+                      "pkts_out=%.1f/s pkts_in=%.1f/s",
+                      addr_buf,
+                      (unsigned)p->round_trip_ms,
+                      (double)p->packet_loss_ratio * 100.0,
+                      (double)(bytes_out_g / 1024.0) / elapsed,
+                      (double)(bytes_in_g  / 1024.0) / elapsed,
+                      (double)snaps_applied / elapsed,
+                      (unsigned)ns->snapshot_hz,
+                      (double)pkts_out / elapsed,
+                      (double)pkts_in / elapsed);
+            }
+        }
     }
 }
 
