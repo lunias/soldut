@@ -1,0 +1,22 @@
+# 2p_ffa_respawn — client (victim). Stationary observer. The host
+# kills us 3 times via kill_peer at ticks 200/400/600. We respawn
+# after the first two; the third hits the FFA score cap and ends
+# the round.
+
+window 1280 720
+out build/shots/net/client_ffa_respawn
+network connect 127.0.0.1:24040
+name ClientVictim
+
+spawn_at 800 1100
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 140 shot t140_round_start
+at 210 shot t210_after_kill_1
+at 380 shot t380_respawned_1
+at 410 shot t410_after_kill_2
+at 580 shot t580_respawned_2
+at 620 shot t620_round_end
+
+at 800 end

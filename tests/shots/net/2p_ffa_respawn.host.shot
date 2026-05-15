@@ -1,0 +1,42 @@
+# 2p_ffa_respawn — FFA round respawn-until-score-limit. Host kills
+# the client repeatedly via kill_peer; the client must respawn after
+# RESPAWN_DELAY_TICKS=180 and play continues until host's slot.score
+# reaches the cfg score_limit (3 per the runner). Round ends ONLY at
+# the score cap.
+#
+# Pre-fix mech_kill arming was CTF-only, so the first kill in FFA
+# left the victim dead until round end (or solo_warning fired the
+# 3 s safety timer). Now respawn fires in every mode, and
+# solo_warning skips when any mech has a pending respawn.
+
+window 1280 720
+out build/shots/net/host_ffa_respawn
+network host 24040
+name HostShooter
+
+# Place both bodies close enough that the kill log line is the only
+# thing we need to verify (no carry / no flag mechanics in FFA).
+spawn_at 600 1100
+peer_spawn 1 800 1100
+
+aim 800 1070
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 140 shot t140_round_start
+
+# Kill 1 at tick 200 → slot.score 1, respawn at tick 380. Credit
+# host (mech 0) as the shooter so match_apply_kill increments
+# slot[0].kills / .score (mech 0 = host, mech 1 = client victim).
+at 200 kill_peer 1 0
+at 210 shot t210_after_kill_1
+
+# Kill 2 at tick 400 (post-respawn) → slot.score 2.
+at 400 kill_peer 1 0
+at 410 shot t410_after_kill_2
+
+# Kill 3 at tick 600 → slot.score 3 = score_limit → round ENDS.
+at 600 kill_peer 1 0
+at 620 shot t620_round_end
+
+at 800 end

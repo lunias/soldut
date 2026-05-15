@@ -2,20 +2,84 @@
 
 #include "lobby.h"
 #include "log.h"
+#include "maps.h"
+#include "mech.h"
 #include "world.h"
 
 #include <stdint.h>
 #include <string.h>
 #include <strings.h>
 
+void match_process_respawns(World *w, MatchState *m, LobbyState *lobby) {
+    if (!w || !m) return;
+    if (m->phase != MATCH_PHASE_ACTIVE) return;
+    if (!w->authoritative) return;
+    /* All modes respawn mid-round (FFA / TDM / CTF). Round-end is
+     * gated on score_limit (kills for FFA/TDM, captures for CTF) and
+     * time_limit only — solo_warning is now retired, see
+     * match_step_solo_warning. */
+
+    /* Pre-build picked_positions from currently-alive non-dummy mechs
+     * so the spawn picker keeps respawns away from active fighters
+     * (matches the lobby_spawn_round_mechs greedy max-min strategy). */
+    Vec2 picked[MAX_MECHS];
+    int  n_picked = 0;
+    for (int i = 0; i < w->mech_count; ++i) {
+        const Mech *mm = &w->mechs[i];
+        if (!mm->alive)   continue;
+        if (mm->is_dummy) continue;
+        if (n_picked < (int)(sizeof picked / sizeof picked[0])) {
+            picked[n_picked++] = mech_chest_pos(w, i);
+        }
+    }
+
+    for (int mi = 0; mi < w->mech_count; ++mi) {
+        Mech *mm = &w->mechs[mi];
+        if (mm->alive)                          continue;
+        if (mm->is_dummy)                       continue;
+        if (mm->respawn_at_tick == 0)           continue;
+        if (w->tick < mm->respawn_at_tick)      continue;
+        /* Slot is the authority on "what team to respawn into" — a
+         * player can switch to spectator while dead and we honor that
+         * by suppressing the respawn. Shot-mode runs don't set up
+         * lobby slots, so a slot of -1 is normal; fall back to
+         * the mech's own team (the source of truth for combat). */
+        int slot = lobby ? lobby_find_slot_by_mech(lobby, mi) : -1;
+        int spawn_team = mm->team;
+        if (slot >= 0 && lobby) {
+            if (!lobby->slots[slot].in_use) {
+                mm->respawn_at_tick = 0;
+                continue;
+            }
+            spawn_team = lobby->slots[slot].team;
+        }
+        if (spawn_team == MATCH_TEAM_NONE) {
+            /* Spectator — leave the body grounded until they re-pick. */
+            mm->respawn_at_tick = 0;
+            continue;
+        }
+        Vec2 spawn = map_pick_separated_spawn(
+            (MapId)m->map_id, &w->level,
+            spawn_team, m->mode,
+            picked, n_picked);
+        mech_respawn(w, mi, spawn);
+        if (n_picked < (int)(sizeof picked / sizeof picked[0])) {
+            picked[n_picked++] = spawn;
+        }
+    }
+}
+
 void match_shot_log_phase(const char *tag, const MatchState *m) {
     if (!m) return;
     SHOT_LOG("match_state: tag=%s phase=%d mode=%d map=%d rounds=%d/%d "
-             "summary=%.2f countdown=%.2f",
+             "summary=%.2f countdown=%.2f team_score=R%d/B%d limit=%d",
              tag ? tag : "?", (int)m->phase, (int)m->mode, m->map_id,
              m->rounds_played, m->rounds_per_match,
              (double)m->summary_remaining,
-             (double)m->countdown_remaining);
+             (double)m->countdown_remaining,
+             m->team_score[MATCH_TEAM_RED],
+             m->team_score[MATCH_TEAM_BLUE],
+             m->score_limit);
 }
 
 void match_init(MatchState *m, MatchModeId mode, int score_limit,
@@ -64,6 +128,7 @@ void match_begin_round(MatchState *m) {
     m->mvp_slot        = -1;
     m->solo_warning_remaining = -1.0f;
     for (int t = 0; t < MATCH_TEAM_COUNT; ++t) m->team_score[t] = 0;
+    m->score_dirty     = false;     /* round-start broadcast already covers t=0 */
     LOG_I("match: round begin (mode=%s, map=%d, limit=%d)",
           match_mode_name(m->mode), m->map_id, m->score_limit);
     match_shot_log_phase("begin_round", m);
@@ -170,9 +235,16 @@ bool match_apply_kill(MatchState *m, LobbyState *lobby,
         } else {
             ks->kills++;
             ks->score++;
-            if (m->mode == MATCH_MODE_TDM || m->mode == MATCH_MODE_CTF) {
+            /* Team-score-per-kill is a TDM-only rule. In CTF the team
+             * score tracks CAPTURES (+5 per capture, see ctf.c), not
+             * kills — adding here would let a streak of frags hit the
+             * capture limit and end the round, which is the
+             * user-reported "I killed my opponent and the next round
+             * started" bug. Per documents/m5/06-ctf.md §"Scoring". */
+            if (m->mode == MATCH_MODE_TDM) {
                 if (ks->team >= 0 && ks->team < MATCH_TEAM_COUNT) {
                     m->team_score[ks->team]++;
+                    m->score_dirty = true;
                 }
             }
         }
@@ -204,12 +276,26 @@ bool match_step_solo_warning(MatchState *m, const struct World *w, float dt) {
         m->solo_warning_remaining = -1.0f;
         return false;
     }
-    int mech_count = 0, alive_count = 0;
+    /* All modes now respawn mid-round (see mech_kill arming
+     * respawn_at_tick and match_process_respawns firing it). The
+     * "only one alive" condition would fire every kill before the
+     * dying mech's RESPAWN_DELAY_TICKS elapses, which would end the
+     * round on the first kill in 1v1 — exactly the user-reported
+     * bug. solo_warning is now a safety net for disconnect / kick
+     * scenarios where no respawn is pending; if anyone is awaiting
+     * respawn we hold off and let mech_respawn restore them. */
+    int mech_count = 0, alive_count = 0, pending_respawn = 0;
     for (int i = 0; i < w->mech_count; ++i) {
         const Mech *mm = &w->mechs[i];
         if (mm->is_dummy) continue;
         mech_count++;
         if (mm->alive) alive_count++;
+        else if (mm->respawn_at_tick > w->tick) pending_respawn++;
+    }
+    if (pending_respawn > 0) {
+        /* At least one body is coming back; don't arm solo_warning. */
+        m->solo_warning_remaining = -1.0f;
+        return false;
     }
     /* Single-player / pre-spawn (mech_count <= 1 from the start) is
      * exempt — there's no "remaining" without a baseline. */

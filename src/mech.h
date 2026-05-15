@@ -163,6 +163,26 @@ bool mech_apply_damage(World *w, int mech_id, int part, float damage,
 void mech_kill(World *w, int mech_id, int killshot_part, Vec2 dir,
                float impulse, int killer_mech_id, int weapon_id);
 
+/* Mid-round respawn: rebuild the mech in-place at `spawn_pos`. Keeps
+ * the mech's id, particle_base, constraint_base, chassis, and loadout
+ * stable so snapshots / lobby slot mappings don't shift; the rest of
+ * the state (alive, HP, fuel, ammo, dismember mask, damage decals,
+ * pose targets, grapple, recoil, bink) is reset to a fresh-spawn
+ * baseline. Re-activates any constraints in the mech's range that
+ * were deactivated by dismemberment so the body is whole again.
+ *
+ * Server: called from the per-tick respawn step in main.c once
+ * `respawn_at_tick` has been reached. Client: called from
+ * snapshot_apply when it observes the mech's `alive` bit going
+ * false→true (mirrors the host's reset of constraint activity +
+ * damage decals; the snapshot's particle positions overwrite the
+ * spawn-point pose on the very next snapshot tick).
+ *
+ * `RESPAWN_DELAY_TICKS` is the time between a mech's death and its
+ * respawn in modes that respawn mid-round. 3 seconds at 60 Hz. */
+#define RESPAWN_DELAY_TICKS  180u
+void mech_respawn(World *w, int mech_id, Vec2 spawn_pos);
+
 /* Detach a limb. Safe to call multiple times — only the first
  * invocation does any work. `limb` is a LIMB_* bit from world.h. */
 void mech_dismember(World *w, int mech_id, int limb);

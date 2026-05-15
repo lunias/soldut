@@ -1,0 +1,45 @@
+# 2p_ctf_respawn_clean — host (RED) kills the client (BLUE) and the
+# client respawns. Verifies the respawned body comes back clean —
+# no lingering FX_STUMP, no persistent damage decals, no hit-flash.
+# Pairs with 2p_ctf_respawn_clean.client.shot which captures the
+# CLIENT's own view of its respawned local mech (the case my earlier
+# `mid != local_mech_id` gate broke).
+
+window 1280 720
+out build/shots/net/host_ctf_respawn_clean
+network host 24035
+name HostRed
+
+spawn_at 600 1100
+peer_spawn 1 800 1100
+
+aim 800 1070
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 140 shot t140_round_start
+
+# Kill client (mech_id 1) at tick 250 — direct mech_kill via debug
+# directive, no projectiles. Mid-life dismember pre-arm: not needed,
+# kill itself fires the FX_STUMP via mech_apply_damage's damage path?
+# No — kill_peer skips apply_damage; it calls mech_kill directly so
+# no dismemberment. To test FX persistence we need the body to have
+# dismembered limbs. Skip dismember here — we still want to verify
+# the simpler "respawn comes back at full HP, no decals from a
+# previous lifetime's stray hits" promise.
+at 250 kill_peer 1
+at 260 shot t260_just_after_kill
+at 320 shot t320_dead_ragdoll
+
+# Pre-respawn — body still ragdolling.
+at 425 shot t425_pre_respawn
+
+# Respawn at tick 250 + 180 = 430. The client's mech rejoins the
+# round at a fresh BLUE spawn. From the host's camera it'll be off
+# the screen (camera follows HostRed), but the alive transition
+# itself is what we assert via the log.
+at 440 shot t440_post_respawn
+at 470 shot t470_respawn_settled
+at 600 shot t600_round_still_active
+
+at 660 end

@@ -1,0 +1,21 @@
+# 2p_tdm_respawn — client (BLUE victim). Stationary. The host kills
+# us 3 times; we respawn after the first two, then the third hits
+# the TDM team_score cap and the round ends.
+
+window 1280 720
+out build/shots/net/client_tdm_respawn
+network connect 127.0.0.1:24041
+name ClientBlue
+
+spawn_at 800 1100
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 140 shot t140_round_start
+at 210 shot t210_after_kill_1
+at 380 shot t380_respawned_1
+at 410 shot t410_after_kill_2
+at 580 shot t580_respawned_2
+at 620 shot t620_round_end
+
+at 800 end

@@ -1,0 +1,44 @@
+# 2p_ctf_respawn — host (RED) kills the client (BLUE) and verifies the
+# CTF mid-round respawn flow over the wire. Server runs mech_respawn at
+# tick=kill+180; the next snapshot delivers alive=true + fresh particle
+# positions to the client. The round MUST continue (no match_step_solo_warning).
+
+window 1280 720
+out build/shots/net/host_ctf_respawn
+network host 24033
+name HostRed
+
+# Place both bodies on a known platform on Crossfire's red side. The
+# kill is via kill_peer so accuracy / recoil / bink don't enter the
+# picture — we want a deterministic death tick.
+spawn_at 600 1100
+peer_spawn 1 800 1100
+
+aim 800 1070
+
+contact_sheet sheet cols 4 cell 320 180
+
+# Round starts around tick 130 (auto_start_seconds=2).
+at 140 shot t140_round_start
+
+# At tick 250, kill the client mech (id=1). mech_kill arms
+# respawn_at_tick = 250 + 180 = 430 (CTF only).
+at 250 kill_peer 1
+at 260 shot t260_just_after_kill
+at 320 shot t320_dead_ragdoll
+
+# Just before respawn — body should still be ragdolling.
+at 425 shot t425_pre_respawn
+
+# Server fires mech_respawn at tick 430; client mirror lands a snapshot
+# or two later. Capture frames around the transition.
+at 440 shot t440_post_respawn
+at 470 shot t470_respawn_settled
+
+# Verify the round is still running well past where solo_warning would
+# have ended it (180 ticks = 3 s after kill = tick 430). Tick 600 is
+# 350 ticks after the kill — pre-fix the round would have ended at the
+# solo-warning 3 s mark.
+at 600 shot t600_round_still_active
+
+at 660 end

@@ -66,6 +66,8 @@ typedef enum {
     EV_KICK_MODAL,    /* P09 host-only — show confirmation modal for slot (ax) */
     EV_BAN_MODAL,     /* P09 host-only — show ban confirmation modal for slot (ax) */
     EV_VOTE_MAP,      /* P09 — cast a map vote (ax = choice 0/1/2) */
+    EV_BOT_TEAM,      /* host-only — flip bot's team (ax = slot, ay = team) */
+    EV_ADD_BOT,       /* host-only — send ADD_BOT (ax = BotTier 0..3) */
 } EventKind;
 
 typedef struct {
@@ -535,16 +537,24 @@ static bool parse_script(const char *path, Script *out) {
                 ev.ay = (float)mid;
                 script_push(out, ev);
             } else if (strcmp(ev_kind, "kill_peer") == 0) {
-                /* "at <tick> kill_peer <mech_id>" — host-side debug
-                 * that directly invokes mech_kill on the named mech.
-                 * Lets a CTF drop-on-kill shot test bench the death
-                 * flow without requiring perfect weapons aim across
-                 * the recoil-and-bink window. The directive is a no-op
-                 * for clients (mech_kill is server-authoritative). */
-                int mid = -1;
-                if (args[0]) sscanf(args, "%d", &mid);
+                /* "at <tick> kill_peer <mech_id> [<shooter_mech_id>]"
+                 * — host-side debug that directly invokes
+                 * mech_apply_damage on the named mech. Lets a CTF
+                 * drop-on-kill shot test bench the death flow without
+                 * requiring perfect weapons aim across the recoil-
+                 * and-bink window. The optional second arg is the
+                 * shooter mech_id; without it kills are
+                 * environmental (= suicide → no score credit), so
+                 * FFA / TDM score tests must supply a shooter to get
+                 * the kill credited to the right slot. CTF drop-on-
+                 * kill tests don't need the credit. The directive is
+                 * a no-op for clients (mech_kill is server-
+                 * authoritative). */
+                int mid = -1, shooter = -1;
+                if (args[0]) sscanf(args, "%d %d", &mid, &shooter);
                 ev.kind = EV_KILL_PEER;
                 ev.ax = (float)mid;
+                ev.ay = (float)shooter;
                 script_push(out, ev);
             } else if (strcmp(ev_kind, "team_change") == 0) {
                 /* "at <tick> team_change <team_id>" — drives the same
@@ -555,6 +565,29 @@ static bool parse_script(const char *path, Script *out) {
                 if (args[0]) sscanf(args, "%d", &team);
                 ev.kind = EV_TEAM_CHANGE;
                 ev.ax = (float)team;
+                script_push(out, ev);
+            } else if (strcmp(ev_kind, "bot_team") == 0) {
+                /* "at <tick> bot_team <slot> <team>" — host clicks a
+                 * bot row's team chip to flip RED↔BLUE. Drives the
+                 * same path as the lobby UI: NET_MSG_LOBBY_BOT_TEAM
+                 * over the wire when running as a client (host UI
+                 * post wan-fixes-16), direct lobby_set_team on a
+                 * native server. */
+                int slot = -1, team = MATCH_TEAM_RED;
+                if (args[0]) sscanf(args, "%d %d", &slot, &team);
+                ev.kind = EV_BOT_TEAM;
+                ev.ax = (float)slot;
+                ev.ay = (float)team;
+                script_push(out, ev);
+            } else if (strcmp(ev_kind, "add_bot") == 0) {
+                /* "at <tick> add_bot <tier>" — host clicks the "Add
+                 * Bot" button. Drives net_client_send_add_bot under
+                 * the hood; server adds a bot slot and re-broadcasts
+                 * LOBBY_LIST. */
+                int tier = 1;  /* veteran */
+                if (args[0]) sscanf(args, "%d", &tier);
+                ev.kind = EV_ADD_BOT;
+                ev.ax = (float)tier;
                 script_push(out, ev);
             } else if (strcmp(ev_kind, "flag_carry") == 0) {
                 /* "at <tick> flag_carry <flag_idx>" — force flag
@@ -1297,6 +1330,9 @@ static void shot_host_flow(Game *g, float dt) {
             /* P07 — CTF tick (server only). Same shape as main.c. */
             ctf_step(g, dt);
             shot_apply_new_kills(g);
+            /* Mid-round respawn — mirrors main.c. CTF-only inside
+             * match_process_respawns. */
+            match_process_respawns(&g->world, &g->match, &g->lobby);
             /* Mirror main.c's per-tick fan-out queues. Without these,
              * the client sees no remote HIT_EVENT / FIRE_EVENT /
              * PICKUP_STATE during shot tests — and bugs like the P09
@@ -1312,6 +1348,16 @@ static void shot_host_flow(Game *g, float dt) {
                 g->world.flag_state_dirty = false;
             } else if (g->net.role != NET_ROLE_SERVER) {
                 g->world.flag_state_dirty = false;
+            }
+            /* Drain match score dirty bit on the host — re-ships
+             * MATCH_STATE so the client's HUD banner picks up team
+             * score updates (CTF captures, TDM kill credit). Same
+             * shape as main.c::broadcast_match_state_if_dirty. */
+            if (g->net.role == NET_ROLE_SERVER && g->match.score_dirty) {
+                net_server_broadcast_match_state(&g->net, &g->match);
+                g->match.score_dirty = false;
+            } else if (g->net.role != NET_ROLE_SERVER) {
+                g->match.score_dirty = false;
             }
             bool end = false;
             if (g->match.mode == MATCH_MODE_FFA) {
@@ -1402,15 +1448,70 @@ static void shot_host_flow(Game *g, float dt) {
                         net_server_broadcast_lobby_list (&g->net, &g->lobby);
                     }
                 } else {
-                    /* Inter-round: brief countdown, no lobby. */
+                    /* Inter-round: brief countdown, no lobby. Mirrors
+                     * main.c::advance_to_next_round which goes via
+                     * start_round (full level rebuild + fresh
+                     * lobby_spawn_round_mechs + ROUND_START broadcast).
+                     * Without the full setup the client would never
+                     * exit MODE_SUMMARY into MODE_MATCH for round 2 +,
+                     * and round 2's mech_count would stay at 0 from
+                     * lobby_clear_round_mechs. */
                     LOG_I("match_flow: round %d/%d — continuing match",
                           g->match.rounds_played + 1, g->match.rounds_per_match);
                     lobby_clear_round_mechs(&g->lobby, &g->world);
+                    /* Per-round slot reset — score / kills / deaths /
+                     * team_kills / current_streak. Ready +
+                     * longest_streak persist across rounds within a
+                     * match. Pre-fix, round 2 inherited round 1's
+                     * slot.score (already at the cap) and the FFA
+                     * round-end gate fired the same tick round 2
+                     * began. */
+                    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+                        if (!g->lobby.slots[i].in_use) continue;
+                        LobbySlot *s = &g->lobby.slots[i];
+                        s->score          = 0;
+                        s->kills          = 0;
+                        s->deaths         = 0;
+                        s->team_kills     = 0;
+                        s->current_streak = 0;
+                    }
+                    /* Rebuild level for the next round (vote winner
+                     * already applied to g->match.map_id before
+                     * after_summary returned here). */
+                    arena_reset(&g->level_arena);
+                    map_build((MapId)g->match.map_id, &g->world,
+                              &g->level_arena);
+                    decal_init((int)level_width_px(&g->world.level),
+                               (int)level_height_px(&g->world.level));
+                    maps_refresh_serve_info(map_def(g->match.map_id)->short_name,
+                                            NULL, &g->server_map_desc,
+                                            g->server_map_serve_path,
+                                            sizeof(g->server_map_serve_path));
+                    if (g->net.role == NET_ROLE_SERVER) {
+                        net_server_broadcast_map_descriptor(&g->net,
+                                                            &g->server_map_desc);
+                    }
+                    lobby_spawn_round_mechs(&g->lobby, &g->world,
+                                            g->match.map_id, g->local_slot_id,
+                                            g->match.mode);
+                    pickup_init_round(&g->world);
+                    g->world.pickupfeed_count = 0;
+                    g->world.match_mode_cached = (int)g->match.mode;
+                    ctf_init_round(&g->world, g->match.mode);
+                    g->world.flag_state_dirty = false;
                     match_begin_countdown(&g->match,
                                           g->match.inter_round_countdown_default);
+                    g->mode = MODE_MATCH;
                     if (g->net.role == NET_ROLE_SERVER) {
-                        net_server_broadcast_match_state(&g->net, &g->match);
+                        /* Order: lobby table first so clients have
+                         * mech_id mappings before ROUND_START + the
+                         * snapshot stream. Same as main.c. */
                         net_server_broadcast_lobby_list (&g->net, &g->lobby);
+                        g->lobby.dirty = false;
+                        net_server_broadcast_round_start(&g->net, &g->match);
+                        if (g->world.flag_count > 0) {
+                            net_server_broadcast_flag_state(&g->net, &g->world);
+                        }
                     }
                 }
             }
@@ -1882,6 +1983,30 @@ int shotmode_run(const char *script_path) {
                     }
                     break;
                 }
+                case EV_BOT_TEAM: {
+                    int slot = (int)ev->ax;
+                    int team = (int)ev->ay;
+                    if (game.net.role == NET_ROLE_CLIENT) {
+                        net_client_send_bot_team(&game.net, slot, team);
+                        LOG_I("shot: bot_team slot=%d team=%d (sent to host)",
+                              slot, team);
+                    } else if (slot >= 0 && slot < MAX_LOBBY_SLOTS &&
+                               game.lobby.slots[slot].in_use)
+                    {
+                        lobby_set_team(&game.lobby, slot, team);
+                        LOG_I("shot: bot_team slot=%d team=%d (host-direct)",
+                              slot, team);
+                    }
+                    break;
+                }
+                case EV_ADD_BOT: {
+                    int tier = (int)ev->ax;
+                    if (game.net.role == NET_ROLE_CLIENT) {
+                        net_client_send_add_bot(&game.net, (uint8_t)tier);
+                        LOG_I("shot: add_bot tier=%d (sent to host)", tier);
+                    }
+                    break;
+                }
                 case EV_ARM_CARRY: {
                     int fidx = (int)ev->ax;
                     int mid  = (int)ev->ay;
@@ -1898,6 +2023,7 @@ int shotmode_run(const char *script_path) {
                 }
                 case EV_KILL_PEER: {
                     int mid = (int)ev->ax;
+                    int shooter = (int)ev->ay;
                     if (game.net.role == NET_ROLE_SERVER &&
                         mid >= 0 && mid < game.world.mech_count &&
                         game.world.mechs[mid].alive) {
@@ -1912,9 +2038,10 @@ int shotmode_run(const char *script_path) {
                          * 9999 dmg ensures lethal regardless of armor. */
                         mech_apply_damage(&game.world, mid, PART_CHEST,
                                           9999.0f, (Vec2){0.0f, -1.0f},
-                                          /*shooter*/ -1);
+                                          shooter);
                         (void)pelv;
-                        LOG_I("shot: kill_peer mech=%d (host-side)", mid);
+                        LOG_I("shot: kill_peer mech=%d shooter=%d (host-side)",
+                              mid, shooter);
                     }
                     break;
                 }
@@ -2341,12 +2468,14 @@ int shotmode_run(const char *script_path) {
             }
             case EV_KILL_PEER: {
                 int mid = (int)ev->ax;
+                int shooter = (int)ev->ay;
                 if (mid >= 0 && mid < game.world.mech_count &&
                     game.world.mechs[mid].alive) {
                     mech_apply_damage(&game.world, mid, PART_CHEST,
                                       9999.0f, (Vec2){0.0f, -1.0f},
-                                      /*shooter*/ -1);
-                    LOG_I("shot: kill_peer mech=%d (single-player)", mid);
+                                      shooter);
+                    LOG_I("shot: kill_peer mech=%d shooter=%d (single-player)",
+                          mid, shooter);
                 }
                 break;
             }
@@ -2368,6 +2497,8 @@ int shotmode_run(const char *script_path) {
             case EV_KICK_MODAL:
             case EV_BAN_MODAL:
             case EV_VOTE_MAP:
+            case EV_BOT_TEAM:
+            case EV_ADD_BOT:
                 /* Single-player has no peers / lobby vote state. */
                 break;
             }
@@ -2423,6 +2554,10 @@ int shotmode_run(const char *script_path) {
          * dirty bit is cleared here without broadcasting (no client
          * to inform in single-player). */
         ctf_step(&game, TICK_DT);
+        /* Mid-round respawn — same gating as main.c. Pass NULL lobby
+         * so the helper uses mech.team directly (no slot mapping in
+         * single-player shot mode). */
+        match_process_respawns(&game.world, &game.match, NULL);
         game.world.flag_state_dirty = false;
         game.input = in;
 

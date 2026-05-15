@@ -1,0 +1,50 @@
+# 2p_ctf_score_limit — verifies the host-configured score_limit gates
+# CTF round-end. Pre-fix the M5-era "+5 team_score per capture"
+# against a clamped CTF default of 5 made the round end on the first
+# capture; post-fix capture adds +1 to team_score so score_limit
+# directly = captures-to-win, matching FFA / TDM (which use
+# kills-to-win).
+#
+# Setup: score_limit=3 (per the runner's cfg). Host stands on the
+# RED home flag. arm_carry forces flag 1 (BLUE) into a CARRIED state
+# with the host as carrier; the next ctf_step tick sees the
+# "carrying enemy flag + own flag home + touching own home flag"
+# precondition and fires ctf_capture (team_score++).
+#
+# Score progression:
+#   tick 200 — capture 1 → team_score=1, round must stay ACTIVE
+#   tick 240 — capture 2 → team_score=2, round must stay ACTIVE
+#   tick 280 — capture 3 → team_score=3 = score_limit → round ENDS
+#              (SUMMARY phase + map-vote follow-up)
+
+window 1280 720
+out build/shots/net/host_ctf_score_limit
+network host 24037
+name HostRed
+
+# Park on the RED home flag (Crossfire RED flag is at x=480, y=1520,
+# platform top at y=1536). Pelvis at y=1496 puts chest within 36 px
+# of the staff segment (the new touch-box rule from
+# tests/shots/net/run_ctf_pickup.sh).
+spawn_at 480 1496
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 140 shot t140_round_start
+
+# Capture 1. arm_carry puts BLUE in our hands; ctf_step on the
+# next tick sees us touching the RED home flag with the BLUE flag
+# and fires ctf_capture.
+at 180 arm_carry 1 0
+at 220 shot t220_after_capture1
+
+# Capture 2. The captured flag was sent home on capture 1, so we
+# can immediately re-arm it.
+at 240 arm_carry 1 0
+at 270 shot t270_after_capture2
+
+# Capture 3 — this should hit score_limit=3 and end the round.
+at 290 arm_carry 1 0
+at 320 shot t320_after_capture3_round_end
+
+at 600 end

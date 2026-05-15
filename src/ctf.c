@@ -142,11 +142,17 @@ static void ctf_capture(struct Game *g, int mi) {
     int captured = enemy_flag_idx(m->team);
     Flag *flag = &g->world.flags[captured];
 
-    /* Score: +5 to team, +1 to player. team_score[] is indexed by
-     * MATCH_TEAM_RED/_BLUE so we use the carrier's team (which is the
-     * SCORING team — they ran the enemy flag back to their base). */
+    /* Score: +1 to team_score per capture, +1 to the carrier's
+     * personal score. team_score is the round-end threshold against
+     * `match.score_limit` — so the host's configured score_limit
+     * directly equals "captures needed to win" in CTF, matching FFA
+     * (kills to win) and TDM (team kills to win). The original M5 P07
+     * design had +5 per capture, which made a default score_limit of
+     * 5 end the round on the FIRST capture; the user reported that as
+     * the "round ends as soon as I bring the flag back" bug. */
     if (m->team >= 0 && m->team < MATCH_TEAM_COUNT) {
-        g->match.team_score[m->team] += 5;
+        g->match.team_score[m->team] += 1;
+        g->match.score_dirty = true;
     }
     int slot = lobby_find_slot_by_mech(&g->lobby, mi);
     if (slot >= 0) g->lobby.slots[slot].score += 1;
@@ -252,8 +258,18 @@ void ctf_step(struct Game *g, float dt) {
 
         if (flag->status == FLAG_CARRIED) continue;
 
-        /* Touch detection. */
+        /* Touch detection — distance from the mech's chest to the
+         * nearest point on the visible flag staff (a vertical line
+         * segment from `home_pos` up by FLAG_STAFF_HEIGHT_PX, matching
+         * render.c::draw_flag). Authoring the flag's `pos_y` at the
+         * platform surface lets the staff/pennant lie at chest height
+         * automatically — without segment math the chest-to-base
+         * distance was the only test, and maps that placed the base
+         * 50 px below chest height (Crossfire) never fired pickup.
+         * (See FLAG_STAFF_HEIGHT_PX in world.h.) */
         Vec2 fp = ctf_flag_position(w, f);
+        const float staff_top_y = fp.y - FLAG_STAFF_HEIGHT_PX;  /* smaller y = higher on screen */
+        const float staff_bot_y = fp.y;
         const float r2 = FLAG_TOUCH_RADIUS_PX * FLAG_TOUCH_RADIUS_PX;
         for (int mi = 0; mi < w->mech_count; ++mi) {
             Mech *m = &w->mechs[mi];
@@ -261,7 +277,13 @@ void ctf_step(struct Game *g, float dt) {
             if (m->is_dummy)  continue;
             if (m->team == MATCH_TEAM_NONE) continue;
             Vec2 cp = mech_chest_pos(w, mi);
-            float dx = cp.x - fp.x, dy = cp.y - fp.y;
+            float dx = cp.x - fp.x;
+            /* Clamp chest's y onto the staff line segment, then take
+             * Euclidean distance from chest to the clamp point. */
+            float dy;
+            if      (cp.y < staff_top_y) dy = staff_top_y - cp.y;
+            else if (cp.y > staff_bot_y) dy = cp.y - staff_bot_y;
+            else                          dy = 0.0f;
             if (dx * dx + dy * dy > r2) continue;
             ctf_touch(g, f, mi);
             /* If the touch transitioned this flag into CARRIED, stop —

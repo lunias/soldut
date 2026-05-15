@@ -452,15 +452,16 @@ void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                                 ? g->config.map_rotation[0] : MAP_FOUNDRY;
         L->setup_score_limit  = g->config.score_limit;
         L->setup_time_limit_s = (int)g->config.time_limit;
+        L->setup_rounds_per_match = (g->config.rounds_per_match > 0)
+                                    ? g->config.rounds_per_match : 3;
         L->setup_friendly_fire= g->config.friendly_fire;
         /* Bot fill is configured per-bot in the lobby (M6 post-P04
          * UX rewrite). The host setup screen no longer surfaces
          * a count or tier picker. */
-        /* Fix CTF defaults that the FFA-default config wouldn't reach.
-         * If the user picked CTF on entry, clamp the score limit. */
-        if (L->setup_mode == MATCH_MODE_CTF && L->setup_score_limit >= 25) {
-            L->setup_score_limit = FLAG_CAPTURE_DEFAULT;
-        }
+        /* score_limit applies uniformly across FFA / TDM / CTF (kills
+         * for the first two, captures for the third) — no mode-
+         * specific auto-clamp. The default at config_init is now 5,
+         * which is sensible for every mode. */
         /* Validate the seeded map against the seeded mode. If the
          * default cfg's map doesn't support the desired mode (e.g. user
          * has mode_rotation=ctf but map_rotation=foundry), step to a
@@ -523,11 +524,9 @@ void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
             int new_mode = mb_mode[i];
             if (new_mode != L->setup_mode) {
                 L->setup_mode = new_mode;
-                /* Auto-clamp limits + auto-pick a compatible map. */
-                if (L->setup_mode == MATCH_MODE_CTF &&
-                    L->setup_score_limit >= 25) {
-                    L->setup_score_limit = FLAG_CAPTURE_DEFAULT;
-                }
+                /* Auto-pick a mode-compatible map. score_limit stays
+                 * unchanged across mode flips — same semantics in each
+                 * mode (kills / captures-to-win). */
                 if (!setup_map_supports_mode(L->setup_map_id,
                                              L->setup_mode,
                                              &g->world, &g->level_arena)) {
@@ -601,6 +600,35 @@ void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     if (ui_button(&L->ui, (Rectangle){panel_x + label_w + step_w + sval_w + S(8),
                                        y, step_w, row_h}, "+", true)) {
         L->setup_time_limit_s += 10;
+    }
+    y += row_h + gap;
+
+    /* ---- Rounds stepper (match-level cap; after N rounds we go back
+     *      to the lobby without showing the map-vote screen). The
+     *      panel was already sized for 6 rows (row_h * 6 + gap * 5 +
+     *      S(32)); pre-fix only 5 rows were drawn so the bottom 60 px
+     *      of the panel was empty headroom — see panel rect at
+     *      host_setup_screen_run top. */
+    ui_draw_text(&L->ui, "Rounds / match", panel_x, y + S(14), 18,
+                 (Color){200, 220, 240, 255});
+    if (ui_button(&L->ui, (Rectangle){panel_x + label_w, y, step_w, row_h},
+                  "−", true) && L->setup_rounds_per_match > 1) {
+        L->setup_rounds_per_match--;
+    }
+    Rectangle rval_r = (Rectangle){panel_x + label_w + step_w + S(4), y,
+                                    sval_w, row_h};
+    DrawRectangleRec(rval_r, (Color){20, 24, 32, 255});
+    DrawRectangleLinesEx(rval_r, L->ui.scale, L->ui.panel_edge);
+    char rbuf[32]; snprintf(rbuf, sizeof rbuf, "%d", L->setup_rounds_per_match);
+    int rw_ = ui_measure(&L->ui, rbuf, 18);
+    ui_draw_text(&L->ui, rbuf,
+                 (int)(rval_r.x + (rval_r.width - rw_) * 0.5f),
+                 (int)(rval_r.y + (rval_r.height - 18*L->ui.scale) * 0.5f),
+                 18, L->ui.text_col);
+    if (ui_button(&L->ui, (Rectangle){panel_x + label_w + step_w + sval_w + S(8),
+                                       y, step_w, row_h}, "+", true) &&
+        L->setup_rounds_per_match < 32) {
+        L->setup_rounds_per_match++;
     }
     y += row_h + gap;
 
@@ -1358,6 +1386,8 @@ static void apply_chat_send(Game *g, const char *text) {
 
 typedef struct PlayerListCtx {
     const LobbyState *lobby;
+    LobbyState       *lobby_mut;  /* same lobby, writable — host-side mutations */
+    Game             *host_game;  /* same game, writable — for host-only wire sends */
     const int        *order;
     int               n;
     int               mode;       /* MatchModeId — drives team chip text/colour */
@@ -1399,19 +1429,54 @@ static void player_row(const UIContext *u, Rectangle row, int idx,
 
     /* Team chip — only show colour bias for TDM/CTF; FFA gets a
      * neutral gray "FFA" chip so we don't imply a team that doesn't
-     * exist. */
+     * exist. For bot rows in TDM/CTF the host can click the chip to
+     * toggle the bot's team (RED↔BLUE) — bots can't change their own
+     * team from a UI of their own, so the host owns this choice. */
     Color tc = team_color_for_mode(s->team, ctx->mode);
     int chip_x = (int)row.x + (int)(240 * u->scale);
     int chip_y = (int)row.y + (int)(6 * u->scale);
     int chip_w = (int)(64 * u->scale);
     int chip_h = (int)(row.height - 12 * u->scale);
-    DrawRectangle(chip_x, chip_y, chip_w, chip_h, tc);
+    Rectangle chip_r = (Rectangle){ (float)chip_x, (float)chip_y,
+                                    (float)chip_w, (float)chip_h };
+    bool chip_clickable = ctx->host_view && s->is_bot &&
+                          (ctx->mode == MATCH_MODE_TDM ||
+                           ctx->mode == MATCH_MODE_CTF);
+    bool chip_hover = chip_clickable && ui_point_in_rect(u->mouse, chip_r);
+    if (chip_hover) {
+        /* Brighten on hover so the host sees the affordance. */
+        tc.r = (unsigned char)((tc.r > 215) ? 255 : tc.r + 40);
+        tc.g = (unsigned char)((tc.g > 215) ? 255 : tc.g + 40);
+        tc.b = (unsigned char)((tc.b > 215) ? 255 : tc.b + 40);
+    }
+    DrawRectangleRec(chip_r, tc);
+    if (chip_clickable) {
+        DrawRectangleLinesEx(chip_r, u->scale, (Color){ 240, 240, 240, 255 });
+    }
     const char *tn = team_name_for_mode(s->team, ctx->mode);
     int tn_w = ui_measure(u, tn, 16);
     ui_draw_text(u, tn,
                  chip_x + (chip_w - tn_w) / 2,
                  chip_y + (chip_h - (int)(16 * u->scale)) / 2,
                  16, BLACK);
+    if (chip_clickable && chip_hover && u->mouse_pressed && ctx->host_game) {
+        int new_team = (s->team == MATCH_TEAM_RED) ? MATCH_TEAM_BLUE
+                                                   : MATCH_TEAM_RED;
+        /* Post-wan-fixes-16 the host UI runs as NET_ROLE_CLIENT against
+         * the in-process server thread — so a direct lobby_set_team
+         * here mutates the host UI's local copy ONLY, never the
+         * server's canonical lobby. Send over the wire (which the
+         * server validates as "from host slot") so the change reaches
+         * the server, gets re-broadcast to every peer, and shows up
+         * symmetrically on both windows. The native NET_ROLE_SERVER
+         * branch (offline / standalone) goes straight to the lobby
+         * helper. */
+        if (ctx->host_game->net.role == NET_ROLE_CLIENT) {
+            net_client_send_bot_team(&ctx->host_game->net, slot, new_team);
+        } else if (ctx->lobby_mut) {
+            lobby_set_team(ctx->lobby_mut, slot, new_team);
+        }
+    }
 
     /* Bot tier chip — placed to the LEFT of the [Remove] button on
      * the bot row. Per-tier accent color signals difficulty at a
@@ -1631,16 +1696,13 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                      16, tc);
         if (can_change && hover && L->ui.mouse_pressed && !active) {
             /* Host mode change. Update local match + broadcast. CTF
-             * needs a compatible map; clamp score limit if jumping
-             * from FFA's 25 to CTF. */
+             * needs a compatible map. The score_limit the host chose
+             * applies uniformly across modes — captures in CTF, kills
+             * in FFA/TDM — so no auto-override here. */
             g->match.mode = (MatchModeId)modes[i].mode;
             g->match.friendly_fire = g->config.friendly_fire ||
                                       (g->match.mode == MATCH_MODE_FFA);
             g->world.friendly_fire = g->match.friendly_fire;
-            if (g->match.mode == MATCH_MODE_CTF &&
-                g->match.score_limit >= 25) {
-                g->match.score_limit = FLAG_CAPTURE_DEFAULT;
-            }
             /* Validate map mode_mask. If incompatible, advance to a
              * supporting map. We have to peek the chosen map's META
              * which lives on the level we already built — but maps.c
@@ -1684,6 +1746,7 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                 net_client_send_host_setup(&g->net,
                     (int)g->match.mode, g->match.map_id,
                     g->match.score_limit, (int)g->match.time_limit,
+                    g->match.rounds_per_match,
                     g->match.friendly_fire);
             }
             LOG_I("host: lobby mode → %s map → %s",
@@ -1740,6 +1803,7 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                     net_client_send_host_setup(&g->net,
                         (int)g->match.mode, g->match.map_id,
                         g->match.score_limit, (int)g->match.time_limit,
+                        g->match.rounds_per_match,
                         g->match.friendly_fire);
                 }
                 LOG_I("host: lobby map -> %s",
@@ -1748,11 +1812,16 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
         }
     }
 
-    /* Status text — score / time / ff — to the right of the map. */
-    char stat[96];
-    snprintf(stat, sizeof stat, "score %d  ·  time %.0fs  ·  ff=%s",
+    /* Status text — score / time / rounds / ff — to the right of the
+     * map. The rounds_per_match field was added at M6 round-shape
+     * redesign and now shows up next to the score/time so players
+     * can see "this is a 3-round match" before they Ready Up. */
+    char stat[128];
+    snprintf(stat, sizeof stat,
+             "score %d  ·  time %.0fs  ·  rounds %d  ·  ff=%s",
              g->match.score_limit,
              (double)g->match.time_limit,
+             g->match.rounds_per_match,
              g->match.friendly_fire ? "ON" : "off");
     int sx_text = map_x + map_w + S(16);
     int sty = mp_y + (mp_h - (int)(16*L->ui.scale + 0.5f)) / 2;
@@ -1913,7 +1982,10 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
      * dedicated binary (no UI). */
     bool host_view = is_host;
     PlayerListCtx pctx = {
-        .lobby = &g->lobby, .order = order, .n = n,
+        .lobby = &g->lobby,
+        .lobby_mut = host_view ? &g->lobby : NULL,
+        .host_game = host_view ? g : NULL,
+        .order = order, .n = n,
         .mode = (int)g->match.mode,
         .ui_state = L,
         .host_view = host_view,

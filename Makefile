@@ -258,6 +258,16 @@ host-overlay-preview: $(BUILD_DIR)/host_overlay_preview
 	mkdir -p build/shots
 	./$(BUILD_DIR)/host_overlay_preview
 
+# M6 round-shape redesign — visual proof that the new Rounds row in
+# host_setup_screen_run fits without overlapping adjacent rows or the
+# Back/Start buttons at 720p and 1080p.
+$(BUILD_DIR)/host_setup_layout_preview: tests/host_setup_layout_preview.c $(HEADLESS_OBJ) $(RAYLIB_LIB) $(ENET_LIB) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(WARNINGS) $(INCLUDES) tests/host_setup_layout_preview.c $(HEADLESS_OBJ) $(LDFLAGS) $(LIBS) -o $@
+
+host-setup-layout-preview: $(BUILD_DIR)/host_setup_layout_preview
+	mkdir -p build/shots
+	./$(BUILD_DIR)/host_setup_layout_preview
+
 # wan-fixes-11 — visual preview for the new Ready Up button (idle +
 # ready states) and the match-start loading overlay. Same headless-
 # CI-skip rationale as host-overlay-preview. Saves three PNGs into

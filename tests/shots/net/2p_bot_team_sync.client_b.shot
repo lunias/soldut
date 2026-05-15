@@ -1,0 +1,18 @@
+# 2p_bot_team_sync — client B (second connector → slot 2). Pure
+# observer. The host (client A) adds a bot then flips its team
+# twice; client B's lobby table must mirror those changes through
+# the broadcast LOBBY_LIST.
+
+window 1280 720
+out build/shots/net/dedi/2p_bot_team_sync.client_b
+network connect 127.0.0.1:{{PORT}}
+name ClientBlue
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 30 shot t30_no_bot_yet
+at 70 shot t70_bot_added_red
+at 130 shot t130_bot_blue
+at 210 shot t210_bot_red_again
+
+at 280 end

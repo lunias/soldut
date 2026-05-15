@@ -19,7 +19,13 @@ void config_defaults(ServerConfig *cfg) {
     cfg->interp_delay_ms    = 0;            /* 0 = derive from snapshot_hz */
     cfg->countdown_default  = 0.0f;         /* 0 = use match_init's 5 s */
     cfg->mode               = MATCH_MODE_FFA;
-    cfg->score_limit        = 25;
+    /* Default score_limit is mode-uniform: 5 kills / captures to end a
+     * round. Pre-fix this was 25 (FFA's classic deathmatch length) with
+     * a CTF-specific auto-clamp to 5 — confusing semantics when a host
+     * picked CTF and saw an FFA-sized number. Per the M6 round-shape
+     * redesign the host picks ONE number and it applies across all
+     * modes. */
+    cfg->score_limit        = 5;
     cfg->time_limit         = 600.0f;       /* 10 min */
     cfg->friendly_fire      = false;
     cfg->auto_start_seconds = 60.0f;

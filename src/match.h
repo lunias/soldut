@@ -85,6 +85,15 @@ typedef struct MatchState {
      * matches, reset to -1 if it stops matching). Host-only state —
      * not on the wire; clients see the round end via ROUND_END. */
     float        solo_warning_remaining;
+
+    /* Server-side dirty bit set whenever team_score changes (CTF
+     * capture or TDM kill credit). main.c's MATCH_PHASE_ACTIVE
+     * broadcaster checks this each tick and re-ships MATCH_STATE so
+     * the client's HUD banner picks up the new score in the same
+     * frame the host sees it; pre-fix, team_score only synced at
+     * ROUND_START / ROUND_END so the client's banner showed "R 0-B 0"
+     * for the entire round. Off the wire — server-only book-keeping. */
+    bool         score_dirty;
 } MatchState;
 
 /* Initialize defaults from a config snapshot. Called once at server
@@ -137,6 +146,20 @@ bool match_round_should_end(const MatchState *m);
  * `m->solo_warning_remaining` as the tracker. */
 struct World;
 bool match_step_solo_warning(MatchState *m, const struct World *w, float dt);
+
+/* Mid-round respawn step — walks every mech with a non-zero
+ * `respawn_at_tick` and rebuilds the ones whose timer has elapsed
+ * (CTF only at v1; FFA / TDM still ride the round-end respawn). The
+ * caller passes a non-NULL lobby on the host so the helper can
+ * respect per-slot team changes that happened mid-death (e.g., the
+ * player switched to spectator while ragdolling); pass NULL on the
+ * single-player shot-mode path, where the mech's own `team` field is
+ * the source of truth. Authoritative-only; clients mirror through
+ * snapshots (alive bit + fresh particle positions + cleared limb
+ * mask). See documents/m5/06-ctf.md §"Respawn" and snapshot.c's
+ * was_alive→now_alive constraint reactivation. */
+void match_process_respawns(struct World *w, MatchState *m,
+                            struct LobbyState *lobby);
 
 /* Mode helpers. */
 const char *match_mode_name(MatchModeId mode);

@@ -1,0 +1,17 @@
+# 2p_ctf_score_limit — client (BLUE). Stationary observer.
+# Verifies the wire mirrors team_score updates and the eventual
+# ROUND_END broadcast at score_limit.
+
+window 1280 720
+out build/shots/net/client_ctf_score_limit
+network connect 127.0.0.1:24037
+name ClientBlue
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 140 shot t140_round_start
+at 220 shot t220_after_capture1
+at 270 shot t270_after_capture2
+at 320 shot t320_after_capture3_round_end
+
+at 600 end

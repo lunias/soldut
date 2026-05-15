@@ -99,6 +99,7 @@ typedef struct {
     char        map_name[24];         /* --map foundry|slipstream|crossfire|... */
     int         score_limit;          /* --score N; 0 = leave cfg default */
     int         time_limit_s;         /* --time N; 0 = leave cfg default */
+    int         rounds_per_match;     /* --rounds N; 0 = leave cfg default */
     bool        friendly_fire;
     bool        skip_title;
     bool        ff_set;
@@ -283,6 +284,10 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
             int n = atoi(argv[++i]);
             if (n > 0) out->time_limit_s = n;
         }
+        else if (strcmp(argv[i], "--rounds") == 0 && i + 1 < argc) {
+            int n = atoi(argv[++i]);
+            if (n > 0 && n <= 32) out->rounds_per_match = n;
+        }
         /* M6 P06 — perf bench harness. --bench drives an offline-solo
          * round for N seconds then exits with code 0 on budget hit /
          * code 1 otherwise; --bench-csv is independent (works for any
@@ -444,6 +449,19 @@ static void broadcast_flag_state_if_dirty(Game *g) {
     bot_assign_team_roles(&g->bots, &g->world);
 }
 
+/* When team_score changes mid-round (CTF capture or TDM kill credit),
+ * re-ship MATCH_STATE so the client's HUD banner updates in the same
+ * frame the host's does. Pre-fix, team_score was only synced at
+ * ROUND_START / ROUND_END, and the client's "R N - B M" line froze
+ * at "R 0 - B 0" for the whole round even though the score climbed
+ * on the host. */
+static void broadcast_match_state_if_dirty(Game *g) {
+    if (g->net.role != NET_ROLE_SERVER) return;
+    if (!g->match.score_dirty) return;
+    net_server_broadcast_match_state(&g->net, &g->match);
+    g->match.score_dirty = false;
+}
+
 /* Server: drain pickup-state events queued by pickup_step /
  * pickup_spawn_transient. Each event ships the full spawner record
  * (20 bytes) so clients can both mirror state transitions on level-
@@ -560,14 +578,15 @@ static void start_round(Game *g) {
     g->match.score_limit  = g->config.score_limit;
     g->match.time_limit   = g->config.time_limit;
     g->match.friendly_fire= g->config.friendly_fire;
-    /* P07 — CTF default score limit is 5 captures (per the design
-     * canon), much smaller than the FFA default of 25 kills. If the
-     * config's score_limit looks like the FFA default (>= 25), assume
-     * the host hasn't customized for CTF and clamp to FLAG_CAPTURE_DEFAULT.
-     * A host who explicitly sets score_limit=10 in soldut.cfg keeps 10. */
-    if (g->match.mode == MATCH_MODE_CTF && g->match.score_limit >= 25) {
-        g->match.score_limit = FLAG_CAPTURE_DEFAULT;
-    }
+    /* No CTF-specific auto-clamp here: the host's configured
+     * score_limit applies uniformly across FFA (kills), TDM (team
+     * kills), and CTF (captures). Pre-fix this fired
+     * `score_limit = FLAG_CAPTURE_DEFAULT` whenever score_limit >= 25
+     * in CTF, overriding any host pick of 25/30/50 captures with the
+     * built-in 5; combined with the M5-era "+5 team_score per
+     * capture" the round ended on the first capture under the
+     * defaults. ctf_capture now adds +1 per capture, so the
+     * threshold IS the captures-to-win number the host typed in. */
     /* FFA mode: every player is on team 1 (MATCH_TEAM_FFA aliases
      * MATCH_TEAM_RED). The friendly-fire check in mech_apply_damage
      * compares teams and drops same-team hits when ff is off — so
@@ -914,6 +933,29 @@ static void advance_to_next_round(Game *g) {
     /* Tear down dead mechs from the previous round. start_round will
      * re-spawn fresh ones. */
     lobby_clear_round_mechs(&g->lobby, &g->world);
+    /* Reset per-round slot stats (score, kills, deaths, team_kills,
+     * current_streak). Without this, round 2 starts with each slot's
+     * round-1 score intact, and the FFA / TDM / CTF score gates fire
+     * IMMEDIATELY because slot.score >= score_limit (or team_score
+     * for TDM/CTF, separately reset in match_begin_round) is already
+     * true. The user-reported symptom was "round 2 starts and ends
+     * the same tick" — that's the score carrying over.
+     *
+     * Ready flags + longest_streak are preserved across rounds — the
+     * READY commitment is for the WHOLE match (lobby_reset_round_stats
+     * called from end_match clears those once we're back at LOBBY).
+     * longest_streak is match-cumulative by design. dirty bit triggers
+     * the next net_poll to ship the cleared LOBBY_LIST to peers. */
+    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+        if (!g->lobby.slots[i].in_use) continue;
+        LobbySlot *s = &g->lobby.slots[i];
+        s->score          = 0;
+        s->kills          = 0;
+        s->deaths         = 0;
+        s->team_kills     = 0;
+        s->current_streak = 0;
+    }
+    g->lobby.dirty = true;
     start_round(g);
 }
 
@@ -1056,12 +1098,19 @@ static void host_match_flow_step(Game *g, float dt) {
              * coincide with a flag touch sees the post-touch state.
              * No-op outside CTF rounds. */
             ctf_step(g, dt);
+            /* Mid-round respawn — runs AFTER apply_new_kills below so a
+             * kill on this tick arms `respawn_at_tick` to a future
+             * value, then the timer elapses RESPAWN_DELAY_TICKS later
+             * and this call refreshes the body. CTF-only — see
+             * match_process_respawns for the gating. */
             apply_new_kills(g);
+            match_process_respawns(&g->world, &g->match, &g->lobby);
             broadcast_new_hits(g);
             broadcast_new_fires(g);
             broadcast_new_pickups(g);
             broadcast_new_explosions(g);
             broadcast_flag_state_if_dirty(g);
+            broadcast_match_state_if_dirty(g);
             /* End on score limit (FFA = any per-player slot >= cap). */
             bool end = false;
             if (g->match.mode == MATCH_MODE_FFA) {
@@ -1370,6 +1419,10 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
     if (args && args->time_limit_s > 0) {
         game.config.time_limit = (float)args->time_limit_s;
         LOG_I("dedicated: --time %d", args->time_limit_s);
+    }
+    if (args && args->rounds_per_match > 0) {
+        game.config.rounds_per_match = args->rounds_per_match;
+        LOG_I("dedicated: --rounds %d", args->rounds_per_match);
     }
     if (args && args->ff_set) {
         game.config.friendly_fire = args->friendly_fire;
@@ -1778,6 +1831,7 @@ static bool host_start_begin(Game *g, const LaunchArgs *args,
              "%s", map_name_str);
     if (g->config.score_limit > 0) server_args.score_limit = g->config.score_limit;
     if (g->config.time_limit > 0.0f) server_args.time_limit_s = (int)g->config.time_limit;
+    if (g->config.rounds_per_match > 0) server_args.rounds_per_match = g->config.rounds_per_match;
     if (g->config.friendly_fire)    { server_args.friendly_fire = true; server_args.ff_set = true; }
     /* Forward bot fill to the in-process server thread (it runs a
      * separate Game with its own config, so the values would
@@ -2557,6 +2611,9 @@ int main(int argc, char **argv) {
                 game.config.mode               = (MatchModeId)ui.setup_mode;
                 game.config.score_limit        = ui.setup_score_limit;
                 game.config.time_limit         = (float)ui.setup_time_limit_s;
+                game.config.rounds_per_match   = (ui.setup_rounds_per_match > 0)
+                                                  ? ui.setup_rounds_per_match
+                                                  : game.config.rounds_per_match;
                 game.config.friendly_fire      = ui.setup_friendly_fire;
                 game.config.map_rotation[0]    = ui.setup_map_id;
                 game.config.map_rotation_count = 1;

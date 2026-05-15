@@ -74,6 +74,7 @@ typedef struct LobbyUIState {
     int        setup_map_id;          /* MapId — re-chosen if mode-mask incompatible */
     int        setup_score_limit;
     int        setup_time_limit_s;    /* int seconds for the +/- stepper */
+    int        setup_rounds_per_match;/* rounds in a match before returning to lobby */
     bool       setup_friendly_fire;
     /* setup_bots / setup_bot_tier retired post-M6 P04 — bot fill
      * configured from the lobby (per-bot tiers via [Add Bot]). */
