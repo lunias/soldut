@@ -243,28 +243,41 @@ void title_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     ClearBackground((Color){8, 10, 14, 255});
 
     /* Big banner. Font sizes are BASE values; ui_draw_text multiplies
-     * by ui.scale internally so they grow correctly at 4K. */
+     * by ui.scale internally so they grow correctly at 4K.
+     *
+     * m6-ui-fixes — the prior layout planted the title at sh/6 and
+     * centered the button stack at sh/2. At 1080p (scale=1.5) the
+     * subtitle bottom landed at ~345 px and the first button at
+     * ~288 px — the buttons OVERLAPPED the subtitle. New layout:
+     * title anchored to a fixed top margin, then the button stack
+     * is placed at max(vertical-center, subtitle_bottom + margin)
+     * so there is always breathing room regardless of scale. */
     const char *title = "SOLDUT";
     int big_base = 84;
     int tw = ui_measure(&L->ui, title, big_base);
-    int big_y = sh / 6;
+    int big_y = S(56);
     ui_draw_text(&L->ui, title, (sw - tw) / 2, big_y, big_base,
                  (Color){80, 180, 255, 255});
 
     int sub_base = 18;
-    int sub_w = ui_measure(&L->ui, "M4 — lobby & matches", sub_base);
+    int sub_w = ui_measure(&L->ui, "M6 — lobby & matches", sub_base);
     int sub_y = big_y + (int)((float)big_base * L->ui.scale + S(8));
-    ui_draw_text(&L->ui, "M4 — lobby & matches",
+    ui_draw_text(&L->ui, "M6 — lobby & matches",
                  (sw - sub_w) / 2, sub_y, sub_base,
                  (Color){160, 160, 170, 255});
+    int sub_bottom = sub_y + (int)((float)sub_base * L->ui.scale + 0.5f);
 
     int ver_base = 14;
     ui_draw_text(&L->ui, SOLDUT_VERSION_STRING, S(12),
                  sh - S(28), ver_base, (Color){90, 100, 120, 255});
 
-    /* Stack of buttons. */
+    /* Stack of buttons — vertically centered, but pushed down if the
+     * centered position would crowd the subtitle. */
     int bw = S(360), bh = S(56), gap = S(14);
-    int by = sh / 2 - (bh * 5 + gap * 4) / 2;
+    int btn_stack_h = bh * 5 + gap * 4;
+    int by_centered = (sh - btn_stack_h) / 2;
+    int by_min      = sub_bottom + S(40);
+    int by = by_centered > by_min ? by_centered : by_min;
     int bx = (sw - bw) / 2;
 
     if (ui_button(&L->ui, (Rectangle){bx, by, bw, bh}, "Single Player", true)) {
@@ -307,7 +320,7 @@ void title_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
 
     if (L->show_keybinds) {
         DrawRectangle(0, 0, sw, sh, (Color){0, 0, 0, 180});
-        int dw = S(520), dh = S(440);
+        int dw = S(560), dh = S(480);
         int dx = (sw - dw) / 2, dy = (sh - dh) / 2;
         Rectangle dr = (Rectangle){dx, dy, dw, dh};
         ui_panel_default(&L->ui, dr);
@@ -318,30 +331,30 @@ void title_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                      (Color){240, 220, 180, 255});
 
         /* Two-column table of keybind rows. Mirrors the actual platform
-         * layer (src/platform.c) — the canonical source of truth, since
-         * code wins over docs per CLAUDE.md. RMB → BTN_FIRE_SECONDARY
-         * is the new entry at M5 P09. */
+         * layer (src/platform.c) plus the main-loop key hooks in
+         * src/main.c — code wins over docs per CLAUDE.md. */
         struct { const char *key, *action; } rows[] = {
-            { "A / D",                 "Move left / right" },
+            { "A / D / Arrows",        "Move left / right" },
             { "Space",                 "Jump" },
-            { "W",                     "Jet" },
-            { "Ctrl / S",              "Crouch (drops through one-way)" },
+            { "W / Up Arrow",          "Jet" },
+            { "Ctrl / S / Down",       "Crouch (drops through one-way)" },
             { "X",                     "Prone" },
             { "Left Mouse",            "Primary fire (active slot)" },
-            { "Right Mouse",           "Secondary fire — inactive slot, NEW" },
-            { "Q",                     "Swap weapon (toggle slot)" },
+            { "Right Mouse",           "Secondary fire (inactive slot)" },
+            { "Q",                     "Swap weapon (toggle active slot)" },
             { "R",                     "Reload" },
             { "F",                     "Melee" },
             { "E",                     "Use / interact (Engineer pack)" },
             { "Shift",                 "Dash / burst-jet boost" },
-            { "Esc",                   "Leave to title (in lobby/match)" },
-            { "F2",                    "Mute audio (paired-process tests)" },
+            { "+ / -",                 "Master volume up / down" },
+            { "F2",                    "Mute audio" },
+            { "Esc",                   "Leave to title / close modal" },
         };
         int n_rows = (int)(sizeof(rows) / sizeof(rows[0]));
         int row_y = dy + S(60);
         int row_h = S(24);
         int kx    = dx + S(28);
-        int ax    = dx + S(180);
+        int ax    = dx + S(200);
         for (int i = 0; i < n_rows; ++i) {
             ui_draw_text(&L->ui, rows[i].key, kx, row_y, 16,
                          (Color){200, 220, 240, 255});
@@ -1679,9 +1692,13 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
         }
     }
 
-    /* Map cycle button — to the right of the mode buttons. */
+    /* Map cycle button — to the right of the mode buttons.
+     * m6-ui-fixes — was a one-way custom-drawn pick (LMB-only, no
+     * arrow affordances). Now uses ui_cycle_button so RMB walks the
+     * registry backward and the left/right arrow glyphs make the
+     * directionality discoverable, matching the host-setup screen. */
     int map_x = mp_x + 3 * (mb_w + mb_gap) + S(12);
-    int map_w = S(180);
+    int map_w = S(220);
     Rectangle map_r = (Rectangle){map_x, mp_y, map_w, mp_h};
     char map_label[64];
     /* P08b — when the host advertises a map_id outside the client's
@@ -1697,55 +1714,37 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     } else {
         map_disp = "(custom)";
     }
-    snprintf(map_label, sizeof map_label, "Map: %s%s",
-             map_disp,
-             can_change ? "  ▶" : "");
+    snprintf(map_label, sizeof map_label, "Map: %s", map_disp);
     {
-        bool hover = can_change && ui_point_in_rect(L->ui.mouse, map_r);
-        Color bg = hover ? L->ui.button_hover : L->ui.button_bg;
-        DrawRectangleRec(map_r, bg);
-        DrawRectangleLinesEx(map_r, L->ui.scale, L->ui.panel_edge);
-        Color tc = can_change ? L->ui.text_col : L->ui.text_dim;
-        int tw = ui_measure(&L->ui, map_label, 16);
-        ui_draw_text(&L->ui, map_label,
-                     (int)(map_r.x + (map_r.width - tw) * 0.5f),
-                     (int)(map_r.y + (map_r.height - 16*L->ui.scale) * 0.5f),
-                     16, tc);
-        if (can_change && hover && L->ui.mouse_pressed && !g->test_play_lvl[0]) {
-            /* Cycle to next map that supports the current mode. P08b —
-             * the registry can include user-authored maps from
-             * assets/maps/, not just the four reserved indices. */
-            int cur = g->match.map_id;
-            int N = g_map_registry.count;
-            for (int step = 1; step <= N; ++step) {
-                int next = (cur + step) % N;
-                arena_reset(&g->level_arena);
-                map_build((MapId)next, &g->world, &g->level_arena);
-                if (g->world.level.meta.mode_mask & (1u << g->match.mode)) {
-                    g->match.map_id = next;
-                    break;
+        bool can_step = can_change && !g->test_play_lvl[0];
+        int step = ui_cycle_button(&L->ui, map_r, map_label, can_step);
+        if (step != 0) {
+            int new_map = setup_step_map_for_mode(
+                g->match.map_id, (int)g->match.mode, step,
+                &g->world, &g->level_arena);
+            if (new_map != g->match.map_id) {
+                g->match.map_id = new_map;
+                g->config.map_rotation[0] = g->match.map_id;
+                g->config.map_rotation_count = 1;
+                /* P08 — same refresh+broadcast as the mode-change branch. */
+                maps_refresh_serve_info(map_def(g->match.map_id)->short_name,
+                                        NULL, &g->server_map_desc,
+                                        g->server_map_serve_path,
+                                        sizeof(g->server_map_serve_path));
+                if (g->net.role == NET_ROLE_SERVER) {
+                    net_server_broadcast_match_state(&g->net, &g->match);
+                    net_server_broadcast_map_descriptor(&g->net, &g->server_map_desc);
+                } else if (g->net.role == NET_ROLE_CLIENT && slot_is_host) {
+                    /* wan-fixes-6 — same dedicated-host wire push as the
+                     * mode-change branch. */
+                    net_client_send_host_setup(&g->net,
+                        (int)g->match.mode, g->match.map_id,
+                        g->match.score_limit, (int)g->match.time_limit,
+                        g->match.friendly_fire);
                 }
+                LOG_I("host: lobby map -> %s",
+                      map_def(g->match.map_id)->display_name);
             }
-            g->config.map_rotation[0] = g->match.map_id;
-            g->config.map_rotation_count = 1;
-            /* P08 — same refresh+broadcast as the mode-change branch. */
-            maps_refresh_serve_info(map_def(g->match.map_id)->short_name,
-                                    NULL, &g->server_map_desc,
-                                    g->server_map_serve_path,
-                                    sizeof(g->server_map_serve_path));
-            if (g->net.role == NET_ROLE_SERVER) {
-                net_server_broadcast_match_state(&g->net, &g->match);
-                net_server_broadcast_map_descriptor(&g->net, &g->server_map_desc);
-            } else if (g->net.role == NET_ROLE_CLIENT && slot_is_host) {
-                /* wan-fixes-6 — same dedicated-host wire push as the
-                 * mode-change branch. */
-                net_client_send_host_setup(&g->net,
-                    (int)g->match.mode, g->match.map_id,
-                    g->match.score_limit, (int)g->match.time_limit,
-                    g->match.friendly_fire);
-            }
-            LOG_I("host: lobby map → %s",
-                  map_def(g->match.map_id)->display_name);
         }
     }
 

@@ -229,6 +229,9 @@ typedef struct {
     float      volume;              /* per-id gain after bus + distance */
     AudioBusId bus;                 /* SFX or UI */
     bool       loaded;              /* source.frameCount > 0 at init */
+    double     last_play_t;         /* m6-ui-fixes — GetTime() of the last
+                                     * audio_play_global hit; drives the
+                                     * UI-bus minimum-interval guard. */
 } SfxEntry;
 
 static SfxEntry g_sfx[SFX_COUNT];
@@ -317,10 +320,21 @@ static const SfxManifestEntry g_sfx_manifest[] = {
     { SFX_FLAG_RETURN,       "assets/sfx/flag_return.wav",       3, 0.85f, AUDIO_BUS_SFX },
     { SFX_FLAG_CAPTURE,      "assets/sfx/flag_capture.wav",      3, 1.00f, AUDIO_BUS_SFX },
 
-    /* --- UI --- */
-    { SFX_UI_HOVER,          "assets/sfx/ui_hover.wav",          3, 0.45f, AUDIO_BUS_UI  },
-    { SFX_UI_CLICK,          "assets/sfx/ui_click.wav",          3, 0.65f, AUDIO_BUS_UI  },
-    { SFX_UI_TOGGLE,         "assets/sfx/ui_toggle.wav",         3, 0.55f, AUDIO_BUS_UI  },
+    /* --- UI ---
+     * m6-ui-fixes — UI samples drop to 1 alias each. The previous
+     * 3-alias round-robin was meant to let rapid plays overlap
+     * (necessary for gunfire), but for UI clicks it's the source
+     * of the audible "stacking": tapping two buttons in close
+     * succession produced two simultaneous decays of the 103 ms
+     * sample. One alias means PlaySound restarts from the start
+     * each time, which is the standard click-UX shape and matches
+     * what every other in-game UI does. The new debounce guard in
+     * audio_play_global also filters same-frame double-fires that
+     * happen when both a hot-rect handler AND a follow-up state
+     * change ping the click within ~16 ms. */
+    { SFX_UI_HOVER,          "assets/sfx/ui_hover.wav",          1, 0.45f, AUDIO_BUS_UI  },
+    { SFX_UI_CLICK,          "assets/sfx/ui_click.wav",          1, 0.65f, AUDIO_BUS_UI  },
+    { SFX_UI_TOGGLE,         "assets/sfx/ui_toggle.wav",         1, 0.55f, AUDIO_BUS_UI  },
 
     /* --- Death --- */
     { SFX_KILL_FANFARE,      "assets/sfx/kill_fanfare.wav",      3, 0.75f, AUDIO_BUS_SFX },
@@ -606,6 +620,18 @@ void audio_play_global(SfxId id) {
     if (id <= SFX_NONE || id >= SFX_COUNT) return;
     SfxEntry *e = &g_sfx[id];
     if (!e->loaded || e->alias_count == 0) return;
+
+    /* m6-ui-fixes — same-id minimum interval. Prevents the audible
+     * "stacking" when two UI hot-rect handlers in the same frame both
+     * fire SFX_UI_CLICK (e.g. closing one modal + opening another) or
+     * when held repeat keys nudge audio_play_global faster than the
+     * sample can decay. UI bus uses 60 ms; non-UI buses fall through
+     * with no guard so concurrent gunfire / explosions still layer. */
+    if (e->bus == AUDIO_BUS_UI) {
+        double now = GetTime();
+        if (now - e->last_play_t < 0.060) return;
+        e->last_play_t = now;
+    }
 
     Sound s = e->aliases[e->next_alias];
     e->next_alias = (e->next_alias + 1) % e->alias_count;
