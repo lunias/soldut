@@ -40,6 +40,70 @@ Font ui_font_for(UIFontKind kind) {
     }
 }
 
+/* m6-ui-fixes — TTF codepoint coverage. Passing `codepoints=NULL,
+ * count=0` to LoadFontEx generates only the ASCII printable range
+ * (32-126), so any UI string containing en-dash, em-dash, ellipsis,
+ * middle dot, true minus, smart quotes, arrows, or geometric
+ * triangles renders as the missing-glyph "?" (or as nothing, with
+ * leading whitespace squashed).
+ *
+ * The list below covers every non-ASCII codepoint that appears in
+ * a `"..."` literal anywhere under src/, plus a handful of common
+ * Latin Supplement / arrow / triangle codepoints we want available
+ * for future UI work. Coverage per face (verified via fc-query):
+ *   - Atkinson-Hyperlegible-Regular.ttf — full Latin/Punctuation,
+ *     U+2014 em-dash, U+2026 ellipsis, U+00B7 middle dot, U+2212
+ *     minus, U+2122 trademark. (No triangle/arrow glyphs.)
+ *   - VG5000-Regular.otf — adds U+2190..2193 arrows, U+25B2/▲,
+ *     U+25B6/▶, U+25BC/▼, U+25C0/◀.
+ *   - Steps-Mono-Thin.otf — limited ASCII; has em-dash, ellipsis,
+ *     minus, smart quotes.
+ * Codepoints missing from the source font silently produce a
+ * zero-area slot, which raylib's DrawTextEx then renders as the
+ * fallback "?" glyph (or blank when no fallback exists) — so this
+ * list can be a superset without producing visible artefacts in
+ * the per-face atlases. */
+static const int g_ui_codepoints[] = {
+    /* ASCII printable 32..126 (95 codepoints) */
+    0x0020,0x0021,0x0022,0x0023,0x0024,0x0025,0x0026,0x0027,
+    0x0028,0x0029,0x002A,0x002B,0x002C,0x002D,0x002E,0x002F,
+    0x0030,0x0031,0x0032,0x0033,0x0034,0x0035,0x0036,0x0037,
+    0x0038,0x0039,0x003A,0x003B,0x003C,0x003D,0x003E,0x003F,
+    0x0040,0x0041,0x0042,0x0043,0x0044,0x0045,0x0046,0x0047,
+    0x0048,0x0049,0x004A,0x004B,0x004C,0x004D,0x004E,0x004F,
+    0x0050,0x0051,0x0052,0x0053,0x0054,0x0055,0x0056,0x0057,
+    0x0058,0x0059,0x005A,0x005B,0x005C,0x005D,0x005E,0x005F,
+    0x0060,0x0061,0x0062,0x0063,0x0064,0x0065,0x0066,0x0067,
+    0x0068,0x0069,0x006A,0x006B,0x006C,0x006D,0x006E,0x006F,
+    0x0070,0x0071,0x0072,0x0073,0x0074,0x0075,0x0076,0x0077,
+    0x0078,0x0079,0x007A,0x007B,0x007C,0x007D,0x007E,
+    /* Latin-1 punctuation + symbols we use or expect to use */
+    0x00A1, /* ¡ */ 0x00A2, /* ¢ */ 0x00A3, /* £ */ 0x00A9, /* © */
+    0x00AB, /* « */ 0x00AE, /* ® */ 0x00B0, /* ° */ 0x00B1, /* ± */
+    0x00B5, /* µ */ 0x00B7, /* · — middle dot, lobby status separator */
+    0x00BB, /* » */ 0x00BF, /* ¿ */
+    /* General punctuation */
+    0x2010, /* ‐ hyphen */         0x2013, /* – en dash */
+    0x2014, /* — em dash */        0x2018, /* ' left single quote */
+    0x2019, /* ' right single quote */ 0x201C, /* " left double quote */
+    0x201D, /* " right double quote */ 0x2022, /* • bullet */
+    0x2026, /* … ellipsis — "RELOADING…", "Loading match…" */
+    0x2030, /* ‰ per mille */      0x2039, /* ‹ */ 0x203A, /* › */
+    /* Currencies + tech symbols */
+    0x20AC, /* € */               0x2122, /* ™ */
+    /* Math: minus sign (distinct from hyphen-minus) */
+    0x2212, /* − — stepper "minus" button in host-setup */
+    /* Arrows — present in VG5000 + as a fallback in some Atkinson builds */
+    0x2190, /* ← */ 0x2191, /* ↑ */ 0x2192, /* → */ 0x2193, /* ↓ */
+    /* Geometric triangles (cycle arrows / spinners) */
+    0x25B2, /* ▲ */ 0x25B6, /* ▶ — "▶" used in lobby map labels */
+    0x25BC, /* ▼ */ 0x25C0, /* ◀ */
+    /* Check / cross marks (commonly useful for toggles) */
+    0x2713, /* ✓ */ 0x2717, /* ✗ */
+};
+
+#define UI_CODEPOINT_COUNT (int)(sizeof g_ui_codepoints / sizeof g_ui_codepoints[0])
+
 /* Try to LoadFontEx for one face; on failure, leave the slot zeroed so
  * ui_font_for transparently falls back. raylib accepts both .ttf and .otf
  * via stb_truetype as long as the file has TrueType (not CFF) outlines —
@@ -49,7 +113,11 @@ static Font load_font_or_zero(const char *path, int px) {
         LOG_I("font: %s not found; will fall back to default", path);
         return (Font){0};
     }
-    Font f = LoadFontEx(path, px, NULL, 0);
+    /* Pass our explicit codepoint list so non-ASCII glyphs (em-dash,
+     * ellipsis, middle dot, minus, triangles) get rasterised into the
+     * atlas. raylib casts away the const internally — the array is
+     * read-only from LoadFontEx's POV. */
+    Font f = LoadFontEx(path, px, (int *)g_ui_codepoints, UI_CODEPOINT_COUNT);
     if (f.texture.id == 0 || f.glyphCount == 0) {
         LOG_W("font: LoadFontEx(%s) failed; falling back to default", path);
         if (f.texture.id != 0) UnloadFont(f);
