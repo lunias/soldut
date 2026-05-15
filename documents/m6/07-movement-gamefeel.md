@@ -1257,20 +1257,78 @@ accel-cap clamps it to 0.778 and the dash effectively does nothing.
   reconciliation should stay aligned. Test plan: `tests/net/run.sh`,
   `tests/shots/net/run.sh 2p_basic`, paired-process net tests.
 
+### Phase 7 — network sync validation ✅ shipped (no code change)
+
+Per plan §6 Phase 7: confirm none of the Phase 1-6 movement changes
+break client-server position prediction or remote-mech interpolation.
+
+**Verdict: zero regressions from Phase 1-6 against parent commit
+`3626e36`.** All Phase 1-6 motion/sync paths preserve host↔client
+agreement under the same paired-process tests that gate the
+movement-tuning work.
+
+- **3-process net tests (real ENet over loopback):**
+  - `tests/net/run.sh`        — 13/13 PASS
+  - `tests/net/run_3p.sh`     — 10/10 PASS
+
+- **Paired-shot tests directly exercising Phase 1-6 surfaces:**
+  - `2p_basic`                — 12/12 PASS (run.sh wrapper)
+  - `run_frag_grenade`        — 9/9 PASS (explosion sync, projectile arcs)
+  - `run_grapple_lag_comp`    — 5/5 PASS (server-side lag comp)
+  - `run_snapshot_rate`       — 5/5 PASS (interp clock + rate)
+  - `run_rmb_hitscan`         — 5/5 PASS (secondary fire / hitscan)
+  - `run_secondary_fire`      — 7/7 PASS
+  - `run_input_redundancy`    — 5/5 PASS (input bundling, ENet throttle)
+  - `run_riot_cannon_sfx`     — 3/3 PASS
+  - `run_meet_named`          — 18/18 PASS (custom-map host→client)
+  - `run_meet_custom`         — 15/15 PASS
+
+- **Triage on the broader paired-shot suite (25 scripts):** 15
+  GREEN, 8 PARTIAL (stale, pre-existing — identical pass/fail
+  counts on `3626e36` confirmed by `git stash` round-trip), 2
+  infrastructure (`run_dedi` needs a scenario arg, `run_round_sync_
+  banner` has a non-standard output format). Stale tests:
+  `run_anim_stability`, `run_ctf`, `run_ctf_combat`,
+  `run_ctf_drop_on_kill`, `run_kill_feed`, `run_lag_comp`,
+  `run_round_loop`, `run_round_sync`. Root causes (per a kill_feed
+  case study):
+  1. **Map size expansion** (M6 P05 `4db9e7b`) — crossfire is now
+     140×60 tiles (4480 px wide). Tests that assumed pulse-rifle
+     range across the spawn separation now miss.
+  2. **Spawn separation tightening** (this branch `ad75daf` /
+     `3626e36`) — spawn allocator gives the 2-player pair more
+     space; aim coordinates hardcoded against older spawn layouts
+     no longer target the opponent.
+  3. **Lobby flow drift** (wan-fixes-11) — round-timing assertions
+     shifted by ±5 ticks.
+
+- **Tuning lever for the stale tests:** add a
+  `--dedi-spawn-override` CLI flag to the dedicated server (~30
+  lines in `src/net.c` / `src/dedi.c`) so paired-dedi tests can
+  script "spawn ClientA at (X1, Y1), ClientB at (X2, Y2)" the same
+  way host-client tests use `peer_spawn`. Out of scope for this
+  branch; tracked for a future shot-test-hygiene pass.
+
+- **No code change in Phase 7.** Measurement-only ship.
+
+- **Playtest:** N/A.
+- **Next:** **Phase 8** — update CURRENT_STATE.md tunables table +
+  the spec doc `documents/03-physics-and-mechs.md` §Movement to
+  reflect the Phase 1-6 shipping numbers; PR open.
+
 ### Resume here when next session starts
 
 1. Read this section (§13) for the running log.
 2. `git log --oneline main..HEAD` to confirm the commits above are
    on the branch.
-3. Re-run all four probe shots + `make test-spawn-geometry` to
-   reproduce baselines:
+3. Re-run all four probe shots to reproduce baselines:
    - `tests/shots/m6_movement_probe.shot`
    - `tests/shots/m6_movement_jet.shot`
    - `tests/shots/m6_movement_slope.shot`
    - `tests/shots/m6_movement_dash.shot`
    - `tests/shots/m6_aurora_slope.shot`
-4. Phase 6 shipped a real fix (Scout dash); Phase 7 (network
-   sync validation) is the next phase per the plan.
+4. Phases 1-7 all landed; Phase 8 (docs update + open PR) is the
+   wrap-up.
 
 ### Phase 1.2 followup — sync investigation (NOT a Phase 1.x regression)
 
