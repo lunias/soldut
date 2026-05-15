@@ -1316,19 +1316,60 @@ movement-tuning work.
   the spec doc `documents/03-physics-and-mechs.md` §Movement to
   reflect the Phase 1-6 shipping numbers; PR open.
 
-### Resume here when next session starts
+### Phase 8 — docs update + PR open ✅ shipped
 
-1. Read this section (§13) for the running log.
-2. `git log --oneline main..HEAD` to confirm the commits above are
-   on the branch.
-3. Re-run all four probe shots to reproduce baselines:
-   - `tests/shots/m6_movement_probe.shot`
-   - `tests/shots/m6_movement_jet.shot`
-   - `tests/shots/m6_movement_slope.shot`
-   - `tests/shots/m6_movement_dash.shot`
-   - `tests/shots/m6_aurora_slope.shot`
-4. Phases 1-7 all landed; Phase 8 (docs update + open PR) is the
-   wrap-up.
+Closing-out pass per plan §6 Phase 8 + philosophy rule 10
+("the code is the spec"). Brings the two living docs back into
+agreement with the shipping code on this branch.
+
+- **CURRENT_STATE.md** — Tunables (current values) table updated:
+  - `JUMP_IMPULSE_PXS` 320 → 480 (Phase 3).
+  - `AIR_CONTROL = 0.35` row removed; replaced by `AIR_ACCEL_PXS2
+    = 1680` (Phase 2).
+  - Three new rows for the Phase 1 ground-accel model:
+    `GROUND_ACCEL_PXS2 = 2800`, `GROUND_DECEL_PXS2 = 4666`,
+    `GROUND_FRICTION_PXS2 = 1400`.
+  - `SCOUT_DASH_PXS = 720` row annotated for the Phase 6 dash-as-
+    direct-velocity-SET semantics.
+  - New row for `apply_jet_force` Phase 4 horizontal multiplier
+    (0.5 · vertical when BTN_LEFT/RIGHT held).
+  - Pre-existing staleness fix: `PHYSICS_GRAVITY_PXS2 = 1200` →
+    `level->gravity.y = 1080` (matches `src/level.c:67`).
+  - Pre-existing staleness fix: `PHYSICS_RKV` → `PHYSICS_VELOCITY_
+    DAMP` (the actual name in `src/physics.h`).
+
+- **documents/03-physics-and-mechs.md §Movement** — added a top-
+  of-section M6 P07 update note: pointers to the headline changes
+  (input-is-a-CAP invariant, air momentum preserved, jet
+  horizontal, Scout dash direct SET) and a link back to this
+  plan doc. Spec-level RUNSPEED/JUMPSPEED reference values
+  preserved as abstract framing; concrete shipping numbers live
+  in CURRENT_STATE.md.
+
+- **Tests:** no code touched in Phase 8, no regression sweep
+  needed.
+
+- **PR status:** to be opened.
+
+- **Implementation log final state:** Phases 1, 1.1, 1.2, 1.2-
+  followups, 2, 3, 4, 5, 6, 7, 8 all landed. Code changes in
+  Phases 1, 1.1, 1.2, 2, 3, 4, 6. Measurement-only ships in
+  Phases 5, 7. Documentation-only ship in Phase 8.
+
+### How to pick this branch up next
+
+1. `git log --oneline main..HEAD` to see the phase commits in order.
+2. The five probe shots reproduce the measurement baselines:
+   - `tests/shots/m6_movement_probe.shot` (running jump)
+   - `tests/shots/m6_movement_jet.shot` (pure JET + JET-RIGHT)
+   - `tests/shots/m6_movement_slope.shot` (slope-down → flat)
+   - `tests/shots/m6_movement_dash.shot` (Scout dash spike)
+   - `tests/shots/m6_aurora_slope.shot` (slope pose + passive slide)
+3. Authoritative tunables: `src/mech.c:148-170` (search for "M6 P07").
+4. If a future feel-tweak round revisits these numbers, follow the
+   same pattern — measure before/after on the probe shots, ship per-
+   phase commits with playtest verdicts in the body, batch-update
+   CURRENT_STATE.md only at the end.
 
 ### Phase 1.2 followup — sync investigation (NOT a Phase 1.x regression)
 

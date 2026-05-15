@@ -3493,17 +3493,21 @@ them against playtest reactions. (Per-weapon stats are in the
 
 | Source                    | Constant                        | Value    |
 |---------------------------|---------------------------------|----------|
-| `src/physics.h`           | `PHYSICS_GRAVITY_PXS2`          | 1200     |
-| `src/physics.h`           | `PHYSICS_RKV` (Verlet damping)  | 0.99     |
+| `src/level.c`             | `level->gravity.y`              | 1080     |
+| `src/physics.h`           | `PHYSICS_VELOCITY_DAMP` (Verlet) | 0.99    |
 | `src/physics.h`           | `PHYSICS_CONSTRAINT_ITERATIONS` | 12       |
 | `src/mech.c`              | `RUN_SPEED_PXS`                 | 280      |
-| `src/mech.c`              | `JUMP_IMPULSE_PXS`              | 320      |
+| `src/mech.c`              | `JUMP_IMPULSE_PXS`              | 480 (M6 P07 Phase 3, was 320) |
 | `src/mech.c`              | `JET_THRUST_PXS2`               | 2200     |
 | `src/mech.c`              | `JET_DRAIN_PER_SEC`             | 0.60     |
-| `src/mech.c`              | `AIR_CONTROL`                   | 0.35     |
+| `src/mech.c`              | `GROUND_ACCEL_PXS2`             | 2800 (M6 P07 Phase 1) |
+| `src/mech.c`              | `GROUND_DECEL_PXS2`             | 4666 (M6 P07 Phase 1) |
+| `src/mech.c`              | `GROUND_FRICTION_PXS2`          | 1400 (M6 P07 Phase 1) |
+| `src/mech.c`              | `AIR_ACCEL_PXS2`                | 1680 (M6 P07 Phase 2, replaced AIR_CONTROL=0.35 SET model) |
 | `src/mech.c`              | `BINK_DECAY_PER_SEC`            | 1.8      |
 | `src/mech.c`              | `BINK_MAX`                      | 0.35 (~20°) |
-| `src/mech.c`              | `SCOUT_DASH_PXS`                | 720      |
+| `src/mech.c`              | `SCOUT_DASH_PXS`                | 720 (M6 P07 Phase 6 — direct vel SET on dash tick, bypasses Phase 1 accel-cap) |
+| `src/mech.c::apply_jet_force` | jet horizontal multiplier   | 0.5 · vertical (M6 P07 Phase 4, when BTN_LEFT/RIGHT held) |
 | `src/mech.c`              | `ENGINEER_HEAL`                 | 50       |
 | `src/mech.c`              | `ENGINEER_COOLDOWN`             | 30 s     |
 | Chassis HP (Scout/Trp/Heavy/Sniper/Eng) | `health_max`          | 100/150/220/130/140 |
