@@ -1,0 +1,30 @@
+# M6 m6-pickup-placement — visual proof that aurora's central pit
+# is now a carved basin with reachable pickups, and the east mountain-
+# peak rail cannon sits on the exposed summit (not buried in the rise
+# tile body).
+#
+# Pre-fix the 5 pit pickups at y = floor_pick + 64 = 2800 sat inside
+# the still-solid floor tiles; the central pit was BACKGROUND-poly
+# decoration only. Post-fix cols 74..86 rows 86..87 are carved EMPTY
+# so the pickups inhabit a real 2-tile-deep basin.
+
+window 1280 720
+out build/shots/m6_placement_aurora
+seed 1 2
+
+map aurora
+
+# Spawn at the central-pit lip (col 73, just west of the carve) so
+# the camera frames the new basin shape on its first shot.
+spawn_at 2336 2712
+
+contact_sheet placement_aurora cols 3 cell 426 240
+
+at 1   shot t1_pit_overview
+at 60  shot t60_settled
+
+# Walk right into the carved basin.
+at 80  press right
+at 130 release right
+at 160 shot t160_inside_pit
+at 200 end

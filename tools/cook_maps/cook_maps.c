@@ -30,6 +30,7 @@
 #include "../../src/map_thumb.h"
 #include "../../src/match.h"
 #include "../../src/mech.h"
+#include "../../src/placement_validate.h"
 #include "../../src/weapons.h"
 #include "../../src/world.h"
 
@@ -445,8 +446,14 @@ static void build_slipstream(void) {
 
     /* ---- Slope polygons ---- */
     const int floor_y    = t2w(H -  4);
-    const int main_top   = t2w(H - 17);
-    const int catwalk_y  = t2w(H - 31);
+    /* `main_top` / `catwalk_y` are the TOP edges of their respective
+     * platform tiles. The spawn-block (above) already learnt that
+     * `t2w(H - 17)` is the BOTTOM of the row-(H-18) tile (cf. spawn
+     * fix at `spawn_main`); the pickup block below took longer to
+     * follow suit. Using the wrong row buried every pickup 16 px
+     * deep in the platform body. */
+    const int main_top   = t2w(H - 18);
+    const int catwalk_y  = t2w(H - 32);
     const int basement_ceil = t2w(H - 11);
     (void)basement_ceil;     /* M6 slipstream-trap-fix — slide chute slopes removed; only kept for the comment. */
 
@@ -521,7 +528,11 @@ static void build_slipstream(void) {
     const int basement_pick = floor_y - 16;
     const int main_pick     = main_top - 16;
     const int catwalk_pick  = catwalk_y - 16;
-    const int beam_pick     = t2w(H - 37) - 16;
+    /* Top beam tile row is `H - 38` (between rows H-38 and H-37 via
+     * `tile_fill(..., H-38, ..., H-37, SOLID)`). `t2w(H - 37) - 16`
+     * placed the pickup mid-tile in the beam body — same off-by-one
+     * as `main_top` / `catwalk_y`. */
+    const int beam_pick     = t2w(H - 38) - 16;
     /* Cave network — WEAPON Mass Driver in centermost room. */
     push_pickup(t2w(50), basement_pick, PICKUP_WEAPON, WEAPON_MASS_DRIVER);
     /* Side rooms: ARMOR heavy + HEALTH large. */
@@ -541,8 +552,11 @@ static void build_slipstream(void) {
     /* Catwalk-mid extra small healths. */
     push_pickup(t2w(20),     catwalk_pick, PICKUP_HEALTH, HEALTH_SMALL);
     push_pickup(t2w(W - 20), catwalk_pick, PICKUP_HEALTH, HEALTH_SMALL);
-    /* Top beam: WEAPON Rail Cannon (high-reward, exposed). */
-    push_pickup(t2w(W / 2),  beam_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
+    /* Top beam: WEAPON Rail Cannon (high-reward, exposed). Offset
+     * three tiles left of the centerline so the pickup clears the
+     * decorative centerline stalactite (cols 48..52, base y=416)
+     * while still reading as the "top of the map" prize. */
+    push_pickup(t2w(W / 2 - 3),  beam_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
 
     set_meta("Slipstream",
              "Stacked catwalks. Vertical jet beats.",
@@ -864,12 +878,20 @@ static void build_concourse(void) {
     push_pickup(t2w(15),    gallery_pick, PICKUP_HEALTH, HEALTH_SMALL);
     push_pickup(t2w(W - 6),  gallery_pick, PICKUP_HEALTH, HEALTH_SMALL);
     push_pickup(t2w(W - 15), gallery_pick, PICKUP_HEALTH, HEALTH_SMALL);
-    /* Gallery alcoves: ARMOR light + POWERUP invisibility. */
-    push_pickup(t2w(21), t2w(H - 31) - 16, PICKUP_ARMOR, ARMOR_LIGHT);
-    push_pickup(t2w(79), t2w(H - 31) - 16, PICKUP_POWERUP, POWERUP_INVISIBILITY);
-    /* Doorways: AMMO_SECONDARY ×2 (hot-spot fights). */
+    /* Gallery prizes — placed on the gallery surface itself, not in
+     * the tiny outer-wall alcove cuts. (The original Y of `t2w(H-31)
+     * - 16` floated the pickups ~48 px above the gallery floor;
+     * `gallery_pick` lands them on the catwalk surface like the four
+     * HEALTH small spawners above.) */
+    push_pickup(t2w(21), gallery_pick, PICKUP_ARMOR, ARMOR_LIGHT);
+    push_pickup(t2w(79), gallery_pick, PICKUP_POWERUP, POWERUP_INVISIBILITY);
+    /* Doorways: AMMO_SECONDARY ×2 (hot-spot fights). The right pickup
+     * mirrors the left one: cover stubs sit at cols 22 and 77, so the
+     * atrium-side x is col 23 (left) and col 76 (right). The previous
+     * `W - 23 = 77` placed the right ammo INSIDE the right wing-side
+     * cover stub. */
     push_pickup(t2w(23), floor_pick, PICKUP_AMMO_SECONDARY, 0);
-    push_pickup(t2w(W - 23), floor_pick, PICKUP_AMMO_SECONDARY, 0);
+    push_pickup(t2w(W - 24), floor_pick, PICKUP_AMMO_SECONDARY, 0);
 
     set_meta("Concourse",
              "Long sightlines through the atrium. Mid-range fight.",
@@ -1058,6 +1080,15 @@ static void build_aurora(void) {
     /* Floor. */
     tile_fill(0, H - 4, W, H, SOLID);
 
+    /* Central pit — carve the top two rows of floor (cols 74..86) so
+     * the cluster of HEALTH small + JET_FUEL pickups below has a
+     * physical basin to live in. Pre-fix the pit was BACKGROUND-poly
+     * decoration only; the pickups sat at `floor_pick + 64` which is
+     * inside the still-solid floor tile. Right endpoint is 87
+     * (exclusive) so the rightmost pickup at col 86 lands in the
+     * carved area. */
+    tile_fill(74, H - 4, 87, H - 2, TILE_F_EMPTY);
+
     /* Outer walls — short, capped at mountain-peak height. */
     tile_fill(0,     H - 35, 2,     H - 4, SOLID);
     tile_fill(W - 2, H - 35, W,     H - 4, SOLID);
@@ -1087,7 +1118,6 @@ static void build_aurora(void) {
     const int floor_y     = t2w(H -  4);
     const int hill_peak_y = t2w(H - 11);                /* west / east hill tops */
     const int pit_low_y   = t2w(H -  4 + 2);            /* central pit basin */
-    const int peak_top    = t2w(H - 35);
 
     /* Two big 30° hills — ~10 tiles wide each. tan(30°) ≈ 0.577 →
      * 7 tile rise / 12 tile run. */
@@ -1112,15 +1142,18 @@ static void build_aurora(void) {
              t2w(W - 44), floor_y);
     (void)pit_low_y;
 
-    /* 45° central pit valley — 4-tile basin at the bottom with 45°
-     * slopes on each side, ~14 tiles wide each side. */
+    /* Cracked-edge BACKGROUND silhouettes that visually sell the
+     * carved central pit. Shrunk from the old 4-tile-deep slopes to
+     * 2 tiles deep so the visual matches the actual tile carve
+     * above. Purely decorative — physics uses the tile carve, not
+     * the polys. */
     push_tri(POLY_KIND_BACKGROUND,
-             t2w(60), floor_y,
-             t2w(74), floor_y + t2w(4),
+             t2w(68), floor_y,
+             t2w(74), floor_y + t2w(2),
              t2w(74), floor_y);
     push_tri(POLY_KIND_BACKGROUND,
-             t2w(86), floor_y + t2w(4),
-             t2w(100), floor_y,
+             t2w(86), floor_y + t2w(2),
+             t2w(92), floor_y,
              t2w(86), floor_y);
 
     /* 6 floating overhead struts (grapple anchors). Small horizontal
@@ -1196,7 +1229,13 @@ static void build_aurora(void) {
     /* ---- Pickups (≈26 per brief). ---- */
     const int floor_pick = floor_y - 16;
     const int hill_pick  = hill_peak_y - 16;
-    const int peak_pick  = peak_top - 16;
+    /* `peak_top` is the JOIN between peak body and peak rise (the
+     * bottom edge of the rise's tile row). The "exposed summit"
+     * pickup needs to sit ABOVE the rise — use the rise's top edge
+     * `t2w(H - 38)` instead. Pre-fix `peak_top - 16` was buried in
+     * the rise tile body, which only worked on the west side because
+     * t2w(6) happened to land inside the west alcove cavity. */
+    const int peak_pick  = t2w(H - 38) - 16;
     const int strut_pick_a = t2w(H - 50) - 16;
     const int strut_pick_b = t2w(H - 58) - 16;
 
@@ -1221,9 +1260,14 @@ static void build_aurora(void) {
     push_pickup(t2w(80),  strut_pick_b, PICKUP_WEAPON, WEAPON_MASS_DRIVER);
     push_pickup(t2w(61),  strut_pick_a, PICKUP_HEALTH, HEALTH_SMALL);
     push_pickup(t2w(117), strut_pick_a, PICKUP_HEALTH, HEALTH_SMALL);
-    /* Mountain peaks (exposed summit): WEAPON Rail Cannon ×2. */
-    push_pickup(t2w(6),     peak_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
-    push_pickup(t2w(W - 6), peak_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
+    /* Mountain peaks (exposed summit): WEAPON Rail Cannon ×2.
+     * Outer rise ledge spans cols 2..5 (west) and W-6..W-3 (east);
+     * col 4 / W-4 is the middle of each ledge. (Pre-fix used col 6
+     * which is the alcove cavity on the west and the rise body on
+     * the east — asymmetric, and only worked by accident on the
+     * west side.) */
+    push_pickup(t2w(4),     peak_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
+    push_pickup(t2w(W - 4), peak_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
     /* Mountain-peak alcoves: HEALTH large ×2 + POWERUP berserk ×1. */
     push_pickup(t2w(8),     t2w(H - 37) - 16, PICKUP_HEALTH, HEALTH_LARGE);
     push_pickup(t2w(W - 8), t2w(H - 37) - 16, PICKUP_HEALTH, HEALTH_LARGE);
@@ -1401,9 +1445,14 @@ static void build_crossfire(void) {
     /* Sky bridge: ARMOR heavy + Rail Cannon. */
     push_pickup(t2w(W / 2 - 4), sky_pick, PICKUP_ARMOR, ARMOR_HEAVY);
     push_pickup(t2w(W / 2 + 4), sky_pick, PICKUP_WEAPON, WEAPON_RAIL_CANNON);
-    /* Central-high jetpack alcoves: POWERUP invisibility ×2. */
-    push_pickup(t2w(77),     t2w(H - 33) - 16, PICKUP_POWERUP, POWERUP_INVISIBILITY);
-    push_pickup(t2w(W - 77), t2w(H - 33) - 16, PICKUP_POWERUP, POWERUP_INVISIBILITY);
+    /* Central-high jetpack alcoves: POWERUP invisibility ×2.
+     * Place INSIDE the alcove cavity at rows H-30..H-26 — `sky_pick`
+     * (= 16 px above the sky bridge top) lands in the cavity-bottom
+     * row. Pre-fix `t2w(H - 33) - 16` floated the pickups four rows
+     * ABOVE the alcove cap, in open air far from the labelled
+     * jetpack-alcove geometry. */
+    push_pickup(t2w(77),     sky_pick, PICKUP_POWERUP, POWERUP_INVISIBILITY);
+    push_pickup(t2w(W - 77), sky_pick, PICKUP_POWERUP, POWERUP_INVISIBILITY);
 
     set_meta("Crossfire",
              "Mirror CTF arena. Two bases, central battleground.",
@@ -1435,6 +1484,13 @@ static void build_citadel(void) {
     /* Floor + ceiling. */
     tile_fill(0, H - 4, W, H, SOLID);
     tile_fill(0, 0, W, 2, SOLID);
+
+    /* Plaza bowl basin — carve the top two rows of floor at cols
+     * 76..83 so the Mass Driver `floor_pick + 64` placement below
+     * sits inside an actual physical recess. Pre-fix the basin was
+     * SOLID-poly slope overlap with the still-solid floor tiles, so
+     * the basin pickup was buried unreachably in the floor. */
+    tile_fill(76, H - 4, 84, H - 2, TILE_F_EMPTY);
 
     /* Outer walls full height. */
     tile_fill(0,     2, 2,     H - 4, SOLID);
@@ -1478,15 +1534,19 @@ static void build_citadel(void) {
     const int floor_y    = t2w(H - 4);
     const int castle_top = t2w(H - 22);
 
-    /* 30° plaza bowl — slope from each castle exit down to the basin.
-     * Basin is 8 tiles wide at the bottom (x=76..84). */
-    push_tri(POLY_KIND_SOLID,
-             t2w(2 + castle_w + 4), floor_y,
+    /* Plaza bowl visual hint — two cracked-edge BACKGROUND wedges on
+     * either side of the carved basin. Pre-fix these were SOLID polys
+     * that overlapped the still-solid floor tiles (no walkable slope
+     * surface, and the basin pickup was buried in tile); the tile
+     * carve above now provides the basin geometry, so these stay
+     * purely decorative. */
+    push_tri(POLY_KIND_BACKGROUND,
+             t2w(70), floor_y,
              t2w(76), floor_y + t2w(2),
              t2w(76), floor_y);
-    push_tri(POLY_KIND_SOLID,
+    push_tri(POLY_KIND_BACKGROUND,
              t2w(84), floor_y + t2w(2),
-             t2w(W - 2 - castle_w - 4), floor_y,
+             t2w(90), floor_y,
              t2w(84), floor_y);
 
     /* M6 bot-stuck-fix — castle outer slopes raised 96 → 160 to clear
@@ -1598,6 +1658,33 @@ static void build_citadel(void) {
 static int cook_one(Arena *scratch, Arena *verify_arena,
                     const char *short_name, void (*builder)(void)) {
     builder();
+
+    /* Placement audit — every pickup / spawn / flag must sit in
+     * reachable space. A single bad placement aborts the cook so we
+     * never quietly ship a map with pickups buried in tile or polygon
+     * solids. See src/placement_validate.{c,h}. */
+    PlacementIssue issues[256];
+    int issue_count = placement_validate(&g_cooker.world.level,
+                                         issues,
+                                         (int)(sizeof issues / sizeof issues[0]));
+    if (issue_count > 0) {
+        fprintf(stderr, "cook_maps: %s placement validation FAILED — "
+                        "%d issue(s):\n",
+                short_name, issue_count);
+        const int tile_size = g_cooker.world.level.tile_size;
+        for (int i = 0; i < issue_count; ++i) {
+            const PlacementIssue *iss = &issues[i];
+            int tx = (tile_size > 0) ? iss->x / tile_size : -1;
+            int ty = (tile_size > 0) ? iss->y / tile_size : -1;
+            fprintf(stderr,
+                    "  %-13s %s idx=%-2d pos=(%d, %d) tile=(%d, %d) detail=%d\n",
+                    placement_issue_kind_str(iss->kind),
+                    placement_entity_kind_str(iss->entity),
+                    iss->index, iss->x, iss->y, tx, ty, iss->detail);
+        }
+        return 1;
+    }
+
     arena_reset(scratch);
 
     /* Encode the thumb PNG first so it can ride along inside the .lvl

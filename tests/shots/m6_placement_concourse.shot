@@ -1,0 +1,22 @@
+# M6 m6-pickup-placement — visual proof that concourse's right-
+# doorway AMMO_SECONDARY (mirror of the left-doorway pickup at col
+# 23) now lands at col 76 — atrium-side of the right wing-side
+# cover stub at col 77. Pre-fix the mirror x of W-23 = 77 placed
+# the pickup INSIDE the stub.
+
+window 1280 720
+out build/shots/m6_placement_concourse
+seed 1 2
+
+map concourse
+
+# Spawn just east of the right doorway stub so the camera frames
+# both stub and pickup. Right stub: col 77 rows 52..55. Pickup is
+# now at col 76 row 55.
+spawn_at 2530 1736
+
+contact_sheet placement_concourse cols 2 cell 640 360
+
+at 1  shot t1_doorway
+at 60 shot t60_settled
+at 90 end

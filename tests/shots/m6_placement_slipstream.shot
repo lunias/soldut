@@ -1,0 +1,30 @@
+# M6 m6-pickup-placement — visual proof that slipstream's
+# main-floor / catwalk / top-beam pickups are now placed above the
+# platform surfaces (instead of sunk into the tile bodies).
+#
+# Pre-fix the main_pick / catwalk_pick / beam_pick formulas used the
+# BOTTOM edge of each platform's tile row, burying every pickup 16 px
+# deep in solid. Post-fix the same row-(H-18) / row-(H-32) / row-(H-38)
+# TOP edges are used.
+
+window 1280 720
+out build/shots/m6_placement_slipstream
+seed 1 2
+
+map slipstream
+
+# Spawn on the right main floor near the AMMO_PRIMARY pickup at
+# t2w(50)=1600, main_pick=1008. World y of main-floor top is t2w(32)=1024;
+# pelvis sits at floor - 40 = 984.
+spawn_at 1600 984
+
+contact_sheet placement_slipstream cols 3 cell 426 240
+
+at 1   shot t1_main_floor_pre
+at 60  shot t60_main_floor_settled
+
+# Walk left toward t2w(15) AMMO pickup so the camera reveals the row.
+at 90 press left
+at 150 release left
+at 170 shot t170_after_walk_left
+at 200 end
