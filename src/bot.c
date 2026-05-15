@@ -2753,10 +2753,14 @@ void bot_step(BotSystem *bs, World *w, struct Game *g, float dt) {
              * that node as blacklisted, clear the goal score so the
              * next run_strategy is free to pick something fresh, and
              * also reset the stuck timer (we're "moving on" mentally
-             * even if we haven't moved yet). */
+             * even if we haven't moved yet). Engage stuck is left
+             * alone — a bot firing in place at a visible enemy is
+             * valid combat behavior, and clearing it dropped 1v1
+             * kill totals in the bake suite. */
             if (mind->stuck_since_tick > 0 &&
                 w->tick - mind->stuck_since_tick > BOT_GOAL_ABANDON_TICKS &&
-                mind->goal_target_node >= 0)
+                mind->goal_target_node >= 0 &&
+                mind->goal != BOT_GOAL_ENGAGE)
             {
                 bot_abandon_node(mind, w->tick, mind->goal_target_node);
                 mind->goal_score_cached = 0.0f;
