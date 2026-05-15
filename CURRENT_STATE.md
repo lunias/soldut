@@ -5,7 +5,185 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-15** (M6 lobby-loadout-preview — modal loadout picker with treadmill animation cycle, per-jetpack exhaust FX, and spider chart). Replaces the per-row cycle buttons in the lobby's right column with a single eye-catching `[ CHOOSE LOADOUT ]` button + a compact summary panel. Clicking the button opens a full-screen modal that drives a synthetic mech through 8 animation phases (IDLE-primary → IDLE-secondary → WALK → SPRINT → JUMP → JET → CROUCH → PRONE, 16 s loop) on a scrolling treadmill, while a 6-axis radar chart (SPEED / ARMOR / POWER / RANGE / MOBILITY / UTILITY, normalised against all 2160 possible loadouts) and a composed description blurb update live as the player cycles. ESC / [X] / scrim-click all close the modal — `SetExitKey(KEY_NULL)` at platform init makes ESC a controllable key. Code lives in new `src/loadout_preview.{h,c}` (~1100 LOC); the renderer exposes a new `render_draw_mech_preview` wrapper around the already-existing `draw_mech_sprites` so the preview can drive an isolated `ParticlePool` + `ConstraintPool` without touching the live `World`. Pose comes straight from `pose_compute` (M6 P01) — the cycle driver writes the synthesized `PoseInputs` (anim_id / gait_phase / pelvis / aim_dir / active_slot / grounded) and copies the resulting `PoseBones` into the inline 16-particle pool each frame. Jet exhaust sources colours + dimensions from `g_jet_fx` in `mech_jet_fx.c` so the preview's flame matches what the player will see in-game — STANDARD blue ion, BURST orange/red dual-nozzle 1.6× length, GLIDE_WING pale-cyan strobe (mirrors `sustain_tick_divisor=4`), JUMP_JET green burst-only pop every 1.2 s (mirrors `has_continuous_plume=false`). The cycle-button click path mirrors the lobby's old `apply_loadout_change` flow exactly: mutate `L->lobby_*`, ship the diff via `net_client_send_loadout` (client) or `lobby_set_loadout` (host), persist via `lobby_ui_save_prefs` — so swapping the entry point introduced zero new persistence/protocol surface. When ONE slot changes the cycle jumps to the matching phase (secondary → PHASE_IDLE_SECONDARY, jetpack → PHASE_JET) for immediate feedback; any other change resets to the start of the loop. `can_edit_modal = !ready` plumbed through so the modal's cycle buttons disable when the player has Ready-Up'd (matching wan-fixes-14 lobby behaviour). New `tests/loadout_preview_overlay.c` + `make loadout-preview-overlay` target captures 20 PNGs: 8 layout shots (lobby + modal at 720p/1080p/1440p/4K) + 8 per-phase modal shots at 1080p + 4 per-jetpack JET-phase shots showing each plume colour. All existing assertion tests still pass (`test-snapshot`, `test-pose-compute`, `test-prefs`, `test-level-io`, `test-mech-ik`).
+Last updated: **2026-05-15** (M6 ctf-fixes — round-shape redesign:
+universal mid-round respawn, score_limit unified across modes,
+rounds_per_match host UI, HUD score banner sync, per-round slot reset).
+Five commits on `m6-ctf-fixes` rebuild what "a round" means so FFA /
+TDM / CTF all share the same shape — kill / get captured / die →
+respawn after 3 s; round ends when someone hits `score_limit` (kills
+for FFA/TDM, captures for CTF); after `rounds_per_match` rounds the
+match ends and we go back to the lobby (no map vote).
+
+What changed across the five commits (oldest → newest):
+
+1. **`8b3894c`** — Three core CTF fixes shipped together.
+   - **Flag-pickup touch box**: `ctf.c::ctf_step` measures distance
+     from chest to the visible STAFF SEGMENT (base up by
+     `FLAG_STAFF_HEIGHT_PX = 28`, matching `render.c::draw_flag`)
+     instead of distance-to-base only. Crossfire's flag base sits
+     16 px above the platform top — chest at standing height is
+     52 px above the base, outside the 36 px touch radius. Pre-fix
+     pickup never fired on .lvl-authored maps with that placement;
+     post-fix the staff is touchable from any height along its
+     visible length.
+   - **Mid-round CTF respawn**: new `Mech.respawn_at_tick` field +
+     `mech_respawn(World*, mid, spawn_pos)` that resets skeleton +
+     HP / fuel / ammo / dismember / damage decals / hit-flash /
+     pinned FX_STUMP / grapple. `mech_kill` arms the timer in CTF;
+     `match_process_respawns` (new in `match.{c,h}`) walks the pool
+     each ACTIVE tick and fires `mech_respawn` when the timer
+     expires. Match-end is gated on `score_limit` (captures) +
+     `time_limit` only; `match_step_solo_warning` skips CTF. Client
+     side: `snapshot_apply` calls `mech_respawn` when it observes
+     alive going false → true so the local mech's own decals / FX
+     reset symmetrically with remote viewers (pre-fix the gate was
+     `mid != local_mech_id` and the local player saw their previous
+     life's damage state).
+   - **Bot team chip wire path**: clicking the team chip on a bot
+     row in the lobby now sends `NET_MSG_LOBBY_BOT_TEAM` (id 36,
+     2-byte body — slot + team) to the in-process server thread
+     instead of mutating the host UI's local lobby copy only.
+     Pre-fix the host UI saw the bot flip teams but the server (and
+     the remote client) kept the old assignment.
+
+2. **`0da627a`** — Score-limit semantic unified.
+   - `ctf_capture` now adds **+1** to `team_score` (was +5). The
+     two CTF-specific auto-clamps (`if score_limit >= 25, set to 5`)
+     removed from `main.c::start_round` and `lobby_ui.c::mode-flip`.
+     The host's configured `score_limit` applies uniformly across
+     all modes: kills (FFA / TDM) or captures (CTF).
+
+3. **`ea4c5d6`** — HUD score banner sync over the wire.
+   - New `MatchState.score_dirty` bit, set by `ctf_capture` and the
+     TDM branch of `match_apply_kill`. Drained each tick in
+     `main.c::broadcast_match_state_if_dirty` (mirror in
+     `shotmode.c`'s host flow). Pre-fix team_score only synced at
+     ROUND_START / ROUND_END, so the client's "R N - B M" banner
+     froze at "R 0 - B 0" for the entire round while captures
+     accumulated host-side. `match_shot_log_phase` now logs
+     `team_score=R%d/B%d limit=%d` so paired tests can grep
+     `rx_match_state` on the client log for the live progression.
+
+4. **`43df2a4`** — Universal respawn + `rounds_per_match` host UI.
+   - `mech_kill` now arms `respawn_at_tick` for **every** mode (was
+     CTF-only). `match_process_respawns` drops its CTF gate.
+     `match_step_solo_warning` returns early when any mech has a
+     pending respawn — the rule becomes a safety net for kick /
+     disconnect scenarios where no body is coming back.
+   - `cfg->score_limit` default 25 → **5** across all modes;
+     `cfg->rounds_per_match` was already 3 default.
+   - Host setup screen gains a "Rounds / match" stepper row between
+     Time limit and Friendly fire. Panel was already sized for 6
+     rows (`row_h * 6 + gap * 5 + S(32)`); pre-fix only 5 rows used
+     the panel so there was 60 px of headroom for the new row. Layout
+     verified at 720p (sc=1.0) and 1080p (sc=1.5) via a new
+     `tests/host_setup_layout_preview.c` + `make
+     host-setup-layout-preview` harness — no overlap with the
+     Back / Start Hosting buttons or the footer tip at either
+     breakpoint.
+   - `LobbyUIState.setup_rounds_per_match` seeded from
+     `g->config.rounds_per_match`. `LaunchArgs.rounds_per_match` +
+     new `--rounds N` CLI flag. `dedicated_run` applies it; the
+     host UI's `host_start_begin` forwards
+     `g->config.rounds_per_match` into the in-proc server's
+     `server_args` so the dedicated thread spawns with the host's
+     chosen value.
+   - `NET_MSG_LOBBY_HOST_SETUP` body grew 8 → 9 bytes (new u8
+     `rounds_per_match` between `time_s` and `ff`).
+     `net_client_send_host_setup` signature grows a
+     `rounds_per_match` param; both call sites in the in-lobby host
+     controls updated. Server handler validates the new byte
+     (1..32) and mirrors into match + config. Pre-rounds clients
+     sending the old 8-byte body are rejected (no back-compat
+     across this M6 revision).
+   - Lobby status line gains "rounds N" between time and ff:
+     `score 5  ·  time 600s  ·  rounds 3  ·  ff=off`.
+   - `kill_peer` shotmode directive gained an optional
+     `<shooter_mech_id>` so FFA / TDM tests can credit kills to
+     the right slot. Default -1 (suicide) preserves CTF
+     drop-on-kill behavior.
+
+5. **`95513ce`** — Per-round slot reset.
+   - User-reported: "first round ends → map vote → round 2 starts
+     and immediately ends." Root cause: `advance_to_next_round`
+     zeroed only `match.team_score` (via `match_begin_round`) but
+     left `slot.score` intact. Round 2 inherited round 1's
+     slot.score already at the cap, so the FFA round-end gate fired
+     the same tick round 2 began. TDM / CTF were saved by
+     team_score reset; FFA exposed the gap because its round-end
+     check reads slot.score.
+   - `main.c::advance_to_next_round` now zeros `score` / `kills` /
+     `deaths` / `team_kills` / `current_streak` for every in-use
+     slot before calling `start_round`. `ready` + `longest_streak`
+     persist across rounds within a match (cleared once we
+     `end_match` and return to LOBBY). `lobby.dirty = true` so the
+     next LOBBY_LIST broadcast ships the cleared scores; HUD
+     banner resets to 0 in real time, matches the host's view.
+   - `shotmode.c::shot_host_flow`'s inter-round path was missing
+     more than the slot reset — it skipped the full level rebuild
+     + `lobby_spawn_round_mechs` + `ROUND_START` broadcast that
+     `main.c::start_round` runs. Without `ROUND_START` the test
+     client stays in MODE_SUMMARY for round 2. Inlined the same
+     setup the lobby → active path already runs.
+
+New paired regression tests under `tests/shots/net/`:
+- `run_ctf_pickup.sh` — 4 assertions. Host (RED) and client (BLUE)
+  each walk into the opposing flag; pickup must fire on the
+  authoritative server AND the broadcasted `NET_MSG_FLAG_STATE`
+  must transition the flag to CARRIED on both peers' views.
+- `run_ctf_respawn.sh` — 5 assertions. Kill, no round-end, respawn
+  fires at tick+180, round stays ACTIVE for 600+ ticks past the
+  would-be solo_warning timer.
+- `run_ctf_respawn_clean.sh` — 5 assertions. Respawned mech has no
+  lingering FX_STUMP / damage decals / hit-flash on either the
+  host's view or the client's view of its own local mech.
+- `run_ctf_score_limit.sh` — 9 assertions. cfg score_limit=3; host
+  arms 3 captures via `arm_carry`. Each capture +1 to team_score;
+  exactly one round-end at the third capture; client mirrors the
+  team_score progression live through `rx_match_state` SHOT_LOG.
+- `run_bot_team_sync.sh` — 10 assertions. Dedicated server pattern
+  from `run_dedi.sh` so client A (first connector) is is_host=true.
+  Client A adds a bot via `add_bot 1`, flips its team RED ↔ BLUE
+  via `bot_team 2 N`. Server validates host + bot, mirrors via
+  LOBBY_LIST. Visual sync verified on the contact sheets — both
+  clients see the bot's team chip flip in lockstep across all 4
+  captured frames.
+- `run_ffa_respawn.sh` — 5 assertions. Host kills client 3 times
+  (with `kill_peer 1 0` to credit the shooter); client respawns
+  after each of the first two; the third hits FFA score_limit=3
+  and ends the round. solo_warning silent throughout.
+- `run_tdm_respawn.sh` — 6 assertions. Same shape with TDM
+  `team_score` gating + the HUD-banner team_score sync regression.
+- `run_rounds_match.sh` — 4 assertions. cfg `rounds_per_match=1`,
+  one round ends → `end_match` (not `advance_to_next_round`);
+  client returns to MODE_LOBBY via match.phase=LOBBY.
+- `run_multi_round.sh` — 5 assertions. cfg `score_limit=2` +
+  `rounds_per_match=3`. Host scores 2 kills → round 1 ends. Both
+  sides vote-fast-forward the summary. Round 2 begins and runs
+  through the rest of the script without an immediate end. The
+  contact sheet shows round 2 actually playing on Foundry with
+  the HUD banner reading **score 0** (proving slot.score reset).
+
+New single-player shot scripts: `m5_ctf_respawn.shot` (CTF kill →
+180-tick respawn → round still ACTIVE), `m6_ctf_respawn_fx.shot`
+(verify FX_STUMP / damage decals cleared on respawn).
+
+New shotmode directives: `bot_team <slot> <team>`, `add_bot <tier>`,
+`kill_peer <victim> [shooter]` (extended).
+
+Regression sweep, all green: `test-ctf` 52/52 (one assertion
+updated from `team_score += 5` to `+= 1` matching the new
+capture rule), `test-snapshot`, `test-pickups`, `test-spawn`,
+`test-level-io`, `test-prefs`, `test-map-chunks`,
+`test-grapple-ceiling`, `test-frag-grenade`, `tests/net/run_3p.sh`
+10/10, `run_dedi_host_setup.sh` 7/7.
+
+Pre-existing flakes carried forward: `run_ctf_drop_on_kill.sh`'s
+"drop position matches the carrier's pelvis" assertion (verified
+pre-existing on clean main); `run_anim_stability.sh`'s two
+"transitions bounded" assertions (verified pre-existing).
+
+Previously: **2026-05-15** (M6 lobby-loadout-preview — modal loadout picker with treadmill animation cycle, per-jetpack exhaust FX, and spider chart). Replaces the per-row cycle buttons in the lobby's right column with a single eye-catching `[ CHOOSE LOADOUT ]` button + a compact summary panel. Clicking the button opens a full-screen modal that drives a synthetic mech through 8 animation phases (IDLE-primary → IDLE-secondary → WALK → SPRINT → JUMP → JET → CROUCH → PRONE, 16 s loop) on a scrolling treadmill, while a 6-axis radar chart (SPEED / ARMOR / POWER / RANGE / MOBILITY / UTILITY, normalised against all 2160 possible loadouts) and a composed description blurb update live as the player cycles. ESC / [X] / scrim-click all close the modal — `SetExitKey(KEY_NULL)` at platform init makes ESC a controllable key. Code lives in new `src/loadout_preview.{h,c}` (~1100 LOC); the renderer exposes a new `render_draw_mech_preview` wrapper around the already-existing `draw_mech_sprites` so the preview can drive an isolated `ParticlePool` + `ConstraintPool` without touching the live `World`. Pose comes straight from `pose_compute` (M6 P01) — the cycle driver writes the synthesized `PoseInputs` (anim_id / gait_phase / pelvis / aim_dir / active_slot / grounded) and copies the resulting `PoseBones` into the inline 16-particle pool each frame. Jet exhaust sources colours + dimensions from `g_jet_fx` in `mech_jet_fx.c` so the preview's flame matches what the player will see in-game — STANDARD blue ion, BURST orange/red dual-nozzle 1.6× length, GLIDE_WING pale-cyan strobe (mirrors `sustain_tick_divisor=4`), JUMP_JET green burst-only pop every 1.2 s (mirrors `has_continuous_plume=false`). The cycle-button click path mirrors the lobby's old `apply_loadout_change` flow exactly: mutate `L->lobby_*`, ship the diff via `net_client_send_loadout` (client) or `lobby_set_loadout` (host), persist via `lobby_ui_save_prefs` — so swapping the entry point introduced zero new persistence/protocol surface. When ONE slot changes the cycle jumps to the matching phase (secondary → PHASE_IDLE_SECONDARY, jetpack → PHASE_JET) for immediate feedback; any other change resets to the start of the loop. `can_edit_modal = !ready` plumbed through so the modal's cycle buttons disable when the player has Ready-Up'd (matching wan-fixes-14 lobby behaviour). New `tests/loadout_preview_overlay.c` + `make loadout-preview-overlay` target captures 20 PNGs: 8 layout shots (lobby + modal at 720p/1080p/1440p/4K) + 8 per-phase modal shots at 1080p + 4 per-jetpack JET-phase shots showing each plume colour. All existing assertion tests still pass (`test-snapshot`, `test-pose-compute`, `test-prefs`, `test-level-io`, `test-mech-ik`).
 
 Side effects of the rewrite:
 - `draw_mech_sprites` no longer `static` in `src/render.c` — the preview path needs to reuse it without paying the `Level *` dependency that `draw_mech_capsules` has (for the per-frame ray-clamp on arm bones). `draw_mech` still gates which it calls.

@@ -13,7 +13,57 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-15** (M6 lobby-loadout-preview). **Added** three
+Last updated: **2026-05-15** (M6 ctf-fixes — round-shape redesign).
+**Added** three new entries:
+
+- "Mid-round respawn delay is a fixed 180 ticks across all modes
+  (M6 ctf-fixes)" — under "Networking". `RESPAWN_DELAY_TICKS` in
+  `mech.h` hardcodes 3 s respawn delay (60 Hz × 3). No per-mode /
+  per-chassis / cfg-driven tuning. Picked because the FX_STUMP
+  emitter lasts 1.5 s and its blood spawns can live another 1.5 s,
+  so 3 s guarantees all death FX have aged out by respawn (combined
+  with the explicit FX_STUMP zap in `mech_respawn` for belt-and-
+  suspenders). Revisit when playtesting shows the cadence is wrong
+  (Soldat uses ~2.5 s) or when we want competitive-mode tuning
+  (longer respawn in TDM / shorter in FFA for tempo).
+
+- "solo_warning is now a fallback for kicks/disconnects only
+  (M6 ctf-fixes)" — under "Networking". `match_step_solo_warning`
+  used to be the only way for a FFA / TDM round to end after the
+  last opponent died. With universal respawn, the rule has to skip
+  whenever any mech has a pending `respawn_at_tick > w->tick` —
+  otherwise round 2 ends 3 s after every 1v1 kill (the fixed
+  respawn delay is exactly the solo_warning timer). The function
+  is kept as a safety: if everyone in the round leaves (kick /
+  disconnect / spectator team switch) with no pending respawns,
+  it fires after 3 s so the match doesn't stall forever. Revisit
+  when the safety becomes load-bearing for some scenario we
+  haven't anticipated, or when we want to retire it entirely (the
+  time_limit gate is the alternative).
+
+- "NET_MSG_LOBBY_HOST_SETUP body grew 8 → 9 bytes; no back-compat
+  (M6 ctf-fixes)" — under "Networking". The
+  `rounds_per_match` host-UI field is sent over the wire so the
+  in-process server thread learns about it (the host UI is
+  `NET_ROLE_CLIENT` post wan-fixes-16). Pre-fix the body was 8
+  bytes (mode + map + score + time + ff); post-fix it's 9 (the new
+  u8 between time_s and ff). The server's
+  `server_handle_lobby_host_setup` rejects bodies < 9 bytes, so a
+  pre-rounds-aware client trying to send the old format is
+  silently dropped. We don't maintain wire compat across M6
+  revisions — both binaries are built from the same commit in
+  shipping. Revisit if we ever want point-release wire stability
+  (the protocol version field would need to land first).
+
+**Code cleanup** (no entries deleted): the
+`if score_limit >= 25 → FLAG_CAPTURE_DEFAULT` auto-clamp in
+`main.c::start_round` and the matching one in
+`lobby_ui.c`'s mode-flip handler are gone. `cfg->score_limit`
+default is now 5 across all modes, and the host's number applies
+uniformly — 5 captures in CTF, 5 kills in FFA / TDM. The CTF
+score-limit interpretation is no longer mode-specific magic.
+
+Previously: **2026-05-15** (M6 lobby-loadout-preview). **Added** three
 new entries:
 
 - "Loadout preview exhaust anchors at the feet, not at the chassis
@@ -1360,6 +1410,70 @@ WAN polish. Net effect on the trade-off ledger:
     timer to the HUD pip.
   - The HUD final-art pass (P13) lands and we want the dropped flag
     to read at a glance — natural carrier for the pulse work.
+
+### Mid-round respawn delay is a fixed 180 ticks across all modes (M6 ctf-fixes)
+
+- **What we did** — `RESPAWN_DELAY_TICKS` in `mech.h` hard-codes
+  3 s respawn (60 Hz × 3) for every mode. `mech_kill` arms
+  `m->respawn_at_tick = w->tick + RESPAWN_DELAY_TICKS` whenever
+  `w->authoritative` is true; `match_process_respawns` fires
+  `mech_respawn` once `w->tick >= m->respawn_at_tick`. No
+  per-mode / per-chassis / cfg-driven tuning.
+- **Why** — Three seconds is a comfortable Soldat-adjacent cadence
+  AND it's just past the worst-case FX_STUMP-spawned blood
+  particle's total lifetime (1.5 s emitter + 1.5 s blood life =
+  3 s exactly). Pre-fix the CTF-only respawn was 180 ticks, and
+  retiring the mode gate kept the same number for FFA / TDM so we
+  didn't introduce per-mode behaviour we hadn't playtested.
+- **Revisit when** —
+  - Playtest data says the cadence is wrong (too long → tempo drops
+    in 1v1; too short → ragdoll cleanup hasn't finished).
+  - Competitive-mode tuning becomes a thing (e.g. longer respawn
+    for TDM so kills feel weightier).
+  - We want a per-chassis death-time multiplier (Heavy takes
+    longer to "reboot" than Scout).
+
+### solo_warning is now a fallback for kicks/disconnects only (M6 ctf-fixes)
+
+- **What we did** — `match_step_solo_warning` returns false early
+  when ANY non-dummy mech has `respawn_at_tick > w->tick`. The
+  rule's old job ("3 s after the last opponent dies, end the
+  round") no longer fires in normal play because dying mechs
+  always have a pending respawn at the same tick the warning
+  would have triggered.
+- **Why** — Universal respawn made the "everyone alive count ≤ 1"
+  condition a near-permanent state during 1v1 — every kill
+  flipped it to true for 3 s until the respawn fired. Without the
+  pending-respawn skip the FFA / TDM round would have ended on
+  the first kill. The rule is kept (not deleted) as a safety:
+  if all players in a round leave (kick / disconnect / spectator
+  team switch) with no respawns pending, the warning fires after
+  3 s so the match doesn't stall on time_limit alone.
+- **Revisit when** —
+  - The safety becomes load-bearing for a scenario we haven't
+    anticipated (refactor instead of remove).
+  - We decide to retire the rule entirely — time_limit is the
+    alternative end gate for fully-emptied rounds.
+
+### NET_MSG_LOBBY_HOST_SETUP body grew 8 → 9 bytes; no back-compat (M6 ctf-fixes)
+
+- **What we did** — `rounds_per_match` is a host-UI knob, so the
+  wire message that carries host setup changes from the lobby
+  needs to ship it too. Pre-fix the body was 8 bytes
+  (`mode u8 + map_id u16 + score_limit u16 + time_limit_s u16 +
+  ff u8`). Post-fix it's 9 (the new `rounds_per_match u8` between
+  `time_limit_s` and `ff`). `server_handle_lobby_host_setup`
+  rejects bodies `< 9` bytes, so a pre-M6-rounds client sending
+  the old 8-byte format is silently dropped.
+- **Why** — We don't maintain wire compat across M6 sub-revisions
+  — both binaries are built from the same commit in shipping.
+  Adding a protocol version field + a tagged body would have been
+  overkill for a single new byte on a host-only message.
+- **Revisit when** —
+  - Point-release wire stability becomes a requirement (e.g. we
+    ship M6 to itch.io and want M6.1 patches to interop).
+  - Other wire messages start accumulating fields and a generic
+    protocol-version handshake is worth building.
 
 ### Initial pickup state for mid-round joiners not shipped (P05)
 
