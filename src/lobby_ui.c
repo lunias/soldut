@@ -452,15 +452,16 @@ void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                                 ? g->config.map_rotation[0] : MAP_FOUNDRY;
         L->setup_score_limit  = g->config.score_limit;
         L->setup_time_limit_s = (int)g->config.time_limit;
+        L->setup_rounds_per_match = (g->config.rounds_per_match > 0)
+                                    ? g->config.rounds_per_match : 3;
         L->setup_friendly_fire= g->config.friendly_fire;
         /* Bot fill is configured per-bot in the lobby (M6 post-P04
          * UX rewrite). The host setup screen no longer surfaces
          * a count or tier picker. */
-        /* Fix CTF defaults that the FFA-default config wouldn't reach.
-         * If the user picked CTF on entry, clamp the score limit. */
-        if (L->setup_mode == MATCH_MODE_CTF && L->setup_score_limit >= 25) {
-            L->setup_score_limit = FLAG_CAPTURE_DEFAULT;
-        }
+        /* score_limit applies uniformly across FFA / TDM / CTF (kills
+         * for the first two, captures for the third) — no mode-
+         * specific auto-clamp. The default at config_init is now 5,
+         * which is sensible for every mode. */
         /* Validate the seeded map against the seeded mode. If the
          * default cfg's map doesn't support the desired mode (e.g. user
          * has mode_rotation=ctf but map_rotation=foundry), step to a
@@ -523,11 +524,9 @@ void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
             int new_mode = mb_mode[i];
             if (new_mode != L->setup_mode) {
                 L->setup_mode = new_mode;
-                /* Auto-clamp limits + auto-pick a compatible map. */
-                if (L->setup_mode == MATCH_MODE_CTF &&
-                    L->setup_score_limit >= 25) {
-                    L->setup_score_limit = FLAG_CAPTURE_DEFAULT;
-                }
+                /* Auto-pick a mode-compatible map. score_limit stays
+                 * unchanged across mode flips — same semantics in each
+                 * mode (kills / captures-to-win). */
                 if (!setup_map_supports_mode(L->setup_map_id,
                                              L->setup_mode,
                                              &g->world, &g->level_arena)) {
@@ -601,6 +600,35 @@ void host_setup_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
     if (ui_button(&L->ui, (Rectangle){panel_x + label_w + step_w + sval_w + S(8),
                                        y, step_w, row_h}, "+", true)) {
         L->setup_time_limit_s += 10;
+    }
+    y += row_h + gap;
+
+    /* ---- Rounds stepper (match-level cap; after N rounds we go back
+     *      to the lobby without showing the map-vote screen). The
+     *      panel was already sized for 6 rows (row_h * 6 + gap * 5 +
+     *      S(32)); pre-fix only 5 rows were drawn so the bottom 60 px
+     *      of the panel was empty headroom — see panel rect at
+     *      host_setup_screen_run top. */
+    ui_draw_text(&L->ui, "Rounds / match", panel_x, y + S(14), 18,
+                 (Color){200, 220, 240, 255});
+    if (ui_button(&L->ui, (Rectangle){panel_x + label_w, y, step_w, row_h},
+                  "−", true) && L->setup_rounds_per_match > 1) {
+        L->setup_rounds_per_match--;
+    }
+    Rectangle rval_r = (Rectangle){panel_x + label_w + step_w + S(4), y,
+                                    sval_w, row_h};
+    DrawRectangleRec(rval_r, (Color){20, 24, 32, 255});
+    DrawRectangleLinesEx(rval_r, L->ui.scale, L->ui.panel_edge);
+    char rbuf[32]; snprintf(rbuf, sizeof rbuf, "%d", L->setup_rounds_per_match);
+    int rw_ = ui_measure(&L->ui, rbuf, 18);
+    ui_draw_text(&L->ui, rbuf,
+                 (int)(rval_r.x + (rval_r.width - rw_) * 0.5f),
+                 (int)(rval_r.y + (rval_r.height - 18*L->ui.scale) * 0.5f),
+                 18, L->ui.text_col);
+    if (ui_button(&L->ui, (Rectangle){panel_x + label_w + step_w + sval_w + S(8),
+                                       y, step_w, row_h}, "+", true) &&
+        L->setup_rounds_per_match < 32) {
+        L->setup_rounds_per_match++;
     }
     y += row_h + gap;
 
@@ -1718,6 +1746,7 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                 net_client_send_host_setup(&g->net,
                     (int)g->match.mode, g->match.map_id,
                     g->match.score_limit, (int)g->match.time_limit,
+                    g->match.rounds_per_match,
                     g->match.friendly_fire);
             }
             LOG_I("host: lobby mode → %s map → %s",
@@ -1774,6 +1803,7 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                     net_client_send_host_setup(&g->net,
                         (int)g->match.mode, g->match.map_id,
                         g->match.score_limit, (int)g->match.time_limit,
+                        g->match.rounds_per_match,
                         g->match.friendly_fire);
                 }
                 LOG_I("host: lobby map -> %s",
@@ -1782,11 +1812,16 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
         }
     }
 
-    /* Status text — score / time / ff — to the right of the map. */
-    char stat[96];
-    snprintf(stat, sizeof stat, "score %d  ·  time %.0fs  ·  ff=%s",
+    /* Status text — score / time / rounds / ff — to the right of the
+     * map. The rounds_per_match field was added at M6 round-shape
+     * redesign and now shows up next to the score/time so players
+     * can see "this is a 3-round match" before they Ready Up. */
+    char stat[128];
+    snprintf(stat, sizeof stat,
+             "score %d  ·  time %.0fs  ·  rounds %d  ·  ff=%s",
              g->match.score_limit,
              (double)g->match.time_limit,
+             g->match.rounds_per_match,
              g->match.friendly_fire ? "ON" : "off");
     int sx_text = map_x + map_w + S(16);
     int sty = mp_y + (mp_h - (int)(16*L->ui.scale + 0.5f)) / 2;

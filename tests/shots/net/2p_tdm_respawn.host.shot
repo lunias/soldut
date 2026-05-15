@@ -1,0 +1,27 @@
+# 2p_tdm_respawn — TDM round respawn-until-team-score-cap. Mirrors
+# 2p_ffa_respawn but for TDM (host on RED, client on BLUE). The
+# kill credit increments `team_score[RED]` until it hits the score
+# cap, then the round ends.
+
+window 1280 720
+out build/shots/net/host_tdm_respawn
+network host 24041
+name HostRed
+
+spawn_at 600 1100
+peer_spawn 1 800 1100
+
+aim 800 1070
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 140 shot t140_round_start
+
+at 200 kill_peer 1 0
+at 210 shot t210_after_kill_1
+at 400 kill_peer 1 0
+at 410 shot t410_after_kill_2
+at 600 kill_peer 1 0
+at 620 shot t620_round_end
+
+at 800 end

@@ -13,8 +13,11 @@
 void match_process_respawns(World *w, MatchState *m, LobbyState *lobby) {
     if (!w || !m) return;
     if (m->phase != MATCH_PHASE_ACTIVE) return;
-    if (m->mode != MATCH_MODE_CTF) return;          /* CTF-only for now */
     if (!w->authoritative) return;
+    /* All modes respawn mid-round (FFA / TDM / CTF). Round-end is
+     * gated on score_limit (kills for FFA/TDM, captures for CTF) and
+     * time_limit only — solo_warning is now retired, see
+     * match_step_solo_warning. */
 
     /* Pre-build picked_positions from currently-alive non-dummy mechs
      * so the spawn picker keeps respawns away from active fighters
@@ -273,23 +276,26 @@ bool match_step_solo_warning(MatchState *m, const struct World *w, float dt) {
         m->solo_warning_remaining = -1.0f;
         return false;
     }
-    /* CTF respawns dead players mid-round (see mech_respawn in mech.c)
-     * — the "only one alive" condition fires every time a player dies
-     * before their RESPAWN_DELAY_TICKS elapses, which would end the
-     * CTF round on the FIRST kill rather than after capture-score is
-     * met. Disable solo_warning for CTF entirely so the round runs
-     * out under the existing score-limit / time-limit gates per
-     * documents/m5/06-ctf.md §"Round end". */
-    if (m->mode == MATCH_MODE_CTF) {
-        m->solo_warning_remaining = -1.0f;
-        return false;
-    }
-    int mech_count = 0, alive_count = 0;
+    /* All modes now respawn mid-round (see mech_kill arming
+     * respawn_at_tick and match_process_respawns firing it). The
+     * "only one alive" condition would fire every kill before the
+     * dying mech's RESPAWN_DELAY_TICKS elapses, which would end the
+     * round on the first kill in 1v1 — exactly the user-reported
+     * bug. solo_warning is now a safety net for disconnect / kick
+     * scenarios where no respawn is pending; if anyone is awaiting
+     * respawn we hold off and let mech_respawn restore them. */
+    int mech_count = 0, alive_count = 0, pending_respawn = 0;
     for (int i = 0; i < w->mech_count; ++i) {
         const Mech *mm = &w->mechs[i];
         if (mm->is_dummy) continue;
         mech_count++;
         if (mm->alive) alive_count++;
+        else if (mm->respawn_at_tick > w->tick) pending_respawn++;
+    }
+    if (pending_respawn > 0) {
+        /* At least one body is coming back; don't arm solo_warning. */
+        m->solo_warning_remaining = -1.0f;
+        return false;
     }
     /* Single-player / pre-spawn (mech_count <= 1 from the start) is
      * exempt — there's no "remaining" without a baseline. */

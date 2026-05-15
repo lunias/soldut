@@ -1232,7 +1232,10 @@ static void server_handle_lobby_host_setup(NetState *ns, NetPeer *p,
                                            const uint8_t *body, int blen,
                                            Game *g)
 {
-    if (blen < 8) return;
+    /* 9-byte body: mode(1) + map(2) + score(2) + time(2) + rounds(1)
+     * + ff(1). Pre-rounds clients sent 8 bytes — we reject those here
+     * since wire-compat across this M6 revision isn't a goal. */
+    if (blen < 9) return;
     int requester = lobby_find_slot_by_peer(&g->lobby, (int)p->client_id);
     if (requester < 0) return;
     if (!g->lobby.slots[requester].is_host) {
@@ -1249,11 +1252,12 @@ static void server_handle_lobby_host_setup(NetState *ns, NetPeer *p,
     }
 
     const uint8_t *r = body;
-    uint8_t  mode_byte    = r_u8 (&r);
-    uint16_t map_id       = r_u16(&r);
-    uint16_t score_limit  = r_u16(&r);
-    uint16_t time_limit_s = r_u16(&r);
-    uint8_t  ff           = r_u8 (&r);
+    uint8_t  mode_byte        = r_u8 (&r);
+    uint16_t map_id           = r_u16(&r);
+    uint16_t score_limit      = r_u16(&r);
+    uint16_t time_limit_s     = r_u16(&r);
+    uint8_t  rounds_per_match = r_u8 (&r);
+    uint8_t  ff               = r_u8 (&r);
 
     MatchModeId mode = (MatchModeId)mode_byte;
     if (mode != MATCH_MODE_FFA && mode != MATCH_MODE_TDM && mode != MATCH_MODE_CTF) {
@@ -1269,8 +1273,11 @@ static void server_handle_lobby_host_setup(NetState *ns, NetPeer *p,
 
     g->match.mode          = mode;
     g->match.map_id        = (int)map_id;
-    if (score_limit > 0)  g->match.score_limit = (int)score_limit;
-    if (time_limit_s > 0) g->match.time_limit  = (float)time_limit_s;
+    if (score_limit > 0)      g->match.score_limit     = (int)score_limit;
+    if (time_limit_s > 0)     g->match.time_limit      = (float)time_limit_s;
+    if (rounds_per_match > 0 && rounds_per_match <= 32) {
+        g->match.rounds_per_match = (int)rounds_per_match;
+    }
     g->match.friendly_fire = (ff != 0) || (mode == MATCH_MODE_FFA);
     g->world.friendly_fire = g->match.friendly_fire;
     /* Mirror into config so the rotation pickers and subsequent
@@ -1278,6 +1285,7 @@ static void server_handle_lobby_host_setup(NetState *ns, NetPeer *p,
     g->config.mode               = mode;
     g->config.score_limit        = g->match.score_limit;
     g->config.time_limit         = g->match.time_limit;
+    g->config.rounds_per_match   = g->match.rounds_per_match;
     g->config.friendly_fire      = (ff != 0);
     g->config.map_rotation[0]    = (int)map_id;
     g->config.map_rotation_count = 1;
@@ -1294,9 +1302,10 @@ static void server_handle_lobby_host_setup(NetState *ns, NetPeer *p,
                             g->server_map_serve_path,
                             sizeof(g->server_map_serve_path));
 
-    LOG_I("server: HOST_SETUP applied: mode=%s map=%s score=%d time=%d ff=%d",
+    LOG_I("server: HOST_SETUP applied: mode=%s map=%s score=%d time=%d rounds=%d ff=%d",
           match_mode_name(mode), md ? md->short_name : "?",
-          g->match.score_limit, (int)g->match.time_limit, (int)g->match.friendly_fire);
+          g->match.score_limit, (int)g->match.time_limit,
+          g->match.rounds_per_match, (int)g->match.friendly_fire);
 
     net_server_broadcast_match_state(ns, &g->match);
     net_server_broadcast_map_descriptor(ns, &g->server_map_desc);
@@ -3284,15 +3293,23 @@ void net_client_send_bot_team(NetState *ns, int target_slot, int new_team) {
 void net_client_send_host_setup(NetState *ns,
                                 int mode, int map_id,
                                 int score_limit, int time_limit_s,
+                                int rounds_per_match,
                                 bool friendly_fire)
 {
     if (!ns || ns->role != NET_ROLE_CLIENT || !ns->connected) return;
-    uint8_t buf[9]; uint8_t *p = buf;
+    /* 1 byte tag + 1 mode + 2 map + 2 score + 2 time + 1 rounds + 1 ff = 10. */
+    uint8_t buf[10]; uint8_t *p = buf;
     w_u8 (&p, NET_MSG_LOBBY_HOST_SETUP);
     w_u8 (&p, (uint8_t)mode);
     w_u16(&p, (uint16_t)map_id);
     w_u16(&p, (uint16_t)(score_limit > 0 ? score_limit : 0));
     w_u16(&p, (uint16_t)(time_limit_s > 0 ? time_limit_s : 0));
+    /* Clamp to a sensible u8 range — server clamps too, but we
+     * defensively also avoid sending nonsense from a misconfigured
+     * UI. 0 means "no change" on the server side. */
+    int rpm = (rounds_per_match > 0 && rounds_per_match <= 32)
+              ? rounds_per_match : 0;
+    w_u8 (&p, (uint8_t)rpm);
     w_u8 (&p, friendly_fire ? 1u : 0u);
     enet_send_to(ns->server.enet_peer, NET_CH_LOBBY, ENET_PACKET_FLAG_RELIABLE,
                  buf, (int)(p - buf));

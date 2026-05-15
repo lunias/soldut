@@ -99,6 +99,7 @@ typedef struct {
     char        map_name[24];         /* --map foundry|slipstream|crossfire|... */
     int         score_limit;          /* --score N; 0 = leave cfg default */
     int         time_limit_s;         /* --time N; 0 = leave cfg default */
+    int         rounds_per_match;     /* --rounds N; 0 = leave cfg default */
     bool        friendly_fire;
     bool        skip_title;
     bool        ff_set;
@@ -282,6 +283,10 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
         else if (strcmp(argv[i], "--time") == 0 && i + 1 < argc) {
             int n = atoi(argv[++i]);
             if (n > 0) out->time_limit_s = n;
+        }
+        else if (strcmp(argv[i], "--rounds") == 0 && i + 1 < argc) {
+            int n = atoi(argv[++i]);
+            if (n > 0 && n <= 32) out->rounds_per_match = n;
         }
         /* M6 P06 — perf bench harness. --bench drives an offline-solo
          * round for N seconds then exits with code 0 on budget hit /
@@ -1392,6 +1397,10 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
         game.config.time_limit = (float)args->time_limit_s;
         LOG_I("dedicated: --time %d", args->time_limit_s);
     }
+    if (args && args->rounds_per_match > 0) {
+        game.config.rounds_per_match = args->rounds_per_match;
+        LOG_I("dedicated: --rounds %d", args->rounds_per_match);
+    }
     if (args && args->ff_set) {
         game.config.friendly_fire = args->friendly_fire;
         LOG_I("dedicated: --ff %d", (int)args->friendly_fire);
@@ -1799,6 +1808,7 @@ static bool host_start_begin(Game *g, const LaunchArgs *args,
              "%s", map_name_str);
     if (g->config.score_limit > 0) server_args.score_limit = g->config.score_limit;
     if (g->config.time_limit > 0.0f) server_args.time_limit_s = (int)g->config.time_limit;
+    if (g->config.rounds_per_match > 0) server_args.rounds_per_match = g->config.rounds_per_match;
     if (g->config.friendly_fire)    { server_args.friendly_fire = true; server_args.ff_set = true; }
     /* Forward bot fill to the in-process server thread (it runs a
      * separate Game with its own config, so the values would
@@ -2578,6 +2588,9 @@ int main(int argc, char **argv) {
                 game.config.mode               = (MatchModeId)ui.setup_mode;
                 game.config.score_limit        = ui.setup_score_limit;
                 game.config.time_limit         = (float)ui.setup_time_limit_s;
+                game.config.rounds_per_match   = (ui.setup_rounds_per_match > 0)
+                                                  ? ui.setup_rounds_per_match
+                                                  : game.config.rounds_per_match;
                 game.config.friendly_fire      = ui.setup_friendly_fire;
                 game.config.map_rotation[0]    = ui.setup_map_id;
                 game.config.map_rotation_count = 1;

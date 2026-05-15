@@ -1,0 +1,41 @@
+# 2p_rounds_match — verify rounds_per_match gates the SUMMARY →
+# LOBBY exit. With cfg rounds_per_match=1 the very first round-end
+# triggers end_match (not advance_to_next_round) and both clients
+# return to MODE_LOBBY without the map-vote being honored.
+#
+# The host kills the client 3 times to hit FFA score_limit=3 →
+# round end. Both clients vote so the summary fast-forwards to 1s.
+# Then after_summary runs end_match because rounds_played reaches
+# rounds_per_match.
+
+window 1280 720
+out build/shots/net/host_rounds_match
+network host 24042
+name HostShooter
+
+spawn_at 600 1100
+peer_spawn 1 800 1100
+
+aim 800 1070
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 140 shot t140_round_start
+
+at 200 kill_peer 1 0
+at 400 kill_peer 1 0
+at 600 kill_peer 1 0
+at 620 shot t620_round_end
+
+# Cast a map vote during summary so fast-forward fires (need BOTH
+# clients to vote — see host_match_flow_step's "all voted"
+# fast-forward).
+at 660 vote_map 0
+at 680 shot t680_summary_voted
+
+# After 1 s (60 ticks) summary fast-forward elapses → after_summary
+# fires → rounds_played=1 >= rounds_per_match=1 → end_match →
+# match.phase=LOBBY, lobby_clear_round_mechs.
+at 800 shot t800_back_in_lobby
+
+at 900 end

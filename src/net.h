@@ -77,12 +77,13 @@ enum {
     NET_MSG_LOBBY_VOTE_STATE   = 27,    /* server → client: vote candidates + tallies */
     NET_MSG_LOBBY_KICK         = 28,    /* host → server (host only)          */
     NET_MSG_LOBBY_BAN          = 29,    /* host → server (host only)          */
-    /* wan-fixes-6 — host changes mode / map / score / time / ff from
-     * the in-lobby controls. Server validates sender is the host
-     * (slot.is_host == true), applies to its own match + config,
-     * then re-broadcasts MATCH_STATE + MAP_DESCRIPTOR so every
-     * client picks it up. 8-byte fixed body: u8 mode, u16 map_id,
-     * u16 score, u16 time_s, u8 ff. */
+    /* wan-fixes-6 — host changes mode / map / score / time / rounds
+     * / ff from the in-lobby controls. Server validates sender is the
+     * host (slot.is_host == true), applies to its own match + config,
+     * then re-broadcasts MATCH_STATE + MAP_DESCRIPTOR so every client
+     * picks it up. 9-byte fixed body: u8 mode, u16 map_id, u16 score,
+     * u16 time_s, u8 rounds_per_match, u8 ff. M6 round-shape redesign
+     * added rounds_per_match. */
     NET_MSG_LOBBY_HOST_SETUP   = 34,    /* host → server (host only)          */
     /* M6 P04+ — host adds a single bot to the lobby at the chosen
      * tier. Body: 1 byte (BotTier 0..3). Bot index is server-side
@@ -514,14 +515,17 @@ void net_client_send_ban        (NetState *ns, int target_slot);
  * Server validates sender is host AND target is a bot. A non-host
  * call is silently dropped server-side. */
 void net_client_send_bot_team   (NetState *ns, int target_slot, int new_team);
-/* wan-fixes-6 — host pushes a mode / map / score / time / ff update
- * to the dedicated server. Server validates the sender is the
+/* wan-fixes-6 — host pushes a mode / map / score / time / rounds / ff
+ * update to the dedicated server. Server validates the sender is the
  * `slot.is_host == true` peer; non-host sends are silently dropped.
- * On success the server re-broadcasts MATCH_STATE + MAP_DESCRIPTOR
- * so every client sees the new lobby state. Fixed 9-byte wire body. */
+ * On success the server re-broadcasts MATCH_STATE + MAP_DESCRIPTOR so
+ * every client sees the new lobby state. M6 round-shape redesign:
+ * body grew to 9 bytes to include rounds_per_match (after `time_s`,
+ * before `ff`). */
 void net_client_send_host_setup (NetState *ns,
                                  int mode, int map_id,
                                  int score_limit, int time_limit_s,
+                                 int rounds_per_match,
                                  bool friendly_fire);
 
 /* Server-side: enact a kick/ban directly (no wire round-trip). Used by

@@ -2148,17 +2148,17 @@ void mech_kill(World *w, int mid, int killshot_part, Vec2 dir,
              dir.x, dir.y, impulse, m->dismember_mask,
              weapon_id, killer_mech_id, flags);
 
-    /* Mid-round respawn — arm the per-mech timer for modes that respawn
-     * during the round. CTF needs this: a flag game with no respawn is
-     * a 1v0 spectator session as soon as anyone dies (the user-reported
-     * bug "I kill my opponent and the next round starts"). FFA/TDM
-     * still ride the existing round-end respawn (no timer set), so this
-     * change is scoped to the mode that requires it. The server's
-     * per-tick respawn step in main.c walks all mechs and fires
-     * mech_respawn when world.tick reaches respawn_at_tick. */
-    if (w->authoritative &&
-        (MatchModeId)w->match_mode_cached == MATCH_MODE_CTF)
-    {
+    /* Mid-round respawn — arm the per-mech timer for ALL modes (FFA,
+     * TDM, CTF). The score_limit is the only round-end gate: a player
+     * dies, respawns RESPAWN_DELAY_TICKS later, and play continues
+     * until someone hits the configured kill cap (FFA / TDM) or
+     * capture cap (CTF). Per the M6 round-shape redesign — a CTF flag
+     * game can't function without respawn, and FFA / TDM with respawn
+     * matches the "fast respawn" pillar in documents/00-vision.md. The
+     * server's per-tick respawn step in match_process_respawns walks
+     * all mechs and fires mech_respawn when world.tick reaches the
+     * armed value. */
+    if (w->authoritative) {
         m->respawn_at_tick = w->tick + RESPAWN_DELAY_TICKS;
     }
 }

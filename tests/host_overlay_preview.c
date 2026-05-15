@@ -51,12 +51,13 @@ int main(void) {
      * re-seed from g->config every frame. Pick a non-default mode +
      * map so the captured PNG shows non-trivial widget state under
      * the overlay. */
-    ui.setup_initialized   = true;
-    ui.setup_mode          = 1;             /* TDM */
-    ui.setup_map_id        = 1;             /* second registry slot */
-    ui.setup_score_limit   = 25;
-    ui.setup_time_limit_s  = 300;
-    ui.setup_friendly_fire = false;
+    ui.setup_initialized      = true;
+    ui.setup_mode             = 1;          /* TDM */
+    ui.setup_map_id           = 1;          /* second registry slot */
+    ui.setup_score_limit      = 5;
+    ui.setup_time_limit_s     = 300;
+    ui.setup_rounds_per_match = 3;
+    ui.setup_friendly_fire    = false;
 
     /* Make the overlay active. */
     ui.host_starting    = true;

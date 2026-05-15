@@ -1,0 +1,23 @@
+# 2p_rounds_match — client side. The host kills us 3 times to hit
+# the FFA score cap; we vote during summary so the fast-forward
+# fires; after the summary elapses end_match returns us to LOBBY.
+
+window 1280 720
+out build/shots/net/client_rounds_match
+network connect 127.0.0.1:24042
+name ClientVictim
+
+spawn_at 800 1100
+
+contact_sheet sheet cols 4 cell 320 180
+
+at 140 shot t140_round_start
+at 620 shot t620_round_end
+
+# Cast a map vote so the host's summary fast-forward fires (both
+# active slots have voted).
+at 660 vote_map 0
+at 680 shot t680_summary_voted
+at 800 shot t800_back_in_lobby
+
+at 900 end

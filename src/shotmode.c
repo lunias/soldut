@@ -537,16 +537,24 @@ static bool parse_script(const char *path, Script *out) {
                 ev.ay = (float)mid;
                 script_push(out, ev);
             } else if (strcmp(ev_kind, "kill_peer") == 0) {
-                /* "at <tick> kill_peer <mech_id>" — host-side debug
-                 * that directly invokes mech_kill on the named mech.
-                 * Lets a CTF drop-on-kill shot test bench the death
-                 * flow without requiring perfect weapons aim across
-                 * the recoil-and-bink window. The directive is a no-op
-                 * for clients (mech_kill is server-authoritative). */
-                int mid = -1;
-                if (args[0]) sscanf(args, "%d", &mid);
+                /* "at <tick> kill_peer <mech_id> [<shooter_mech_id>]"
+                 * — host-side debug that directly invokes
+                 * mech_apply_damage on the named mech. Lets a CTF
+                 * drop-on-kill shot test bench the death flow without
+                 * requiring perfect weapons aim across the recoil-
+                 * and-bink window. The optional second arg is the
+                 * shooter mech_id; without it kills are
+                 * environmental (= suicide → no score credit), so
+                 * FFA / TDM score tests must supply a shooter to get
+                 * the kill credited to the right slot. CTF drop-on-
+                 * kill tests don't need the credit. The directive is
+                 * a no-op for clients (mech_kill is server-
+                 * authoritative). */
+                int mid = -1, shooter = -1;
+                if (args[0]) sscanf(args, "%d %d", &mid, &shooter);
                 ev.kind = EV_KILL_PEER;
                 ev.ax = (float)mid;
+                ev.ay = (float)shooter;
                 script_push(out, ev);
             } else if (strcmp(ev_kind, "team_change") == 0) {
                 /* "at <tick> team_change <team_id>" — drives the same
@@ -1960,6 +1968,7 @@ int shotmode_run(const char *script_path) {
                 }
                 case EV_KILL_PEER: {
                     int mid = (int)ev->ax;
+                    int shooter = (int)ev->ay;
                     if (game.net.role == NET_ROLE_SERVER &&
                         mid >= 0 && mid < game.world.mech_count &&
                         game.world.mechs[mid].alive) {
@@ -1974,9 +1983,10 @@ int shotmode_run(const char *script_path) {
                          * 9999 dmg ensures lethal regardless of armor. */
                         mech_apply_damage(&game.world, mid, PART_CHEST,
                                           9999.0f, (Vec2){0.0f, -1.0f},
-                                          /*shooter*/ -1);
+                                          shooter);
                         (void)pelv;
-                        LOG_I("shot: kill_peer mech=%d (host-side)", mid);
+                        LOG_I("shot: kill_peer mech=%d shooter=%d (host-side)",
+                              mid, shooter);
                     }
                     break;
                 }
@@ -2403,12 +2413,14 @@ int shotmode_run(const char *script_path) {
             }
             case EV_KILL_PEER: {
                 int mid = (int)ev->ax;
+                int shooter = (int)ev->ay;
                 if (mid >= 0 && mid < game.world.mech_count &&
                     game.world.mechs[mid].alive) {
                     mech_apply_damage(&game.world, mid, PART_CHEST,
                                       9999.0f, (Vec2){0.0f, -1.0f},
-                                      /*shooter*/ -1);
-                    LOG_I("shot: kill_peer mech=%d (single-player)", mid);
+                                      shooter);
+                    LOG_I("shot: kill_peer mech=%d shooter=%d (single-player)",
+                          mid, shooter);
                 }
                 break;
             }

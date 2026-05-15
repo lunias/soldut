@@ -21,10 +21,11 @@
  *
  *     # match rules
  *     mode=ffa            # ffa | tdm | ctf
- *     score_limit=25
+ *     score_limit=5       # kills (FFA/TDM) or captures (CTF) to win a round
  *     time_limit=600      # seconds
  *     friendly_fire=0
  *     auto_start_seconds=60
+ *     rounds_per_match=3  # rounds in a match before returning to lobby
  *
  *     # rotation (comma-separated short names from maps.c / match modes)
  *     map_rotation=foundry,slipstream,reactor
