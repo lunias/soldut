@@ -951,6 +951,16 @@ static void nav_visit_visible(const struct BotNav *nv, int src,
     }
 }
 
+/* M6 bot-fire-los — precompute visibility at CHEST height (node.y - 24),
+ * not at the pelvis-anchored node origin. The fire gate uses chest-to-
+ * chest LOS (see `los_clear_for_fire`), so the visibility table that
+ * drives Phase-2 reposition must use the same height — otherwise the
+ * bot routes to a node where pelvis-line sees the enemy but chest-line
+ * still doesn't, and it ping-pongs between repositions. 24 px is the
+ * pelvis→chest offset on every chassis (PART_CHEST sits directly above
+ * PART_PELVIS in `mech.c::build_pose`'s rest skeleton). */
+#define BOT_VIS_LOS_Y_OFFSET   (-24.0f)
+
 static void build_visibility(struct BotNav *nv, const Level *L) {
     int N = nv->node_count;
     nv->vis_edge_count = 0;
@@ -959,8 +969,10 @@ static void build_visibility(struct BotNav *nv, const Level *L) {
     float max_d2 = BOT_VIS_MAX_PX * BOT_VIS_MAX_PX;
     for (int i = 0; i < N; ++i) {
         Vec2 a = nv->nodes[i].pos;
+        a.y += BOT_VIS_LOS_Y_OFFSET;
         for (int j = i + 1; j < N; ++j) {
             Vec2 b = nv->nodes[j].pos;
+            b.y += BOT_VIS_LOS_Y_OFFSET;
             float dx = b.x - a.x, dy = b.y - a.y;
             float d2 = dx*dx + dy*dy;
             if (d2 > max_d2) continue;
@@ -1002,13 +1014,18 @@ typedef enum {
  * the candidate set had any visible nodes. Flat scan finds the
  * geometrically-best node and leans on A* to verify reachability. */
 /* `prefers_high` adds an elevation bias for snipers (Rail Cannon's
- * WeaponEngagementProfile sets this; ignored for other queries). */
+ * WeaponEngagementProfile sets this; ignored for other queries).
+ * `exclude_node` (-1 = no exclusion) skips a specific candidate — used
+ * by tactic_engage's stuck-at-engagement-node break-out to find a
+ * different node when the bot has arrived at the BFS winner but LOS
+ * remains blocked from there. */
 static int nav_pick_position(const struct BotNav *nv,
                              Vec2 from, int target_node,
                              BotPosQuery q,
                              float max_walk_dist_px,
                              float optimal_range_px,
-                             bool prefers_high)
+                             bool prefers_high,
+                             int exclude_node)
 {
     if (!nv || nv->node_count == 0) return -1;
     if (target_node < 0 || target_node >= nv->node_count) return -1;
@@ -1021,6 +1038,7 @@ static int nav_pick_position(const struct BotNav *nv,
     float best_score = 0.0f;
 
     for (int i = 0; i < nv->node_count; ++i) {
+        if (i == exclude_node) continue;
         Vec2 cp = nv->nodes[i].pos;
         float dxw = cp.x - from.x, dyw = cp.y - from.y;
         float walk_d2 = dxw*dxw + dyw*dyw;
@@ -1281,6 +1299,36 @@ static inline Vec2 mech_pelvis_vel(const World *w, int mid) {
 static bool los_clear(const World *w, Vec2 a, Vec2 b) {
     float t;
     return !level_ray_hits(&w->level, a, b, &t);
+}
+
+/* M6 bot-fire-los — fire-decision LOS along the actual bullet path
+ * (shooter CHEST → enemy CHEST), not pelvis-to-pelvis. The bullet
+ * spawns at the muzzle (along +aim from R_HAND) and the bot aims at
+ * the enemy's chest; pelvis-to-pelvis approximates neither.
+ *
+ * Why CHEST not R_HAND for the origin: the hand particle is IK-driven
+ * and can be transiently pushed inside cover by the collision solver
+ * when the bot hugs a wall. CHEST is a stable torso-anchored particle
+ * that lives ~24 px above the pelvis on every chassis — the same
+ * offset the bot uses for its aim target on enemies. Hand-as-origin
+ * dropped bake kill counts ~22% by false-blocking near-cover shots;
+ * chest-as-origin keeps the catch-rate for through-wall fires (the
+ * actual bug) without the near-cover false negatives.
+ *
+ * Cheap (one ray cast). Same `level_ray_hits` backing function the
+ * runtime hitscan uses, so the bot's "can I fire?" decision agrees
+ * exactly with what a fire would resolve to. */
+static bool los_clear_for_fire(const World *w, int mid, int enemy_id) {
+    const Mech *me = &w->mechs[mid];
+    const Mech *en = &w->mechs[enemy_id];
+    int my_chest    = me->particle_base + PART_CHEST;
+    int enemy_chest = en->particle_base + PART_CHEST;
+    Vec2 origin = { w->particles.pos_x[my_chest],
+                    w->particles.pos_y[my_chest]  };
+    Vec2 target = { w->particles.pos_x[enemy_chest],
+                    w->particles.pos_y[enemy_chest] };
+    float t;
+    return !level_ray_hits(&w->level, origin, target, &t);
 }
 
 /* M6 P05 Phase 4 — forward decl for aggression model. Definition
@@ -1792,7 +1840,7 @@ static float score_pursue_enemy(const World *w, const BotMind *mind,
         engage_node = nav_pick_position(nv, mp, enemy_node,
                                          BOT_POS_ENGAGE, -1.0f,
                                          wp->optimal_range_px,
-                                         wp->prefers_high);
+                                         wp->prefers_high, -1);
     }
     /* Fall back to enemy's nav node when no engagement candidate is
      * visible — same behavior as before, so the worst case doesn't
@@ -2114,8 +2162,9 @@ static void tactic_engage(BotMind *mind, const struct BotNav *nv,
     }
     out->aim_target = chest;
 
-    /* LOS check — only fire if we can see them. */
-    bool los = los_clear(w, mp, ep);
+    /* LOS check — use the actual bullet path (hand → enemy chest), not
+     * pelvis-to-pelvis. See `los_clear_for_fire` for the rationale. */
+    bool los = los_clear_for_fire(w, mid, enemy_id);
 
     /* Health-low retreat: don't fire forward when we're rotating away. */
     float hf = health_fraction(&w->mechs[mid]);
@@ -2142,13 +2191,33 @@ static void tactic_engage(BotMind *mind, const struct BotNav *nv,
                 if (target_node < 0)
                     target_node = nav_nearest_node(nv, ep, 512.0f, 0);
                 int eng_node = -1;
+                int start    = -1;
                 if (target_node >= 0) {
                     const WeaponEngagementProfile *wp =
                         weapon_profile_for(w->mechs[mid].weapon_id);
                     eng_node = nav_pick_position(nv, mp, target_node,
                                                   BOT_POS_ENGAGE, 1200.0f,
                                                   wp->optimal_range_px,
-                                                  wp->prefers_high);
+                                                  wp->prefers_high, -1);
+                    /* M6 bot-fire-los — if the BFS's best node is where
+                     * the bot is already standing AND LOS is still
+                     * blocked from here (we wouldn't be in this branch
+                     * otherwise), re-BFS excluding the stale winner so
+                     * the bot actually moves. Without this the bot
+                     * sits at its own location with no path planned
+                     * and the standoff persists forever. */
+                    start = nav_nearest_node(nv, mp, 256.0f,
+                                              BOT_NODE_F_ON_FLOOR);
+                    if (start < 0)
+                        start = nav_nearest_node(nv, mp, 512.0f, 0);
+                    if (start >= 0 && start == eng_node) {
+                        eng_node = nav_pick_position(nv, mp, target_node,
+                                                      BOT_POS_ENGAGE,
+                                                      1200.0f,
+                                                      wp->optimal_range_px,
+                                                      wp->prefers_high,
+                                                      start);
+                    }
                 }
                 mind->engagement_node      = (int16_t)eng_node;
                 mind->engagement_for_enemy = (int16_t)enemy_id;
@@ -2157,16 +2226,19 @@ static void tactic_engage(BotMind *mind, const struct BotNav *nv,
                 /* Plan a path so the bot follows walls / jumps / jets
                  * instead of pushing into the cover that blocked LOS. */
                 if (eng_node >= 0) {
-                    int start = nav_nearest_node(nv, mp, 256.0f,
+                    if (start < 0) {
+                        start = nav_nearest_node(nv, mp, 256.0f,
                                                   BOT_NODE_F_ON_FLOOR);
-                    if (start < 0)
-                        start = nav_nearest_node(nv, mp, 512.0f, 0);
+                        if (start < 0)
+                            start = nav_nearest_node(nv, mp, 512.0f, 0);
+                    }
                     if (start >= 0 && start != eng_node) {
                         bot_plan_path(mind, nv, start, eng_node);
                     } else if (start == eng_node) {
-                        /* Already at the engagement node but LOS still
-                         * blocked — likely a pose-vs-node mismatch.
-                         * Step toward the enemy as a fallback. */
+                        /* No second-best either — walk straight at the
+                         * enemy. The motion forces next-tick BFS from a
+                         * new position, which often finds new visible
+                         * nodes. Better than freezing in place. */
                         mind->path_len = 0;
                     }
                 }
@@ -2207,9 +2279,21 @@ static void tactic_engage(BotMind *mind, const struct BotNav *nv,
             if (mind->engagement_node >= 0 &&
                 mind->engagement_node < nv->node_count)
             {
-                /* No path / path exhausted — head straight to the
-                 * engagement node. */
+                /* No path / path exhausted — head toward the
+                 * engagement node. If we're already sitting on it
+                 * (within 64 px), the node is the cause of the stall:
+                 * walk toward the enemy instead so the next strategy
+                 * tick BFSes from a moved-on position. Forces the
+                 * stuck-at-engagement-node loop to break. */
                 Vec2 np = nv->nodes[mind->engagement_node].pos;
+                float ddx = np.x - mp.x, ddy = np.y - mp.y;
+                if (ddx*ddx + ddy*ddy < 64.0f * 64.0f) {
+                    mind->engagement_node      = -1;
+                    mind->engagement_node_tick = 0;
+                    out->move_target = ep;
+                    if (ep.y < mp.y - 64.0f) out->want_jet = true;
+                    return;
+                }
                 out->move_target = np;
                 if (np.y < mp.y - 64.0f) out->want_jet = true;
                 return;
@@ -2302,7 +2386,7 @@ static void tactic_retreat(BotMind *mind, const struct BotNav *nv,
         return;
     }
     int cover_node = nav_pick_position(nv, mp, enemy_node, BOT_POS_COVER,
-                                        -1.0f, 0.0f, false);
+                                        -1.0f, 0.0f, false, -1);
     if (cover_node >= 0) {
         mind->goal_target_node = (int16_t)cover_node;
         int start = nav_nearest_node(nv, mp, 256.0f, BOT_NODE_F_ON_FLOOR);
@@ -3057,7 +3141,10 @@ void bot_step(BotSystem *bs, World *w, struct Game *g, float dt) {
         if (!wants.want_fire) {
             float scan_r = mind->pers.awareness_radius_px * 1.6f;
             if (scan_r < 1200.0f) scan_r = 1200.0f;
-            int eo = find_nearest_enemy(w, mid, scan_r, mode);
+            /* Find a nearby enemy (any LOS or none) — then gate fire
+             * on the actual bullet-path LOS, not pelvis-to-pelvis. */
+            int eo = find_nearest_enemy_ex(w, mid, scan_r, mode, false);
+            if (eo >= 0 && !los_clear_for_fire(w, mid, eo)) eo = -1;
             if (eo >= 0) {
                 Vec2 mp = mech_pelvis_pos(w, mid);
                 Vec2 ep = mech_pelvis_pos(w, eo);

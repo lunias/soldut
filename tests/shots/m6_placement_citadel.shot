@@ -1,0 +1,26 @@
+# M6 m6-pickup-placement — visual proof that citadel's plaza bowl
+# is now a carved basin and the Mass Driver pickup inside it is
+# reachable. Pre-fix the bowl was SOLID-poly slope overlap on still-
+# solid floor tiles, so the Mass Driver at floor_pick + 64 sat
+# buried; post-fix cols 76..83 rows 76..77 are carved EMPTY.
+
+window 1280 720
+out build/shots/m6_placement_citadel
+seed 1 2
+
+map citadel
+
+# Spawn at the lip of the bowl (col 75) so the camera frames the
+# new basin shape on its first shot.
+spawn_at 2400 2392
+
+contact_sheet placement_citadel cols 3 cell 426 240
+
+at 1   shot t1_bowl_overview
+at 60  shot t60_settled
+
+# Walk right into the carved bowl.
+at 80  press right
+at 130 release right
+at 160 shot t160_inside_bowl
+at 200 end
