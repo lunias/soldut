@@ -14,6 +14,7 @@ static FILE *g_log_file;
 
 int g_shot_mode = 0;
 int g_shot_perf_overlay = 0;
+int g_physics_log = 0;
 
 static const char *level_tag(LogLevel l) {
     switch (l) {

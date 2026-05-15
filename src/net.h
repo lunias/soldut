@@ -342,14 +342,24 @@ typedef struct NetState {
     int         recent_input_head;    /* next slot to overwrite */
 } NetState;
 
-/* Default render-time delay for remote-mech interpolation. 100 ms is
- * the safe baseline: at 60 Hz that's six snapshot intervals of buffer,
+/* Default render-time delay for remote-mech interpolation. 150 ms is
+ * the safe baseline: at 60 Hz that's nine snapshot intervals of buffer,
  * comfortably absorbing typical WAN jitter (a single late snapshot
  * doesn't starve the interp ring and produce a visible hitch). The
  * macro is the back-compat fallback used when the server doesn't
  * ship snapshot_hz in ACCEPT — and the floor for the
- * net_interp_delay_for(...) derivation below. */
-#define NET_INTERP_DELAY_MS 100u
+ * net_interp_delay_for(...) derivation below.
+ *
+ * wan-fixes-17 bumped the floor 100 → 150 ms after live MN ↔ AZ
+ * playtest data (87 ms mean RTT, 0.05–0.13% loss) showed steady
+ * reorder bursts of 17–50 ms width producing ~one visible micro-
+ * stutter per minute. 100 ms left only 6 snapshot intervals of
+ * buffer; a single late-by-17ms snapshot would starve the ring
+ * for a frame. 150 ms restores the buffer at the cost of ~50 ms
+ * additional visible-latency on remote mechs. Hosts who play
+ * exclusively on LAN can dial back via `interp_delay_ms` in
+ * soldut.cfg (clamped to [40, 200] ms in net_set_interp_delay_override). */
+#define NET_INTERP_DELAY_MS 150u
 
 /* Helper: derive an interp delay (ms) from a snapshot Hz. Three
  * snapshot intervals plus a 100 ms floor for jitter tolerance.
@@ -364,15 +374,15 @@ typedef struct NetState {
  * the latency win; hosts who play exclusively on LAN can set a
  * shorter `interp_delay_ms` in soldut.cfg to dial it back down.
  *
- *   30 Hz → 100 ms (3 × 33 ms)
- *   60 Hz → 100 ms (floor; was 50 ms pre-wan-fixes-2)
- *   20 Hz → 150 ms
- *  120 Hz → 100 ms (floor; sim only runs at 60 Hz anyway) */
+ *   30 Hz → 150 ms (floor)
+ *   60 Hz → 150 ms (floor; was 100 ms pre-wan-fixes-17, 50 ms pre-wan-fixes-2)
+ *   20 Hz → 150 ms (also clipped by the 200 ms cap below)
+ *  120 Hz → 150 ms (floor; sim only runs at 60 Hz anyway) */
 static inline uint32_t net_interp_delay_for(uint32_t snapshot_hz) {
     if (snapshot_hz == 0) snapshot_hz = 30;
     uint32_t d = (3u * 1000u + snapshot_hz / 2u) / snapshot_hz;
     if (d < NET_INTERP_DELAY_MS) d = NET_INTERP_DELAY_MS;
-    if (d > 150u) d = 150u;
+    if (d > 200u) d = 200u;
     return d;
 }
 

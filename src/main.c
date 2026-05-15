@@ -330,6 +330,14 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
             }
             out->net_log_interval_ms = ms;
         }
+        else if (strcmp(argv[i], "--physics-log") == 0) {
+            /* wan-fixes-17 — opt-in fingerprint for geometry-stuck
+             * events. Promotes the inside_tile + large-anchor SHOT_LOG
+             * sites to LOG_W in soldut.log. Sets g_physics_log
+             * directly here (no LaunchArgs field needed — the global
+             * is read by the physics tick loop, no other plumbing). */
+            g_physics_log = 1;
+        }
     }
 }
 

@@ -48,6 +48,23 @@ extern int g_shot_mode;
  *        shotmode `perf_overlay on` directive. */
 extern int g_shot_perf_overlay;
 
+/* wan-fixes-17 — opt-in production-friendly log gate for the small
+ * set of physics events that matter for "got stuck in geometry"
+ * post-mortems: inside-tile particle penetration + large
+ * post-physics anchor pull-backs. Default 0 (SHOT_LOG-only). Set
+ * to 1 by `--physics-log` on the command line. When 1, the
+ * affected sites emit LOG_W alongside their existing SHOT_LOG so
+ * a stuck event leaves a fingerprint in soldut.log during real
+ * play — bridging the SHOT_LOG instrumentation gap that hid the
+ * 2026-05-15 MN ↔ AZ session's geometry-stuck event from the
+ * post-game log review. */
+extern int g_physics_log;
+
 void log_shot(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 #define SHOT_LOG(...) do { if (g_shot_mode) log_shot(__VA_ARGS__); } while (0)
+
+/* PHYS_LOG: production-time physics diagnostic. No-op unless
+ * g_physics_log is non-zero (set by `--physics-log`). Lands as
+ * LOG_W in soldut.log + stderr, exactly like other warnings. */
+#define PHYS_LOG(...) do { if (g_physics_log) log_msg(SLOG_WARN, __VA_ARGS__); } while (0)
