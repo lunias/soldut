@@ -1,0 +1,37 @@
+# M6 slipstream-trap-fix — verify no chassis can wedge anywhere on
+# slipstream's basement_ceil or catwalk surfaces. Spawns Heavy at the
+# basement_ceil edge near the (now removed) right slide chute and
+# walks back-and-forth across what used to be the trap zone.
+
+window 1280 720
+seed 1 0
+out build/shots/m6_slipstream_no_trap
+map slipstream
+no_parallax
+loadout heavy "Microgun" "Burst SMG" Light Standard
+
+# basement_ceil top y=1216 → spawn pelvis 40 above = 1176.
+# x=2200 (tile 68.75) was deep inside the right chute interior pre-fix.
+spawn_at 2200 1176
+
+at 5   shot stand_t005
+
+# Walk left across former chute zone (cols 64-72 = x=2048-2304).
+at 30  press left
+at 60  shot walk_left_t060
+at 120 shot walk_left_t120
+at 180 shot walk_left_t180
+at 240 shot walk_left_t240
+at 300 release left
+
+# Walk right back across.
+at 320 press right
+at 380 shot walk_right_t380
+at 440 shot walk_right_t440
+at 500 shot walk_right_t500
+at 560 shot walk_right_t560
+at 600 release right
+
+contact_sheet trap_sheet cols 5 cell 320 180
+
+at 660 end

@@ -89,6 +89,15 @@
  * 10 s is enough that the bot picks a new pickup, walks toward it,
  * grabs it, then is free to consider the original again. */
 #define BOT_ABANDON_COOLDOWN_TICKS  (BOT_TICK_HZ * 10)
+/* M6 many-bots fix — meaningful-progress check window. If the bot
+ * hasn't gotten BOT_PROGRESS_THRESHOLD_PX closer to its goal node in
+ * BOT_PROGRESS_STALL_TICKS (5 s), abandon. The unreachable-pickup
+ * loop bounces pelvis through 100s of px during JET cycles so the
+ * per-tick stuck detector never accumulates the 4 s window — this
+ * tracker samples once per strategy tick (~10 Hz) and asks "are we
+ * actually any closer?". */
+#define BOT_PROGRESS_THRESHOLD_PX  64.0f
+#define BOT_PROGRESS_STALL_TICKS   (BOT_TICK_HZ * 5)
 
 #define BOT_RUN_SPEED_PXS        280.0f
 #define BOT_JET_THRUST_PXS2      2200.0f
@@ -1517,15 +1526,25 @@ static int ctf_friendly_flag_idx(const World *w, int mid) {
 }
 
 static float score_engage(const World *w, const BotMind *mind, int mid,
-                          MatchModeId mode, int *out_target)
+                          MatchModeId mode, int *out_target,
+                          float famine_seconds)
 {
     *out_target = -1;
     /* Pre-Phase-2 this required LOS; without it, the goal never
      * triggered on cover-heavy maps (5/8 in the M6 P05 1v1 baseline).
      * Now we accept LOS-blocked enemies at a damped score and let
-     * tactic_engage's Phase 2 reposition the bot. */
-    int enemy = find_nearest_enemy_ex(w, mid, mind->pers.awareness_radius_px,
-                                       mode, false);
+     * tactic_engage's Phase 2 reposition the bot.
+     *
+     * M6 many-bots fix — awareness radius widens during combat famine.
+     * Default Veteran is 800 px; after 30 s of no-kill it's effectively
+     * 2400 px (3× boost) so wandering bots actually NOTICE distant
+     * targets and can engage them. Pre-fix the bot's awareness was a
+     * fixed cap, so on a 4000-px-wide map two bots in opposite corners
+     * never registered as enemies for engagement scoring even after
+     * minutes of stalemate. */
+    float awareness_boost = 1.0f + clampf(famine_seconds / 30.0f, 0.0f, 1.0f) * 2.0f;
+    float aware_radius = mind->pers.awareness_radius_px * awareness_boost;
+    int enemy = find_nearest_enemy_ex(w, mid, aware_radius, mode, false);
     if (enemy < 0) return 0.0f;
     *out_target = enemy;
     Vec2 mp = mech_pelvis_pos(w, mid);
@@ -1789,13 +1808,24 @@ static float score_pursue_enemy(const World *w, const BotMind *mind,
 }
 
 static GoalPick run_strategy(const World *w, BotMind *mind, int mid,
-                             const struct BotNav *nv, MatchModeId mode)
+                             const struct BotNav *nv, MatchModeId mode,
+                             float famine_seconds)
 {
     GoalPick best = { BOT_GOAL_IDLE, -1, -1 };
     float    best_score = 0.0f;
 
+    /* M6 many-bots fix — combat-famine boost. As seconds without a
+     * kill grow, multiply ENGAGE / PURSUE_ENEMY scores so wandering
+     * bots converge on each other. Caps at 3× boost after 30 s of
+     * no kills (linear ramp from 1.0 at 0 s → 3.0 at 30 s). Without
+     * this, on bigger maps the bots scatter to opposite corners
+     * pursuing pickups + repositioning + retreating, never re-meet,
+     * and the round runs out time without a single kill happening. */
+    float famine_boost = 1.0f + clampf(famine_seconds / 30.0f, 0.0f, 1.0f) * 2.0f;
+
     int eng_target = -1;
-    float s_engage = score_engage(w, mind, mid, mode, &eng_target);
+    float s_engage = score_engage(w, mind, mid, mode, &eng_target,
+                                  famine_seconds) * famine_boost;
 
     int pickup_node = -1;
     float s_pickup  = score_pursue_pickup(w, mind, nv, mid, &pickup_node);
@@ -1841,10 +1871,13 @@ static GoalPick run_strategy(const World *w, BotMind *mind, int mid,
     /* Always-on fallback: walk toward the nearest enemy across the
      * map. Scored low enough that PICKUP / ENGAGE / flag goals win
      * when they apply, but high enough that bots eventually meet in
-     * the middle even on big maps where awareness < map_width. */
+     * the middle even on big maps where awareness < map_width.
+     * famine_boost (above) ramps this up over time when no kills
+     * are happening — by 30 s of no-kill the boost is 3× and
+     * pursue_enemy generally wins over pickup / reposition. */
     int pursue_node = -1, pursue_target = -1;
     float s_pursue = score_pursue_enemy(w, mind, nv, mid, mode,
-                                        &pursue_node, &pursue_target);
+                                        &pursue_node, &pursue_target) * famine_boost;
 
     /* Phase 5 — role-aware defender goal. score_defend_flag is only
      * relevant in CTF; outside CTF it returns 0. The defender lingers
@@ -2475,9 +2508,16 @@ void bot_system_reset_minds(BotSystem *bs) {
             bs->minds[i].abandoned_nodes[j] = -1;
             bs->minds[i].abandoned_until[j] = 0;
         }
+        bs->minds[i].progress_anchor_x = 0.0f;
+        bs->minds[i].progress_anchor_y = 0.0f;
+        bs->minds[i].progress_anchor_dist_to_goal = 0.0f;
+        bs->minds[i].progress_anchor_goal_node = -1;
+        bs->minds[i].progress_anchor_tick = 0;
     }
     bs->count = 0;
     bs->nav   = NULL;     /* nav is level-arena owned; caller reset that arena */
+    bs->last_kill_count    = 0;
+    bs->famine_anchor_tick = 0;
 }
 
 void bot_system_destroy(BotSystem *bs) {
@@ -2589,6 +2629,11 @@ void bot_attach(BotSystem *bs, int mech_id, BotTier tier, uint64_t seed_salt) {
         m->abandoned_nodes[j] = -1;
         m->abandoned_until[j] = 0;
     }
+    m->progress_anchor_x = 0.0f;
+    m->progress_anchor_y = 0.0f;
+    m->progress_anchor_dist_to_goal = 0.0f;
+    m->progress_anchor_goal_node = -1;
+    m->progress_anchor_tick = 0;
     pcg32_seed(&m->rng,
                (bs->seed ^ ((uint64_t)mech_id << 16) ^ seed_salt),
                (uint64_t)(mech_id + 1) * 2654435761uLL);
@@ -2719,6 +2764,20 @@ void bot_step(BotSystem *bs, World *w, struct Game *g, float dt) {
         mode = (MatchModeId)w->match_mode_cached;
     }
 
+    /* M6 many-bots fix — combat famine tracker. Detect "any kill since
+     * last bot_step" by comparing world.killfeed_count to our stash;
+     * advance famine_anchor_tick on no-change, reset on change. The
+     * per-strategy boost downstream reads (now - famine_anchor_tick)
+     * to scale up engage / pursue scores so wandering bots converge
+     * when the round goes too long without a kill. */
+    if (w->killfeed_count != bs->last_kill_count) {
+        bs->last_kill_count    = w->killfeed_count;
+        bs->famine_anchor_tick = w->tick;
+    } else if (bs->famine_anchor_tick == 0) {
+        /* First call after a reset — anchor to now. */
+        bs->famine_anchor_tick = w->tick;
+    }
+
     for (int i = 0; i < MAX_MECHS; ++i) {
         BotMind *mind = &bs->minds[i];
         if (!mind->in_use) continue;
@@ -2771,8 +2830,92 @@ void bot_step(BotSystem *bs, World *w, struct Game *g, float dt) {
                 mind->path_step         = 0;
             }
 
+            /* M6 many-bots fix — meaningful-progress check. The
+             * per-tick stuck detector resets every time pelvis x
+             * moves >0.5 px, which masks the "JET up to unreachable
+             * pickup → fall back → repeat" loop (pelvis bounces
+             * through 100s of px each cycle so the per-tick check
+             * never accumulates). Once per strategy tick we check
+             * whether the bot is actually any closer to its goal
+             * node than 5 s ago; if not, abandon. Same goal-clear
+             * + blacklist as the stuck-driven path above; ENGAGE
+             * exempt for the same reason. */
+            if (mind->goal_target_node >= 0 &&
+                mind->goal != BOT_GOAL_ENGAGE &&
+                bs->nav && mind->goal_target_node < bs->nav->node_count)
+            {
+                Vec2 pelv_now = mech_pelvis_pos(w, mid);
+                Vec2 gp       = bs->nav->nodes[mind->goal_target_node].pos;
+                float dx = gp.x - pelv_now.x, dy = gp.y - pelv_now.y;
+                float dist_now = sqrtf(dx*dx + dy*dy);
+                bool need_anchor =
+                    (mind->progress_anchor_goal_node != mind->goal_target_node) ||
+                    (mind->progress_anchor_tick == 0);
+                if (need_anchor) {
+                    mind->progress_anchor_x = pelv_now.x;
+                    mind->progress_anchor_y = pelv_now.y;
+                    mind->progress_anchor_dist_to_goal = dist_now;
+                    mind->progress_anchor_goal_node = mind->goal_target_node;
+                    mind->progress_anchor_tick = w->tick;
+                } else if (w->tick - mind->progress_anchor_tick >
+                           BOT_PROGRESS_STALL_TICKS) {
+                    /* Sample window expired. Did we get meaningfully
+                     * closer? "Closer" by Euclidean distance to the
+                     * goal node; the bot might have gone around walls
+                     * but should still be net-closer if it's making
+                     * any progress. */
+                    float improvement =
+                        mind->progress_anchor_dist_to_goal - dist_now;
+                    if (improvement < BOT_PROGRESS_THRESHOLD_PX) {
+                        bot_abandon_node(mind, w->tick, mind->goal_target_node);
+                        mind->goal_score_cached = 0.0f;
+                        mind->goal_target_node  = -1;
+                        mind->goal              = BOT_GOAL_IDLE;
+                        mind->path_len          = 0;
+                        mind->path_step         = 0;
+                        mind->progress_anchor_goal_node = -1;
+                        mind->progress_anchor_tick = 0;
+                        SHOT_LOG("bot %d: no-progress abandonment (improvement=%.1f px in %llu ticks)",
+                                 mid, (double)improvement,
+                                 (unsigned long long)(w->tick - mind->progress_anchor_tick));
+                    } else {
+                        /* Made progress — re-anchor for the next window. */
+                        mind->progress_anchor_x = pelv_now.x;
+                        mind->progress_anchor_y = pelv_now.y;
+                        mind->progress_anchor_dist_to_goal = dist_now;
+                        mind->progress_anchor_tick = w->tick;
+                    }
+                }
+            } else {
+                /* No goal-target_node (or ENGAGE) — clear anchor so a
+                 * fresh goal starts a fresh window. */
+                mind->progress_anchor_goal_node = -1;
+                mind->progress_anchor_tick = 0;
+            }
+
             int prev_target = mind->goal_target_mech;
-            GoalPick pick = run_strategy(w, mind, mid, bs->nav, mode);
+            float famine_secs = (bs->famine_anchor_tick > 0 &&
+                                 w->tick > bs->famine_anchor_tick)
+                ? (float)(w->tick - bs->famine_anchor_tick) * BOT_TICK_DT
+                : 0.0f;
+            GoalPick pick = run_strategy(w, mind, mid, bs->nav, mode,
+                                          famine_secs);
+            /* M6 many-bots fix — apply the blacklist AFTER the strategy
+             * picks. Pre-fix only score_pursue_pickup checked the
+             * blacklist; score_pursue_enemy / score_grab_flag /
+             * score_capture / score_chase_carrier all ignored it, so
+             * the abandonment was undone the very same strategy tick
+             * by REPOSITION re-picking the same engage_node. Now any
+             * goal whose target_node is currently blacklisted gets
+             * downgraded to IDLE so the bot's bot_step IDLE-fallback
+             * path runs pick_reposition_node (which DOES filter the
+             * blacklist) and the bot gets a fresh reachable target. */
+            if (pick.target_node >= 0 &&
+                bot_node_abandoned(mind, w->tick, pick.target_node)) {
+                pick.goal        = BOT_GOAL_IDLE;
+                pick.target_mech = -1;
+                pick.target_node = -1;
+            }
             mind->goal             = (uint8_t)pick.goal;
             mind->goal_target_mech = (int16_t)pick.target_mech;
             mind->goal_target_node = (int16_t)pick.target_node;
