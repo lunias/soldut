@@ -142,11 +142,16 @@ static void ctf_capture(struct Game *g, int mi) {
     int captured = enemy_flag_idx(m->team);
     Flag *flag = &g->world.flags[captured];
 
-    /* Score: +5 to team, +1 to player. team_score[] is indexed by
-     * MATCH_TEAM_RED/_BLUE so we use the carrier's team (which is the
-     * SCORING team — they ran the enemy flag back to their base). */
+    /* Score: +1 to team_score per capture, +1 to the carrier's
+     * personal score. team_score is the round-end threshold against
+     * `match.score_limit` — so the host's configured score_limit
+     * directly equals "captures needed to win" in CTF, matching FFA
+     * (kills to win) and TDM (team kills to win). The original M5 P07
+     * design had +5 per capture, which made a default score_limit of
+     * 5 end the round on the FIRST capture; the user reported that as
+     * the "round ends as soon as I bring the flag back" bug. */
     if (m->team >= 0 && m->team < MATCH_TEAM_COUNT) {
-        g->match.team_score[m->team] += 5;
+        g->match.team_score[m->team] += 1;
     }
     int slot = lobby_find_slot_by_mech(&g->lobby, mi);
     if (slot >= 0) g->lobby.slots[slot].score += 1;

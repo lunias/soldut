@@ -356,8 +356,8 @@ static void test_capture(Game *g) {
            "capture: Red carrier reset to -1");
     EXPECT(g->world.flags[1].status == FLAG_HOME,
            "capture: Blue flag still HOME");
-    EXPECT(g->match.team_score[MATCH_TEAM_BLUE] == team_score_before + 5,
-           "capture: team_score += 5");
+    EXPECT(g->match.team_score[MATCH_TEAM_BLUE] == team_score_before + 1,
+           "capture: team_score += 1 (one capture toward score_limit)");
     EXPECT(g->lobby.slots[blue_slot].score == score_before + 1,
            "capture: scorer slot.score += 1");
     EXPECT(g->world.flag_state_dirty, "capture: dirty bit set");

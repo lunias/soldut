@@ -560,14 +560,15 @@ static void start_round(Game *g) {
     g->match.score_limit  = g->config.score_limit;
     g->match.time_limit   = g->config.time_limit;
     g->match.friendly_fire= g->config.friendly_fire;
-    /* P07 — CTF default score limit is 5 captures (per the design
-     * canon), much smaller than the FFA default of 25 kills. If the
-     * config's score_limit looks like the FFA default (>= 25), assume
-     * the host hasn't customized for CTF and clamp to FLAG_CAPTURE_DEFAULT.
-     * A host who explicitly sets score_limit=10 in soldut.cfg keeps 10. */
-    if (g->match.mode == MATCH_MODE_CTF && g->match.score_limit >= 25) {
-        g->match.score_limit = FLAG_CAPTURE_DEFAULT;
-    }
+    /* No CTF-specific auto-clamp here: the host's configured
+     * score_limit applies uniformly across FFA (kills), TDM (team
+     * kills), and CTF (captures). Pre-fix this fired
+     * `score_limit = FLAG_CAPTURE_DEFAULT` whenever score_limit >= 25
+     * in CTF, overriding any host pick of 25/30/50 captures with the
+     * built-in 5; combined with the M5-era "+5 team_score per
+     * capture" the round ended on the first capture under the
+     * defaults. ctf_capture now adds +1 per capture, so the
+     * threshold IS the captures-to-win number the host typed in. */
     /* FFA mode: every player is on team 1 (MATCH_TEAM_FFA aliases
      * MATCH_TEAM_RED). The friendly-fire check in mech_apply_damage
      * compares teams and drops same-team hits when ff is off — so

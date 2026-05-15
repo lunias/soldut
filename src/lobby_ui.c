@@ -1668,16 +1668,13 @@ void lobby_screen_run(LobbyUIState *L, Game *g, int sw, int sh) {
                      16, tc);
         if (can_change && hover && L->ui.mouse_pressed && !active) {
             /* Host mode change. Update local match + broadcast. CTF
-             * needs a compatible map; clamp score limit if jumping
-             * from FFA's 25 to CTF. */
+             * needs a compatible map. The score_limit the host chose
+             * applies uniformly across modes — captures in CTF, kills
+             * in FFA/TDM — so no auto-override here. */
             g->match.mode = (MatchModeId)modes[i].mode;
             g->match.friendly_fire = g->config.friendly_fire ||
                                       (g->match.mode == MATCH_MODE_FFA);
             g->world.friendly_fire = g->match.friendly_fire;
-            if (g->match.mode == MATCH_MODE_CTF &&
-                g->match.score_limit >= 25) {
-                g->match.score_limit = FLAG_CAPTURE_DEFAULT;
-            }
             /* Validate map mode_mask. If incompatible, advance to a
              * supporting map. We have to peek the chosen map's META
              * which lives on the level we already built — but maps.c
