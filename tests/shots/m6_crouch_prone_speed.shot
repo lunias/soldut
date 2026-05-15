@@ -1,0 +1,45 @@
+# M6 — verify crouch / prone slow lateral movement.
+#
+# Holds BTN_RIGHT continuously while cycling posture: stand → crouch
+# → stand → prone → stand. Each phase runs for 60 ticks (1 s). The
+# contact sheet shows the mech's progress at the end of each phase;
+# distance traveled in the crouch and prone phases should be visibly
+# smaller than the standing-walk phases.
+#
+# Tunables (src/mech.c): CROUCH_SPEED_MULT 0.50, PRONE_SPEED_MULT 0.25.
+# Trooper run_mult = 1.00, ARMOR_LIGHT run_mult = 1.00. So expected
+# steady-state run velocity = 280 / 140 / 70 px/s respectively.
+
+window 1280 720
+seed   77 33
+out    build/shots/m6_crouch_prone_speed
+
+loadout Trooper "Pulse Rifle" Sidearm Light Standard
+spawn_at 400 920
+mouse    1100 360
+
+# Settle and stand.
+at  20 shot t020_settled
+
+# Phase 1: stand + walk right for ~60 ticks (1 s).
+at  30 press right
+at  90 shot t090_walked_standing
+
+# Phase 2: crouch + walk right.
+at  91 press crouch
+at 150 shot t150_walked_crouched
+at 151 release crouch
+
+# Phase 3: another standing walk (sanity check after crouch released).
+at 210 shot t210_walked_standing_again
+
+# Phase 4: prone + walk right.
+at 211 press prone
+at 270 shot t270_walked_prone
+at 271 release prone
+
+at 330 shot t330_walked_standing_final
+at 331 release right
+
+contact_sheet speed_sheet cols 5
+at 360 end

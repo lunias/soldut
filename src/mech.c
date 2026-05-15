@@ -148,6 +148,14 @@ MechLoadout mech_default_loadout(void) {
 
 /* ---- Movement tunables (Soldat-derived; see reference/soldat-constants.md) */
 #define RUN_SPEED_PXS      280.0f
+/* Crouch / prone lateral-speed scalars. The body still uses the full
+ * accel/decel rates (GROUND_ACCEL_PXS2 etc.) to reach the lower cap;
+ * we're capping the target speed, not the rate of change. Applied only
+ * when grounded — airborne players with BTN_CROUCH/BTN_PRONE held still
+ * get full air control, matching the anim priority (JET/FALL override
+ * CROUCH/PRONE in build_pose). */
+#define CROUCH_SPEED_MULT  0.50f
+#define PRONE_SPEED_MULT   0.25f
 /* M6 P07 Phase 3 — taller jump (§5B). 320 → 480 px/s impulse takes
  * apex from 47 px (v²/2g = 320²/2160) to 107 px (480²/2160) — roughly
  * mech-height, the Soldat-y arc the user asked for. Airtime 0.60 s →
@@ -575,7 +583,7 @@ static bool any_foot_grounded(const World *w, const Mech *m) {
            (p->flags[rf] & PARTICLE_FLAG_GROUNDED);
 }
 
-static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, bool grounded) {
+static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, bool grounded, bool posture_clamp) {
     ParticlePool *p = &w->particles;
 
     if (!grounded) {
@@ -701,10 +709,33 @@ static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, 
     float vt_target = speed * dt;                       /* px/tick along tangent */
     float vt_now    = vx_now * tx + vy_now * ty;        /* signed scalar */
 
-    /* Above the cap in the input direction → input does nothing. The
-     * existing contact friction (physics.c:contact_with_velocity) is
-     * the only thing that bleeds excess speed back toward the cap. */
-    if (vt_now >= vt_target) return;
+    /* Above the cap in the input direction. Two policies:
+     *
+     *   - Default (slopes, dashes, recoil): the cap is just an "input
+     *     can push you up to here" target. External momentum is sacred,
+     *     contact friction is the only thing that bleeds it down.
+     *
+     *   - posture_clamp = true (crouch / prone): the player has
+     *     deliberately committed to a slower posture. Treat the cap as
+     *     authoritative and actively decelerate at GROUND_DECEL_PXS2
+     *     toward it (same rate as a flick-reverse — snappy, ~3-4 ticks
+     *     from full run down to crouch cap). Without this, a player who
+     *     crouches mid-run would coast at full speed for ~1 s while
+     *     PHYSICS_VELOCITY_DAMP (0.99/tick) erodes their momentum. */
+    if (vt_now >= vt_target) {
+        if (!posture_clamp) return;
+        float vt_excess = vt_now - vt_target;
+        float max_delta = GROUND_DECEL_PXS2 * dt * dt;
+        if (vt_excess > max_delta) vt_excess = max_delta;
+        float dx = vt_excess * tx;
+        float dy = vt_excess * ty;
+        for (int part = 0; part < PART_COUNT; ++part) {
+            int idx = m->particle_base + part;
+            p->prev_x[idx] += dx;
+            p->prev_y[idx] += dy;
+        }
+        return;
+    }
 
     /* Below the cap. ACCEL when motion is in input direction (or at
      * rest); DECEL (snappier) when motion opposes input — flick the
@@ -981,17 +1012,23 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
         if (m->ability_cooldown > 0.0f) m->ability_cooldown -= dt;
 
         bool moving = false;
-        float run_speed = RUN_SPEED_PXS * ch->run_mult * ar->run_mult;
+        float posture_mult = 1.0f;
+        if (grounded) {
+            if (in.buttons & BTN_PRONE)       posture_mult = PRONE_SPEED_MULT;
+            else if (in.buttons & BTN_CROUCH) posture_mult = CROUCH_SPEED_MULT;
+        }
+        bool posture_clamp = (posture_mult < 1.0f);
+        float run_speed = RUN_SPEED_PXS * ch->run_mult * ar->run_mult * posture_mult;
         if (in.buttons & BTN_LEFT) {
-            apply_run_velocity(w, m, -run_speed, dt, grounded);
+            apply_run_velocity(w, m, -run_speed, dt, grounded, posture_clamp);
             moving = true;
         }
         if (in.buttons & BTN_RIGHT) {
-            apply_run_velocity(w, m,  run_speed, dt, grounded);
+            apply_run_velocity(w, m,  run_speed, dt, grounded, posture_clamp);
             moving = true;
         }
         if (grounded && !moving) {
-            apply_run_velocity(w, m, 0.0f, dt, true);
+            apply_run_velocity(w, m, 0.0f, dt, true, false);
         }
 
         /* Scout dash: BTN_DASH while grounded gives a one-shot horizontal
