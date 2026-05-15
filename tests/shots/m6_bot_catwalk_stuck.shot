@@ -1,0 +1,39 @@
+# M6 — visualize the Heavy catwalk stuck bug.
+#
+# From bake trace: bot mid=2 (Heavy) starts at the RED spawn alcove (~288, 2072)
+# and gets PERMANENTLY stuck at (540, 2054) for hundreds of ticks. Stuck=226+
+# means the bot has been ~3 seconds without moving x by more than 0.5 px.
+#
+# Heavy chassis is the tallest. Spawn alcove has roof at row H-10 (=60).
+# Just outside the alcove at tile x=15..30, there's a slope ramp that
+# rises from y=2016 (96 px above floor) up to cw1_top=1280. The Heavy
+# walks out of the alcove and gets stuck against either the slope's
+# leftmost vertex or its underside.
+
+window 1280 720
+seed 1 0
+out build/shots/m6_bot_catwalk_stuck
+map catwalk
+loadout heavy "Auto-Cannon" Sidearm Light Standard
+spawn_at 288 2072
+
+# Hold RIGHT to walk toward (and past) the slope
+at 5   shot stand_t005
+at 30  press right
+at 60  shot walk_t060
+at 90  shot walk_t090
+at 120 shot stuck_t120
+at 180 shot stuck_t180
+at 240 shot stuck_t240
+at 300 shot stuck_t300
+
+# Try jumping to escape
+at 240 press jump
+at 245 release jump
+at 280 press jet
+at 320 release jet
+at 360 shot post_recover_t360
+
+contact_sheet stuck_sheet cols 4
+
+at 400 end

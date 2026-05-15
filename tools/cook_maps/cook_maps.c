@@ -462,21 +462,25 @@ static void build_slipstream(void) {
              t2w(W - 28), main_top,
              t2w(W - 28), basement_ceil);
 
-    /* Angled overhead struts above the catwalks — 45° overhang triangles
-     * jutting down from the level ceiling. Three total: one center-left,
-     * one center-right, one centerline. */
+    /* M6 bot-stuck-fix — overhead struts shortened so their lower vertex
+     * is 3 tiles (96 px) above the catwalk surface instead of touching
+     * it. Pre-fix, the strut hypotenuse intercepted any walker's head
+     * from x≈catwalk-corner outward — Sniper bots spawning on the
+     * catwalk wedged in instantly and never moved. The shorter strut
+     * still reads as a "jet redirect" overhang and still collides for
+     * jetters travelling diagonally upward toward it. */
     push_tri(POLY_KIND_SOLID,
              t2w(18), t2w(H - 36),
              t2w(22), t2w(H - 36),
-             t2w(22), t2w(H - 32));
+             t2w(22), t2w(H - 35));
     push_tri(POLY_KIND_SOLID,
              t2w(W - 22), t2w(H - 36),
              t2w(W - 18), t2w(H - 36),
-             t2w(W - 22), t2w(H - 32));
+             t2w(W - 22), t2w(H - 35));
     push_tri(POLY_KIND_SOLID,
              t2w(48), t2w(H - 40),
              t2w(52), t2w(H - 40),
-             t2w(50), t2w(H - 35));
+             t2w(50), t2w(H - 37));
 
     /* ---- WIND zones at slide-chute landings. ---- */
     /* Left chute landing: nudge sideways toward room 1 (negative x). */
@@ -624,22 +628,21 @@ static void build_reactor(void) {
      * (tiles 53-56 × rows 30-31) still gives ground-to-ground LOS
      * through the column. */
 
-    /* M6 P05 — flanking ramps reshaped to gentle 30° slopes ELEVATED
-     * 96 px above the bowl floor. Pre-P05 was 81° steep AND touched
-     * the floor, which (a) was unwalkable by the mech (>60° limit)
-     * and (b) blocked the bowl-floor nav chain that bots use to
-     * traverse spawn-to-spawn. The 96-px clearance gives bots a
-     * clean floor walk underneath the ramp; the ramp itself stays
-     * visible as the "flank access" route, reachable by JET from
-     * the floor. */
+    /* M6 bot-stuck-fix — bottom edge at floor_y - 160 (was 96). 96 px
+     * was below the Heavy chassis's standing head height (102 px above
+     * floor), so walking bots wedged their head into the slope's
+     * underside and the constraint solver pinned them in place. 160 px
+     * (5 tiles) gives every chassis ~50+ px walking clearance under the
+     * ramp; the slope still reads as "flank access" (jet up to the
+     * bottom edge, walk up). */
     push_tri(POLY_KIND_SOLID,
-             t2w(23),         floor_y - 96,      /* bottom-left 96 px above floor */
-             flank_left_end,  flank_top_y,       /* top at left flank's right corner */
-             flank_left_end,  floor_y - 96);     /* bottom-right 96 px above floor */
+             t2w(23),         floor_y - 160,
+             flank_left_end,  flank_top_y,
+             flank_left_end,  floor_y - 160);
     push_tri(POLY_KIND_SOLID,
-             flank_right_end, flank_top_y,       /* top at right flank's left corner */
-             t2w(87),         floor_y - 96,      /* bottom-right 96 px above floor */
-             flank_right_end, floor_y - 96);     /* bottom-left 96 px above floor */
+             flank_right_end, flank_top_y,
+             t2w(87),         floor_y - 160,
+             flank_right_end, floor_y - 160);
 
     /* ---- Spawns — 16 total. TDM-friendly (red on left, blue on
      * right) plus FFA-friendly central / overlook positions for the
@@ -936,18 +939,16 @@ static void build_catwalk(void) {
     const int cw2_top = t2w(H - 42);
     const int cw3_top = t2w(H - 54);
 
-    /* M6 P05 — floor-to-cw1 ramps + slide-slopes ELEVATED 96 px above
-     * floor so they don't block the bowl-floor nav chain. Geometry
-     * stays as the M5 P18 "walk the whole stack" design; the floor
-     * underneath is now continuous so bots traverse spawn-to-spawn
-     * at floor level. Climbers JET up onto the ramp's bottom edge
-     * and walk up from there. */
-    /* Floor → cw1 left ramp: cols 15..30, top at cw1, bottom 96 px above floor. */
+    /* M6 bot-stuck-fix — elevated bottom raised 96 → 160 (see
+     * reactor's matching note). The 96-px gap caught walking Heavy/
+     * Sniper heads against the slope's underside; 160 px gives all
+     * chassis ground clearance to walk spawn-to-spawn under the ramps. */
+    /* Floor → cw1 left ramp: cols 15..30, top at cw1, bottom 160 px above floor. */
     push_tri(POLY_KIND_SOLID,
-             t2w(15), floor_y - 96, t2w(30), cw1_top, t2w(30), floor_y - 96);
+             t2w(15), floor_y - 160, t2w(30), cw1_top, t2w(30), floor_y - 160);
     /* Floor → cw1 right ramp (mirror). */
     push_tri(POLY_KIND_SOLID,
-             t2w(W - 30), cw1_top, t2w(W - 15), floor_y - 96, t2w(W - 30), floor_y - 96);
+             t2w(W - 30), cw1_top, t2w(W - 15), floor_y - 160, t2w(W - 30), floor_y - 160);
     /* cw1 → cw2 left ramp (cols 50..55) — doesn't touch floor, keep as-is. */
     push_tri(POLY_KIND_SOLID,
              t2w(50), cw1_top, t2w(55), cw2_top, t2w(55), cw1_top);
@@ -955,11 +956,11 @@ static void build_catwalk(void) {
     push_tri(POLY_KIND_SOLID,
              t2w(60), cw2_top, t2w(64), cw3_top, t2w(64), cw2_top);
 
-    /* Slide-slopes from cw1 back to floor — elevated 96 px above floor. */
+    /* Slide-slopes from cw1 back to floor — elevated 160 px above floor. */
     push_tri(POLY_KIND_SOLID,
-             t2w(35), cw1_top, t2w(50), floor_y - 96, t2w(50), cw1_top);
+             t2w(35), cw1_top, t2w(50), floor_y - 160, t2w(50), cw1_top);
     push_tri(POLY_KIND_SOLID,
-             t2w(W - 50), cw1_top, t2w(W - 35), floor_y - 96, t2w(W - 50), floor_y - 96);
+             t2w(W - 50), cw1_top, t2w(W - 35), floor_y - 160, t2w(W - 50), floor_y - 160);
 
     /* 45° angled overhead struts — 4 small triangles hanging from the
      * ceiling band, each acting as a jet-redirect surface. */
@@ -1310,18 +1311,18 @@ static void build_crossfire(void) {
     const int floor_y   = t2w(H - 4);
     const int flag_y    = t2w(flag_plat_top_row);
 
-    /* M6 P05 — entry ramps elevated 96 px above floor so the bowl
-     * floor stays continuous for spawn-to-spawn bot traversal. The
-     * ramps still serve as walkable approaches to each flag platform;
-     * climbers JET up onto the ramp from the floor. */
+    /* M6 bot-stuck-fix — bottom 96 → 160. 96 px caught walking Heavy
+     * heads under the slope's underside. 160 px lets all chassis walk
+     * the floor underneath; ramp still readable as flag-platform
+     * approach (jet up to the bottom edge). */
     push_tri(POLY_KIND_SOLID,
              t2w(base_w),       flag_y,
-             t2w(base_w + 10),  floor_y - 96,
-             t2w(base_w),       floor_y - 96);
+             t2w(base_w + 10),  floor_y - 160,
+             t2w(base_w),       floor_y - 160);
     push_tri(POLY_KIND_SOLID,
-             t2w(W - base_w - 10), floor_y - 96,
+             t2w(W - base_w - 10), floor_y - 160,
              t2w(W - base_w),      flag_y,
-             t2w(W - base_w),      floor_y - 96);
+             t2w(W - base_w),      floor_y - 160);
 
     /* 45° angled struts above central mid (3). */
     push_tri(POLY_KIND_SOLID,
@@ -1488,19 +1489,18 @@ static void build_citadel(void) {
              t2w(W - 2 - castle_w - 4), floor_y,
              t2w(84), floor_y);
 
-    /* M6 P05 — castle outer slopes elevated 96 px above floor so the
-     * plaza floor stays continuous for spawn-to-spawn bot traversal.
-     * (Original was 77° steep AND touched floor — bots couldn't
-     * physically walk it and it blocked floor nav.) Climbers JET up
-     * to the ramp's bottom edge. */
+    /* M6 bot-stuck-fix — castle outer slopes raised 96 → 160 to clear
+     * walking Heavy/Sniper head height. Plaza floor stays continuous
+     * for spawn-to-spawn traversal; climbers still JET to the slope's
+     * lower lip. */
     push_tri(POLY_KIND_SOLID,
              t2w(2 + castle_w),     castle_top,
-             t2w(2 + castle_w + 4), floor_y - 96,
-             t2w(2 + castle_w),     floor_y - 96);
+             t2w(2 + castle_w + 4), floor_y - 160,
+             t2w(2 + castle_w),     floor_y - 160);
     push_tri(POLY_KIND_SOLID,
-             t2w(W - 2 - castle_w - 4), floor_y - 96,
+             t2w(W - 2 - castle_w - 4), floor_y - 160,
              t2w(W - 2 - castle_w),     castle_top,
-             t2w(W - 2 - castle_w),     floor_y - 96);
+             t2w(W - 2 - castle_w),     floor_y - 160);
 
     /* 6 grapple-anchor struts spread across the plaza at varied
      * heights — fewer than the original 12, but still enough for the

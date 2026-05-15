@@ -164,6 +164,14 @@ typedef struct BotMind {
      * flag-state transitions by `bot_assign_team_roles`. */
     uint8_t         team_role;            /* BotTeamRole */
     uint8_t         pad3[3];
+    /* M6 bot-stuck-fix — abandoned-target memory. When the bot has
+     * been stuck pursuing a goal_target_node for too long (the
+     * unreachable-pickup loop where pelvis can't physically clear the
+     * climb), record that node and refuse to re-pick it for ~10 s.
+     * Small ring of 4 entries — covers chains of "tried this, then
+     * the next one, then the next" without forgetting the first. */
+    int16_t         abandoned_nodes[4];
+    uint64_t        abandoned_until[4];   /* world tick at which the entry expires */
     pcg32_t         rng;
 } BotMind;
 
