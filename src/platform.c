@@ -160,6 +160,12 @@ bool platform_init(const PlatformConfig *cfg) {
      * SetTargetFPS(0) gives us free-running render bound only by vsync. */
     SetTargetFPS(0);
 
+    /* M6 lobby-loadout-preview — disable raylib's default "ESC closes the
+     * window" so dismissable modals can intercept ESC without losing the
+     * session. Each ESC handler (match end-round, lobby Controls modal,
+     * loadout preview modal) is explicit via IsKeyPressed(KEY_ESCAPE). */
+    SetExitKey(KEY_NULL);
+
     InitAudioDevice();
     if (!IsAudioDeviceReady()) {
         LOG_W("platform_init: audio device failed to open; continuing silently");

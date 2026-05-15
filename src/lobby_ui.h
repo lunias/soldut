@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lobby.h"
+#include "loadout_preview.h"
 #include "match.h"
 #include "ui.h"
 
@@ -122,6 +123,13 @@ typedef struct LobbyUIState {
     int        countdown_last_int;
     int        countdown_last_phase;
     double     go_visible_until;
+
+    /* M6 lobby-loadout-preview — preview modal state. Initialised in
+     * lobby_ui_init; opened when the player clicks the [PREVIEW LOADOUT]
+     * button under the jetpack picker. Owns its own particle pool +
+     * synthetic Mech + lazily-allocated RenderTexture2D for the
+     * treadmill. See `src/loadout_preview.h`. */
+    LoadoutPreview lp_state;
 } LobbyUIState;
 
 void lobby_ui_init(LobbyUIState *L);

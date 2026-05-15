@@ -78,3 +78,17 @@ void renderer_post_shutdown(void);
  * `renderer_decorations_unload` and then drawing again triggers a
  * reload — that's the hot-reload path P13 Task 9 plugs into. */
 void renderer_decorations_unload(void);
+
+/* M6 lobby-loadout-preview — draw a single isolated mech using an
+ * external ParticlePool + ConstraintPool that the caller has filled
+ * (typically from pose_compute output for a synthetic mech). Caller is
+ * responsible for being inside an active BeginMode2D scope and for
+ * BeginTextureMode framing if rendering to an offscreen target. Held
+ * weapon is rendered too (sprite path when atlas loaded; per-weapon
+ * barrel line otherwise). No grapple, no FX, no decals — just the
+ * skeleton + weapon. alpha is fixed at 1.0 inside (no prev-frame lerp
+ * since the preview rewrites pose every frame). */
+void render_draw_mech_preview(const Mech *m,
+                              const ParticlePool *p,
+                              const ConstraintPool *cp,
+                              Vec2 aim_dir);
