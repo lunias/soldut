@@ -238,6 +238,30 @@ bool snapshot_decode(const uint8_t *buf, int len,
  * the ring and snap fully so we don't slowly slide across the level. */
 void snapshot_apply(World *w, const SnapshotFrame *frame);
 
+/* wan-fixes-20 — push pelvis pos/vel from `frame` into each remote
+ * mech's per-mech interp ring WITHOUT touching local-mech reconcile
+ * state, health/weapon/team/aim fields, ensure_mech_slot spawn paths,
+ * or the stale-sweep that kills unseen mechs. Designed for snapshots
+ * that arrived out of order (their server_time is older than the
+ * latest seen): we still want them in the ring so pick_bracket has
+ * a richer set of samples for forward interpolation, but we MUST
+ * NOT regress health/weapon/team back to the stale state nor confuse
+ * reconcile by replaying inputs from a stale ack point.
+ *
+ * Caller is responsible for the staleness gate — typically "older
+ * than latest but within REMOTE_SNAP_STALE_MAX_MS" (see net.c
+ * client_handle_snapshot). */
+void snapshot_apply_remote_ring_only(World *w, const SnapshotFrame *frame);
+
+/* Max staleness (ms behind the latest-seen server_time) we'll accept
+ * a reordered snapshot for. Past this, the ring's oldest entry is
+ * newer than the incoming one and there's no useful insertion to
+ * make. At 60 Hz snapshots × 8-entry ring that's 133 ms of span;
+ * 250 ms gives comfortable headroom for bursty WAN reorder
+ * (the worst observed in the 2026-05-15 MN ↔ AZ playtest was
+ * ~50 ms windows). */
+#define REMOTE_SNAP_STALE_MAX_MS 250u
+
 /* P03 — interpolate remote mechs between bracketing ring entries.
  * `render_time_ms` is the client's local render clock — typically
  * `latest_server_time_ms - INTERP_DELAY_MS`, advanced each tick by

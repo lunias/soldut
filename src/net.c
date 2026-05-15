@@ -1816,12 +1816,33 @@ static void client_handle_snapshot(NetState *ns, const uint8_t *body,
         LOG_W("client: snapshot decode failed (%d bytes)", blen);
         return;
     }
-    /* Drop strictly older snapshots — UDP doesn't guarantee order, and
-     * processing a stale frame would push back-in-time data into the
-     * remote ring AND re-snap the local mech backward (followed by a
-     * full input replay against a stale base). */
-    if (ns->client_render_clock_armed &&
-        snap.header.server_time_ms < ns->client_latest_server_time_ms) {
+    /* wan-fixes-20 — reorder-tolerant admission.
+     *
+     * Pre-fix: snapshots strictly older than the latest-seen
+     * server_time were dropped at the receive site. That was safe
+     * for reconcile (which can't rewind to a stale ack point) but
+     * silently threw away samples that would have been useful in
+     * the per-mech interp ring. Live MN ↔ AZ playtests showed
+     * ~10-37 reordered snapshots per second arriving in WAN
+     * micro-burst windows; rejecting them caused render_time to
+     * outpace newest_t in the ring, freezing remote-mech motion
+     * for 30-80 ms at a time.
+     *
+     * Post-fix: full reconcile + apply only for snapshots that
+     * advance server_time (existing behaviour). Reordered-but-
+     * recent snapshots (within REMOTE_SNAP_STALE_MAX_MS = 250 ms
+     * of the latest) take the ring-only path which updates each
+     * remote mech's per-mech interp ring without touching the
+     * local mech, health/weapon/team/aim fields, or the stale-
+     * sweep. Snapshots older than that → drop. */
+    bool advances = !ns->client_render_clock_armed ||
+                    snap.header.server_time_ms >= ns->client_latest_server_time_ms;
+    if (!advances) {
+        uint32_t age = ns->client_latest_server_time_ms - snap.header.server_time_ms;
+        if (age > REMOTE_SNAP_STALE_MAX_MS) return;
+        snapshot_apply_remote_ring_only(&g->world, &snap);
+        /* Don't bump snapshots_applied — this isn't a full apply
+         * (no reconcile, no state advance). Net stats stay honest. */
         return;
     }
     /* One-shot log so we can see snapshots are flowing. */

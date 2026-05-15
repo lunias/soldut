@@ -418,6 +418,13 @@ static int ensure_mech_slot(World *w, int desired_id, Vec2 spawn,
     return desired_id;
 }
 
+/* Forward declaration — definition lives in the "Remote-mech
+ * interpolation" section below. snapshot_apply + the new
+ * snapshot_apply_remote_ring_only both call it. */
+static void remote_snap_push(Mech *m, uint32_t stx,
+                             float px, float py,
+                             float vx, float vy);
+
 void snapshot_apply(World *w, const SnapshotFrame *frame) {
     if (!frame || !frame->valid) return;
 
@@ -498,18 +505,8 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
             /* Push the snapshot into the ring (always, including the
              * just-snapped case — the next tick's interp will see the
              * fresh entry and stay put on it). */
-            int slot = m->remote_snap_head;
-            m->remote_snap_ring[slot] = (RemoteSnapBuf){
-                .server_time_ms = frame->header.server_time_ms,
-                .pelvis_x       = new_px,
-                .pelvis_y       = new_py,
-                .vel_x          = vx,
-                .vel_y          = vy,
-                .valid          = true,
-            };
-            m->remote_snap_head = (slot + 1) % REMOTE_SNAP_RING;
-            if (m->remote_snap_count < REMOTE_SNAP_RING)
-                m->remote_snap_count++;
+            remote_snap_push(m, frame->header.server_time_ms,
+                             new_px, new_py, vx, vy);
         }
 
         /* Aim: reconstruct from the angle. The pose drive needs an
@@ -801,7 +798,93 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
     }
 }
 
+void snapshot_apply_remote_ring_only(World *w, const SnapshotFrame *frame) {
+    if (!frame || !frame->valid) return;
+    int local_id = w->local_mech_id;
+    for (int i = 0; i < frame->ent_count; ++i) {
+        const EntitySnapshot *e = &frame->ents[i];
+        int mid = (int)e->mech_id;
+        if (mid < 0 || mid >= w->mech_count) continue;     /* skip ensure_mech_slot */
+        if (mid == local_id) continue;                     /* never touch local */
+        Mech *m = &w->mechs[mid];
+        if (m->remote_snap_count <= 0) continue;            /* no ring to merge into */
+        float new_px = dequant_pos(e->pos_x_q);
+        float new_py = dequant_pos(e->pos_y_q);
+        float vx     = dequant_vel(e->vel_x_q);
+        float vy     = dequant_vel(e->vel_y_q);
+        remote_snap_push(m, frame->header.server_time_ms,
+                         new_px, new_py, vx, vy);
+    }
+}
+
 /* ---- Remote-mech interpolation ----------------------------------- */
+
+/* wan-fixes-20 — insert (stx, px, py, vx, vy) into the per-mech
+ * snapshot ring with reorder-tolerant eviction. The head/count
+ * scheme used by the original M5 P03 code assumes monotonic
+ * arrivals: head advances each push and the oldest slot is the
+ * one being overwritten. That's wrong for out-of-order arrivals,
+ * where head may point past a NEWER entry — overwriting it would
+ * silently throw away a valid future sample.
+ *
+ * Eviction policy here:
+ *   1. If `stx` already exists in the ring → no-op (dup).
+ *   2. If any slot is invalid → write there.
+ *   3. Else (ring full): find the slot with the smallest
+ *      server_time. If that's older than `stx`, overwrite it.
+ *      If `stx` is older than every existing slot, drop —
+ *      we have no useful insertion to make.
+ *
+ * head/count are still maintained but their precise meaning
+ * shifts: head is just "next slot for the simple monotonic
+ * write path"; the count tracks valid entries. pick_bracket
+ * walks all slots and orders by server_time regardless of
+ * physical layout, so eviction order doesn't affect correctness. */
+static void remote_snap_push(Mech *m,
+                             uint32_t stx,
+                             float px, float py,
+                             float vx, float vy)
+{
+    /* Dup check + invalid-slot scan + oldest-slot tracking, one pass. */
+    int  empty_slot = -1;
+    int  oldest_slot = -1;
+    uint32_t oldest_t = (uint32_t)-1;
+    for (int s = 0; s < REMOTE_SNAP_RING; ++s) {
+        if (!m->remote_snap_ring[s].valid) {
+            if (empty_slot < 0) empty_slot = s;
+            continue;
+        }
+        if (m->remote_snap_ring[s].server_time_ms == stx) return;  /* dup */
+        if (m->remote_snap_ring[s].server_time_ms < oldest_t) {
+            oldest_t   = m->remote_snap_ring[s].server_time_ms;
+            oldest_slot = s;
+        }
+    }
+
+    int target;
+    if (empty_slot >= 0) {
+        target = empty_slot;
+    } else {
+        /* Ring is full. Only evict if incoming is newer than the
+         * current oldest — otherwise the incoming is itself the
+         * oldest and inserting it would just overwrite something
+         * more useful. */
+        if (stx < oldest_t) return;
+        target = oldest_slot;
+    }
+
+    m->remote_snap_ring[target] = (RemoteSnapBuf){
+        .server_time_ms = stx,
+        .pelvis_x       = px,
+        .pelvis_y       = py,
+        .vel_x          = vx,
+        .vel_y          = vy,
+        .valid          = true,
+    };
+    m->remote_snap_head = (target + 1) % REMOTE_SNAP_RING;
+    if (m->remote_snap_count < REMOTE_SNAP_RING)
+        m->remote_snap_count++;
+}
 
 /* Pick the bracket pair around `t` from the per-mech ring. Returns
  * indices into the ring or sets *a == *b for clamp cases. */
@@ -848,21 +931,42 @@ void snapshot_interp_remotes(World *w, uint32_t render_time_ms) {
         const RemoteSnapBuf *a = &m->remote_snap_ring[ai];
         const RemoteSnapBuf *b = &m->remote_snap_ring[bi];
 
-        float t = 0.0f;
-        if (a != b) {
-            uint32_t span = b->server_time_ms - a->server_time_ms;
-            if (span > 0u) {
-                t = (float)((double)(render_time_ms - a->server_time_ms) /
-                            (double)span);
-            }
-            if (t < 0.0f) t = 0.0f;
-            if (t > 1.0f) t = 1.0f;
-        }
+        float target_x, target_y, target_vx, target_vy;
 
-        float target_x = a->pelvis_x + (b->pelvis_x - a->pelvis_x) * t;
-        float target_y = a->pelvis_y + (b->pelvis_y - a->pelvis_y) * t;
-        float target_vx = a->vel_x + (b->vel_x - a->vel_x) * t;
-        float target_vy = a->vel_y + (b->vel_y - a->vel_y) * t;
+        /* wan-fixes-20 — forward extrapolation. When pick_bracket
+         * clamps to newest (ai == bi) AND render_time is past that
+         * sample, the original M5 P03 code froze the mech at
+         * a->pelvis until a fresher snapshot arrived. On real WAN
+         * with bursty delivery, render_time outpaces newest_t for
+         * windows of 30–80 ms multiple times per minute → visible
+         * stutter (mech freezes, then catches up). Instead, dead-
+         * reckon forward using the last known velocity, capped at
+         * EXTRAP_CAP_MS so we don't fling the mech off a cliff if
+         * the link drops entirely. */
+        const float EXTRAP_CAP_MS = 100.0f;
+        if (ai == bi && a->server_time_ms < render_time_ms) {
+            float extrap_ms = (float)(render_time_ms - a->server_time_ms);
+            if (extrap_ms > EXTRAP_CAP_MS) extrap_ms = EXTRAP_CAP_MS;
+            target_x  = a->pelvis_x + a->vel_x * (extrap_ms / 1000.0f);
+            target_y  = a->pelvis_y + a->vel_y * (extrap_ms / 1000.0f);
+            target_vx = a->vel_x;
+            target_vy = a->vel_y;
+        } else {
+            float t = 0.0f;
+            if (a != b) {
+                uint32_t span = b->server_time_ms - a->server_time_ms;
+                if (span > 0u) {
+                    t = (float)((double)(render_time_ms - a->server_time_ms) /
+                                (double)span);
+                }
+                if (t < 0.0f) t = 0.0f;
+                if (t > 1.0f) t = 1.0f;
+            }
+            target_x  = a->pelvis_x + (b->pelvis_x - a->pelvis_x) * t;
+            target_y  = a->pelvis_y + (b->pelvis_y - a->pelvis_y) * t;
+            target_vx = a->vel_x    + (b->vel_x    - a->vel_x   ) * t;
+            target_vy = a->vel_y    + (b->vel_y    - a->vel_y   ) * t;
+        }
 
         int pelv = m->particle_base + PART_PELVIS;
         float dx = target_x - pp->pos_x[pelv];
