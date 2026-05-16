@@ -413,6 +413,14 @@ static void build_foundry(void) {
     /* 1× JET_FUEL on the cover-wall top alongside the armor. */
     push_pickup(t2w(50), plat_pick - 64, PICKUP_JET_FUEL, 0);
 
+    /* M6 P10 §3.3 — single low-density FOG volume in the right gallery
+     * so the new soft-zone bleed has somewhere to read on this
+     * otherwise zone-less map. strength=0.15 maps to per-zone fog
+     * density; the shader path picks this up via the existing
+     * atmosphere_collect_fog_zones plumbing. */
+    push_ambi(t2w(65), t2w(H - 14), t2w(30), t2w(8),
+              AMBI_FOG, 0.15f, 0.0f, 0.0f);
+
     set_meta("Foundry",
              "Open floor with cover columns. Ground-game.",
              "foundry",
@@ -764,6 +772,16 @@ static void build_reactor(void) {
                    /*vignette*/    q0_16(0.30f),
                    /*weather_kind*/ 4,       /*weather_density*/ q0_16(0.40f));
 
+    /* M6 P10 §3.3 — ACID pool under the pillar arch. 12-tile-wide ×
+     * 4-tile-deep volume sitting on the bowl floor; chest-altitude
+     * lands inside the rect so mechs running the corridor take 5 HP/s
+     * environmental damage. Gameplay sell of the new feathered glow +
+     * a real reason to hop the bowl instead of walking through it.
+     * Revert by deleting this push_ambi call (per §3.3 instructions)
+     * if the bake regresses on Reactor. */
+    push_ambi(t2w(49), t2w(H - 7), t2w(12), t2w(4),
+              AMBI_ACID, 0.6f, 0.0f, 0.0f);
+
     /* unused-loc warnings */
     (void)bowl_low;
 }
@@ -945,14 +963,22 @@ static void build_concourse(void) {
     push_pickup(t2w(W - 24), floor_pick, PICKUP_AMMO_SECONDARY, 0);
 
     set_meta("Concourse",
-             "Long sightlines through the atrium. Mid-range fight.",
+             "Overgrown atrium with drizzle leaking through the roof.",
              "atrium",
              (uint16_t)((1u << MATCH_MODE_FFA) | (1u << MATCH_MODE_TDM)));
-    /* M6 P09 — CONCRETE: neutral default, no weather. */
-    set_meta_atmos(/*theme*/ 0,
-                   /*fog_density*/ 0,        /*fog_color*/ 0,
-                   /*vignette*/    q0_16(0.12f),
-                   /*weather_kind*/ 0,       /*weather_density*/ 0);
+    /* M6 P10 §3.1 — Re-themed CONCRETE → OVERGROWN to retire the
+     * CONCRETE × 2 duplicate with Crossfire. RAIN @ 0.18 covers the
+     * previously-unused RAIN weather mode. Sky colors override the
+     * theme defaults for a covered-but-leaky atrium feel. */
+    Level *Lm = &g_cooker.world.level;
+    Lm->meta.sky_top_rgb565 = rgb565(110, 140, 90);
+    Lm->meta.sky_bot_rgb565 = rgb565( 70, 100, 60);
+    set_meta_atmos(/*theme*/ 5 /*OVERGROWN*/,
+                   /*fog_density*/ q0_16(0.10f),
+                   /*fog_color*/   rgb565(140, 170, 110),
+                   /*vignette*/    q0_16(0.20f),
+                   /*weather_kind*/ 2 /*RAIN*/,
+                   /*weather_density*/ q0_16(0.18f));
 }
 
 /* ===================================================================== */
@@ -1117,12 +1143,15 @@ static void build_catwalk(void) {
              "Vertical TDM. Ground game + risk/reward catwalks.",
              "exterior",
              (uint16_t)(1u << MATCH_MODE_TDM));
-    /* M6 P09 — NEON: purple/cyan cyber, dim ambient. No weather. */
-    set_meta_atmos(/*theme*/ 3,
+    /* M6 P10 §3.1 — NEON catwalks with cyberpunk rain. Light RAIN @
+     * 0.10 differentiates Catwalk from Aurora (which keeps NEON +
+     * DUST) and exercises the second use of the RAIN weather mode. */
+    set_meta_atmos(/*theme*/ 3 /*NEON*/,
                    /*fog_density*/ q0_16(0.08f),
                    /*fog_color*/   rgb565(130, 80, 200),
                    /*vignette*/    q0_16(0.40f),
-                   /*weather_kind*/ 0,       /*weather_density*/ 0);
+                   /*weather_kind*/ 2 /*RAIN*/,
+                   /*weather_density*/ q0_16(0.10f));
 }
 
 /* ===================================================================== */
@@ -1521,6 +1550,17 @@ static void build_crossfire(void) {
      * jetpack-alcove geometry. */
     push_pickup(t2w(77),     sky_pick, PICKUP_POWERUP, POWERUP_INVISIBILITY);
     push_pickup(t2w(W - 77), sky_pick, PICKUP_POWERUP, POWERUP_INVISIBILITY);
+
+    /* M6 P10 §3.3 — two small WIND zones flanking the central catwalk,
+     * each blowing outward (away from center). Adds a "navigate the
+     * crosswind" decision when crossing through. Strength 0.4 is
+     * gentle enough that a Trooper can fight it but a Heavy needs to
+     * jet over instead of walking through. Symmetric so the CTF
+     * arena's mirror property is preserved. */
+    push_ambi(t2w(W / 2 - 20), t2w(H - 22), t2w(8), t2w(8),
+              AMBI_WIND, 0.4f, -1.0f, 0.0f);   /* left zone blows LEFT */
+    push_ambi(t2w(W / 2 + 12), t2w(H - 22), t2w(8), t2w(8),
+              AMBI_WIND, 0.4f,  1.0f, 0.0f);   /* right zone blows RIGHT */
 
     set_meta("Crossfire",
              "Mirror CTF arena. Two bases, central battleground.",
