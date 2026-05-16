@@ -704,8 +704,14 @@ tutorial level. From there:
 - **Hit-pause** — A handful of ticks of frozen physics on a notable kill
   (the killshot itself, not chip damage). FX (blood) keeps falling
   during the freeze.
-- **Screen shake** — Decays exponentially. Triggered by recoil and
-  notable events.
+- **Screen shake** — Decays exponentially (×0.92/tick). Triggered by
+  recoil and notable events. **M6 P10**: per-fire weapon shake reduced
+  (hitscan 0.05 → 0.02, projectile spawn 0.04 → 0.015) so sustained
+  auto-fire no longer pegs the camera. Big-event shake (hit 0.12,
+  explosion 0.4, kill 0.6) unchanged. Tunable via `shake_scale` in
+  `soldut-prefs.cfg` (default 1.0, range [0, 2]; 0 disables shake),
+  CLI flag `--shake-scale F` overrides. Applied at the render-side
+  amp + rotation site in `render.c::update_camera`.
 - **HUD** — Health bar, jet fuel gauge, ammo counter, crosshair, kill
   feed. Drawn last, on top of everything.
 
@@ -3932,6 +3938,12 @@ them against playtest reactions. (Per-weapon stats are in the
 | `src/mech_jet_fx.c`       | hot-zone radius (sustain/boost/ignition) | 40 / 80 / 120 px |
 | `src/mech_jet_fx.c`       | `plume_length_px` (Standard/Burst/Glide) | **56 / 64 / 36** (revised from 28 / 34 / 18 after visual iteration — the spec-default was occluded by mech body) |
 | `src/render.c`            | `JET_HOT_ZONE_MAX` (shimmer slots)   | 16 |
+| `src/render.c`            | shake amp / rotation @ intensity=1.0 | 6 px / 1.2 rad (multiplied by `Renderer.shake_scale`, default 1.0 — M6 P10) |
+| `src/weapons.c`           | per-fire shake (hitscan / projectile) | **0.02 / 0.015** (was 0.05 / 0.04; M6 P10) |
+| `src/mech.c`              | hit shake / kill shake               | 0.12 / 0.6 (unchanged — "big shake okay for big events") |
+| `src/projectile.c`        | explosion shake                      | 0.4 (unchanged) |
+| `src/simulate.c`          | shake decay per tick                 | ×0.92 (×0.95 during hit-pause) |
+| `src/prefs.c`             | `UserPrefs.shake_scale` default      | 1.0 (range [0, 2]; M6 P10) |
 
 The simulation runs at **60 Hz** at M1 (not 120 Hz as
 [documents/03-physics-and-mechs.md](documents/03-physics-and-mechs.md)

@@ -92,6 +92,7 @@ int main(void) {
         snprintf(w.connect_addr, sizeof w.connect_addr,
                  "soldut.example.org:23073");
         w.master_volume        = 0.55f;
+        w.shake_scale          = 0.40f;
 
         bool saved = prefs_save(&w, path);
         ASSERT_TRUE("save: returns true", saved);
@@ -108,6 +109,8 @@ int main(void) {
                    "soldut.example.org:23073");
         ASSERT_TRUE("round-trip: master_volume = 0.55",
                     r.master_volume > 0.545f && r.master_volume < 0.555f);
+        ASSERT_TRUE("round-trip: shake_scale = 0.40",
+                    r.shake_scale > 0.395f && r.shake_scale < 0.405f);
 
         remove(path);
     }

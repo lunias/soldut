@@ -31,6 +31,12 @@ typedef struct {
      * dx=dy=0 — the conversion is the identity. */
     float    blit_scale;
     float    blit_dx, blit_dy;
+
+    /* M6 P10 — scalar multiplier on shake amplitude + rotation.
+     * Default 1.0; main.c sets it from UserPrefs.shake_scale (or the
+     * --shake-scale CLI flag) after renderer_init. 0 disables shake
+     * entirely. update_camera() multiplies amp/rotation by this. */
+    float    shake_scale;
 } Renderer;
 
 void renderer_init(Renderer *r, int screen_w, int screen_h, Vec2 follow);

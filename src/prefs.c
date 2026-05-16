@@ -67,6 +67,7 @@ void prefs_defaults(UserPrefs *out) {
     snprintf(out->connect_addr, sizeof out->connect_addr, "127.0.0.1:23073");
     out->master_volume  = PREFS_DEFAULT_VOLUME;
     out->internal_res_h = 1080;  /* M6 P03 — see prefs.h. */
+    out->shake_scale    = 1.0f;  /* M6 P10 — see prefs.h. */
 }
 
 /* ---- key=value parser (lifted from config.c's apply_kv pattern,
@@ -122,6 +123,15 @@ static void apply_kv(UserPrefs *p, const char *key, char *val) {
             p->internal_res_h = n;
         } else {
             LOG_W("prefs: internal_res_h '%s' out of range (0 or 360..4320) — keeping default", val);
+        }
+    }
+    else if (strcasecmp(key, "shake_scale") == 0) {
+        char *endp = NULL;
+        float v = (float)strtod(val, &endp);
+        if (endp == val || !(v >= 0.0f && v <= 2.0f)) {
+            LOG_W("prefs: shake_scale '%s' out of [0,2] — keeping default", val);
+        } else {
+            p->shake_scale = v;
         }
     }
     else {
@@ -197,6 +207,7 @@ bool prefs_save(const UserPrefs *p, const char *path) {
     fprintf(f, "connect_addr=%s\n",  p->connect_addr);
     fprintf(f, "master_volume=%.2f\n", p->master_volume);
     fprintf(f, "internal_res_h=%d\n",  p->internal_res_h);
+    fprintf(f, "shake_scale=%.2f\n",   p->shake_scale);
 
     if (fflush(f) != 0 || fclose(f) != 0) {
         LOG_W("prefs: failed to flush %s", tmp);

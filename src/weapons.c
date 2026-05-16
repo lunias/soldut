@@ -415,7 +415,9 @@ void weapons_fire_hitscan(World *w, int mid) {
     me->recoil_kick = 1.0f;
 
     me->fire_cooldown = wpn->fire_rate_sec;
-    w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.05f);
+    /* M6 P10 — per-fire shake cut 0.05 → 0.02. See the matching comment
+     * in weapons_fire_hitscan_lag_comp for the rationale. */
+    w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.02f);
     for (int k = 0; k < 3; ++k) {
         fx_spawn_spark(&w->fx, origin,
             (Vec2){ dir.x * 350.0f, dir.y * 350.0f }, w->rng);
@@ -522,7 +524,11 @@ void weapons_fire_hitscan_lag_comp(World *w, int mid, uint64_t shot_at_tick) {
     me->recoil_kick = 1.0f;
 
     me->fire_cooldown = wpn->fire_rate_sec;
-    w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.05f);
+    /* M6 P10 — was 0.05; bursty per-shot accumulation made sustained fire
+     * shake the camera too aggressively. Cut to 0.02 so even an SMG-rate
+     * loop stays around shake_intensity ≈ 0.05 steady-state instead of
+     * ≈ 0.6. Big-event shake (kill / explosion / hit) is unchanged. */
+    w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.02f);
     for (int k = 0; k < 3; ++k) {
         fx_spawn_spark(&w->fx, origin,
             (Vec2){ dir.x * 350.0f, dir.y * 350.0f }, w->rng);
@@ -561,7 +567,9 @@ void weapons_predict_local_fire(World *w, int mid) {
     w->particles.pos_y[hand_idx] -= dir.y * wpn->recoil_impulse;
     me->recoil_kick = 1.0f;
     me->fire_cooldown = wpn->fire_rate_sec;
-    w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.05f);
+    /* M6 P10 — per-fire shake cut 0.05 → 0.02 (predict path; matches the
+     * authoritative hitscan paths above). */
+    w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.02f);
     for (int k = 0; k < 3; ++k) {
         fx_spawn_spark(&w->fx, origin,
             (Vec2){ dir.x * 350.0f, dir.y * 350.0f }, w->rng);
@@ -642,7 +650,11 @@ void weapons_spawn_projectiles(World *w, int mid, int weapon_id) {
     w->particles.pos_y[hand_idx] -= dir.y * wpn->recoil_impulse;
     me->recoil_kick = 1.0f;
     me->fire_cooldown = wpn->fire_rate_sec;
-    w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.04f);
+    /* M6 P10 — projectile-spawn shake cut 0.04 → 0.015 (matches the
+     * hitscan-fire reduction; the projectile's eventual *explosion*
+     * still adds 0.4 unconditionally, which is the big-event shake the
+     * user is OK with). */
+    w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.015f);
     for (int k = 0; k < 3; ++k) {
         fx_spawn_spark(&w->fx, origin,
             (Vec2){ dir.x * 350.0f, dir.y * 350.0f }, w->rng);
