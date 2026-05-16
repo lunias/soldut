@@ -66,3 +66,22 @@ void explosion_spawn(World *w, Vec2 pos, float radius, float damage,
  * the pool. Returns the slot index or -1. Used by render.c to draw the
  * rope from the firer's hand to the in-flight head. */
 int projectile_find_grapple_head(const ProjectilePool *p, int owner_mech_id);
+
+/* wan-fixes-21 — push an entry into the world's explosion-record
+ * ring. `source` is EXPL_SRC_PREDICTED (client's local detonate)
+ * or EXPL_SRC_SERVER (NET_MSG_EXPLOSION handler). The opposite-
+ * source lookup is used to suppress double-flash. */
+void explosion_record_push(World *w, Vec2 pos, int owner_mech,
+                           int weapon_id, int source);
+
+/* wan-fixes-21 — find the OLDEST valid record matching
+ * (owner_mech, weapon_id, source) within `max_age_ticks` of
+ * `w->tick`. Expires stale entries on the way (sets valid=false).
+ * Returns NULL if no match. Returned pointer is mutable so the
+ * caller can mark the matched record consumed (valid=false) to
+ * keep subsequent server events from re-matching the same one. */
+ExplosionRecord *explosion_record_find_consume(World *w,
+                                                int owner_mech,
+                                                int weapon_id,
+                                                int source,
+                                                uint32_t max_age_ticks);

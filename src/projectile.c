@@ -117,24 +117,65 @@ static void detonate(World *w, int i) {
     ProjectilePool *p = &w->projectiles;
     if (p->exploded[i]) return;
     p->exploded[i] = 1;
-    /* wan-fixes-10 — only the SERVER spawns the explosion visual from
-     * the projectile-step detonate path. The client's visual grenade
-     * collides against rest-pose remote bones (wan-fixes-3) which can
-     * be ~10 px off from the server's animated bone positions; the
-     * client's locally-spawned visual then landed in a different place
-     * than where damage was applied. With server-driven EXPLOSION
-     * events, clients spawn the visual on event receipt at the
-     * server's authoritative pos. Client's projectile here just dies
-     * silently; explosion_spawn is called from
-     * client_handle_explosion in net.c. */
-    if (w->authoritative && p->aoe_radius[i] > 0.0f) {
-        explosion_spawn(w,
-            (Vec2){ p->pos_x[i], p->pos_y[i] },
-            p->aoe_radius[i],
-            p->aoe_damage[i],
-            p->aoe_impulse[i],
-            (int)p->owner_mech[i], (int)p->owner_team[i],
-            (int)p->weapon_id[i]);
+    /* wan-fixes-10 (server) / wan-fixes-21 (client) — explosion visual
+     * placement.
+     *
+     * SERVER: spawn the authoritative explosion (damage + impulse +
+     * sparks/smoke/sfx). NET_MSG_EXPLOSION is also broadcast from
+     * `explosion_spawn` so every client receives the canonical pos
+     * (`src/net.c::net_server_broadcast_explosion`).
+     *
+     * CLIENT: predict the visual locally if the server's
+     * NET_MSG_EXPLOSION hasn't arrived yet — wan-fixes-10 used to
+     * skip the client visual entirely, which delayed all AOE
+     * feedback by 1× RTT (~86 ms WAN). For slow projectiles like
+     * Mass Driver this caused "looks like a miss" → "actually a
+     * hit" surprise. `explosion_spawn`'s authoritative gate keeps
+     * the damage loop a no-op on the client so the prediction is
+     * visual-only. The opposite-source lookup against the
+     * explosion record ring de-dupes against the server's later
+     * EXPLOSION arrival. If the server's event ARRIVED FIRST
+     * (rare but possible) we skip the prediction and let the
+     * server's visual stand. */
+    if (p->aoe_radius[i] > 0.0f) {
+        if (w->authoritative) {
+            explosion_spawn(w,
+                (Vec2){ p->pos_x[i], p->pos_y[i] },
+                p->aoe_radius[i],
+                p->aoe_damage[i],
+                p->aoe_impulse[i],
+                (int)p->owner_mech[i], (int)p->owner_team[i],
+                (int)p->weapon_id[i]);
+        } else if (!p->bouncy[i]) {
+            /* Predict only for BALLISTIC AOE projectiles (Mass Driver
+             * rocket, micro-rockets, plasma orb). Bouncy fused
+             * grenades diverge ~hundreds of pixels between
+             * client/server sim once the bounce + fuse paths
+             * accumulate, so prediction would land in the wrong spot
+             * and the handler wouldn't be able to de-dup it. Frags
+             * stay on the wan-fixes-10 "wait for server event"
+             * path; the user perceives that delay less for thrown
+             * weapons (less twitch, shorter range). */
+            ExplosionRecord *server_already = explosion_record_find_consume(
+                w, (int)p->owner_mech[i], (int)p->weapon_id[i],
+                EXPL_SRC_SERVER, /*max_age_ticks*/30);
+            if (server_already) {
+                /* Server's EXPLOSION already showed the visual.
+                 * Consume the record and die silently. */
+                server_already->valid = false;
+            } else {
+                Vec2 pred = { p->pos_x[i], p->pos_y[i] };
+                explosion_spawn(w, pred,
+                    p->aoe_radius[i],
+                    p->aoe_damage[i],
+                    p->aoe_impulse[i],
+                    (int)p->owner_mech[i], (int)p->owner_team[i],
+                    (int)p->weapon_id[i]);
+                explosion_record_push(w, pred,
+                    (int)p->owner_mech[i], (int)p->weapon_id[i],
+                    EXPL_SRC_PREDICTED);
+            }
+        }
     }
     p->alive[i] = 0;
 }
@@ -691,4 +732,57 @@ void explosion_spawn(World *w, Vec2 pos, float radius, float damage,
             w->particles.pos_y[idx] += ndy * k_imp;
         }
     }
+}
+
+/* ---- wan-fixes-21: explosion record ring -------------------------- *
+ *
+ * Used to de-duplicate the client's predicted AOE explosion visual
+ * (spawned by `detonate` above) against the server's authoritative
+ * NET_MSG_EXPLOSION broadcast (handled in `src/net.c::client_handle_
+ * explosion`). One ring per World; FIFO eviction; O(EXPLOSION_RECORD_
+ * RING = 16) scan per push/find. Free even at frag-grenade fire rates. */
+
+void explosion_record_push(World *w, Vec2 pos, int owner_mech,
+                           int weapon_id, int source)
+{
+    int slot = w->explosion_record_head;
+    w->explosion_record_ring[slot] = (ExplosionRecord){
+        .pos        = pos,
+        .at_tick    = w->tick,
+        .owner_mech = (uint16_t)owner_mech,
+        .weapon_id  = (uint8_t)weapon_id,
+        .source     = (uint8_t)source,
+        .valid      = true,
+    };
+    w->explosion_record_head = (slot + 1) % EXPLOSION_RECORD_RING;
+}
+
+ExplosionRecord *explosion_record_find_consume(World *w,
+                                                int owner_mech,
+                                                int weapon_id,
+                                                int source,
+                                                uint32_t max_age_ticks)
+{
+    ExplosionRecord *best = NULL;
+    uint64_t best_at = (uint64_t)-1;
+    uint64_t cutoff  = (w->tick > (uint64_t)max_age_ticks)
+                            ? (w->tick - (uint64_t)max_age_ticks)
+                            : 0;
+    for (int i = 0; i < EXPLOSION_RECORD_RING; ++i) {
+        ExplosionRecord *r = &w->explosion_record_ring[i];
+        if (!r->valid) continue;
+        if (r->at_tick < cutoff) {
+            /* Stale — expire it. Cheap GC done lazily on every scan. */
+            r->valid = false;
+            continue;
+        }
+        if (r->owner_mech != (uint16_t)owner_mech) continue;
+        if (r->weapon_id  != (uint8_t)weapon_id)   continue;
+        if (r->source     != (uint8_t)source)      continue;
+        if (r->at_tick < best_at) {
+            best    = r;
+            best_at = r->at_tick;
+        }
+    }
+    return best;
 }
