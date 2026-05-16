@@ -583,6 +583,84 @@ static bool any_foot_grounded(const World *w, const Mech *m) {
            (p->flags[rf] & PARTICLE_FLAG_GROUNDED);
 }
 
+/* M6 P10 — Step assist. When the mech is grounded with horizontal input
+ * held but its leading foot is pinned against a short obstacle (<~1 tile
+ * tall) and the body has stalled, lift the entire skeleton by a few
+ * pixels per tick so the obstacle clears. Without this, multi-particle
+ * skeleton physics tends to wedge against 1-tile ledges and the corners
+ * where a slope's apex meets a horizontal platform.
+ *
+ * Probes (all using level_ray_hits — handles tiles + polys):
+ *   1. Forward at ankle height — must be blocked (obstacle present).
+ *   2. Forward at ankle - STEP_HEIGHT — must be clear (obstacle is short).
+ *   3. Up from head by the per-tick lift amount — must be clear (no ceiling).
+ *
+ * Gated by: grounded, anim STAND/RUN/CROUCH (not prone), not grappling,
+ * leading-foot contact normal roughly flat (ny < -0.85) so we don't
+ * lift the body off a slope surface whose own material the forward
+ * probe would otherwise hit, and current x-velocity below ~60 px/s in
+ * the input direction (already cruising → nothing to step over). */
+#define STEP_PROBE_AHEAD_PX  14.0f
+#define STEP_HEIGHT_PX       30.0f
+#define STEP_LIFT_PER_TICK   8.0f
+
+static void apply_step_assist(World *w, Mech *m, float input_dir) {
+    if (!m->grounded) return;
+    if (input_dir == 0.0f) return;
+    if (m->anim_id != ANIM_STAND && m->anim_id != ANIM_RUN &&
+        m->anim_id != ANIM_CROUCH) return;
+    if (m->grapple.state == GRAPPLE_ATTACHED) return;
+
+    ParticlePool *p = &w->particles;
+    int b = m->particle_base;
+    int lf = b + PART_L_FOOT;
+    int rf = b + PART_R_FOOT;
+
+    /* Skip when on a slope — the foot's contact normal indicates we're
+     * mid-slope, where forward probes hit the slope surface itself and
+     * would falsely trigger the lift on every tick of climbing. The
+     * specific slope-apex case (gentle slope into a step) is handled by
+     * map fixes, not here. */
+    float ny_l = p->contact_ny_q[lf] / 127.0f;
+    float ny_r = p->contact_ny_q[rf] / 127.0f;
+    float ny_avg = (ny_l + ny_r) * 0.5f;
+    if (ny_avg > -0.85f) return;
+
+    int pelv = b + PART_PELVIS;
+    float vx_now = p->pos_x[pelv] - p->prev_x[pelv];
+    if (vx_now * input_dir > 1.0f) return;     /* > ~60 px/s — already cruising */
+
+    float lf_x = p->pos_x[lf], rf_x = p->pos_x[rf];
+    float lf_y = p->pos_y[lf], rf_y = p->pos_y[rf];
+    float lead_x = (input_dir > 0.0f) ? fmaxf(lf_x, rf_x) : fminf(lf_x, rf_x);
+    float lead_y = fminf(lf_y, rf_y);
+    float probe_y = lead_y - 6.0f;
+    float ahead_x = lead_x + input_dir * STEP_PROBE_AHEAD_PX;
+
+    Vec2 a_low = (Vec2){ lead_x, probe_y };
+    Vec2 b_low = (Vec2){ ahead_x, probe_y };
+    float t_low = 1.0f;
+    if (!level_ray_hits(&w->level, a_low, b_low, &t_low)) return;
+    Vec2 a_hi = (Vec2){ lead_x,  probe_y - STEP_HEIGHT_PX };
+    Vec2 b_hi = (Vec2){ ahead_x, probe_y - STEP_HEIGHT_PX };
+    float t_hi = 1.0f;
+    if (level_ray_hits(&w->level, a_hi, b_hi, &t_hi)) return;
+
+    Vec2 head = (Vec2){ p->pos_x[b + PART_HEAD], p->pos_y[b + PART_HEAD] };
+    Vec2 head_up = (Vec2){ head.x, head.y - STEP_LIFT_PER_TICK - 2.0f };
+    float t_ceil = 1.0f;
+    if (level_ray_hits(&w->level, head, head_up, &t_ceil)) return;
+
+    for (int part = 0; part < PART_COUNT; ++part) {
+        int idx = b + part;
+        physics_translate_kinematic(p, idx, 0.0f, -STEP_LIFT_PER_TICK);
+    }
+
+    SHOT_LOG("t=%llu mech=%d step_assist dir=%+.0f lift=%.0f at x=%.0f",
+             (unsigned long long)w->tick, m->id, input_dir,
+             STEP_LIFT_PER_TICK, lead_x);
+}
+
 static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, bool grounded, bool posture_clamp) {
     ParticlePool *p = &w->particles;
 
@@ -1042,6 +1120,14 @@ void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
         }
         if (grounded && !moving) {
             apply_run_velocity(w, m, 0.0f, dt, true, false);
+        }
+        /* M6 P10 — step-up over short obstacles when the body has
+         * stalled. Cheap probes; no-op when nothing's in the way. */
+        if (grounded && moving) {
+            float in_dir = 0.0f;
+            if (in.buttons & BTN_LEFT)  in_dir = -1.0f;
+            if (in.buttons & BTN_RIGHT) in_dir = +1.0f;
+            apply_step_assist(w, m, in_dir);
         }
 
         /* Scout dash: BTN_DASH while grounded gives a one-shot horizontal

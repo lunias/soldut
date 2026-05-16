@@ -1,0 +1,48 @@
+# m6_p10_step_assist.shot — M6 P10 (2026-05-16)
+#
+# Verifies the general step-up assist in src/mech.c::apply_step_assist:
+# paints a single 1-tile-tall solid obstacle on the slipstream floor,
+# then walks a Trooper right into it. The mech should climb the step
+# instead of wedging against it.
+#
+# Slipstream has a clean flat floor at row H-3 (row 47 for H=50, so the
+# floor TOP is at y = 47 * 32 = 1504). We paint a 1-tile solid block at
+# (tile_x=42, tile_y=46) which puts a 32-px-tall step at world x=1344,
+# y=1472. The mech starts at world x=1280 just above the floor, then
+# right-walks into the step.
+#
+# Verification (m6_p10_step_assist.log):
+#   - The 'step_assist' SHOT_LOG line should fire at least once when the
+#     leading foot reaches the step.
+#   - By t=180, pelvis x should exceed 1400 (past the step base at 1344)
+#     AND pelvis y should be ~960 px above the new step surface (i.e.
+#     pelv.y < 1480 — pelvis standing on the raised tile, not wedged at
+#     floor level y > 1500).
+#
+# A failing run shows the mech stuck at x ≈ 1340 with pelvis y near
+# 1500 — wedged against the step.
+
+window 1280 720
+seed   42 7
+out    build/shots/m6_p10_step_assist
+
+map slipstream
+
+# Paint a 1-tile-tall solid step on the floor at tile column 42.
+# Floor top row is 47 (y=1504); the step tile is one row up, at row 46.
+# 0x0001 = TILE_F_SOLID.
+paint_tile 42 46 0x0001
+
+loadout Trooper "Pulse Rifle" "Frag Grenades" Light Standard
+
+spawn_at 1280 1450
+mouse    1280 600
+
+at   1 press right
+
+at  30 shot pre_step
+at  90 shot at_step
+at 180 shot post_step
+at 220 end
+
+contact_sheet step_sheet cols 3 cell 426 240

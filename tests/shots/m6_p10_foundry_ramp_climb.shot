@@ -1,0 +1,42 @@
+# m6_p10_foundry_ramp_climb.shot — M6 P10 (2026-05-16)
+#
+# Regression for the "stuck at the spawn ramp / platform corner" trap on
+# the foundry map. The pre-P10 spawn-ramp polygon ended at the platform's
+# BOTTOM edge, leaving a 32-px vertical step at the apex that the
+# multi-particle skeleton could not climb. This shot drives a Trooper
+# right-walk from the foot of the LEFT ramp; after ~3 seconds of
+# continuous right input he must be on top of the platform — not
+# wedged at the corner.
+#
+# Verification:
+#   - 'ramp_foot.png': mech standing at the foot of the slope
+#   - 'mid_climb.png': mech mid-slope, pelvis above floor_y
+#   - 'on_platform.png': mech standing on the spawn platform, pelvis
+#     within ±48 px of the platform-top surface (y = 960 in foundry world
+#     coords for the H=40 height)
+#
+# If the climb fails the contact sheet will show three near-identical
+# frames stuck near the apex.
+
+window 1280 720
+seed   42 7
+out    build/shots/m6_p10_foundry_ramp_climb
+
+map foundry
+loadout Trooper "Pulse Rifle" "Frag Grenades" Light Standard
+
+# Slope foot is at (t2w(7)=224, floor_y=1152). Drop the mech a few px
+# above the floor just past the foot, so the first frame already has
+# him in contact with the slope.
+spawn_at 240 1100
+mouse    1100 600
+
+# Press and hold RIGHT through the whole run.
+at   1 press right
+
+at  30 shot ramp_foot
+at  90 shot mid_climb
+at 180 shot on_platform
+at 220 end
+
+contact_sheet climb_sheet cols 3 cell 426 240
