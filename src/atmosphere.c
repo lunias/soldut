@@ -367,7 +367,16 @@ static void spawn_weather_particle(FxPool *pool, World *w,
 }
 
 /* Spawn one ambient-zone particle. `kind` is FX_AMBIENT_*; rect comes
- * from the LvlAmbi record so the particle stays inside the zone. */
+ * from the LvlAmbi record so the particle stays inside the zone.
+ *
+ * M6 P10 soft-zone Part B — spawn region is inset by AMBI_PARTICLE_INSET
+ * (12 px) by default, with a 15 % chance per call of spawning in the
+ * outer boundary ring at half alpha + half life. Halving the alpha and
+ * life on edge spawns makes the spawn-density step fade smoothly into
+ * the surrounding world instead of cliffing at the rect edge — pairs
+ * with the feathered overlay in atmosphere_draw_ambient_zones. */
+#define AMBI_PARTICLE_INSET    12.0f
+#define AMBI_BOUNDARY_FRACTION  0.15f
 static void spawn_ambient_particle(FxPool *pool, uint8_t kind,
                                    const LvlAmbi *a, pcg32_t *rng) {
     int idx = -1;
@@ -384,10 +393,20 @@ static void spawn_ambient_particle(FxPool *pool, uint8_t kind,
     fp->kind  = kind;
     fp->pin_mech_id = -1;
 
-    float minx = (float)a->rect_x;
-    float miny = (float)a->rect_y;
-    float maxx = minx + (float)a->rect_w;
-    float maxy = miny + (float)a->rect_h;
+    bool boundary = (pcg32_float01(rng) < AMBI_BOUNDARY_FRACTION);
+    float inset = boundary ? 0.0f : AMBI_PARTICLE_INSET;
+    float minx = (float)a->rect_x + inset;
+    float miny = (float)a->rect_y + inset;
+    float maxx = (float)(a->rect_x + a->rect_w) - inset;
+    float maxy = (float)(a->rect_y + a->rect_h) - inset;
+    /* Degenerate small zones: fall back to the raw rect so we still
+     * spawn somewhere reasonable. */
+    if (maxx <= minx || maxy <= miny) {
+        minx = (float)a->rect_x;
+        miny = (float)a->rect_y;
+        maxx = minx + (float)a->rect_w;
+        maxy = miny + (float)a->rect_h;
+    }
 
     switch (kind) {
         case FX_AMBIENT_WIND_STREAK: {
@@ -432,6 +451,15 @@ static void spawn_ambient_particle(FxPool *pool, uint8_t kind,
             break;
         }
         default: fp->alive = 0; return;
+    }
+
+    if (boundary) {
+        /* Half-alpha + half-life: boundary spawns fade quickly so the
+         * spawn-density step at the rect edge reads as soft bleed-out
+         * rather than a cliff. */
+        fp->color = (fp->color & 0xFFFFFF00u) | ((fp->color & 0xFFu) >> 1);
+        fp->life     *= 0.5f;
+        fp->life_max *= 0.5f;
     }
     fp->render_prev_pos = fp->pos;
 }
@@ -614,71 +642,112 @@ static Color rgba8_to_color(uint32_t v) {
     };
 }
 
+/* M6 P10 — soft ambient-zone boundaries. The hard rect + outline pair
+ * that shipped in P09 broke immersion in-game (the user said as much
+ * verbatim: "I do not like the hard boundary for the ambient zone that
+ * is rendered in the actual game"). We replace each overlay with a
+ * stack of 6 concentric rounded rects whose alpha ramps to 0 over a
+ * 32-px feather distance — the volume now reads as a region of
+ * atmosphere instead of a painted box. WIND drops its runtime overlay
+ * entirely (the streak particles are the visual). FOG keeps the disc
+ * preview but loses the outline (the shader already does the soft
+ * falloff). The editor's hard-edge preview lives in tools/editor/
+ * render.c and is untouched — designers still need exact bounds. */
+#define AMBI_FEATHER_RINGS 6
+#define AMBI_FEATHER_PX    32.0f
+
+/* Draw a feathered-edge filled overlay. Paints AMBI_FEATHER_RINGS
+ * concentric rounded rects from outermost-faintest to innermost-
+ * brightest. Each ring grows by t*AMBI_FEATHER_PX and dims by (1-t).
+ * Drawn outer→inner so the bright inner rect overpaints the larger
+ * faint rings underneath, producing a smooth radial bleed past the
+ * rect edge. Skips rings whose computed alpha is 0. */
+static void draw_feathered_overlay(Rectangle r, Color tint,
+                                   unsigned char base_alpha) {
+    for (int k = AMBI_FEATHER_RINGS - 1; k >= 0; --k) {
+        float t = (float)k / (float)(AMBI_FEATHER_RINGS - 1);
+        float grow = t * AMBI_FEATHER_PX;
+        unsigned char ring_a =
+            (unsigned char)((float)base_alpha * (1.0f - t));
+        if (ring_a == 0) continue;
+        Rectangle rk = {
+            r.x - grow, r.y - grow,
+            r.width  + 2.0f * grow,
+            r.height + 2.0f * grow,
+        };
+        DrawRectangleRounded(rk, 0.20f, 4,
+            (Color){ tint.r, tint.g, tint.b, ring_a });
+    }
+}
+
 void atmosphere_draw_ambient_zones(const Level *L, double time) {
     if (!L || L->ambi_count == 0) return;
-    /* Pre-frame: paint the rect-tint overlay for ZERO_G + ACID + FOG.
-     * The particle layer in fx_draw paints the per-zone particles on
-     * top (already running inside BeginMode2D). */
+    /* Runtime overlay pass — feathered, no hard outlines. Particles
+     * paint on top (already running inside BeginMode2D in render.c). */
     for (int zi = 0; zi < L->ambi_count; ++zi) {
         const LvlAmbi *a = &L->ambis[zi];
         Rectangle r = (Rectangle){ (float)a->rect_x, (float)a->rect_y,
                                    (float)a->rect_w, (float)a->rect_h };
         switch ((AmbiKind)a->kind) {
             case AMBI_ZERO_G: {
-                /* Faint cyan tint + edge frame to announce the volume. */
-                DrawRectangleRec(r, (Color){ 120, 160, 220, 25 });
-                DrawRectangleLinesEx(r, 1.0f, (Color){ 180, 220, 255, 80 });
+                /* Soft cyan glow bleeding ~32 px past the rect edge. */
+                Color tint = { 120, 160, 220, 0 };
+                draw_feathered_overlay(r, tint, 32);
                 break;
             }
             case AMBI_ACID: {
-                /* Pulsing green tint inside the rect. */
-                int alpha = 30 + (int)(20.0 * sin(time * 1.5));
-                if (alpha < 0) alpha = 0;
-                if (alpha > 80) alpha = 80;
-                Color tint = { 120, 220, 80, (unsigned char)alpha };
-                DrawRectangleRec(r, tint);
-                /* Caustic surface band at the top edge. Stretched
-                 * scrolling sine highlight — cheap stand-in for a
-                 * real caustic texture. */
-                float t = (float)time;
-                for (int x = 0; x < a->rect_w; x += 8) {
-                    float wave = sinf((float)(a->rect_x + x) * 0.05f + t * 2.0f);
+                /* Pulsing green glow with the same feather bleed. */
+                int pulse = 22 + (int)(14.0 * sin(time * 1.5));
+                if (pulse < 8)  pulse = 8;
+                if (pulse > 50) pulse = 50;
+                Color tint = { 120, 220, 80, 0 };
+                draw_feathered_overlay(r, tint, (unsigned char)pulse);
+                /* Caustic surface band — tapered so the wave doesn't
+                 * sharp-cut at the rect's left/right edges. Loop runs
+                 * within [INSET, rect_w - INSET]; alpha fades in/out
+                 * across the first/last 24 px of that span. */
+                const float CAUSTIC_INSET = 16.0f;
+                const float CAUSTIC_FADE  = 24.0f;
+                float t_now = (float)time;
+                int start = (int)CAUSTIC_INSET;
+                int end   = a->rect_w - (int)CAUSTIC_INSET;
+                if (end <= start) break;
+                for (int x = start; x < end; x += 8) {
+                    float left  = (float)(x - start) / CAUSTIC_FADE;
+                    float right = (float)(end - x)   / CAUSTIC_FADE;
+                    float edge_t = (left < right) ? left : right;
+                    if (edge_t < 0.0f) edge_t = 0.0f;
+                    if (edge_t > 1.0f) edge_t = 1.0f;
+                    unsigned char a8 =
+                        (unsigned char)(180.0f * edge_t);
+                    if (a8 == 0) continue;
+                    float wave = sinf((float)(a->rect_x + x) * 0.05f
+                                       + t_now * 2.0f);
                     int   yoff = (int)(wave * 2.0f);
                     DrawRectangle(a->rect_x + x, a->rect_y + yoff,
-                                  6, 4, (Color){ 180, 255, 120, 180 });
+                                  6, 4,
+                                  (Color){ 180, 255, 120, a8 });
                 }
-                /* Edge frame so the volume reads even with low tint alpha. */
-                DrawRectangleLinesEx(r, 2.0f, (Color){ 120, 220, 80, 200 });
                 break;
             }
             case AMBI_FOG: {
-                /* Soft volumetric hint — the real fog lives in the
-                 * shader (collect_fog_zones feeds the uniform array).
-                 * Here we just paint a faint disc so designers can see
-                 * where their fog volumes sit during editor preview. */
+                /* Faint designer-visible disc; the real haze lives in
+                 * the halftone shader's fog-zone pass. Outline killed —
+                 * the shader's exp(-r²/r²) falloff is already soft. */
                 float cx = (float)a->rect_x + (float)a->rect_w * 0.5f;
                 float cy = (float)a->rect_y + (float)a->rect_h * 0.5f;
-                float radius = (a->rect_w < a->rect_h ? a->rect_w : a->rect_h) * 0.5f;
+                float radius = (a->rect_w < a->rect_h
+                                ? a->rect_w : a->rect_h) * 0.5f;
                 Color fog = g_atmosphere.fog_color;
-                Color base = (Color){ fog.r, fog.g, fog.b, 30 };
-                DrawCircle((int)cx, (int)cy, radius, base);
-                DrawRectangleLinesEx(r, 1.0f, (Color){ fog.r, fog.g, fog.b, 120 });
+                DrawCircle((int)cx, (int)cy, radius,
+                           (Color){ fog.r, fog.g, fog.b, 18 });
                 break;
             }
-            case AMBI_WIND: {
-                /* Thin edge frame in the wind direction so designers
-                 * can see the volume + flow direction at a glance. */
-                DrawRectangleLinesEx(r, 1.0f, (Color){ 200, 220, 255, 100 });
-                float cx = (float)a->rect_x + (float)a->rect_w * 0.5f;
-                float cy = (float)a->rect_y + (float)a->rect_h * 0.5f;
-                float dx = (float)a->dir_x_q / 32767.0f;
-                float dy = (float)a->dir_y_q / 32767.0f;
-                float L_arrow = 24.0f;
-                Vector2 a0 = { cx, cy };
-                Vector2 a1 = { cx + dx * L_arrow, cy + dy * L_arrow };
-                DrawLineEx(a0, a1, 2.0f, (Color){ 230, 240, 255, 180 });
+            case AMBI_WIND:
+                /* No runtime overlay — the streak particles ARE the
+                 * visual. Editor still paints rect+arrow inline (see
+                 * tools/editor/render.c). */
                 break;
-            }
             default: break;
         }
     }

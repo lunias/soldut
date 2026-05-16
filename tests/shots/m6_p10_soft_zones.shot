@@ -1,0 +1,60 @@
+# m6_p10_soft_zones.shot — M6 P10
+#
+# Verifies the soft-edge ambient-zone overlay shipped in P10 §2:
+#   - ZERO_G and ACID zones paint a feathered glow that bleeds ~32 px
+#     past the stored rect, no hard outline.
+#   - Particle spawn is inset by 12 px with a 15% boundary-ring mix.
+#   - WIND zones have no runtime overlay (streaks ARE the visual).
+#
+# Frames captured at tick 1 (settled, mech outside), tick 30 (mech
+# approaching the zones), and tick 90 (mech inside the ZERO_G zone).
+# Eyeball check: no rect outline should be visible in any frame.
+#
+# Run:
+#   ./soldut --shot tests/shots/m6_p10_soft_zones.shot
+# Output:
+#   build/shots/m6_p10_soft_zones/{outside,approaching,inside}.png
+#   build/shots/m6_p10_soft_zones/cs.png  (3-up contact sheet)
+
+window 1920 1080
+seed   1 1
+out    build/shots/m6_p10_soft_zones
+
+map citadel
+
+# Three zones in a row on a flat run of citadel. Citadel is 160×80
+# tiles → 5120×2560 px. Place zones around y=1600 (one of the plaza
+# floors), spanning 192 px tall × 256 px wide each.
+#
+# AmbiKind enum:
+#   AMBI_WIND   = 0  (no runtime overlay — streaks only)
+#   AMBI_ZERO_G = 1  (feathered cyan glow)
+#   AMBI_ACID   = 2  (feathered green glow + tapered caustic)
+#   AMBI_FOG    = 3  (shader-side haze + designer disc)
+paint_ambi 1  1280 1400 1536 1600   0.7   0.0  0.0       # ZERO_G
+paint_ambi 2  1700 1400 1956 1600   0.5   0.0  0.0       # ACID
+paint_ambi 0  2100 1400 2356 1600   0.6   1.0  0.0       # WIND right
+
+# Mech spawns to the LEFT of the ZERO_G zone so frame 1 shows the
+# zones from outside (where the soft bleed is most visible).
+spawn_at 900 1500
+mouse    1600 540
+
+# Frame 1 — mech outside any zone, all three glows visible from
+# their soft-feathered edges. NO hard rect outlines should appear.
+at 1   shot outside
+
+# Walk right into the ZERO_G edge by tick 30. Holding right + jet
+# keeps the mech moving + lets ZERO_G's airborne motes catch it.
+at 1   press right
+at 60  press jet
+at 90  release jet
+at 120 release right
+
+at 30  shot approaching
+at 90  shot inside
+
+# Contact sheet for 3-up visual review.
+contact_sheet cs cols 3 cell 640 360
+
+at 130 end

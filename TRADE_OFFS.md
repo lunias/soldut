@@ -13,8 +13,18 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-15** (M6 P09 — editor-runtime parity +
-atmospherics). **Added** three new entries:
+Last updated: **2026-05-16** (M6 P10 — ship-prep soft zones + map
+polish). **Added** one entry: "Bots are unaware of AMBI_ACID zones"
+under "Bot AI improvements". The P10 plan (§4.2) prescribed a
+post-pass that flags nav nodes whose floor sample lies inside an
+ACID rect and bumps their A* traversal cost, but the §4.1 gate
+("if all 8 maps PASS bake verdict, skip §4.2") fired — Reactor's
+new ACID pool yields +15% kills/+12% fires but no FAIL verdict, so
+bots stay ignorant and rubber-band through ACID for the friends-
+ship. Deletes when the cost-multiplier patch ships in M6 P11.
+
+Previously (M6 P09 — editor-runtime parity + atmospherics): added
+three entries:
 
 - "Decoration atlas sub-rect lookup still uses hash-of-offset, not a
   real manifest (M6 P09)" — under "Rendering". The editor now exposes
@@ -2646,6 +2656,37 @@ diverge between clients for the same hit.
   both sides land on the same trajectory — ~10 lines, no wire
   changes. Until that complaint surfaces, the divergence is
   acceptable.
+
+### Bots are unaware of AMBI_ACID zones (M6 P10)
+
+- **What we did** — `src/bot.c` has zero reads of `world.level.ambis`
+  (verified by `grep -n "ambi\|AMBI" src/bot.c` returning empty).
+  Bots run their layered Quake III utility scorer ignorant of every
+  ambient zone, including the new Reactor ACID pool (12-tile-wide
+  hazard under the central pillar arch, 5 HP/s envdamage). They
+  rubber-band through it; we just accept the kill bump as decoration.
+- **Why** — The M6 P10 plan (§4.2) prescribed a one-pass nav-cost
+  bump: tag any `BotNavNode` whose floor sample sits inside an
+  AMBI_ACID rect, multiply its A* traversal cost by ~8×, the
+  pathfinder routes around. About 25 lines plus a `traverse_cost_mul`
+  field on `BotNavNode`. But the plan also defined a gate (§4.1):
+  *"If all 8 maps PASS bake verdict, skip §4.2 entirely. Ship."* The
+  fresh bake-all run after §3.3's ACID add was 8/8 PASS (reactor:
+  R8/B7 = 15 kills, fires +12%) so we shipped without the bot fix.
+  Doing the bot work anyway would have added 90 minutes of
+  implement-and-verify time to a friends-ship that's already on a
+  hard deadline.
+- **Revisit when** — Anyone plays the Reactor ACID pool live and a
+  bot walks straight in repeatedly without engaging; OR we add a
+  second ACID zone to a different map and the bake starts trending
+  toward FAIL. Fix path is in the plan doc (§4.2): add
+  `BotNavNode.traverse_cost_mul` (default 1.0, consumed in the A*
+  edge-cost sum), post-pass the nav graph to flag ACID nodes, set
+  their multiplier to 8.0. The trade-off entry deletes when that
+  ships. Wind / Zero-G awareness intentionally stays out of scope —
+  WIND only shifts kinematics ≤700 px/s (rubber-bandable) and ZERO_G
+  zones are vertical-mobility opportunities that bots ignoring is
+  fine (they just don't exploit them).
 
 ---
 

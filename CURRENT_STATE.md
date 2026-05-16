@@ -5,9 +5,114 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-15** (M6 P09 — editor-runtime parity +
-atmospherics). New tunables block below; everything from the M6
-ctf-fixes notes still applies underneath.
+Last updated: **2026-05-16** (M6 P10 — ship-prep: soft ambient-zone
+boundaries + map polish). Soft-zone tunables added below the
+atmospherics block. M6 P09 notes still apply underneath.
+
+## M6 P10 — Soft ambient-zone boundaries + map polish
+
+Ship prep for the 2026-05-17 friends-build. Three changes shipped:
+
+**§2 — Soft ambient-zone boundaries** (`src/atmosphere.c`).
+The hard rect-overlay + outline pair P09 shipped was breaking
+immersion in-game (user verbatim: "I do not like the hard boundary
+for the ambient zone that is rendered in the actual game, it is nice
+in the editor, but in the game it breaks immersion"). Runtime overlay
+rewritten to a 6-ring feathered fill — `AMBI_FEATHER_RINGS = 6`,
+`AMBI_FEATHER_PX = 32` — that bleeds ~32 px past the stored rect on
+all sides with alpha ramped to 0, no hard outline anywhere. WIND
+drops its runtime overlay entirely (the streak particles ARE the
+visual). FOG keeps the disc preview but loses its hard rect outline
+and alpha drops 30 → 18 (the shader's `exp(-r²/r²)` already does the
+soft falloff). ACID's caustic surface band gained a `[INSET, rect_w
+- INSET]` loop bound with the first/last 24 px alpha-tapered. Particle
+spawn (`spawn_ambient_particle`) inset by `AMBI_PARTICLE_INSET = 12`
+with `AMBI_BOUNDARY_FRACTION = 0.15` of spawns landing in the outer
+boundary ring at half alpha + half life so the spawn-density step
+fades smoothly. Editor preview at `tools/editor/render.c:83-95` is
+untouched — designers still need exact bounds.
+
+| Tunable                       | Value | Where                                      |
+|-------------------------------|-------|--------------------------------------------|
+| `AMBI_FEATHER_RINGS`          | 6     | `src/atmosphere.c`                         |
+| `AMBI_FEATHER_PX`             | 32 px | `src/atmosphere.c`                         |
+| `AMBI_PARTICLE_INSET`         | 12 px | `src/atmosphere.c::spawn_ambient_particle` |
+| `AMBI_BOUNDARY_FRACTION`      | 0.15  | `src/atmosphere.c::spawn_ambient_particle` |
+| ACID caustic `INSET / FADE`   | 16 / 24 px | `src/atmosphere.c::atmosphere_draw_ambient_zones` |
+| Per-frame `DrawRectangleRounded` budget | 6 × ambi_count (max 192 calls) | `draw_feathered_overlay` |
+
+**§3.1 — Theme/weather hygiene** (`tools/cook_maps/cook_maps.c`).
+- **CONCOURSE** retired its CONCRETE×2 duplicate with Crossfire →
+  OVERGROWN theme + RAIN density 0.18 + sky overrides (110,140,90→
+  70,100,60) + fog (140,170,110 @ 0.10) + vignette 0.20. New blurb
+  reads "Overgrown atrium with drizzle leaking through the roof."
+- **CATWALK** stays NEON but gains RAIN density 0.10 (cyberpunk
+  catwalks in cyberrain — also differentiates from Aurora which keeps
+  NEON + DUST).
+
+Theme coverage post-P10: 6/7 themes in use (OVERGROWN moved to
+Concourse; CONCRETE survives on Crossfire only). All 5 non-NONE
+weather kinds in use: SNOW (Slipstream), RAIN ×2 (Concourse + Catwalk),
+DUST ×2 (Citadel + Aurora), EMBERS (Reactor).
+
+**§3.3 — Ambient zone adds** to three previously zone-less maps so
+the new feather has somewhere to read:
+- **FOUNDRY** — 1 FOG zone at strength 0.15 in the right gallery
+  (cols 65–95, rows H-14 to H-6). Designed as eye candy; no gameplay
+  effect (FOG is shader-side).
+- **REACTOR** — 1 ACID pool under the central pillar arch (12 tiles
+  wide × 4 tiles deep, strength 0.6). Chest-height clip → 5 HP/s
+  environmental damage. Bake stayed PASS (R8/B7, fires +12%) so the
+  zone stays. Revert path is a one-line `push_ambi` deletion.
+- **CROSSFIRE** — 2 mirror WIND zones flanking the central catwalk
+  (strength 0.4), each blowing outward. Adds a small "navigate the
+  crosswind" decision on mid-map crossings; symmetric so the CTF
+  arena's mirror property is preserved.
+
+Bake-test result post-§3: all 8 maps PASS verdict
+(`make bake-all` — `foundry:9/394 slipstream:7/407 reactor:15/492
+concourse:7/554 catwalk:11/699 aurora:11/599 crossfire:11/736
+citadel:15/695` kills/fires). Reactor +15% kills tracks the ACID
+hazard biting bots; Concourse +75% kills tracks the new weather
+making the matchup more dynamic. No regressions to FAIL.
+
+**§4 bot AI** — skipped. The plan's §4.1 gate ("if all 8 maps PASS,
+skip §4.2") was satisfied; bots stay ignorant of ACID and rubber-band
+through it. Acceptable for a friends-ship build — the new
+hazard-awareness work (`BotNavNode.traverse_cost_mul`) is queued for
+M6 P11.
+
+**§3.2 decorations** — skipped intentionally. The decoration
+placeholder fallback paints 16-px colored rectangles (no
+`assets/sprites/decorations.png` ships at v1); adding `push_deco`
+calls now would litter the maps with visible boxes. Better to ship
+clean than with placeholder rects per the plan's "cut if it looks
+bad" guidance.
+
+**Windows ship** — `make windows` builds clean to
+`build/windows/Soldut.exe` (2.1 MB, PE32+ x86-64) +
+`SoldutEditor.exe` (1.2 MB). Stripped `assets/raw/` from the ship
+(61 MB of source-pack audio/maps not needed at runtime). Zipped to
+`build/soldut-windows-2026-05-17.zip` (8.6 MB, 109 files). Wine
+isn't installed in this WSL2 environment — Windows-host smoke test
+is a manual user step before distribution.
+
+**Tests green post-P10:** all asserting unit + paired-process tests
+pass (`test-level-io`, `test-pickups`, `test-ctf`, `test-snapshot`,
+`test-spawn`, `test-prefs`, `test-map-share`, `test-map-registry`,
+`test-grapple-ceiling`, `test-frag-grenade`, `test-mech-ik`,
+`test-pose-compute`, `test-damage-numbers`, `test-atmosphere-parity`
+10/10, `tests/net/run.sh 2p_basic`, `tests/net/run_3p.sh`,
+`tests/shots/net/run.sh 2p_basic` 12/12). New shot tests
+`tests/shots/m6_p10_soft_zones.shot` (3-frame contact sheet on
+Citadel — soft ZERO_G/ACID feather visible, no rect outline) and
+`m6_p10_acid_feather.shot` (close-up ACID zone on Slipstream
+showing caustic taper + 32-px green bleed). Pre-existing flakes
+`run_ctf_walk_own_flag.sh` and `run_kill_feed.sh` (the latter
+stashes-and-fails too, so not P10's) stay red.
+
+Protocol id stays `S0LK` (no wire changes — soft-zone rendering is
+pure-visual; new ambis ride the existing `.lvl` distribution).
 
 ## Atmospherics (M6 P09)
 
