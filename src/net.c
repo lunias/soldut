@@ -2385,36 +2385,37 @@ static void client_handle_explosion(NetState *ns, const uint8_t *body, int blen,
     }
 
     /* No client predict in flight. Server's wire event is the only
-     * detonation signal we have. Apply the dying-frame + FX-at-
-     * local-pos treatment so the player sees a continuous visual:
+     * detonation signal we have. Use SERVER pos for the FX (matches
+     * where damage was actually applied — bouncy grenades diverge
+     * between client and server sim, so a "visible hit but no
+     * damage" symptom can only be resolved by trusting the server's
+     * authoritative position for BOTH damage and visual).
      *
-     *  - Snap render_prev to the local projectile's current pos so
-     *    the next render frame lerps to that pos exactly.
-     *  - Mark exploded=1 (projectile_step will kill it next tick).
-     *  - Leave alive=1 for one more render frame so the sprite sits
-     *    AT the explosion center with the spark FX fanning out.
-     *  - Spawn the FX at LOCAL pos when we have one (matches the
-     *    visible grenade location); fall back to server pos only if
-     *    the local projectile is gone (pool overflow / desync).
-     *
-     * Damage is server-authoritative — already applied before this
-     * broadcast — so using local pos for the FX center has no
-     * gameplay consequence; it's purely visual continuity. */
-    Vec2 fx_pos = pos;
+     * Visual continuity: snap the local projectile's pos to the
+     * server's pos for the dying frame. render_prev keeps the OLD
+     * local pos so the next render frame lerps from LOCAL → SERVER
+     * over alpha — the grenade visibly "snaps" to where it actually
+     * exploded over ~16 ms. For small sim divergence (a few px) the
+     * snap is invisible; for larger divergence (hundreds of px,
+     * after several bounces in tight geometry) the player sees the
+     * grenade rapidly translate to the true detonation point, then
+     * boom. Better than "grenade vanishes here, sparks appear there
+     * with no connection." */
     if (local_idx >= 0) {
-        fx_pos = (Vec2){ pp->pos_x[local_idx], pp->pos_y[local_idx] };
         pp->exploded[local_idx]      = 1;
         pp->render_prev_x[local_idx] = pp->pos_x[local_idx];
         pp->render_prev_y[local_idx] = pp->pos_y[local_idx];
+        pp->pos_x[local_idx]         = pos.x;
+        pp->pos_y[local_idx]         = pos.y;
         /* alive stays 1 — projectile_step's top-of-loop check kills
          * it on the next tick after rendering the dying frame. */
     }
 
     int owner_team = ((int)owner < g->world.mech_count)
                          ? (int)g->world.mechs[owner].team : 0;
-    explosion_spawn(&g->world, fx_pos, wpn->aoe_radius, wpn->aoe_damage,
+    explosion_spawn(&g->world, pos, wpn->aoe_radius, wpn->aoe_damage,
                     wpn->aoe_impulse, (int)owner, owner_team, (int)weapon);
-    explosion_record_push(&g->world, fx_pos, (int)owner, (int)weapon,
+    explosion_record_push(&g->world, pos, (int)owner, (int)weapon,
                           EXPL_SRC_SERVER);
 }
 

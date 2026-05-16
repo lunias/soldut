@@ -116,28 +116,30 @@ asrt "at least one throw is medium charge (≤ 0.60)" "[[ $HAS_LOW  -eq 1 ]]"
 asrt "at least one throw is max charge (≥ 0.95)"    "[[ $HAS_HIGH -eq 1 ]]"
 
 # Speed range covers both buckets. After the FRAG_THROW_SPEED_MAX_MUL
-# bump (2.0 → 2.4) max-charge throws are now ~1680 px/s.
+# bump (2.4 → 3.0) max-charge throws are now ~2100 px/s.
 HAS_SLOW=0; HAS_FAST=0
 for L in "${CHARGE_LINES[@]}"; do
     V=$(echo "$L" | sed -E 's/.*v=([0-9.]+).*/\1/')
-    if awk -v v="$V" 'BEGIN{exit !(v <= 1200)}'; then HAS_SLOW=1; fi
-    if awk -v v="$V" 'BEGIN{exit !(v >= 1500)}'; then HAS_FAST=1; fi
+    if awk -v v="$V" 'BEGIN{exit !(v <= 1500)}'; then HAS_SLOW=1; fi
+    if awk -v v="$V" 'BEGIN{exit !(v >= 1800)}'; then HAS_FAST=1; fi
 done
-asrt "at least one throw is sub-max speed (≤ 1200 px/s)" "[[ $HAS_SLOW -eq 1 ]]"
-asrt "at least one throw is full-charge speed (≥ 1500 px/s)" "[[ $HAS_FAST -eq 1 ]]"
+asrt "at least one throw is sub-max speed (≤ 1500 px/s)" "[[ $HAS_SLOW -eq 1 ]]"
+asrt "at least one throw is full-charge speed (≥ 1800 px/s)" "[[ $HAS_FAST -eq 1 ]]"
 
-# AOE detonations (host).
+# AOE detonations (host). With the longer fuse (1.5s → 2.0s) some
+# throws may not detonate before the round's time-limit ends — require
+# at least 3 to verify the mechanics rather than chasing exact counts.
 EXPL_COUNT=$(grep -cE '^\[SHOT \] t=[0-9]+ explosion at .* weapon=10' "$H_LOG" 2>/dev/null || echo 0)
-asrt "host logs at least 4 frag explosions" \
-    "[[ $EXPL_COUNT -ge 4 ]]"
+asrt "host logs at least 3 frag explosions" \
+    "[[ $EXPL_COUNT -ge 3 ]]"
 
 # Client receives the explosion events via the wire. (The host IS the
 # authoritative server — explosions are spawned there directly, no
 # client_handle_explosion needed; only the remote peer dispatches it.)
 C_HANDLE=$(grep -cE 'client_handle_explosion .* weapon=10' "$C_LOG" 2>/dev/null)
 [[ -z "$C_HANDLE" ]] && C_HANDLE=0
-asrt "client handles at least 4 explosion events (wire round-trip)" \
-    "[[ $C_HANDLE -ge 4 ]]"
+asrt "client handles at least 3 explosion events (wire round-trip)" \
+    "[[ $C_HANDLE -ge 3 ]]"
 
 # ---- Side-by-side composites ----------------------------------------
 # For every shot name present in BOTH dirs, stack host (left) +
