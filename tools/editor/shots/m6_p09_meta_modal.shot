@@ -1,0 +1,19 @@
+# tools/editor/shots/m6_p09_meta_modal.shot — Visual review of the
+# M6 P09 redesigned META modal. Opens the modal on a fresh map and
+# captures one frame so a reviewer can confirm:
+#   - All field labels are LEGIBLE (dark text on raygui's white panel)
+#   - Section headers (Identity / Audio / Atmospherics) separate the
+#     three field groups
+#   - Theme + Weather cycle buttons show the readable name + < > arrows
+#   - Sliders display the live value on the right
+
+window 1280 800
+new 60 40
+ticks 30
+panels on
+contact_sheet meta_modal cols 1 cell 1280 800
+
+at 0 spawn_add 320 1000 0
+at 1 open_meta
+at 5 shot t05_meta_modal_opened
+at 8 end

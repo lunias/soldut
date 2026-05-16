@@ -19,6 +19,14 @@ const Color COL_TEXT_HIGH   = {255, 240, 180, 255};
 const Color COL_ACCENT      = { 80, 130, 220, 255};
 const Color COL_ACCENT_LO   = { 50,  90, 160, 255};
 const Color COL_BORDER      = { 60,  70,  85, 255};
+/* M6 P09 — dark text for labels rendered ON TOP of raygui's white
+ * GuiPanel backdrop (modal dialogs). The COL_TEXT white above is fine
+ * for the editor's own dark side-panels but vanishes against raygui's
+ * panel default. Use this for any ui_draw_text() call inside a
+ * GuiPanel/GuiWindow rect. */
+const Color COL_TEXT_DARK   = { 25,  35,  50, 255};
+const Color COL_TEXT_DARK_DIM = { 80,  90, 110, 255};
+const Color COL_SECTION_BG  = {220, 226, 232, 255};   /* slight band behind section headers */
 
 /* ---- Scale ---------------------------------------------------------- */
 
@@ -475,23 +483,55 @@ void ui_meta_apply(MetaModal *m, EditorDoc *d) {
     d->dirty = true;
 }
 
+/* M6 P09 — Helper: paint a section header band (dark text on a faint
+ * tint band) so the modal's sections are visually grouped. */
+static void modal_section_header(const char *title, int dlg_x, int dlg_w,
+                                 int *py, const UIDims *D) {
+    int band_h = D->font_lg + D->pad / 2;
+    int band_y = *py;
+    DrawRectangle(dlg_x + D->pad,  band_y,
+                  dlg_w - D->pad * 2, band_h, COL_SECTION_BG);
+    /* Left accent bar for visual anchor. */
+    DrawRectangle(dlg_x + D->pad,  band_y,
+                  ui_scl(3, D->scale), band_h, COL_ACCENT);
+    ui_draw_text(title, dlg_x + D->pad + ui_scl(10, D->scale),
+                 band_y + D->pad / 4, D->font_lg, COL_TEXT_DARK);
+    *py = band_y + band_h + D->pad / 2;
+}
+
+/* M6 P09 — Helper: paint a left-side text label in a known-visible
+ * dark color so it reads against raygui's white panel. */
+static void modal_label(const char *text, int x, int y, int font, Color col) {
+    ui_draw_text(text, x, y, font, col);
+}
+
 void ui_meta_modal_draw(MetaModal *m, EditorDoc *d, const UIDims *D) {
     if (!m->open) return;
     int sw = GetScreenWidth(), sh = GetScreenHeight();
-    DrawRectangle(0, 0, sw, sh, (Color){0, 0, 0, 160});
-    /* M6 P09 — grew 560×320 → 640×620 to fit the atmospherics +
-     * music/ambient rows. */
-    int dlg_w = ui_scl(640, D->scale), dlg_h = ui_scl(620, D->scale);
+    DrawRectangle(0, 0, sw, sh, (Color){0, 0, 0, 200});
+
+    /* M6 P09 — redesigned modal. Wider so labels fit on the left
+     * column without truncating, taller so the atmospherics + audio
+     * blocks each get their own header band. Caps at 90 % screen
+     * height so very small windows don't clip the buttons. */
+    int dlg_w = ui_scl(720, D->scale);
+    int dlg_h = ui_scl(720, D->scale);
+    if (dlg_h > sh - ui_scl(40, D->scale)) dlg_h = sh - ui_scl(40, D->scale);
     int dlg_x = (sw - dlg_w) / 2, dlg_y = (sh - dlg_h) / 2;
     GuiPanel((Rectangle){(float)dlg_x, (float)dlg_y, (float)dlg_w, (float)dlg_h},
              "Map metadata");
+
     int label_x = dlg_x + D->pad * 2;
-    int field_x = label_x + ui_scl(120, D->scale);
+    int field_x = label_x + ui_scl(140, D->scale);
     int field_w = dlg_w - (field_x - dlg_x) - D->pad * 2;
-    int y = dlg_y + ui_scl(40, D->scale);
+    int y = dlg_y + ui_scl(36, D->scale);
     int line_h = D->row_h + D->pad / 2;
 
-    ui_draw_text("Display name", label_x, y + D->pad / 2, D->font_base, COL_TEXT);
+    /* ============ Section 1: Identity ============ */
+    modal_section_header("Identity", dlg_x, dlg_w, &y, D);
+
+    modal_label("Display name", label_x, y + D->pad / 2,
+                D->font_base, COL_TEXT_DARK);
     Rectangle nb = {(float)field_x, (float)y, (float)field_w, (float)D->row_h};
     if (GuiTextBox(nb, m->name, (int)sizeof m->name, m->name_edit)) {
         m->name_edit = !m->name_edit;
@@ -499,7 +539,8 @@ void ui_meta_modal_draw(MetaModal *m, EditorDoc *d, const UIDims *D) {
     }
     y += line_h;
 
-    ui_draw_text("Blurb", label_x, y + D->pad / 2, D->font_base, COL_TEXT);
+    modal_label("Blurb (lobby)", label_x, y + D->pad / 2,
+                D->font_base, COL_TEXT_DARK);
     Rectangle bb = {(float)field_x, (float)y, (float)field_w, (float)D->row_h};
     if (GuiTextBox(bb, m->blurb, (int)sizeof m->blurb, m->blurb_edit)) {
         m->blurb_edit = !m->blurb_edit;
@@ -507,9 +548,10 @@ void ui_meta_modal_draw(MetaModal *m, EditorDoc *d, const UIDims *D) {
     }
     y += line_h;
 
-    ui_draw_text("Modes", label_x, y + D->pad / 2, D->font_base, COL_TEXT);
-    int chk = ui_scl(16, D->scale);
-    int gap = ui_scl(80, D->scale);
+    modal_label("Game modes", label_x, y + D->pad / 2,
+                D->font_base, COL_TEXT_DARK);
+    int chk = ui_scl(18, D->scale);
+    int gap = ui_scl(90, D->scale);
     GuiCheckBox((Rectangle){(float)field_x,           (float)y + (D->row_h - chk)/2.0f,
                             (float)chk, (float)chk}, "FFA", &m->mode_ffa);
     GuiCheckBox((Rectangle){(float)(field_x + gap),   (float)y + (D->row_h - chk)/2.0f,
@@ -518,77 +560,137 @@ void ui_meta_modal_draw(MetaModal *m, EditorDoc *d, const UIDims *D) {
                             (float)chk, (float)chk}, "CTF", &m->mode_ctf);
     y += line_h;
 
-    /* M6 P09 — Music + ambient_loop text fields. */
-    ui_draw_text("Music path", label_x, y + D->pad / 2, D->font_base, COL_TEXT);
+    /* ============ Section 2: Audio ============ */
+    y += D->pad / 2;
+    modal_section_header("Audio", dlg_x, dlg_w, &y, D);
+
+    modal_label("Music file", label_x, y + D->pad / 2,
+                D->font_base, COL_TEXT_DARK);
     Rectangle mb = {(float)field_x, (float)y, (float)field_w, (float)D->row_h};
     if (GuiTextBox(mb, m->music_path, (int)sizeof m->music_path, m->music_edit)) {
         m->music_edit = !m->music_edit;
         m->name_edit = false; m->blurb_edit = false; m->ambient_edit = false;
     }
-    y += line_h;
+    y += line_h - D->pad / 4;
+    modal_label("e.g. assets/music/reactor.ogg",
+                field_x, y, D->font_sm, COL_TEXT_DARK_DIM);
+    y += D->font_sm + D->pad / 2;
 
-    ui_draw_text("Ambient loop", label_x, y + D->pad / 2, D->font_base, COL_TEXT);
+    modal_label("Ambient loop", label_x, y + D->pad / 2,
+                D->font_base, COL_TEXT_DARK);
     Rectangle ab = {(float)field_x, (float)y, (float)field_w, (float)D->row_h};
     if (GuiTextBox(ab, m->ambient_path, (int)sizeof m->ambient_path, m->ambient_edit)) {
         m->ambient_edit = !m->ambient_edit;
         m->name_edit = false; m->blurb_edit = false; m->music_edit = false;
     }
-    y += line_h;
+    y += line_h - D->pad / 4;
+    modal_label("e.g. assets/sfx/ambient_reactor.ogg",
+                field_x, y, D->font_sm, COL_TEXT_DARK_DIM);
+    y += D->font_sm + D->pad / 2;
 
-    /* ---- M6 P09 — Atmospherics block ---- */
-    ui_draw_text("Atmospherics", dlg_x + D->pad * 2,
-                 y + D->pad / 2, D->font_lg, COL_TEXT_HIGH);
-    y += D->font_lg + D->pad;
+    /* ============ Section 3: Atmospherics ============ */
+    y += D->pad / 2;
+    modal_section_header("Atmospherics", dlg_x, dlg_w, &y, D);
 
     /* Theme cycle button. */
     static const char *theme_names[] = {
-        "CONCRETE", "BUNKER", "ICE_SHEET", "NEON",
-        "RUST", "OVERGROWN", "INDUSTRIAL",
+        "Concrete (default)", "Bunker (warm)", "Ice Sheet (cool blue)",
+        "Neon (purple)", "Rust (orange)", "Overgrown (green)",
+        "Industrial (steel)",
     };
     int n_themes = (int)(sizeof theme_names / sizeof theme_names[0]);
-    ui_draw_text("Theme", label_x, y + D->pad / 2, D->font_base, COL_TEXT);
-    Rectangle tb = {(float)field_x, (float)y, (float)field_w, (float)D->row_h};
+
+    modal_label("Theme", label_x, y + D->pad / 2,
+                D->font_base, COL_TEXT_DARK);
     int safe_theme = (m->theme_id >= 0 && m->theme_id < n_themes)
                      ? m->theme_id : 0;
-    char tbuf[48];
-    snprintf(tbuf, sizeof tbuf, "%s  ▾", theme_names[safe_theme]);
-    if (GuiButton(tb, tbuf)) {
+    /* Cycle button — < prev | name | next > arrangement. */
+    int arrow_w = ui_scl(28, D->scale);
+    Rectangle tb_l = {(float)field_x, (float)y, (float)arrow_w, (float)D->row_h};
+    Rectangle tb_m = {(float)(field_x + arrow_w + 2), (float)y,
+                      (float)(field_w - arrow_w * 2 - 4), (float)D->row_h};
+    Rectangle tb_r = {(float)(field_x + field_w - arrow_w), (float)y,
+                      (float)arrow_w, (float)D->row_h};
+    if (GuiButton(tb_l, "<"))
+        m->theme_id = (safe_theme + n_themes - 1) % n_themes;
+    if (GuiButton(tb_m, theme_names[safe_theme]))
         m->theme_id = (safe_theme + 1) % n_themes;
-    }
+    if (GuiButton(tb_r, ">"))
+        m->theme_id = (safe_theme + 1) % n_themes;
     y += line_h;
+    modal_label("Sets sky gradient + tile palette. Override per-field below.",
+                field_x, y, D->font_sm, COL_TEXT_DARK_DIM);
+    y += D->font_sm + D->pad;
 
+    /* M6 P09 — Inline-label sliders. Label on the left, value
+     * read-out on the right, slider fills the middle. Single row per
+     * slider — no overlapping with neighbour rows. */
     char sbuf[64];
-    snprintf(sbuf, sizeof sbuf, "Fog density: %.2f", m->fog_density);
-    ui_draw_text(sbuf, label_x, y + D->pad / 2, D->font_sm, COL_TEXT);
-    Rectangle sb_fd = {(float)field_x, (float)y, (float)field_w, (float)(D->row_h - 4)};
-    GuiSlider(sb_fd, "", "", &m->fog_density, 0.0f, 1.0f);
+    int val_w   = ui_scl(50, D->scale);     /* right-aligned "0.42" */
+    int slid_w  = field_w - val_w - ui_scl(8, D->scale);
+    int slid_h  = D->row_h - ui_scl(8, D->scale);
+    int slid_yo = (D->row_h - slid_h) / 2;  /* center slider in row */
+
+    modal_label("Fog density", label_x, y + (D->row_h - D->font_base) / 2,
+                D->font_base, COL_TEXT_DARK);
+    Rectangle sb_fd = {(float)field_x, (float)(y + slid_yo),
+                       (float)slid_w, (float)slid_h};
+    GuiSlider(sb_fd, NULL, NULL, &m->fog_density, 0.0f, 1.0f);
+    snprintf(sbuf, sizeof sbuf, "%.2f", m->fog_density);
+    modal_label(sbuf, field_x + slid_w + ui_scl(8, D->scale),
+                y + (D->row_h - D->font_base) / 2,
+                D->font_base, COL_TEXT_DARK);
     y += line_h;
 
-    snprintf(sbuf, sizeof sbuf, "Vignette: %.2f", m->vignette);
-    ui_draw_text(sbuf, label_x, y + D->pad / 2, D->font_sm, COL_TEXT);
-    Rectangle sb_vg = {(float)field_x, (float)y, (float)field_w, (float)(D->row_h - 4)};
-    GuiSlider(sb_vg, "", "", &m->vignette, 0.0f, 1.0f);
+    modal_label("Vignette", label_x, y + (D->row_h - D->font_base) / 2,
+                D->font_base, COL_TEXT_DARK);
+    Rectangle sb_vg = {(float)field_x, (float)(y + slid_yo),
+                       (float)slid_w, (float)slid_h};
+    GuiSlider(sb_vg, NULL, NULL, &m->vignette, 0.0f, 1.0f);
+    snprintf(sbuf, sizeof sbuf, "%.2f", m->vignette);
+    modal_label(sbuf, field_x + slid_w + ui_scl(8, D->scale),
+                y + (D->row_h - D->font_base) / 2,
+                D->font_base, COL_TEXT_DARK);
     y += line_h;
 
     /* Weather cycle + density. */
-    static const char *weather_names[] = { "NONE", "SNOW", "RAIN", "DUST", "EMBERS" };
+    static const char *weather_names[] = {
+        "None", "Snow", "Rain", "Dust", "Embers",
+    };
     int n_weather = (int)(sizeof weather_names / sizeof weather_names[0]);
     int safe_w = (m->weather_kind >= 0 && m->weather_kind < n_weather)
                  ? m->weather_kind : 0;
-    ui_draw_text("Weather", label_x, y + D->pad / 2, D->font_base, COL_TEXT);
-    Rectangle wb = {(float)field_x, (float)y, (float)field_w, (float)D->row_h};
-    snprintf(tbuf, sizeof tbuf, "%s  ▾", weather_names[safe_w]);
-    if (GuiButton(wb, tbuf)) {
+    modal_label("Weather", label_x, y + D->pad / 2,
+                D->font_base, COL_TEXT_DARK);
+    Rectangle wb_l = {(float)field_x, (float)y, (float)arrow_w, (float)D->row_h};
+    Rectangle wb_m = {(float)(field_x + arrow_w + 2), (float)y,
+                      (float)(field_w - arrow_w * 2 - 4), (float)D->row_h};
+    Rectangle wb_r = {(float)(field_x + field_w - arrow_w), (float)y,
+                      (float)arrow_w, (float)D->row_h};
+    if (GuiButton(wb_l, "<"))
+        m->weather_kind = (safe_w + n_weather - 1) % n_weather;
+    if (GuiButton(wb_m, weather_names[safe_w]))
         m->weather_kind = (safe_w + 1) % n_weather;
-    }
+    if (GuiButton(wb_r, ">"))
+        m->weather_kind = (safe_w + 1) % n_weather;
     y += line_h;
 
-    snprintf(sbuf, sizeof sbuf, "Density: %.2f", m->weather_density);
-    ui_draw_text(sbuf, label_x, y + D->pad / 2, D->font_sm, COL_TEXT);
-    Rectangle sb_wd = {(float)field_x, (float)y, (float)field_w, (float)(D->row_h - 4)};
-    GuiSlider(sb_wd, "", "", &m->weather_density, 0.0f, 1.0f);
-    y += line_h;
+    modal_label("Density", label_x, y + (D->row_h - D->font_base) / 2,
+                D->font_base, COL_TEXT_DARK);
+    Rectangle sb_wd = {(float)field_x, (float)(y + slid_yo),
+                       (float)slid_w, (float)slid_h};
+    GuiSlider(sb_wd, NULL, NULL, &m->weather_density, 0.0f, 1.0f);
+    snprintf(sbuf, sizeof sbuf, "%.2f", m->weather_density);
+    modal_label(sbuf, field_x + slid_w + ui_scl(8, D->scale),
+                y + (D->row_h - D->font_base) / 2,
+                D->font_base, COL_TEXT_DARK);
+    y += line_h + D->pad;
 
+    /* Helper hint line. */
+    modal_label("Tip: leave a slider at 0 to inherit the theme default.",
+                label_x, y, D->font_sm, COL_TEXT_DARK_DIM);
+
+    /* ============ Buttons ============ */
     int btn_w = ui_scl(110, D->scale);
     Rectangle ok = {(float)(dlg_x + dlg_w - btn_w - D->pad * 2),
                     (float)(dlg_y + dlg_h - D->row_h - D->pad),
