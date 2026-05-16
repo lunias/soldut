@@ -96,3 +96,8 @@ tools/audio_normalize/normalized.txt
 # Local pipeline state files
 /tmp/canonical_*.log
 /tmp/canonical_*.exit
+
+# Manual networked playtest scratch — round-by-round host/client logs
+# the user captures during WAN smoke tests. Re-derivable, not for the
+# repo.
+/net-test logs/
