@@ -346,6 +346,14 @@ void projectile_step(World *w, float dt) {
                 }
             }
 
+            /* Bone-collision radius. Bullets stay tight (8 px) but
+             * frag grenades use a wider radius — the sprite itself
+             * is ~7 px wide and the player expects a grenade that
+             * VISUALLY touches a mech to detonate, even when rolling
+             * along the floor next to a foot or grazing a hand. 8 px
+             * left grenades rolling past mechs un-detonated; 14 px
+             * catches contact at the sprite edge. */
+            float bone_r = (p->kind[i] == PROJ_FRAG_GRENADE) ? 14.0f : 8.0f;
             for (int bi = 0; bi < NUM_BONES; ++bi) {
                 int pa = m->particle_base + g_bones[bi].parent;
                 int pb = m->particle_base + g_bones[bi].child;
@@ -359,7 +367,7 @@ void projectile_step(World *w, float dt) {
                     va = (Vec2){ w->particles.pos_x[pa], w->particles.pos_y[pa] };
                     vb = (Vec2){ w->particles.pos_x[pb], w->particles.pos_y[pb] };
                 }
-                float th = swept_seg_vs_bone(a, b, va, vb, /*r*/ 8.0f);
+                float th = swept_seg_vs_bone(a, b, va, vb, bone_r);
                 if (th < 0.0f) continue;
                 if (th < t_hit) {
                     t_hit = th;

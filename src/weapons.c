@@ -712,11 +712,16 @@ void weapons_spawn_throw_charged(World *w, int mid, int weapon_id,
 
     /* Upward lob bias — pivots the launch direction toward "up" so the
      * grenade leaves the hand UP-and-forward rather than straight at
-     * the cursor. Combined with the 1.8× gravity scale this yields a
-     * pronounced parabolic arc the player reads as a throw (vs. a
-     * shot). Lob amount scales with charge so a quick tap is a flat
-     * lob (mostly direct, useful for point-blank) while max charge is
-     * a high arc that comes down on a distant target.
+     * the cursor. Combined with gravity this yields a pronounced
+     * parabolic arc the player reads as a throw (vs. a shot).
+     *
+     * Lob amount scales with TWO factors:
+     *   1. charge — a quick tap is a flat lob (mostly direct, useful
+     *      for point-blank), max charge is a high arc.
+     *   2. aim distance — close targets get little lob (so a grenade
+     *      thrown in an enemy's face goes STRAIGHT AT them, doesn't
+     *      arc over their head), far targets get full lob (so the
+     *      throw clears walls / gaps on the way).
      *
      * Math: build a biased vector (dir.x, dir.y - lob_amount) and
      * renormalize. When the player aims straight up (dir.y ≈ -1) the
@@ -726,8 +731,18 @@ void weapons_spawn_throw_charged(World *w, int mid, int weapon_id,
      * renormalization — straight-down throws still go down. Only
      * horizontal / shallow-down aims get the visible lift. */
     {
-        float lob_amount = FRAG_LOB_MIN_BIAS +
-                           (FRAG_LOB_MAX_BIAS - FRAG_LOB_MIN_BIAS) * charge_factor;
+        float dx_aim = me->aim_world.x - hand.x;
+        float dy_aim = me->aim_world.y - hand.y;
+        float aim_dist = sqrtf(dx_aim * dx_aim + dy_aim * dy_aim);
+        /* 0 at point-blank (≤ 80 px), 1 at ≥ 480 px — smoothly fades
+         * the lob in as the aim moves away. */
+        float dist_scale = (aim_dist - 80.0f) / 400.0f;
+        if (dist_scale < 0.0f) dist_scale = 0.0f;
+        if (dist_scale > 1.0f) dist_scale = 1.0f;
+
+        float lob_amount = (FRAG_LOB_MIN_BIAS +
+                            (FRAG_LOB_MAX_BIAS - FRAG_LOB_MIN_BIAS) * charge_factor)
+                           * dist_scale;
         float lx = dir.x;
         float ly = dir.y - lob_amount;
         float lmag = sqrtf(lx * lx + ly * ly);
