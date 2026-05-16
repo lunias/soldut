@@ -2564,6 +2564,50 @@ WAN polish. Net effect on the trade-off ledger:
     enemy. Currently aggression only DECAYS toward 1.0 over 2 s
     after damage.
 
+### Damage numbers spawn in two places (M6 P04)
+
+`fx_spawn_damage_number` is called from BOTH
+`src/mech.c::mech_apply_damage` (server / single-process) AND
+`src/net.c::client_handle_hit_event` (multiplayer client). Anyone
+reading either site might wonder why both calls exist — it looks like
+a double-spawn.
+
+- **Why** — The same two-caller shape that lets blood/sparks coexist
+  without doubling on the host UI. Per wan-fixes-16, the host server
+  runs on a worker thread with its own `Game`/`FxPool`; the host UI
+  client runs on the main thread with a separate `Game`/`FxPool`
+  connecting via UDP loopback. The server-thread's particle spawns
+  never reach the renderer — only the loopback-HIT_EVENT path
+  produces the visible glyph on the host UI. In single-process
+  shotmode / offline / `--test-play`, there's one `Game`, one
+  `FxPool`, and `mech_apply_damage` runs in the same context as the
+  renderer — so its spawn IS the visible one (no HIT_EVENT broadcast
+  in this mode, no socket bound, no double-spawn).
+- **Revisit when** — Never, unless we collapse the host server/UI
+  thread split (which would itself be a major architecture change).
+  Until then, the dual call is correct and removing either site
+  would silently break the OTHER mode.
+
+### Damage-number trajectories aren't cross-client deterministic (M6 P04)
+
+The damage VALUE on each glyph is wire-deterministic (the
+post-armor damage byte rides `NET_MSG_HIT_EVENT`'s u8 field; every
+client decodes the same byte). The spew DIRECTION, cone-jitter, and
+bounce trajectory use each client's local `WorldRNG` state — they
+diverge between clients for the same hit.
+
+- **Why** — The number is a visual; ±20 px divergence between two
+  players' screens for the same hit is imperceptible. We don't aim
+  for bit-exact cross-client visuals on free particles (M6 P01 only
+  targets ≤1 px on **bones**, not on FX). The numeric agreement is
+  what matters; the trajectory is decorative.
+- **Revisit when** — Players report "the damage numbers feel
+  different between my and my friend's screen". The fix is to seed
+  the spawn RNG with `(victim_mech_id, server_tick, hit_part)` so
+  both sides land on the same trajectory — ~10 lines, no wire
+  changes. Until that complaint surfaces, the divergence is
+  acceptable.
+
 ---
 
 ## How to use this file

@@ -68,6 +68,11 @@ typedef enum {
     EV_VOTE_MAP,      /* P09 — cast a map vote (ax = choice 0/1/2) */
     EV_BOT_TEAM,      /* host-only — flip bot's team (ax = slot, ay = team) */
     EV_ADD_BOT,       /* host-only — send ADD_BOT (ax = BotTier 0..3) */
+    EV_DAMAGE,        /* M6 P04 — apply damage on named mech for the
+                         color-tier shot test. ax = mech_id, ay = part,
+                         az = amount. Drives the same mech_apply_damage
+                         path real combat uses, so the FX_DAMAGE_NUMBER
+                         spawn fires from the canonical seam. */
 } EventKind;
 
 typedef struct {
@@ -75,6 +80,7 @@ typedef struct {
     EventKind kind;
     uint16_t  button;       /* PRESS/RELEASE/TAP */
     float     ax, ay;       /* AIM (world) or MOUSE (screen) */
+    int       az;           /* M6 P04 EV_DAMAGE: amount (0..255) */
     char      name[64];     /* SHOT */
 } Event;
 
@@ -555,6 +561,48 @@ static bool parse_script(const char *path, Script *out) {
                 ev.kind = EV_KILL_PEER;
                 ev.ax = (float)mid;
                 ev.ay = (float)shooter;
+                script_push(out, ev);
+            } else if (strcmp(ev_kind, "damage") == 0) {
+                /* "at <tick> damage <mech_id> <part> <amount>" — M6 P04
+                 * single-process color-tier test driver. Calls
+                 * mech_apply_damage with environmental (no shooter)
+                 * credit; the FX_DAMAGE_NUMBER spawn fires from the
+                 * normal seam. <part> is a numeric PART_* enum value
+                 * (0=HEAD, 2=CHEST, 3=PELVIS, etc. per src/world.h:91)
+                 * or one of the keyword shorthands HEAD / CHEST /
+                 * PELVIS / L_ARM / R_ARM / L_LEG / R_LEG (uppercase). */
+                int  mid = -1, amount = 0;
+                char part_tok[32] = {0};
+                if (sscanf(args, "%d %31s %d",
+                           &mid, part_tok, &amount) != 3) {
+                    LOG_E("shotmode: %s:%d 'damage' needs "
+                          "<mech_id> <part> <amount>", path, lineno);
+                    ok = false; continue;
+                }
+                /* Map part keyword → PART_* enum. Numeric input also
+                 * accepted (a digit-only token parses via atoi). */
+                int part = -1;
+                if (part_tok[0] >= '0' && part_tok[0] <= '9') {
+                    part = atoi(part_tok);
+                } else if (strcmp(part_tok, "HEAD")  == 0)  part = PART_HEAD;
+                else if   (strcmp(part_tok, "NECK")  == 0)  part = PART_NECK;
+                else if   (strcmp(part_tok, "CHEST") == 0)  part = PART_CHEST;
+                else if   (strcmp(part_tok, "PELVIS")== 0)  part = PART_PELVIS;
+                else if   (strcmp(part_tok, "L_ARM") == 0)  part = PART_L_SHOULDER;
+                else if   (strcmp(part_tok, "R_ARM") == 0)  part = PART_R_SHOULDER;
+                else if   (strcmp(part_tok, "L_LEG") == 0)  part = PART_L_HIP;
+                else if   (strcmp(part_tok, "R_LEG") == 0)  part = PART_R_HIP;
+                if (part < 0 || part >= PART_COUNT) {
+                    LOG_E("shotmode: %s:%d 'damage' bad part '%s'",
+                          path, lineno, part_tok);
+                    ok = false; continue;
+                }
+                if (amount < 0)   amount = 0;
+                if (amount > 255) amount = 255;
+                ev.kind = EV_DAMAGE;
+                ev.ax   = (float)mid;
+                ev.ay   = (float)part;
+                ev.az   = amount;
                 script_push(out, ev);
             } else if (strcmp(ev_kind, "team_change") == 0) {
                 /* "at <tick> team_change <team_id>" — drives the same
@@ -2045,6 +2093,30 @@ int shotmode_run(const char *script_path) {
                     }
                     break;
                 }
+                case EV_DAMAGE: {
+                    /* M6 P04 — exercise the damage-number color-tier
+                     * spawn from a single-process shot test. Works on
+                     * the standalone (NET_ROLE_NONE) world used by the
+                     * single-process tier test; also works on a host
+                     * (NET_ROLE_SERVER) for completeness. dir = -Y so
+                     * the spew direction is sideways (perpendicular)
+                     * with a slight upward bias — reads as a spew, not
+                     * as a downward squirt. */
+                    int mid    = (int)ev->ax;
+                    int part   = (int)ev->ay;
+                    int amount = ev->az;
+                    if (mid >= 0 && mid < game.world.mech_count &&
+                        part >= 0 && part < PART_COUNT &&
+                        game.world.mechs[mid].alive) {
+                        mech_apply_damage(&game.world, mid, part,
+                                          (float)amount,
+                                          (Vec2){0.0f, -1.0f},
+                                          /*shooter=*/-1);
+                        LOG_I("shot: damage mech=%d part=%d amount=%d",
+                              mid, part, amount);
+                    }
+                    break;
+                }
                 case EV_KICK:
                 case EV_BAN: {
                     int slot = (int)ev->ax;
@@ -2476,6 +2548,27 @@ int shotmode_run(const char *script_path) {
                                       shooter);
                     LOG_I("shot: kill_peer mech=%d shooter=%d (single-player)",
                           mid, shooter);
+                }
+                break;
+            }
+            case EV_DAMAGE: {
+                /* M6 P04 — single-process color-tier driver. Same
+                 * mech_apply_damage call the multiplayer host-side
+                 * branch makes; the FX_DAMAGE_NUMBER spawn fires from
+                 * the canonical seam in mech.c so this exercises the
+                 * actual feature path, not a synthetic shortcut. */
+                int mid    = (int)ev->ax;
+                int part   = (int)ev->ay;
+                int amount = ev->az;
+                if (mid >= 0 && mid < game.world.mech_count &&
+                    part >= 0 && part < PART_COUNT &&
+                    game.world.mechs[mid].alive) {
+                    mech_apply_damage(&game.world, mid, part,
+                                      (float)amount,
+                                      (Vec2){0.0f, -1.0f},
+                                      /*shooter=*/-1);
+                    LOG_I("shot: damage mech=%d part=%d amount=%d (single-player)",
+                          mid, part, amount);
                 }
                 break;
             }

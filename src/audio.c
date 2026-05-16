@@ -272,6 +272,10 @@ static const SfxManifestEntry g_sfx_manifest[] = {
     { SFX_HIT_FLESH,         "assets/sfx/hit_flesh.wav",     5, 0.90f, AUDIO_BUS_SFX },
     { SFX_HIT_METAL,         "assets/sfx/hit_metal.wav",     5, 0.85f, AUDIO_BUS_SFX },
     { SFX_HIT_CONCRETE,      "assets/sfx/hit_concrete.wav",  5, 0.75f, AUDIO_BUS_SFX },
+    /* M6 P04 — damage-number bounce. 0.30 sits well below SFX_HIT_METAL
+     * (0.85) so the tink reads as the secondary "and now the digit
+     * bounces around" beat, not as another impact. */
+    { SFX_DAMAGE_TINK,       "assets/sfx/damage_tink.wav",   3, 0.30f, AUDIO_BUS_SFX },
 
     /* --- Explosions --- */
     { SFX_EXPLOSION_LARGE,   "assets/sfx/explosion_large.wav",  3, 1.00f, AUDIO_BUS_SFX },
@@ -940,7 +944,7 @@ const char *audio_manifest_kind(int idx) {
     if (idx < 0 || idx >= SFX_MANIFEST_COUNT) return NULL;
     SfxId id = g_sfx_manifest[idx].id;
     if (id <= SFX_WPN_KNIFE_THROW)    return "SFX_WPN";
-    if (id <= SFX_HIT_CONCRETE)       return "SFX_HIT";
+    if (id <= SFX_DAMAGE_TINK)        return "SFX_HIT";
     if (id <= SFX_EXPLOSION_SMALL)    return "SFX_EXPLOSION";
     if (id <= SFX_FOOTSTEP_ICE)       return "SFX_FOOT";
     if (id <= SFX_JET_IGNITION_ICE)   return "SFX_JET";

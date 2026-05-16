@@ -1,0 +1,32 @@
+# 2p_damage_numbers — CLIENT. M6 P04.
+#
+# Pairs with 2p_damage_numbers.host.shot. Client is the passive
+# target — host fires 3 Pulse Rifle shots at it. The wire round-trip
+# under test:
+#   host: weapons_fire_hitscan → mech_apply_damage(victim=client)
+#         → fx_spawn_damage_number(server-thread fx) [invisible]
+#         → broadcast NET_MSG_HIT_EVENT
+#   host UI client (loopback) + this remote client:
+#         client_handle_hit_event → fx_spawn_damage_number
+#         (UI/remote-thread fx) [visible, asserted in log]
+#
+# The runner's assertions diff the dmgnum spawn lines from host log
+# vs client log to verify both sides got dmg=12 / tier=1.
+
+window 1280 720
+out build/shots/net/2p_damage_numbers_client
+network connect 127.0.0.1:24091
+name ClientB
+# Match host's map override so the lobby cycle picks the same level
+# on both peers (matters only for shot framing; the wire round-trip
+# would work on any map).
+map aurora
+
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+
+spawn_at 1800 2712
+aim 1600 2702
+
+at 130 shot pre_match
+at 360 shot post_3_hits
+at 420 end

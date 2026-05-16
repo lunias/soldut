@@ -52,6 +52,14 @@ typedef enum {
     SFX_HIT_FLESH,
     SFX_HIT_METAL,
     SFX_HIT_CONCRETE,
+    /* M6 P04 — Damage-number bounce. Quiet metallic clink that fires
+     * when a flying damage-number glyph contacts the floor; not the
+     * primary impact cue (that's SFX_HIT_METAL / SFX_HIT_FLESH on the
+     * weapon hit). One sample, 3 aliases (round-robin handles the
+     * worst-case 50 bounces/s saturation case in the §15 stress
+     * scenario). 0.30 base volume per the spec §10.2 — incidental,
+     * not central. */
+    SFX_DAMAGE_TINK,
 
     /* Explosions / detonations */
     SFX_EXPLOSION_LARGE,           /* Mass Driver direct + ≥100 dmg AOE */

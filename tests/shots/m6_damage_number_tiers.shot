@@ -1,0 +1,79 @@
+# m6_damage_number_tiers.shot — M6 P04
+#
+# Single-process color-tier visual test for the damage-number feature.
+# Drives one stationary Heavy dummy through five sequential damage
+# events, one per tier, using the new `damage` shotmode directive.
+# Each event spawns a flying glyph (FX_DAMAGE_NUMBER) that flies out
+# from the chest, falls under gravity, bounces ≤2 times on the floor
+# with a metallic *tink*, and fades.
+#
+# Tier mapping (per src/particle.c::g_dmg_tier):
+#   5    → DMG_TIER_LIGHT  (pale yellow, 10 px)
+#   20   → DMG_TIER_NORMAL (yellow,      12 px)
+#   45   → DMG_TIER_MEDIUM (orange,      14 px)
+#   75   → DMG_TIER_HEAVY  (red-orange,  16 px)
+#   150  → DMG_TIER_CRIT   (bright red,  18 px)
+#
+# Heavy chassis HP = 220 + ~75 absorbed by Heavy armor; total damage
+# 5+20+45+75+150 = 295 leaves the dummy alive through every spawn.
+# Per-shot perp_sign + cone-jitter at spawn (particle.c::fx_spawn_
+# damage_number) fans the five glyphs out into different directions
+# so they don't visually stack.
+#
+# Run:
+#   ./soldut --shot tests/shots/m6_damage_number_tiers.shot
+# Output:
+#   build/shots/m6_damage_number_tiers/*.png
+#   build/shots/m6_damage_number_tiers/tiers.png  (3-col contact sheet)
+#
+# Verification (manual visual review on the contact sheet):
+#   - All 5 colors read distinctly (LIGHT pale-yellow → CRIT bright-red).
+#   - Spew arcs are visibly different magnitudes (CRIT spews farther than
+#     LIGHT; bigger glyphs = more damage gradient holds).
+#   - Settled frame shows numbers near/on the floor with at most 2
+#     bounces visible (pin_limb cap from §7).
+
+window 1280 720
+seed 1 1
+out build/shots/m6_damage_number_tiers
+map slipstream
+no_parallax
+loadout Trooper "Pulse Rifle" Sidearm Light Standard
+
+# Slipstream basement_ceil top y=1216 → spawn pelvis 40 above = 1176.
+# Player at left of frame; one Heavy dummy 200 px to the right.
+# Heavy chassis HP=220 (no armor) > total 295 dmg dispatched, but
+# we deliberately let the dummy die after the 4th hit so the spec's
+# "kill via damage tier" beat is also exercised — the kill blow
+# itself doesn't get special treatment, just the appropriate tier
+# color (CRIT for 150).
+spawn_at 1500 1176
+mouse 1180 360
+
+# Auto-dummy (mech_id=1) spawns at slipstream's team-2 spawn point,
+# off-screen. The Heavy I add here is mech_id=2 — the one I drive.
+extra_chassis Heavy 1700 1176
+
+# Let the Verlet solver settle both chassis onto their feet.
+at 30 shot pre_damage
+
+# Five damage events at 5-tick intervals — enough spacing that each
+# spawn fires on its own tick (HIT_FLASH timer doesn't bleed) but
+# tight enough that midflight + settled frames capture all five
+# glyphs simultaneously airborne / on the floor.
+at 35 damage 2 CHEST 5      # LIGHT
+at 40 damage 2 CHEST 20     # NORMAL
+at 45 damage 2 CHEST 45     # MEDIUM
+at 50 damage 2 CHEST 75     # HEAVY
+at 55 damage 2 CHEST 150    # CRIT
+
+# Three captures along the spew → bounce → fade arc.
+at 60  shot t005_spawn         # ~0.08 s after last spawn — fresh spew, all 5 airborne
+at 90  shot t035_midflight     # ~0.58 s — midflight, first bounces visible
+at 150 shot t095_settled       # ~1.58 s — most settled, mid-fade tail
+
+# Ten contact-sheet cells (4 wide × 3 tall) is overkill for 4 frames —
+# 4-col layout gives a clean horizontal strip of 4 frames in row 1.
+contact_sheet tiers cols 4 cell 480 270
+
+at 200 end

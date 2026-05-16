@@ -3107,6 +3107,83 @@ re-runs are byte-identical.
 
 ## Recently fixed
 
+### M6 P04 — Damage numbers (LANDED 2026-05-15)
+
+Flying damage-number glyphs spawn on every successful hit, fly out with
+gravity + bounce + tumble, and fade. Closes the loop on the "Hits have
+weight" vision pillar — the attacker now sees the exact tonnage of metal
+they put through the target, every shot. New `FX_DAMAGE_NUMBER` kind in
+the existing `FxPool` (cap 8000 → 8500; +8 B per particle for `angle`
+and `ang_vel` tumble state) with a 5-tier color/size ramp keyed off the
+post-armor damage byte: LIGHT pale-yellow 20 px (1–9 dmg), NORMAL yellow
+24 px (10–29), MEDIUM orange 30 px (30–59), HEAVY red-orange 36 px
+(60–99), CRIT bright-red 44 px (≥100). Thresholds intentionally mirror
+the M5 P12 decal cliffs so a 75-dmg hit paints a SCORCH decal AND shows
+an orange-red "75" — visual consistency across the two feedback layers.
+
+**Spawn:** two callers, mirroring the existing blood/sparks pattern:
+- `src/mech.c::mech_apply_damage` (server / single-process path) —
+  visible in offline / shotmode / `--test-play` runs.
+- `src/net.c::client_handle_hit_event` (multiplayer client path) —
+  visible on every peer including the host UI (per wan-fixes-16 the
+  host server runs on its own worker thread/Game with a separate
+  FxPool the renderer never reads; the visible spawn lands via the
+  HIT_EVENT UDP loopback).
+No new wire bytes — `NET_MSG_HIT_EVENT`'s existing 12-byte payload
+already carries the post-armor damage byte. Protocol id stays `S0LK`.
+
+**Per-tick physics** (`fx_update` new `FX_DAMAGE_NUMBER` branch in
+`src/particle.c`): gravity with a 0.30 s hover-ramp (`grav_scale = age /
+0.30`) so the number pops up + hangs before falling, ±1 rad/s gentle
+tumble, 0.99 air drag, tile-collide BOUNCE up to 2× via per-axis
+`level_point_solid` probes — each contact plays `SFX_DAMAGE_TINK` at
+0.30 base volume, multiplies x-vel by 0.70 (friction), damps spin to
+60%, and applies y-vel * -0.55. Third contact pins to floor; life-fade
+carries it out from there. Total airborne time ~1.4–2.4 s by tier.
+
+**Render** (`fx_draw_damage_numbers` in `src/particle.c`, called from
+`renderer_draw_frame` after the upscale blit + before `hud_draw`):
+runs OUTSIDE the internal-RT world pass so glyphs land at sharp window
+pixels — drawing inside the RT would bilinear-blur the text on
+upscale, same reason M6 P03 routes the HUD around the cap. Font size
+scales by `camera.zoom * blit_scale` so a CRIT reads at ~45 px on
+1080p and ~90 px on a 4K-windowed run with the 1080-cap internal RT.
+4-pass cardinal-offset outline (cheaper than a shader; visually
+equivalent at small sizes). Steps Mono Thin atlas, falls back to
+raylib's default font if the TTF didn't load.
+
+**Audio:** new `SFX_DAMAGE_TINK` sourced from
+`kenney_impact-sounds/impactMetal_light_000.ogg` (capped 180 ms with
+50 ms fade-out so saturation doesn't bake into a drone; 3 round-robin
+aliases). 50 SFX manifest entries total now (47 base + 2 M6 P02
+ignition + 1 M6 P04 tink). Volume 0.30 — sits well below the
+SFX_HIT_METAL impact cue (0.85) so the bounce reads as the secondary
+"the digit's bouncing around" beat, not as another impact.
+
+**FxPool overlay:** `pin_mech_id` (i16) holds the damage value 0–255;
+`pin_limb` (u8) holds the bounce counter 0–2; `pin_pad` (u8) holds the
+tier flag byte (bit 0 = CRIT, bit 1 = HEAVY). Overlays FX_STUMP's
+existing fields without a union — the kind switch dispatches the
+field meaning per-particle.
+
+**New tests:**
+- `make test-damage-numbers` — paired host/client sync on aurora. Host
+  fires 3 Pulse Rifle (hitscan, 12 dmg) shots; both sides assert 3
+  `dmgnum spawn` SHOT_LOG lines with matching dmg/tier columns. 5
+  assertions in `tests/shots/net/run_damage_numbers.sh`.
+- `tests/shots/m6_damage_number_tiers.shot` — single-process visual
+  review of all 5 tiers on slipstream. New `damage <mech_id> <part>
+  <amount>` shotmode directive drives `mech_apply_damage` directly
+  with the named values; contact sheet composites 4 frames spanning
+  pre-damage → spawn → midflight → settled.
+
+**Sync/regression status:** all asserting unit tests + paired
+baselines pass (`test-physics`, `test-level-io`, `test-snapshot`,
+`test-spawn`, `test-prefs`, `test-pickups`, `test-ctf`,
+`test-map-chunks`, `test-map-registry`, `test-mech-ik`,
+`test-pose-compute`, `test-frag-grenade`, `test-riot-cannon-sfx`,
+`test-damage-numbers`, `tests/net/run.sh`, `tests/net/run_3p.sh`).
+
 ### M6 P03-hotfix — three follow-ups after the first PR build (LANDED 2026-05-12)
 
 The user shipped the P03 Windows artifact to a friend for a 2-player WAN
@@ -3712,9 +3789,16 @@ them against playtest reactions. (Per-weapon stats are in the
 | `src/hud.c`               | `KILL_FEED_FADE_TAIL_SEC`       | 3 (last 3 s alpha-fade; wan-fixes-13) |
 | `src/hud.c`               | HP numerals font_px             | **22** (was 18; wan-fixes-15) |
 | `src/net.c`               | client render interp delay (ms) | 100 (restored by wan-fixes-2) |
-| `src/world.h`             | `MAX_BLOOD` (FX pool capacity)  | **8000** (was 3000; M6 P02 — Burst-jet plume worst case) |
+| `src/world.h`             | `MAX_BLOOD` (FX pool capacity)  | **8500** (was 8000; M6 P04 — +500 headroom for damage-number worst case alongside jet plume saturation) |
 | `src/particle.c`          | `JET_BUOY_PXS2` (exhaust lift)  | 80   |
 | `src/particle.c`          | `GROUND_DUST_GRAVITY_PXS2`      | 120  |
+| `src/particle.c`          | `g_dmg_tier[]` font_px ramp (M6 P04) | LIGHT 20 / NORMAL 24 / MEDIUM 30 / HEAVY 36 / CRIT 44 (1× zoom base; runtime multiplies by `camera.zoom * blit_scale`) |
+| `src/particle.c`          | `g_dmg_tier[]` life_s ramp (M6 P04)  | 1.4 / 1.7 / 1.9 / 2.1 / 2.4 s |
+| `src/particle.c`          | `g_dmg_tier[]` spew speed (M6 P04)   | 60–90 / 80–110 / 100–140 / 120–170 / 140–200 px/s |
+| `src/particle.c`          | `g_dmg_tier[]` upward bias (M6 P04)  | 50 / 70 / 90 / 110 / 130 px/s |
+| `src/particle.c`          | `DMGNUM_HOVER_S` (gravity ramp)  | 0.30 s — number pops + hangs before falling |
+| `src/particle.c`          | damage-number bounce restitution | y-vel × −0.55 + x-vel × 0.70 friction + ang_vel × 0.60 damp |
+| `src/particle.c`          | damage-number bounce cap         | 2 contacts → rest |
 | `src/mech_jet_fx.c`       | `JET_IMPINGE_MAX_DIST` (ground query) | 48 px |
 | `src/mech_jet_fx.c`       | `g_jet_fx[JET_BURST].boost_particles_per_tick` | 8 (sustain 1×) |
 | `src/mech_jet_fx.c`       | `g_jet_fx[JET_JUMP_JET].ignition_particles` | 16 |
