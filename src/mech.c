@@ -986,6 +986,11 @@ static void swap_weapon(Mech *m) {
     m->reload_timer = 0.0f;
     m->charge_timer = 0.0f;
     m->spinup_timer = 0.0f;
+    /* Drop any throw-charge that was active on the previous slot —
+     * swapping mid-hold changes which button the charge logic listens
+     * to, so the stale accumulator would otherwise quietly fire on the
+     * next stray button release. */
+    m->throw_charge = 0.0f;
 }
 
 void mech_step_drive(World *w, int mid, ClientInput in, float dt) {
@@ -1767,9 +1772,14 @@ static void fire_other_slot_one_shot(World *w, int mid) {
             break;
         case WFIRE_PROJECTILE:
         case WFIRE_SPREAD:
-        case WFIRE_THROW:
             weapons_spawn_projectiles(w, mid, weapon_id);
             if (wpn->mag_size > 0) m->ammo--;
+            break;
+        case WFIRE_THROW:
+            /* M6 ship-prep — handled by mech_try_fire's hold-to-charge
+             * block (fires on RELEASE-edge with the accumulated charge).
+             * This path is reached on PRESS-edge of RMB; we skip the
+             * press-fire so the charge handler can claim the button. */
             break;
         case WFIRE_BURST:
             if (m->burst_pending_rounds == 0) {
@@ -1851,9 +1861,150 @@ static void fire_other_slot_one_shot(World *w, int mid) {
 
 /* ---- Try-fire: dispatched on weapon class -------------------------- */
 
+/* M6 ship-prep — cosmetic-only charge accumulator for the local mech
+ * on a pure client. Mirrors the gating in mech_try_fire's charge block
+ * (cooldown / reload / ammo / CTF-carrier) so the meter only ticks when
+ * the throw is actually available; everything else is a no-op. The
+ * server simulates the authoritative side of the charge from replicated
+ * inputs and fires on release-edge; this local path just keeps
+ * `m->throw_charge` in lockstep so the render-side meter has fresh
+ * state to draw from without a snapshot round-trip. */
+void mech_predict_throw_charge(World *w, int mid, ClientInput in) {
+    if (mid < 0 || mid >= w->mech_count) return;
+    Mech *m = &w->mechs[mid];
+    if (!m->alive || m->is_dummy) {
+        m->throw_charge = 0.0f;
+        return;
+    }
+
+    int throw_slot = -1;
+    const Weapon *throw_wpn = NULL;
+    const Weapon *prim_w = weapon_def(m->primary_id);
+    const Weapon *sec_w  = weapon_def(m->secondary_id);
+    if      (prim_w && prim_w->fire == WFIRE_THROW) {
+        throw_slot = 0; throw_wpn = prim_w;
+    } else if (sec_w  && sec_w->fire  == WFIRE_THROW) {
+        throw_slot = 1; throw_wpn = sec_w;
+    }
+    if (throw_slot < 0) {
+        m->throw_charge = 0.0f;
+        return;
+    }
+
+    bool is_active = (throw_slot == m->active_slot);
+    uint16_t btn = is_active ? BTN_FIRE : BTN_FIRE_SECONDARY;
+    bool held = (in.buttons & btn) != 0;
+
+    int *ammo_ptr = (throw_slot == 0) ? &m->ammo_primary : &m->ammo_secondary;
+    bool out_of_ammo = (throw_wpn->mag_size > 0 && *ammo_ptr <= 0);
+    bool ctf_block   = (throw_slot == 1 && ctf_is_carrier(w, mid));
+    bool can_act = !out_of_ammo && !ctf_block &&
+                   m->fire_cooldown <= 0.0f && m->reload_timer <= 0.0f;
+
+    if (held && can_act) {
+        float dt = in.dt > 0.0f ? in.dt : 1.0f / 60.0f;
+        m->throw_charge = fminf(m->throw_charge + dt, FRAG_CHARGE_MAX_SEC);
+    } else if (!held) {
+        m->throw_charge = 0.0f;
+    }
+}
+
 bool mech_try_fire(World *w, int mid, ClientInput in) {
     Mech *m = &w->mechs[mid];
     if (!m->alive || m->is_dummy)            return false;
+
+    /* M6 ship-prep — hold-to-charge WFIRE_THROW (frag grenade).
+     *
+     * The loadout has at most one WFIRE_THROW slot at v1 (frag). When
+     * present, the button that would normally fire it — LMB if it's the
+     * active slot, RMB otherwise — becomes a HOLD-to-charge: press
+     * starts charging, release fires at scaled velocity (Worms-style).
+     * `throw_charge` accumulates in seconds while held; the fire path
+     * maps it to `FRAG_THROW_SPEED_MIN_MUL..MAX_MUL` × the weapon's
+     * baseline `projectile_speed_pxs`. A quick tap still throws (short
+     * lob); holding for FRAG_CHARGE_MAX_SEC = max velocity.
+     *
+     * Charge is GATED by cooldown / reload / ammo / CTF-carrier — no
+     * meter ticks during cooldown so the player gets clean visual
+     * feedback for when their next throw is available. Cancelling
+     * (releasing with zero accumulated time, or losing throw eligibility
+     * mid-hold) resets to 0. */
+    bool throw_fired_this_tick = false;
+    {
+        int throw_slot = -1;
+        int throw_weapon_id = -1;
+        const Weapon *throw_wpn = NULL;
+        const Weapon *prim_w = weapon_def(m->primary_id);
+        const Weapon *sec_w  = weapon_def(m->secondary_id);
+        if      (prim_w && prim_w->fire == WFIRE_THROW) {
+            throw_slot = 0; throw_weapon_id = m->primary_id;   throw_wpn = prim_w;
+        } else if (sec_w  && sec_w->fire  == WFIRE_THROW) {
+            throw_slot = 1; throw_weapon_id = m->secondary_id; throw_wpn = sec_w;
+        }
+
+        if (throw_slot >= 0) {
+            bool is_active = (throw_slot == m->active_slot);
+            uint16_t btn = is_active ? BTN_FIRE : BTN_FIRE_SECONDARY;
+            bool held     = (in.buttons & btn) != 0;
+            bool released = ((m->prev_buttons & ~in.buttons) & btn) != 0;
+            int *ammo_ptr  = (throw_slot == 0) ? &m->ammo_primary : &m->ammo_secondary;
+            bool out_of_ammo = (throw_wpn->mag_size > 0 && *ammo_ptr <= 0);
+            bool ctf_block   = (throw_slot == 1 && ctf_is_carrier(w, mid));
+            bool can_act = !out_of_ammo && !ctf_block &&
+                           m->fire_cooldown <= 0.0f &&
+                           m->reload_timer  <= 0.0f;
+
+            if (held && can_act) {
+                float dt = in.dt > 0.0f ? in.dt : 1.0f / 60.0f;
+                m->throw_charge = fminf(m->throw_charge + dt, FRAG_CHARGE_MAX_SEC);
+            } else if (!held) {
+                if (released && m->throw_charge > 0.0f && can_act) {
+                    float charge_factor = m->throw_charge / FRAG_CHARGE_MAX_SEC;
+                    if (charge_factor > 1.0f) charge_factor = 1.0f;
+
+                    if (!is_active) {
+                        /* Other-slot throw: dance the active-slot aliases
+                         * around the spawn (same shape as
+                         * fire_other_slot_one_shot's ammo-restore epilogue). */
+                        int saved_wpn  = m->weapon_id;
+                        int saved_ammo = m->ammo;
+                        int saved_max  = m->ammo_max;
+                        m->weapon_id   = throw_weapon_id;
+                        m->ammo        = *ammo_ptr;
+                        m->ammo_max    = throw_wpn->mag_size;
+
+                        weapons_spawn_throw_charged(w, mid, throw_weapon_id,
+                                                    charge_factor);
+                        if (throw_wpn->mag_size > 0) m->ammo--;
+                        *ammo_ptr     = m->ammo;
+                        m->weapon_id  = saved_wpn;
+                        m->ammo       = saved_ammo;
+                        m->ammo_max   = saved_max;
+                        m->last_fired_slot = (int8_t)throw_slot;
+                        m->last_fired_tick = w->tick;
+                    } else {
+                        weapons_spawn_throw_charged(w, mid, throw_weapon_id,
+                                                    charge_factor);
+                        if (throw_wpn->mag_size > 0) m->ammo--;
+                        /* Mirror mech_try_fire's tail-of-function ammo
+                         * persist + last-fired stamp. The early-return
+                         * below for WFIRE_THROW skips them, so the
+                         * active-slot throw path has to write them here. */
+                        if (m->active_slot == 0) m->ammo_primary   = m->ammo;
+                        else                     m->ammo_secondary = m->ammo;
+                        m->last_fired_slot = (int8_t)m->active_slot;
+                        m->last_fired_tick = w->tick;
+                    }
+                    throw_fired_this_tick = true;
+                }
+                m->throw_charge = 0.0f;
+            }
+        } else {
+            /* No throw weapon in either slot — clear any stale charge
+             * state from a previous loadout. */
+            m->throw_charge = 0.0f;
+        }
+    }
 
     /* P09 — BTN_FIRE_SECONDARY (RMB): edge-triggered one-shot of the
      * inactive slot. Runs above the active-slot guards so the inactive
@@ -1861,12 +2012,20 @@ bool mech_try_fire(World *w, int mid, ClientInput in) {
      * flag carrier). Shared fire_cooldown still prevents LMB+RMB double
      * fire on the same tick — fire_other_slot_one_shot sets the
      * cooldown via the inner weapons_fire_* call, and the active-slot
-     * dispatch below sees it and bails. */
+     * dispatch below sees it and bails. The throw-charge block above
+     * has already consumed this RMB event when the inactive slot is
+     * WFIRE_THROW; skip the one-shot in that case to avoid double-fire
+     * (charge fires on RELEASE, the one-shot fires on PRESS). */
     if (((~m->prev_buttons) & in.buttons & BTN_FIRE_SECONDARY) != 0) {
-        SHOT_LOG("t=%llu mech=%d fire_secondary edge active=%d prim=%d sec=%d cd=%.3f",
-                 (unsigned long long)w->tick, mid, m->active_slot,
-                 m->primary_id, m->secondary_id, (double)m->fire_cooldown);
-        fire_other_slot_one_shot(w, mid);
+        int other_slot = m->active_slot ^ 1;
+        int other_id   = (other_slot == 0) ? m->primary_id : m->secondary_id;
+        const Weapon *other_w = weapon_def(other_id);
+        if (!other_w || other_w->fire != WFIRE_THROW) {
+            SHOT_LOG("t=%llu mech=%d fire_secondary edge active=%d prim=%d sec=%d cd=%.3f",
+                     (unsigned long long)w->tick, mid, m->active_slot,
+                     m->primary_id, m->secondary_id, (double)m->fire_cooldown);
+            fire_other_slot_one_shot(w, mid);
+        }
     }
 
     const Weapon *wpn = weapon_def(m->weapon_id);
@@ -1936,11 +2095,11 @@ bool mech_try_fire(World *w, int mid, ClientInput in) {
         }
     }
     else if (wpn->fire == WFIRE_THROW) {
-        /* Frag grenades: each press throws one. */
-        if (!fire_pressed) return false;
-        if (wpn->mag_size > 0 && m->ammo <= 0) return false;
-        weapons_spawn_projectiles(w, mid, m->weapon_id);
-        if (wpn->mag_size > 0) m->ammo--;
+        /* M6 ship-prep — handled by the hold-to-charge block at the top
+         * of this function. Returning whether the throw fired on THIS
+         * tick lets snapshot / SFX paths key off the same boolean as
+         * other fire paths. */
+        return throw_fired_this_tick;
     }
     else if (wpn->fire == WFIRE_MELEE) {
         if (!fire_pressed) return false;
@@ -2411,6 +2570,7 @@ void mech_respawn(World *w, int mid, Vec2 spawn_pos) {
     m->reload_timer      = 0.0f;
     m->charge_timer      = 0.0f;
     m->spinup_timer      = 0.0f;
+    m->throw_charge      = 0.0f;
     m->burst_pending_rounds = 0;
     m->burst_pending_timer  = 0.0f;
     m->ability_cooldown  = 0.0f;

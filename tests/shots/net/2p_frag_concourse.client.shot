@@ -1,0 +1,62 @@
+# 2p_frag_concourse — CLIENT (slot 1). Mirrors host capture cadence.
+# Client also throws back, so both viewports show incoming + outgoing
+# arcs. Crucially, the CLIENT side is where the camera-snap bug shows
+# up most clearly (client predicts → server explosion arrives ~RTT/2
+# later → camera was snapping between predicted and server pos).
+
+window 1600 900
+out build/shots/net/2p_frag_concourse_client
+network connect 127.0.0.1:24320
+name ClientB
+map concourse
+
+loadout - "Pulse Rifle" "Frag Grenades" Light Standard
+
+spawn_at 1824 1100
+
+# Aim back at host
+aim 1024 1090
+
+at 130 press swap
+at 138 release swap
+
+# Client throws are STAGGERED between host's so each viewport sees
+# both grenades. Client throw 1 max charge, throw 2 medium,
+# throw 3 max.
+at 210 press fire
+at 270 release fire
+
+at 340 press fire
+at 375 release fire
+
+at 410 press fire
+at 470 release fire
+
+# Captures match the host's shared names so run_frag_concourse.sh
+# composes side-by-side automatically.
+at 150 shot t150_idle
+at 180 shot t180_post_swap
+
+at 220 shot t220_throw1_charging
+at 250 shot t250_throw1_launch
+at 270 shot t270_throw1_arc
+at 290 shot t290_throw1_descent
+at 310 shot t310_throw1_impact
+at 330 shot t330_throw1_linger
+
+at 315 shot t315_throw2_charging
+at 340 shot t340_throw2_launch
+at 370 shot t370_throw2_arc
+at 410 shot t410_throw2_impact
+
+at 420 shot t420_throw3_charging
+at 450 shot t450_throw3_launch
+at 480 shot t480_throw3_arc
+at 520 shot t520_throw3_impact
+at 540 shot t540_throw3_linger
+
+at 600 shot t600_done
+
+contact_sheet client_sheet cols 5
+
+at 660 end

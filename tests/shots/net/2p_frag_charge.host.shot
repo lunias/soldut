@@ -1,0 +1,87 @@
+# 2p_frag_charge — HOST (slot 0, left). M6 ship-prep.
+#
+# Hold-to-charge throw demo + duel. Host and client both spawn on
+# Aurora's long flat central floor (cols 50–73, y=2752 floor). Host
+# at x=1600, client at x=2200 — 600 px gap so both mechs read
+# clearly in each viewport at 1600×900 windowed.
+#
+# Both throw frag grenades at the other to demonstrate parabolic
+# physics: the lob bias rotates the launch up, 1.8× gravity brings
+# the grenade down on the target. Throws are staggered so both
+# viewports show incoming and outgoing arcs in the same shot. Shot
+# names are SHARED with the client script so the runner can paste
+# them side-by-side.
+#
+# Throw schedule (script ticks; world ticks lag ~60 due to lobby +
+# countdown elapsing before MATCH starts):
+#   Host    @ t=210 → 240    (30 t = 0.50 s hold → medium charge)
+#   Client  @ t=260 → 320    (60 t = 1.00 s hold → max charge)
+#   Host    @ t=380 → 440    (60 t = 1.00 s hold → max charge)
+#   Client  @ t=480 → 510    (30 t = 0.50 s hold → medium charge)
+#
+# 1.5 s fuse = 90 ticks; world-tick offset for booms:
+#   throw 1 boom ≈ script 330   (host's medium lands ~midpoint)
+#   throw 2 boom ≈ script 345   (client's max lands ~at host)
+#   throw 3 boom ≈ script 530   (host's max overshoots client)
+#   throw 4 boom ≈ script 595   (client's medium lands ~midpoint)
+
+window 1600 900
+out build/shots/net/2p_frag_charge_host
+network host 24310
+name HostA
+map aurora
+
+loadout - "Pulse Rifle" "Frag Grenades" Light Standard
+
+spawn_at 1600 2712
+peer_spawn 1 2200 2712
+
+aim 2200 2702
+
+# Swap to secondary so LMB → throw.
+at 130 press swap
+at 138 release swap
+
+# Throw 1 — medium charge → toward client B.
+at 210 press fire
+at 240 release fire
+
+# Throw 2 — max charge → toward client B again.
+at 380 press fire
+at 440 release fire
+
+# === SHARED-NAME CAPTURES ===
+# (Names describe the world event so host + client snapshots line up
+# in the side-by-side composite.)
+
+at 150 shot t150_idle
+at 180 shot t180_post_swap
+
+# Throw 1 (host medium): meter visible, launch, arc, descent, boom.
+at 230 shot t230_throw1_charging
+at 250 shot t250_throw1_launch
+at 270 shot t270_throw1_apex
+at 300 shot t300_throw1_descent
+at 330 shot t330_throw1_boom
+
+# Throw 2 (client max): client charging, launch, arc, boom.
+at 290 shot t290_throw2_charging
+at 320 shot t320_throw2_launch
+at 345 shot t345_throw2_apex_boom
+
+# Throw 3 (host max): long arc across the gap.
+at 430 shot t430_throw3_charging
+at 460 shot t460_throw3_launch
+at 500 shot t500_throw3_apex
+at 535 shot t535_throw3_boom
+
+# Throw 4 (client medium): short lob back.
+at 510 shot t510_throw4_launch
+at 560 shot t560_throw4_arc
+at 595 shot t595_throw4_boom
+
+at 660 shot t660_done
+
+contact_sheet host_sheet cols 4
+
+at 720 end

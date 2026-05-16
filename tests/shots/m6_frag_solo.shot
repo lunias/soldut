@@ -1,0 +1,82 @@
+# M6 ship-prep — single mech on reactor, frag-grenade physics
+# diagnostic. Simpler than the paired duel test so the arc, bounce,
+# and detonation read cleanly without a second mech in frame.
+#
+# Mech spawns mid-air at (600, 600), falls to reactor's central
+# floor, swaps to frag, throws one max-charge grenade horizontally
+# right. We capture tight-cadence frames around the throw so the
+# whole sequence is visible:
+#   - charging meter
+#   - launch (mid-air arc, lob bias visible)
+#   - apex
+#   - ground impact (first bounce)
+#   - roll
+#   - settled / detonate
+#   - explosion FX center
+#
+# Use this to verify the dying-frame fix (grenade sprite renders AT
+# the explosion center for one frame after detonate, instead of
+# vanishing a few px away).
+
+window 1920 1080
+seed   2 5
+out    build/shots/m6_frag_solo
+map    reactor
+# Reactor's open central pit (cols 30–80, no overhead). Spawn near
+# left of pit so a max-charge throw has 2500+ px of clear horizontal
+# space to traverse. Previous spawn at (600,600) put the mech on a
+# small platform with a ceiling only 50 px overhead — the throw hit
+# that ceiling immediately and never made it out into the open.
+spawn_at 1200 800
+# Frag in the SECONDARY slot (default chassis/armor/jet, primary kept
+# as Pulse Rifle so swap behavior matches the typical loadout).
+loadout - "Pulse Rifle" "Frag Grenades" Light Standard
+
+# Aim well to the right, slightly down — sets the "natural" throw
+# direction before the lob bias rotates it upward.
+aim 2800 900
+
+# Settle on the ground.
+at  60 shot t060_settled
+
+# Swap to secondary (frag is the default secondary).
+at  80 press swap
+at  88 release swap
+
+# Max-charge throw (60 ticks = 1.0 s hold → charge=1.0 → v=1680).
+at 120 press fire
+at 180 release fire
+
+# Tight capture cadence around the throw + flight + detonation.
+# Throw spawns at world tick ~180 (release tick); fuse 1.5 s = 90 ticks;
+# fuse-triggered detonation around tick 270.
+at 130 shot t130_charging_early
+at 160 shot t160_charging_late
+at 185 shot t185_launch
+at 200 shot t200_arc_rise
+at 215 shot t215_apex
+at 230 shot t230_descent
+at 240 shot t240_pre_impact
+at 243 shot t243_just_before_boom
+at 244 shot t244_boom_center
+at 246 shot t246_boom_plus_2
+at 250 shot t250_boom_plus_6
+at 260 shot t260_linger
+at 280 shot t280_camera_returning
+at 320 shot t320_settled
+
+# Second throw — short tap (10 ticks ≈ 0.17 s charge), straight
+# down at feet to see a short-lob immediate-roll case.
+at 360 aim 700 950
+at 380 press fire
+at 390 release fire
+at 395 shot t395_tap_launch
+at 420 shot t420_tap_bounce
+at 433 shot t433_tap_pre_boom
+at 436 shot t436_tap_boom_center
+at 440 shot t440_tap_boom_plus_4
+at 450 shot t450_tap_linger
+
+contact_sheet solo_sheet cols 5
+
+at 540 end

@@ -112,6 +112,49 @@ void weapons_predict_local_fire(World *w, int mid);
  * weapon. (Caller has already validated cooldown / ammo / etc.) */
 void weapons_spawn_projectiles(World *w, int mid, int weapon_id);
 
+/* M6 ship-prep — hold-to-charge throw (frag grenade). `charge_factor`
+ * ∈ [0, 1] is the fraction of `FRAG_CHARGE_MAX_SEC` the player held the
+ * fire button before releasing. Internally maps to a velocity multiplier
+ * over `wpn->projectile_speed_pxs` (see `FRAG_THROW_SPEED_MIN_MUL` /
+ * `_MAX_MUL`) — short tap lobs short, full charge throws far. Damage,
+ * AOE, drag, gravity, fuse are unchanged. Caller validates cooldown /
+ * ammo / CTF-carrier gates. */
+void weapons_spawn_throw_charged(World *w, int mid, int weapon_id,
+                                 float charge_factor);
+
+/* Hold-to-charge timings for WFIRE_THROW (frag grenade). */
+#define FRAG_CHARGE_MAX_SEC      1.0f   /* seconds to reach full power */
+#define FRAG_THROW_SPEED_MIN_MUL 0.5f   /* multiplier at 0% charge (quick tap) */
+#define FRAG_THROW_SPEED_MAX_MUL 2.4f   /* multiplier at 100% charge */
+
+/* Upward "lob" bias applied to the launch direction in
+ * weapons_spawn_throw_charged. Bias = MIN + (MAX-MIN) × charge_factor;
+ * 0.20..0.55 yields ~11°..29° of upward rotation at horizontal aim
+ * (renormalized into a unit vector, so launch speed is unchanged).
+ * The previous 0.15..0.40 range was too shallow — max-charge throws
+ * traced an almost-flat arc that couldn't clear a small wall right
+ * in front of the mech. 29° at max gives ~230 px apex height for a
+ * baseball-pitch arc that flies over typical platform walls. */
+#define FRAG_LOB_MIN_BIAS        0.20f
+#define FRAG_LOB_MAX_BIAS        0.55f
+
+/* Post-bounce velocity magnitude (px/s) below which a bouncy grenade
+ * detonates on the spot instead of sitting and waiting for the fuse.
+ * Without this, max-energy throws bounced 3-4 times and the final
+ * "grenade rests on the ground" frame ran for ~0.5 s before the
+ * fuse fired — read as a confusing "the grenade disappeared, then
+ * exploded" pause. Empirical: 80 px/s ≈ 1.3 px/tick, slow enough to
+ * be a settled grenade, fast enough that a still-rolling one keeps
+ * going. */
+#define FRAG_SETTLED_VMAG_PXS    80.0f
+
+/* Camera-linger window (ticks @ 60 Hz) after a grenade owned by the
+ * local mech detonates. Keeps `update_camera`'s focus biased toward
+ * `world.last_explosion_pos` for ~0.67 s so the player sees the sparks
+ * and impact AND the smooth-follow pan back home reads as a single
+ * continuous motion, not a snap. */
+#define FRAG_EXPLOSION_LINGER_TICKS 40
+
 /* Melee hit on the closest mech inside `range_px` of the firer's chest
  * along the aim direction. Backstab does ×2.5 damage. */
 void weapons_fire_melee(World *w, int mid, int weapon_id);

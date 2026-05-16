@@ -5,9 +5,255 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-16** (M6 P10 — ship-prep: soft ambient-zone
-boundaries + map polish). Soft-zone tunables added below the
-atmospherics block. M6 P09 notes still apply underneath.
+Last updated: **2026-05-16** (frag grenade: hold-to-charge throw +
+AOE buff). Camera smoothness fix and tiered explosion shake from
+earlier today still apply underneath. M6 P10 still applies underneath
+that.
+
+## Frag grenade — hold-to-charge throw + AOE buff
+
+User feedback after the camera-smoothness fix: "the frag grenade feels
+weak — you can't throw it very far, and there's no control."
+Worms-style fix.
+
+**Hold-to-charge throw** (`mech.c::mech_try_fire`,
+`weapons.c::weapons_spawn_throw_charged`,
+`render.c::draw_throw_charge_meter`).
+
+Press starts charging; release fires with velocity scaled by how long
+you held. The button is LMB when frag is in the active slot, RMB when
+frag is in the other slot — so muscle memory always says "press the
+button that would fire frag normally; hold longer to throw further."
+
+| Charge fraction | Speed multiplier | Effective px/s |
+|---|---|---|
+| 0.00 (instant tap) | 0.5× | 350 |
+| 0.50 (half hold)   | 1.25× | 875 |
+| 1.00 (full hold = `FRAG_CHARGE_MAX_SEC = 1.0 s`) | 2.0× | 1400 |
+
+`Mech.throw_charge` (float, seconds) accumulates while held and gated
+by cooldown / reload / ammo / CTF-carrier (no meter ticks during
+cooldown so the visual feedback for "next throw available" is clean).
+Reset to 0 on respawn + slot swap. Replicated implicitly via the
+input stream — server and client both run the same accumulator on
+identical inputs, so the local charge meter renders at the right
+length without a new snapshot field.
+
+`Mech.throw_charge` is updated server-side in `mech_try_fire`'s new
+charge block, and client-side (cosmetic-only, for the meter) in
+`mech.c::mech_predict_throw_charge` called from
+`simulate.c`'s non-authoritative branch. The existing legacy
+predict path (`weapons_predict_local_fire`) was setting
+`fire_cooldown` on LMB-held with frag active — that blocked the
+charge accumulator — so the client predict now skips WFIRE_THROW.
+
+**Charge meter** is drawn in world space from R_HAND in the aim
+direction, length scales with charge fraction (capped at
+`max_visual_len = 360 px` so a far reticle doesn't paint a huge
+streak), color ramps cyan → yellow → red. Local mech only —
+`throw_charge` isn't replicated so remote players don't see your
+charge tell (deliberate, can revisit if PvP playtest finds it
+costless).
+
+**AOE buff** (`weapons.c` weapon table):
+
+| Stat        | Before | After | Why |
+|-------------|--------|-------|-----|
+| `aoe_damage`   | 80   | **100**   | 3 grenades per round; a well-placed one should clear a small group |
+| `aoe_radius`   | 140  | **180**   | Wider blast rewards landing the throw |
+| `aoe_impulse`  | 55   | **65**    | Slight knockback bump scales with the bigger boom |
+| `projectile_speed_pxs` | 700 | 700 (baseline; charge multiplier owns the actual speed range 350..1400) |
+| `projectile_life_sec`  | 1.5 | 1.5 (unchanged — even max-charge 1400 px/s arrives well inside the fuse) |
+
+Mass Driver still has the highest single-shot AOE damage (130 dmg, 140
+px radius); the buffed Frag now has the LARGEST AOE radius in the
+game (180 px) at the cost of single-shot damage and the 3-per-round
+limit. Slots into the same "≥100 dmg → +0.60 shake" bucket as Mass
+Driver from earlier today, so a charged frag detonation reads chunky.
+
+**Throw physics — parabolic feel + ranged throws**
+(`weapons.c::weapons_spawn_throw_charged`, `projectile.c`).
+
+After the press-fire → hold-to-charge swap the user noted that the
+arc still didn't read as a throw, that throws didn't carry, and that
+grenades "disappeared then exploded somewhere else." Multi-pass tune:
+
+- **Lob bias** added to launch direction (`weapons_spawn_throw_charged`)
+  — rotates the velocity vector UP by `FRAG_LOB_MIN_BIAS` (0.15) at
+  quick tap and `FRAG_LOB_MAX_BIAS` (0.40) at max charge, so a horizontal
+  aim becomes ~9°–22° above horizontal. Grenade leaves UP-and-forward,
+  arcs over, falls — reads as a throw, not a shot. (Initial values
+  0.30/0.65 were too steep and routinely punched the grenade into low
+  ceilings — see reactor test.)
+- **Gravity scale** 1.0 → 1.3 — heavier than a bullet, light enough
+  that max-charge throws keep horizontal carry across ~1500 px before
+  the first ground hit.
+- **Drag** 0.4 → 0.2 — less air resistance so the grenade preserves
+  momentum through the flight.
+- **Max charge speed mul** `FRAG_THROW_SPEED_MAX_MUL` 2.0 → 2.4 (max
+  velocity 1400 → 1680 px/s).
+- **Bounce damping** softer — 0.45/0.65 → 0.70/0.90. Grenades skip
+  3-4 times across flat ground instead of dying on the first bounce.
+- **Settled-detonate** (`projectile.c`): when a post-bounce velocity
+  drops below `FRAG_SETTLED_VMAG_PXS` (80 px/s) the grenade detonates
+  on the spot instead of waiting out the rest of the fuse. Avoids the
+  "grenade rolls to a stop, sits half a second, then explodes" pause.
+- **Direct-mech-hit** (existing): bouncy grenades that strike a mech
+  bone at any point in flight (including post-bounce) bypass the
+  bounce branch and detonate immediately on contact.
+- **Dying-frame fix** (`projectile.c::detonate`): the grenade stays
+  `alive = 1` for one extra render frame after detonate AND
+  `render_prev` is snapped to `pos` — so the grenade sprite renders
+  AT the explosion center with the spark FX fanning out from the same
+  point, instead of vanishing one tick before the particles appear.
+  Kill happens at the top of `projectile_step` on the next tick.
+
+**Camera follow + explosion linger** (`render.c::update_camera`).
+
+Max-charge throws travel ~1500 px — comfortably outside the local
+mech's viewport. Without help the player heard the boom but didn't
+see it. update_camera now biases focus toward:
+
+1. The local mech's in-flight frag grenade (blend factor 0.80,
+   capped at 800 px shift — enough to keep the grenade clearly in
+   view; mech may drift to the edge or just off-screen during a
+   cross-map throw).
+2. After detonate, `World.last_explosion_pos` for the next
+   `FRAG_EXPLOSION_LINGER_TICKS` (40 ticks ≈ 0.67 s) — keeps the
+   camera on the impact so the sparks and shake register, then the
+   smooth-follow pans home in a single continuous motion.
+
+`detonate()` writes `last_explosion_pos` directly (not only inside
+`explosion_spawn`) so client-side bouncy grenades — which skip the
+predicted-explosion branch and wait for `NET_MSG_EXPLOSION` — still
+have a continuous camera focus. Without that, the client saw three
+transitions per throw (follow → snap to mech → snap to explosion
+when wire event arrived → snap back to mech). Now it's one
+transition (follow → linger → smooth pan home).
+
+| Tunable                          | Value      | Where                  |
+|----------------------------------|-----------:|------------------------|
+| `FRAG_CHARGE_MAX_SEC`            | 1.0 s      | `weapons.h`            |
+| `FRAG_THROW_SPEED_MIN_MUL`       | 0.5×       | `weapons.h`            |
+| `FRAG_THROW_SPEED_MAX_MUL`       | 2.4×       | `weapons.h`            |
+| `FRAG_LOB_MIN_BIAS`              | 0.15       | `weapons.h`            |
+| `FRAG_LOB_MAX_BIAS`              | 0.40       | `weapons.h`            |
+| `FRAG_SETTLED_VMAG_PXS`          | 80         | `weapons.h`            |
+| `FRAG_EXPLOSION_LINGER_TICKS`    | 40         | `weapons.h`            |
+| frag `projectile_grav_scale`     | 1.1        | `weapons.c`            |
+| frag `projectile_drag`           | 0.15       | `weapons.c`            |
+| frag `aoe_damage / radius`       | 100 / 180  | `weapons.c`            |
+| bounce damp perp / parallel      | 0.70 / 0.90 | `projectile.c`        |
+| camera grenade-follow blend / cap | 0.80 / 800 px | `render.c`           |
+| frag sprite                      | olive body + lever cap + 12 Hz pulsing fuse spark | `projectile.c::draw_frag_grenade_sprite` |
+
+**Client-side prediction for bouncy frag** (this round) — pre-fix,
+client never spawned local FX for bouncy AOE projectiles because the
+sim diverged from the server. That left a `RTT/2` window where the
+visible grenade was at `LOCAL_POS` but the FX (when wire event
+arrived) appeared at `SERVER_POS` and the camera linger jumped
+between the two. Now `detonate()` on the client predicts the FX +
+pushes an `EXPL_SRC_PREDICTED` record; `net.c::client_handle_explosion`
+finds the record and dedupes (no double-spawn, no `last_explosion_pos`
+overwrite). De-dupe window bumped 30 → 600 ticks so bouncy fuses
+(1.5 s) + bounce-path divergence + shot-mode local-tick drift all
+fit comfortably inside it. `detonate()` also writes
+`last_explosion_pos` directly (not only inside `explosion_spawn`),
+so even paths that skip the spawn keep camera continuity.
+
+**Tests**: paired-shot scaffold `tests/shots/net/run_frag_charge.sh`
+(9/9 PASS) — host + client both throw at each other on Aurora's flat
+floor (mechs visible in BOTH viewports via `peer_spawn`). Asserts
+charge factors tier, velocities scale, both peers receive 4+ wire
+explosion events.
+
+`tests/shots/net/run_frag_concourse.sh` (6/6 PASS) — actual grenade
+battle on Concourse with both peers throwing 3 grenades each.
+Verifies the new dedupe behavior: client predicts each AOE detonate,
+wire-receive matches against the predicted record, server's
+explosions appear AT the client-predicted positions (no jump), no
+double-spawned FX. Produces side-by-side composite at
+`build/shots/net/2p_frag_concourse_combined/` for visual review.
+
+Single-mech diagnostic `tests/shots/m6_frag_solo.shot` runs the same
+physics on Reactor's open central pit at 1920×1080 with tight per-
+tick captures around launch / arc / impact / linger / pan-back —
+useful for inspecting the grenade SPRITE (new olive body + lever
+cap + fuse spark) at maximum visual fidelity.
+
+Existing `run_frag_grenade.sh` (9/9 PASS) regex relaxed to match
+any AOE radius. `test-snapshot`, `test-mech-ik`, `test-pose-compute`,
+`test-ctf`, `test-pickups`, `test-damage-numbers`,
+`test-grapple-ceiling`, `test-frag-grenade`, `test-atmosphere-parity`,
+`test-map-share`, `test-spawn`, `test-prefs` all green.
+
+No protocol/wire changes (camera linger + dying-frame are pure
+client-side cosmetic state).
+
+## Camera smoothness fix — `render.c::update_camera`
+
+## Camera smoothness fix — `render.c::update_camera`
+
+User-reported regression on M6 P10 ship-prep builds: "the level shakes
+when walking left/right, and jetting feels like it's lagging." Two
+compounding root causes; one fix per layer in `update_camera`:
+
+1. **Camera follow ≠ what the renderer draws (sim-tick alpha
+   mismatch).** Every other particle is drawn at
+   `lerp(render_prev, pos, alpha)` — `update_camera` was reading raw
+   post-physics `pos_x/y[PELVIS]`. At any render-rate ≠ sim-rate (or
+   under WSL2 frame-pacing jitter at vsync 60 Hz), the mech's
+   on-screen position oscillated relative to the camera as `alpha`
+   cycled. Fix: `update_camera` now takes `alpha` and lerps the same
+   way the renderer does. Camera target tracks exactly what the mech
+   particle is rendered at.
+
+2. **Pelvis Y bobs with the gait → camera Y bobs → world bobs.**
+   `pose_compute`'s gait IK lifts the swing foot by `LIFT_H = 9 px`,
+   and `mech_post_physics_anchor` pulls the pelvis to
+   `foot_y_avg - chain_len`. Measured per-tick under
+   `tests/shots/m6_smoothness.shot`: raw pelvis Y oscillates **~5.8 px
+   peak-to-trough** every gait half-cycle on flat ground (e.g.,
+   919.11 ↔ 924.95 on Reactor). The MECH should bob (that's what the
+   pose was designed for); the WORLD should not. Fix: on grounded
+   `ANIM_STAND` / `ANIM_RUN`, `update_camera` uses
+   `max(L_foot_y, R_foot_y) - chain_len` as the Y focus — the lower
+   foot's Y is the actual ground surface, stable across the gait
+   cycle. `focus_y` measured at a rock-solid 920.0 ±0.3 across the
+   same run. JET / FALL / CROUCH / PRONE fall through to the lerped
+   pelvis Y (those poses move the pelvis to a non-standing height the
+   camera SHOULD follow).
+
+| Tunable                | Behavior | Where                              |
+|------------------------|----------|------------------------------------|
+| Camera X focus         | lerped pelvis_x (always)         | `render.c::update_camera` |
+| Camera Y focus (grounded STAND/RUN) | `max(L_foot_y,R_foot_y) - chain_len` (lerped) | same |
+| Camera Y focus (otherwise) | lerped pelvis_y                  | same |
+| Smooth-follow rate     | `k*6` (unchanged, ~167 ms time-constant) | same |
+| Cursor lookahead       | 80 px × 0.4 (unchanged)          | same |
+
+No protocol/wire changes. No sim changes (only the renderer's camera
+focus computation). Regression scaffold:
+`tests/shots/m6_smoothness.shot` (walks L/R + jets up + jets diagonal
+on Reactor; contact sheet captures the level Y as stable across the
+gait cycle).
+
+**Explosion shake tiered** (`projectile.c::explosion_spawn`) — after
+the camera-smoothness fix, big AOE weapons read "polite" against the
+new rock-steady world. Pre-tier value was a flat +0.40 for every
+detonation regardless of payload. Now three buckets by AOE damage:
+
+| Bucket   | Threshold     | Shake | Weapons                       |
+|----------|---------------|-------|-------------------------------|
+| Large    | `damage ≥100` | +0.60 | Mass Driver (130 dmg)         |
+| Medium   | `damage ≥ 50` | +0.50 | Frag Grenade (80 dmg)         |
+| Small    | `damage < 50` | +0.40 | Plasma Cannon, Micro-Rockets  |
+
+Decay still ×0.92/tick — even 0.60 falls below 0.10 in <0.5 s, so the
+impulse reads chunky on the hit and is gone before the next salvo.
+Per-fire shake (hitscan 0.02, projectile spawn 0.015) untouched.
+Tunable via `shake_scale` user pref / `--shake-scale F` (0..2, default
+1.0) at the render-side multiply, same as before.
 
 ## M6 P10 — Soft ambient-zone boundaries + map polish
 

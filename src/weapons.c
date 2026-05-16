@@ -147,9 +147,32 @@ static const Weapon g_weapons[WEAPON_COUNT] = {
         .recoil_impulse = 0.4f, .bink = 0.0f, .self_bink = 0.0f,
         .muzzle_offset = 16.0f,
         .projectile_kind = PROJ_FRAG_GRENADE,
+        /* M6 ship-prep — hold-to-charge throw + parabolic feel.
+         *
+         * `projectile_speed_pxs` is the BASELINE the charge multiplier
+         * scales — FRAG_THROW_SPEED_MIN_MUL × 700 = 350 px/s on a quick
+         * tap, MAX_MUL × 700 = 1680 px/s at full charge (max_mul 2.4).
+         *
+         * `grav_scale` 1.3: heavy enough to read as a thrown object that
+         * arcs visibly, light enough that max-charge throws cover real
+         * distance (~1500 px ground range across Aurora's central
+         * corridor). Earlier 1.8× scale clipped the range to ~700 px
+         * which felt anemic.
+         *
+         * `drag` 0.2: light air resistance so the grenade keeps its
+         * momentum across the arc. Earlier 0.5 was killing horizontal
+         * velocity inside ~0.5 s.
+         *
+         * Bouncy: detonation rules in projectile.c — direct mech hit
+         * (mid-flight or post-bounce) detonates immediately; settled
+         * bounce (post-bounce |v| < FRAG_SETTLED_VMAG_PXS) detonates on
+         * the spot so the grenade doesn't sit waiting for fuse.
+         *
+         * AOE damage 100, radius 180 — each round only carries 3
+         * grenades, so a well-placed one should clear a small area. */
         .projectile_speed_pxs = 700.0f, .projectile_life_sec = 1.5f,
-        .projectile_drag = 0.4f, .projectile_grav_scale = 1.0f,
-        .aoe_radius = 140.0f, .aoe_damage = 80.0f, .aoe_impulse = 55.0f,
+        .projectile_drag = 0.15f, .projectile_grav_scale = 1.1f,
+        .aoe_radius = 180.0f, .aoe_damage = 100.0f, .aoe_impulse = 65.0f,
         .bouncy = true,
     },
     [WEAPON_MICRO_ROCKETS] = {
@@ -579,7 +602,8 @@ void weapons_predict_local_fire(World *w, int mid) {
 /* ---- Projectile spawn paths ---------------------------------------- */
 
 static void spawn_one_projectile(World *w, int mid, const Weapon *wpn,
-                                 Vec2 origin, Vec2 dir, int weapon_id)
+                                 Vec2 origin, Vec2 dir, float speed,
+                                 int weapon_id)
 {
     ProjectileSpawn ps = {
         .kind = wpn->projectile_kind,
@@ -587,8 +611,7 @@ static void spawn_one_projectile(World *w, int mid, const Weapon *wpn,
         .owner_mech_id = mid,
         .owner_team = w->mechs[mid].team,
         .origin = origin,
-        .velocity = (Vec2){ dir.x * wpn->projectile_speed_pxs,
-                            dir.y * wpn->projectile_speed_pxs },
+        .velocity = (Vec2){ dir.x * speed, dir.y * speed },
         .damage = wpn->damage,
         .aoe_radius = wpn->aoe_radius,
         .aoe_damage = wpn->aoe_damage,
@@ -622,10 +645,12 @@ void weapons_spawn_projectiles(World *w, int mid, int weapon_id) {
             float ca = cosf(r), sa = sinf(r);
             Vec2 d = { dir.x * ca - dir.y * sa,
                        dir.x * sa + dir.y * ca };
-            spawn_one_projectile(w, mid, wpn, origin, d, weapon_id);
+            spawn_one_projectile(w, mid, wpn, origin, d,
+                                 wpn->projectile_speed_pxs, weapon_id);
         }
     } else {
-        spawn_one_projectile(w, mid, wpn, origin, dir, weapon_id);
+        spawn_one_projectile(w, mid, wpn, origin, dir,
+                             wpn->projectile_speed_pxs, weapon_id);
     }
 
     /* Tracer-style FX from the muzzle so spectators see the fire even
@@ -663,6 +688,88 @@ void weapons_spawn_projectiles(World *w, int mid, int weapon_id) {
     SHOT_LOG("t=%llu spawn_proj mech=%d wpn=%d kind=%d dir=(%.2f,%.2f) v=%.0f",
              (unsigned long long)w->tick, mid, weapon_id,
              wpn->projectile_kind, dir.x, dir.y, wpn->projectile_speed_pxs);
+}
+
+/* M6 ship-prep — hold-to-charge throw. Same spawn structure as
+ * weapons_spawn_projectiles, but the projectile velocity is scaled by
+ * `charge_factor` so a quick tap lobs and a held throw flies. Used
+ * exclusively by mech_try_fire's WFIRE_THROW charge path. */
+void weapons_spawn_throw_charged(World *w, int mid, int weapon_id,
+                                 float charge_factor) {
+    Mech *me = &w->mechs[mid];
+    const Weapon *wpn = weapon_def(weapon_id);
+    if (!wpn || wpn->fire != WFIRE_THROW) return;
+
+    if (charge_factor < 0.0f) charge_factor = 0.0f;
+    if (charge_factor > 1.0f) charge_factor = 1.0f;
+    float speed_mul = FRAG_THROW_SPEED_MIN_MUL +
+                      (FRAG_THROW_SPEED_MAX_MUL - FRAG_THROW_SPEED_MIN_MUL)
+                      * charge_factor;
+    float speed = wpn->projectile_speed_pxs * speed_mul;
+
+    Vec2 hand = mech_hand_pos(w, mid);
+    Vec2 dir  = apply_self_bink(w, me, mech_aim_dir(w, mid));
+
+    /* Upward lob bias — pivots the launch direction toward "up" so the
+     * grenade leaves the hand UP-and-forward rather than straight at
+     * the cursor. Combined with the 1.8× gravity scale this yields a
+     * pronounced parabolic arc the player reads as a throw (vs. a
+     * shot). Lob amount scales with charge so a quick tap is a flat
+     * lob (mostly direct, useful for point-blank) while max charge is
+     * a high arc that comes down on a distant target.
+     *
+     * Math: build a biased vector (dir.x, dir.y - lob_amount) and
+     * renormalize. When the player aims straight up (dir.y ≈ -1) the
+     * bias is along the same axis so the throw direction doesn't
+     * change. When the player aims straight down (dir.y ≈ +1) the
+     * bias subtracts magnitude but stays in the same direction after
+     * renormalization — straight-down throws still go down. Only
+     * horizontal / shallow-down aims get the visible lift. */
+    {
+        float lob_amount = FRAG_LOB_MIN_BIAS +
+                           (FRAG_LOB_MAX_BIAS - FRAG_LOB_MIN_BIAS) * charge_factor;
+        float lx = dir.x;
+        float ly = dir.y - lob_amount;
+        float lmag = sqrtf(lx * lx + ly * ly);
+        if (lmag > 1e-4f) {
+            dir.x = lx / lmag;
+            dir.y = ly / lmag;
+        }
+    }
+
+    const WeaponSpriteDef *wsp = weapon_sprite_def(weapon_id);
+    Vec2 origin = weapon_muzzle_world(hand, dir, wsp, wpn->muzzle_offset);
+
+    spawn_one_projectile(w, mid, wpn, origin, dir, speed, weapon_id);
+
+    /* Mirror weapons_spawn_projectiles' post-spawn FX so the throw
+     * reads identically modulo velocity: tracer + audio + recoil +
+     * cooldown + small spawn-shake (the BIG shake is the AOE detonation,
+     * already tiered in projectile.c::explosion_spawn). */
+    Vec2 spark_end = { origin.x + dir.x * 80.0f, origin.y + dir.y * 80.0f };
+    fx_spawn_tracer(&w->fx, origin, spark_end);
+    audio_play_at(audio_sfx_for_weapon(weapon_id), origin);
+
+    apply_bink_along_segment(w, mid, origin, spark_end, wpn->bink, 80.0f);
+    if (wpn->self_bink > 0.0f) {
+        float sign = ((pcg32_next(w->rng) & 1u) ? 1.0f : -1.0f);
+        me->aim_bink += sign * wpn->self_bink;
+    }
+
+    int hand_idx = me->particle_base + PART_R_HAND;
+    w->particles.pos_x[hand_idx] -= dir.x * wpn->recoil_impulse;
+    w->particles.pos_y[hand_idx] -= dir.y * wpn->recoil_impulse;
+    me->recoil_kick = 1.0f;
+    me->fire_cooldown = wpn->fire_rate_sec;
+    w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.015f);
+    for (int k = 0; k < 3; ++k) {
+        fx_spawn_spark(&w->fx, origin,
+            (Vec2){ dir.x * 350.0f, dir.y * 350.0f }, w->rng);
+    }
+
+    SHOT_LOG("t=%llu spawn_throw mech=%d wpn=%d charge=%.2f v=%.0f dir=(%.2f,%.2f)",
+             (unsigned long long)w->tick, mid, weapon_id,
+             (double)charge_factor, (double)speed, dir.x, dir.y);
 }
 
 /* ---- Melee --------------------------------------------------------- */

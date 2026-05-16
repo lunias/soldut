@@ -1,0 +1,70 @@
+# 2p_frag_concourse — HOST (slot 0). User-requested concourse
+# grenade battle. Two mechs spawn ~800 px apart on the concourse
+# main floor, both throwing frags at each other across the gap.
+# Used to verify:
+#   - Camera smoothly follows each grenade
+#   - Single continuous transition (no follow → mech → explosion → mech)
+#   - Explosion FX lands at the visible grenade position
+#   - Max-charge throws actually have range/clearance
+
+window 1600 900
+out build/shots/net/2p_frag_concourse_host
+network host 24320
+name HostA
+map concourse
+
+loadout - "Pulse Rifle" "Frag Grenades" Light Standard
+
+# Concourse main floor ~y=1100 (from existing shot tests).
+# Host on left, client 800 px right (both within central play area).
+spawn_at 1024 1100
+peer_spawn 1 1824 1100
+
+# Aim at client
+aim 1824 1090
+
+at 130 press swap
+at 138 release swap
+
+# Throw 1 — MAX charge → arc toward client.
+at 180 press fire
+at 240 release fire
+
+# Throw 2 — MEDIUM charge → second wave.
+at 290 press fire
+at 325 release fire
+
+# Throw 3 — MAX charge → finisher.
+at 380 press fire
+at 440 release fire
+
+# Captures (shared names with client for side-by-side composite).
+at 150 shot t150_idle
+at 180 shot t180_post_swap
+
+# Throw 1: charging → flight → arc → impact + boom + linger.
+at 220 shot t220_throw1_charging
+at 250 shot t250_throw1_launch
+at 270 shot t270_throw1_arc
+at 290 shot t290_throw1_descent
+at 310 shot t310_throw1_impact
+at 330 shot t330_throw1_linger
+
+# Throw 2: medium charge.
+at 315 shot t315_throw2_charging
+at 340 shot t340_throw2_launch
+at 370 shot t370_throw2_arc
+at 410 shot t410_throw2_impact
+
+# Throw 3: max charge again.
+at 420 shot t420_throw3_charging
+at 450 shot t450_throw3_launch
+at 480 shot t480_throw3_arc
+at 520 shot t520_throw3_impact
+at 540 shot t540_throw3_linger
+
+at 600 shot t600_done
+
+contact_sheet host_sheet cols 5
+
+at 660 end

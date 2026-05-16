@@ -2360,10 +2360,19 @@ static void client_handle_explosion(NetState *ns, const uint8_t *body, int blen,
         pp->exploded[i] = 1;
     }
 
-    /* wan-fixes-21 — de-dup against a recent CLIENT prediction. */
+    /* wan-fixes-21 — de-dup against a recent CLIENT prediction.
+     * M6 ship-prep: window bumped 30 → 600 ticks to cover bouncy frag
+     * fuses (1.5 s) plus client/server bounce-path divergence plus
+     * shot-mode local-tick drift (independent client world.tick when
+     * not running snapshots in lockstep). Without the bigger window
+     * the wire event would re-spawn the FX (and overwrite
+     * last_explosion_pos), causing the camera to jump from the
+     * client-predicted impact point to the server's impact point —
+     * the bug the user described as "camera goes to explosion area
+     * (sometimes wrong) then back to the mech." */
     ExplosionRecord *pred = explosion_record_find_consume(
         &g->world, (int)owner, (int)weapon,
-        EXPL_SRC_PREDICTED, /*max_age_ticks*/30);
+        EXPL_SRC_PREDICTED, /*max_age_ticks*/600);
     if (pred) {
         pred->valid = false;  /* consume; don't re-match a later event */
         return;

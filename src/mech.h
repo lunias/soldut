@@ -224,6 +224,17 @@ void mech_apply_environmental_damage(World *w, int mech_id, float dt);
  * hits. Returns true if a shot left the barrel. */
 bool mech_try_fire(World *w, int mech_id, ClientInput in);
 
+/* M6 ship-prep — client-side throw-charge predictor (cosmetic only —
+ * does NOT fire). Pure clients don't run `mech_try_fire` (only the
+ * authoritative server does), so `m->throw_charge` wouldn't update on
+ * their side and the local charge meter would never render. Call this
+ * each tick on the LOCAL mech from the client's simulate path to keep
+ * the local accumulator in sync with what the server is computing from
+ * the same inputs. Server-side fire still uses its own latched
+ * accumulator (which produces the same value because inputs are
+ * replicated). */
+void mech_predict_throw_charge(World *w, int mech_id, ClientInput in);
+
 /* Called by simulate at the end of a tick — copies the just-consumed
  * input bitmask into m->prev_buttons so next tick's mech_step_drive
  * and mech_try_fire can do edge detection. Doing this at end-of-tick
