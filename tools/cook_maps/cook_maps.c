@@ -332,19 +332,24 @@ static void build_foundry(void) {
     tile_fill(49, H - 9, 51, H - 4, SOLID);
 
     /* ---- Slope polygons ---- */
-    const int floor_y   = t2w(H - 4);
-    const int plat_top  = t2w(H -  9);
+    const int floor_y      = t2w(H - 4);
+    const int plat_top     = t2w(H -  9);   /* cover-wall TOP / platform BOTTOM */
+    const int spawn_surf_y = t2w(H - 10);   /* spawn platform TOP (walking surface) */
 
-    /* 45° spawn ramps — 4 tiles run × 4 tiles rise from floor to
-     * platform top. Left side: foot at (8, floor) up to (12, plat). */
+    /* Spawn ramps — foot on the floor, apex at the platform's TOP-LEFT
+     * corner so the slope surface joins the platform's walking surface
+     * with no step in between. 5-tile run × 6-tile rise (~50°). Earlier
+     * builds used `plat_top` (the platform's BOTTOM edge) which left a
+     * 32-px wall at the top of each ramp — the "stuck at the apex" bug
+     * the user hit on foundry. M6 P10 (2026-05-16). */
     push_tri(POLY_KIND_SOLID,
-             t2w(8),  floor_y,
-             t2w(12), plat_top,
+             t2w(7),  floor_y,
+             t2w(12), spawn_surf_y,
              t2w(12), floor_y);
-    /* Right side mirror — foot at (W-8, floor), peak at (W-12, plat). */
+    /* Right side mirror. */
     push_tri(POLY_KIND_SOLID,
-             t2w(W - 12), plat_top,
-             t2w(W -  8), floor_y,
+             t2w(W - 12), spawn_surf_y,
+             t2w(W -  7), floor_y,
              t2w(W - 12), floor_y);
 
     /* 30° center hill — 3 tiles wide × 1 tile tall per slope, sits on
