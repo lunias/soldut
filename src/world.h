@@ -383,6 +383,9 @@ typedef struct {
     float     reload_timer;       /* seconds; >0 = reloading */
     float     charge_timer;       /* Rail Cannon: charges before fire */
     float     spinup_timer;       /* Microgun: spin-up before sustained fire */
+    float     throw_charge;       /* WFIRE_THROW hold-to-charge accumulator (seconds);
+                                   * fires on release-edge with velocity scaled by the
+                                   * accumulated fraction. Zeroed on respawn / cancel. */
 
     /* P11 — last-fired slot tracking (purely render-side). When the
      * inactive slot fires via BTN_FIRE_SECONDARY (RMB), the renderer
@@ -1131,6 +1134,16 @@ typedef struct World {
      * ticks. Used to punctuate kills. (Render keeps drawing; only the
      * world clock pauses.) */
     int      hit_pause_ticks;
+
+    /* M6 ship-prep — most recent explosion bookkeeping for camera
+     * linger. update_camera() biases focus toward `last_explosion_pos`
+     * for FRAG_EXPLOSION_LINGER_TICKS after the event so the player
+     * sees the FX, not just hears the SFX. Updated server-side by
+     * explosion_spawn() and client-side by client_handle_explosion()
+     * so both prediction and remote-event paths populate it. */
+    Vec2     last_explosion_pos;
+    uint64_t last_explosion_tick;
+    int      last_explosion_owner_mech;
 
     /* Most recent hit feed line (kill-feed at M1 is a single string). */
     char     last_event[64];

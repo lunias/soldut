@@ -1,0 +1,55 @@
+# 2p_frag_charge — CLIENT (slot 1, right). Pair to .host.shot.
+# Same capture cadence + shared names so run_frag_charge.sh composes
+# host (left) ↔ client (right) side-by-side images that show the
+# same world tick from both viewports.
+
+window 1600 900
+out build/shots/net/2p_frag_charge_client
+network connect 127.0.0.1:24310
+name ClientB
+map aurora
+
+loadout - "Pulse Rifle" "Frag Grenades" Light Standard
+
+spawn_at 2200 2712
+
+aim 1600 2702
+
+at 130 press swap
+at 138 release swap
+
+# Throw 1 (client side): client throws BACK at host.
+at 260 press fire
+at 320 release fire
+
+# Throw 2 (client side): medium charge back at host.
+at 480 press fire
+at 510 release fire
+
+at 150 shot t150_idle
+at 180 shot t180_post_swap
+
+at 230 shot t230_throw1_charging
+at 250 shot t250_throw1_launch
+at 270 shot t270_throw1_apex
+at 300 shot t300_throw1_descent
+at 330 shot t330_throw1_boom
+
+at 290 shot t290_throw2_charging
+at 320 shot t320_throw2_launch
+at 345 shot t345_throw2_apex_boom
+
+at 430 shot t430_throw3_charging
+at 460 shot t460_throw3_launch
+at 500 shot t500_throw3_apex
+at 535 shot t535_throw3_boom
+
+at 510 shot t510_throw4_launch
+at 560 shot t560_throw4_arc
+at 595 shot t595_throw4_boom
+
+at 660 shot t660_done
+
+contact_sheet client_sheet cols 4
+
+at 720 end

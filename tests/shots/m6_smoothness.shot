@@ -1,0 +1,67 @@
+# M6 smoothness verification — walks left/right + jets to expose any
+# remaining mech-vs-world jitter after the camera-follow fix.
+#
+# The renderer reads `update_camera`'s SHOT_LOG line every tick — grep
+# for "cam t=" in the .log to see:
+#   - raw_pel.y       : post-physics pelvis (what the OLD code followed)
+#   - lerp_pel.y      : the lerped pelvis (what the renderer draws)
+#   - L_foot/R_foot   : the per-tick foot Y (oscillate with the gait)
+#   - focus.y         : what update_camera now feeds smooth-follow
+#                       (grounded RUN/STAND → stable; airborne → lerp_pel)
+#   - cam_prev.y      : last frame's camera target Y
+#   - grounded / anim : context
+#
+# Expect: focus.y stable while running on flat ground, even as L/R_foot
+# alternate between planted (chain_below) and lifted (chain_below-9).
+# Expect: raw_pel.y still oscillates by ~4.5 px every gait half-cycle.
+
+window 1280 720
+seed   1 1
+out    build/shots/m6_smoothness
+map    reactor
+spawn_at 600 600
+aim    900 600
+
+# Settle on the ground.
+at  30 shot t030_idle
+
+# Walk right for ~2 seconds (multiple gait cycles).
+at  60 press right
+at  90 shot t090_walk_a
+at 120 shot t120_walk_b
+at 150 shot t150_walk_c
+at 180 release right
+
+# Settle again.
+at 210 shot t210_settled
+
+# Walk left.
+at 240 press left
+at 270 shot t270_walk_left_a
+at 300 shot t300_walk_left_b
+at 330 release left
+
+# Settle.
+at 360 shot t360_settled
+
+# Jet straight up.
+at 390 press jet
+at 420 shot t420_jet_up_a
+at 450 shot t450_jet_up_b
+at 480 release jet
+
+# Descend + land.
+at 540 shot t540_landed
+
+# Jet diagonally.
+at 570 press right
+at 570 press jet
+at 600 shot t600_jet_right_a
+at 630 shot t630_jet_right_b
+at 660 release right
+at 660 release jet
+at 720 shot t720_after
+
+contact_sheet smoothness_sheet cols 4
+
+at 780 end

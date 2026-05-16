@@ -247,8 +247,19 @@ Vec2 renderer_screen_to_world(const Renderer *r, Vec2 screen) {
 }
 
 /* Smoothed follow + screen-shake. Camera target gravitates toward the
- * local mech, with a small lookahead toward the cursor. */
-static void update_camera(Renderer *r, World *w, int sw, int sh, float dt) {
+ * local mech, with a small lookahead toward the cursor.
+ *
+ * `alpha` is the sim-tick interp factor (same one the renderer feeds to
+ * `particle_render_pos`). update_camera follows the LERPED pelvis
+ * position — not the raw post-physics `pos_x[]` — so the camera target
+ * tracks exactly what the mech particle is rendered at. Reading raw
+ * `pos_*` here while the mech draws at `lerp(prev, pos, alpha)` produced
+ * a per-frame screen-space offset that varied with `alpha`: at any
+ * render rate ≠ sim rate (and even at vsync 60 Hz under WSL2 frame-
+ * pacing jitter) the mech-vs-world relative position oscillated, which
+ * the eye reads as "the level is shaking" during walk/jet. */
+static void update_camera(Renderer *r, World *w, int sw, int sh,
+                          float dt, float alpha) {
     Vec2 focus;
     if (w->local_mech_id >= 0) {
         /* M6 — follow the PELVIS, not the chest. Pelvis is the
@@ -260,11 +271,46 @@ static void update_camera(Renderer *r, World *w, int sw, int sh, float dt) {
          * even though the mech's physical position hasn't changed —
          * pelvis is the right reference. */
         const Mech *lm = &w->mechs[w->local_mech_id];
-        int p_idx = lm->particle_base + PART_PELVIS;
-        focus = (Vec2){
-            w->particles.pos_x[p_idx],
-            w->particles.pos_y[p_idx],
-        };
+        int b = lm->particle_base;
+        int p_idx = b + PART_PELVIS;
+        const ParticlePool *pp = &w->particles;
+
+        float px = pp->render_prev_x[p_idx] +
+                   (pp->pos_x[p_idx] - pp->render_prev_x[p_idx]) * alpha;
+        float py = pp->render_prev_y[p_idx] +
+                   (pp->pos_y[p_idx] - pp->render_prev_y[p_idx]) * alpha;
+
+        /* For Y on grounded STAND / RUN, follow a stable "ground
+         * reference" (chain length above the LOWER foot) rather than
+         * the pelvis itself. pose_compute's gait IK lifts the swing
+         * foot by LIFT_H (9 px), and mech_post_physics_anchor pulls
+         * the pelvis to `foot_y_avg - chain_len` — so pelvis_y
+         * oscillates by ~4.5 px every gait half-cycle. The MECH
+         * should bob (that's what the pose was designed for); the
+         * WORLD should not. Decoupling Y here keeps the camera stable
+         * while the mech bounces naturally inside it. The lower
+         * foot's Y is the actual ground surface — stable across the
+         * gait cycle. JET / CROUCH / PRONE / FALL fall through to
+         * the raw lerped pelvis since their pose puts the pelvis at
+         * a non-standing height. */
+        float focus_y = py;
+        if (lm->alive && lm->grounded &&
+            (lm->anim_id == ANIM_STAND || lm->anim_id == ANIM_RUN)) {
+            int lf = b + PART_L_FOOT;
+            int rf = b + PART_R_FOOT;
+            float lf_y = pp->render_prev_y[lf] +
+                         (pp->pos_y[lf] - pp->render_prev_y[lf]) * alpha;
+            float rf_y = pp->render_prev_y[rf] +
+                         (pp->pos_y[rf] - pp->render_prev_y[rf]) * alpha;
+            /* Lower foot in world space = larger pos_y (Y axis points
+             * down). That's the planted-foot Y; the swing foot's Y is
+             * smaller (lifted). */
+            float ground_y = (lf_y > rf_y) ? lf_y : rf_y;
+            const Chassis *ch = mech_chassis((ChassisId)lm->chassis_id);
+            focus_y = ground_y - (ch->bone_thigh + ch->bone_shin);
+        }
+
+        focus = (Vec2){ px, focus_y };
     } else {
         focus = (Vec2){0, 0};
     }
@@ -276,6 +322,68 @@ static void update_camera(Renderer *r, World *w, int sw, int sh, float dt) {
         float lookahead = 80.0f;
         focus.x += (look_dir.x / L) * lookahead * 0.4f;
         focus.y += (look_dir.y / L) * lookahead * 0.4f;
+    }
+
+    /* M6 ship-prep — grenade follow. When the local mech has a thrown
+     * frag grenade in flight (or has just exploded one), bias the focus
+     * point HEAVILY toward it so the player sees the arc, bounce, and
+     * detonation. Without this, max-charge throws (~1700 px range)
+     * regularly land off-screen and the player only hears the explosion
+     * + sees particles drift back into view from off-screen, which
+     * reads as "the boom happened in the wrong place."
+     *
+     * Two sources, in priority order:
+     *   1. An in-flight grenade owned by the local mech (live tracking).
+     *   2. The most recent local-owned explosion within the linger
+     *      window (FRAG_EXPLOSION_LINGER_TICKS) — keeps the camera on
+     *      the impact for ~0.4 s after the grenade dies so the sparks
+     *      and shake are clearly visible BEFORE the camera pans home.
+     *
+     * Blend factor 0.80 + cap 800 px puts the focus comfortably near
+     * the grenade for typical throws; on a max-charge cross-map throw
+     * the mech may drift to the very edge or just off-screen for a
+     * beat, which is the accepted trade — the action IS the grenade. */
+    Vec2 follow_pt = focus;
+    bool follow_active = false;
+    if (w->local_mech_id >= 0) {
+        const ProjectilePool *pjp = &w->projectiles;
+        for (int pi = 0; pi < pjp->count; ++pi) {
+            if (!pjp->alive[pi]) continue;
+            if (pjp->kind[pi] != PROJ_FRAG_GRENADE) continue;
+            if ((int)pjp->owner_mech[pi] != w->local_mech_id) continue;
+            follow_pt.x = pjp->render_prev_x[pi] +
+                          (pjp->pos_x[pi] - pjp->render_prev_x[pi]) * alpha;
+            follow_pt.y = pjp->render_prev_y[pi] +
+                          (pjp->pos_y[pi] - pjp->render_prev_y[pi]) * alpha;
+            follow_active = true;
+            break;
+        }
+        if (!follow_active &&
+            w->last_explosion_owner_mech == w->local_mech_id &&
+            w->tick >= w->last_explosion_tick &&
+            (w->tick - w->last_explosion_tick) <= FRAG_EXPLOSION_LINGER_TICKS)
+        {
+            follow_pt = w->last_explosion_pos;
+            follow_active = true;
+        }
+    }
+    if (follow_active) {
+        float dx_g = follow_pt.x - focus.x;
+        float dy_g = follow_pt.y - focus.y;
+        float gdist = sqrtf(dx_g * dx_g + dy_g * dy_g);
+        if (gdist > 1.0f) {
+            /* Bumped 0.80 / 800 → 0.95 / 1400 so the camera stays on
+             * the grenade even for long max-charge throws. The mech
+             * may drop fully off-screen for the brief duration of
+             * the throw — that's the accepted trade now: the player
+             * is throwing, the grenade IS the action, follow it. */
+            const float kFollowFrac  = 0.95f;
+            const float kFollowMaxPx = 1400.0f;
+            float shift = gdist * kFollowFrac;
+            if (shift > kFollowMaxPx) shift = kFollowMaxPx;
+            focus.x += (dx_g / gdist) * shift;
+            focus.y += (dy_g / gdist) * shift;
+        }
     }
 
     /* Smooth-follow toward focus. */
@@ -1466,6 +1574,67 @@ static void draw_pickups(const PickupPool *pool, double now_s) {
 
 /* ---- Frame --------------------------------------------------------- */
 
+/* M6 ship-prep — hold-to-charge throw indicator. Drawn in world space
+ * (inside BeginMode2D) only for the LOCAL mech, only while
+ * `m->throw_charge > 0`. A line grows from the lerped R_HAND in the
+ * aim direction; length scales with the charge fraction and is capped
+ * at `max_visual_len` so a far reticle doesn't paint a huge streak
+ * across the map. Color ramps cyan → yellow → red to telegraph that
+ * full charge is imminent. Local-only because `throw_charge` is not
+ * replicated (snapshot would have to carry it for remote tells; not
+ * worth the wire bytes at v1). */
+static void draw_throw_charge_meter(const World *w, float alpha) {
+    if (w->local_mech_id < 0) return;
+    const Mech *m = &w->mechs[w->local_mech_id];
+    if (!m->alive || m->is_dummy) return;
+    if (m->throw_charge <= 0.0f) return;
+
+    int rh_idx = m->particle_base + PART_R_HAND;
+    const ParticlePool *pp = &w->particles;
+    float hx = pp->render_prev_x[rh_idx] +
+               (pp->pos_x[rh_idx] - pp->render_prev_x[rh_idx]) * alpha;
+    float hy = pp->render_prev_y[rh_idx] +
+               (pp->pos_y[rh_idx] - pp->render_prev_y[rh_idx]) * alpha;
+
+    float dx = m->aim_world.x - hx;
+    float dy = m->aim_world.y - hy;
+    float dist = sqrtf(dx * dx + dy * dy);
+    if (dist < 1.0f) return;
+    float ux = dx / dist;
+    float uy = dy / dist;
+
+    float c = m->throw_charge / FRAG_CHARGE_MAX_SEC;
+    if (c > 1.0f) c = 1.0f;
+
+    const float max_visual_len = 360.0f;
+    float len = fminf(dist, max_visual_len) * c;
+    float ex = hx + ux * len;
+    float ey = hy + uy * len;
+
+    Color col;
+    if (c < 0.5f) {
+        float t = c * 2.0f;
+        col = (Color){
+            (uint8_t)(80 + 175.0f * t),
+            (uint8_t)220,
+            (uint8_t)(255 - 200.0f * t),
+            230,
+        };
+    } else {
+        float t = (c - 0.5f) * 2.0f;
+        col = (Color){
+            255,
+            (uint8_t)(220 - 180.0f * t),
+            (uint8_t)(50 - 50.0f * t),
+            230,
+        };
+    }
+
+    float thick = 3.0f + 3.0f * c;
+    DrawLineEx((Vector2){ hx, hy }, (Vector2){ ex, ey }, thick, col);
+    DrawCircleV((Vector2){ ex, ey }, 3.0f + 4.0f * c, col);
+}
+
 /* World pass — every world-space draw call lives here so both the
  * post-process and the no-shader fallback emit the same scene. P13
  * threads sw/sh so the screen-space parallax + foreground silhouettes
@@ -1530,6 +1699,10 @@ static void draw_world_pass(Renderer *r, World *w, float alpha,
              * sits on top of the arm and launcher. */
             draw_grapple_rope(w, i, alpha, off);
         }
+        /* M6 ship-prep — hold-to-charge throw meter. Sits between
+         * mechs and projectiles so it reads on top of the body silhouette
+         * but under tracers / FX of any concurrent fire. */
+        draw_throw_charge_meter(w, alpha);
         projectile_draw(&w->projectiles, alpha);
         fx_draw(&w->fx, alpha);
         /* P13 — BACKGROUND polygons sit on top of mechs as alpha-blended
@@ -1587,7 +1760,7 @@ void renderer_draw_frame(Renderer *r, World *w,
     float cam_dt = (r->cam_dt_override > 0.0f)
                    ? r->cam_dt_override
                    : (GetFrameTime() > 0 ? GetFrameTime() : 1.0f / 60.0f);
-    update_camera(r, w, internal_w, internal_h, cam_dt);
+    update_camera(r, w, internal_w, internal_h, cam_dt, alpha);
 
     /* Cache cursor positions for HUD + camera lookahead. The conversion
      * goes window → internal (via blit_* set above) → world (via the
@@ -1617,7 +1790,7 @@ void renderer_draw_frame(Renderer *r, World *w,
          * shader shape. */
         BeginDrawing();
             ClearBackground((Color){12, 14, 18, 255});
-            update_camera(r, w, window_w, window_h, 0.0f);
+            update_camera(r, w, window_w, window_h, 0.0f, alpha);
             draw_world_pass(r, w, alpha, local_visual_offset,
                             window_w, window_h);
             hud_draw(w, window_w, window_h, cursor_screen, r->camera);

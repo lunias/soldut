@@ -6,6 +6,7 @@
 #include "mech.h"
 #include "particle.h"
 #include "snapshot.h"
+#include "weapons.h"
 
 #include <math.h>
 #include <string.h>
@@ -117,6 +118,41 @@ static void detonate(World *w, int i) {
     ProjectilePool *p = &w->projectiles;
     if (p->exploded[i]) return;
     p->exploded[i] = 1;
+    /* M6 ship-prep — keep the grenade ALIVE for one more render frame
+     * after detonation so the player sees the grenade sprite AT the
+     * explosion center, with the spark/smoke FX fanning out from the
+     * same point. Pre-fix the projectile was marked dead the same tick
+     * the explosion spawned, leaving a few render frames where the
+     * sprite was already gone but the particles were still expanding —
+     * read as "grenade disappeared, then a delayed explosion appeared
+     * somewhere else" (because the sparks center is the only spatial
+     * cue, and it lerps with alpha against an already-dead source).
+     *
+     * Snap render_prev to pos so the next frame's lerp(prev, pos,
+     * alpha) collapses to pos regardless of alpha — grenade renders
+     * AT the explosion center, no offset. The kill happens at the top
+     * of projectile_step on the following tick (exploded && alive →
+     * alive = 0). */
+    p->render_prev_x[i] = p->pos_x[i];
+    p->render_prev_y[i] = p->pos_y[i];
+
+    /* M6 ship-prep — camera linger record. Set HERE (not only inside
+     * explosion_spawn) so the client-side path also gets it. On a
+     * client, bouncy AOE projectiles skip the predicted-explosion
+     * branch below (per the wan-fixes-10 comment: bouncy + fuse paths
+     * diverge from the server by hundreds of pixels). That left a
+     * ~RTT/2 window where the grenade was dead, the server's
+     * NET_MSG_EXPLOSION hadn't arrived yet, and the camera had no
+     * focus point — so it snapped back to the mech, then SNAPPED again
+     * to the explosion when the wire event arrived, then snapped back
+     * to the mech when linger expired. Setting last_explosion_pos at
+     * detonate gives the camera a continuous focus point from the
+     * moment the grenade fizzles. */
+    if (p->aoe_radius[i] > 0.0f) {
+        w->last_explosion_pos = (Vec2){ p->pos_x[i], p->pos_y[i] };
+        w->last_explosion_tick = w->tick;
+        w->last_explosion_owner_mech = (int)p->owner_mech[i];
+    }
     /* wan-fixes-10 (server) / wan-fixes-21 (client) — explosion visual
      * placement.
      *
@@ -146,19 +182,30 @@ static void detonate(World *w, int i) {
                 p->aoe_impulse[i],
                 (int)p->owner_mech[i], (int)p->owner_team[i],
                 (int)p->weapon_id[i]);
-        } else if (!p->bouncy[i]) {
-            /* Predict only for BALLISTIC AOE projectiles (Mass Driver
-             * rocket, micro-rockets, plasma orb). Bouncy fused
-             * grenades diverge ~hundreds of pixels between
-             * client/server sim once the bounce + fuse paths
-             * accumulate, so prediction would land in the wrong spot
-             * and the handler wouldn't be able to de-dup it. Frags
-             * stay on the wan-fixes-10 "wait for server event"
-             * path; the user perceives that delay less for thrown
-             * weapons (less twitch, shorter range). */
+        } else {
+            /* M6 ship-prep — predict for ALL client-side AOE
+             * projectiles, including bouncy frag grenades. Pre-fix
+             * (wan-fixes-10) skipped bouncy because their sim diverges
+             * across the fuse and "prediction would land in the wrong
+             * spot." The cost of skipping turned out to be worse: the
+             * client's grenade dies silently, then ~RTT/2 later the
+             * server's NET_MSG_EXPLOSION arrives and the FX appears
+             * somewhere else than where the visible grenade was —
+             * read as "the grenade exploded in the wrong place," and
+             * the camera linger jumped from LOCAL_POS to SERVER_POS
+             * mid-pan.
+             *
+             * With prediction on: client visual is continuous (FX
+             * spawns AT the grenade), and the wire-arrival path
+             * (net.c::client_handle_explosion) finds the PREDICTED
+             * record and dedupes — no double FX, no last_explosion_pos
+             * overwrite. Dedupe window bumped to 120 ticks (2 s) so
+             * bouncy fuses (1.5 s) + bounce-divergence comfortably
+             * fit inside it. Damage still server-authoritative (the
+             * authoritative branch above runs damage). */
             ExplosionRecord *server_already = explosion_record_find_consume(
                 w, (int)p->owner_mech[i], (int)p->weapon_id[i],
-                EXPL_SRC_SERVER, /*max_age_ticks*/30);
+                EXPL_SRC_SERVER, /*max_age_ticks*/600);
             if (server_already) {
                 /* Server's EXPLOSION already showed the visual.
                  * Consume the record and die silently. */
@@ -177,7 +224,9 @@ static void detonate(World *w, int i) {
             }
         }
     }
-    p->alive[i] = 0;
+    /* alive stays 1 for one more render frame — see comment at top of
+     * detonate. The kill happens at the top of projectile_step next
+     * tick on the `exploded && alive` check. */
 }
 
 void projectile_step(World *w, float dt) {
@@ -189,6 +238,15 @@ void projectile_step(World *w, float dt) {
 
     for (int i = 0; i < p->count; ++i) {
         if (!p->alive[i]) continue;
+
+        /* M6 ship-prep — second-stage kill for projectiles that
+         * detonated on the previous tick. detonate() now keeps
+         * `alive = 1` for one extra render frame so the sprite reads
+         * AT the explosion center; consume that ghost frame here. */
+        if (p->exploded[i]) {
+            p->alive[i] = 0;
+            continue;
+        }
 
         /* Fuse / lifetime. Reaching zero detonates AOE projectiles
          * (frag grenades, mass driver duds), expires non-AOE ones.
@@ -231,9 +289,15 @@ void projectile_step(World *w, float dt) {
         Vec2 a = { p->pos_x[i], p->pos_y[i] };
         Vec2 b = { a.x + p->vel_x[i] * dt, a.y + p->vel_y[i] * dt };
 
-        /* Tile collision via DDA ray. */
+        /* Tile + polygon collision via DDA ray + edge tests. Also
+         * captures the surface normal at the hit point so the bouncy
+         * reflection below can use the actual normal (slopes!) instead
+         * of the axis-aligned dominant-axis approximation that used
+         * to nudge grenades INTO sloped polygons. */
         float t_wall;
-        bool hit_wall = level_ray_hits(&w->level, a, b, &t_wall);
+        float hit_nx = 0.0f, hit_ny = -1.0f;
+        bool hit_wall = level_ray_hits_normal(&w->level, a, b,
+                                              &t_wall, &hit_nx, &hit_ny);
 
         /* Bone collision against every other mech. The lower of the two
          * hit times wins; AOE projectiles detonate at the contact, non-
@@ -288,6 +352,15 @@ void projectile_step(World *w, float dt) {
                 }
             }
 
+            /* Bone-collision radius. Bullets stay tight (8 px) but
+             * frag grenades use 22 px — wide enough that "I threw it
+             * in their face" reliably registers even when the
+             * grenade is moving fast and the bone is moving (walk /
+             * pose anim can move a bone 5-10 px per tick). The
+             * sprite itself is ~7 px wide, so 22 px captures
+             * sprite-edge contact plus a comfortable bone-motion
+             * buffer. Cheaper than a true moving-vs-moving CCD. */
+            float bone_r = (p->kind[i] == PROJ_FRAG_GRENADE) ? 22.0f : 8.0f;
             for (int bi = 0; bi < NUM_BONES; ++bi) {
                 int pa = m->particle_base + g_bones[bi].parent;
                 int pb = m->particle_base + g_bones[bi].child;
@@ -301,7 +374,27 @@ void projectile_step(World *w, float dt) {
                     va = (Vec2){ w->particles.pos_x[pa], w->particles.pos_y[pa] };
                     vb = (Vec2){ w->particles.pos_x[pb], w->particles.pos_y[pb] };
                 }
-                float th = swept_seg_vs_bone(a, b, va, vb, /*r*/ 8.0f);
+                /* Test against the END-of-tick bone position. */
+                float th = swept_seg_vs_bone(a, b, va, vb, bone_r);
+
+                /* Also test against the START-of-tick bone position
+                 * (render_prev). When the mech is walking / animating
+                 * the bones can sweep ~10 px per tick. The static
+                 * end-of-tick test alone misses contacts where the
+                 * bone SWEPT THROUGH the projectile during the tick
+                 * — taking the closer-t hit between the two static
+                 * tests is a cheap proxy for moving-vs-moving CCD. */
+                if (!bx_lookup) {
+                    Vec2 va_p = (Vec2){ w->particles.render_prev_x[pa],
+                                        w->particles.render_prev_y[pa] };
+                    Vec2 vb_p = (Vec2){ w->particles.render_prev_x[pb],
+                                        w->particles.render_prev_y[pb] };
+                    float th_prev = swept_seg_vs_bone(a, b, va_p, vb_p, bone_r);
+                    if (th_prev >= 0.0f && (th < 0.0f || th_prev < th)) {
+                        th = th_prev;
+                    }
+                }
+
                 if (th < 0.0f) continue;
                 if (th < t_hit) {
                     t_hit = th;
@@ -411,28 +504,60 @@ void projectile_step(World *w, float dt) {
 
             /* Bouncy projectiles (frag grenades) ricochet off tiles
              * instead of detonating; they keep their fuse and continue
-             * to integrate. We pick a normal by which axis crossed
-             * first (cheap approximation; works for tile-aligned maps). */
+             * to integrate. Direct mech hits (hit_mech >= 0) bypass
+             * this branch — those fall through to the detonate path
+             * below, so a grenade that bounces and THEN strikes a mech
+             * on a later tick also detonates immediately. */
             if (hit_wall && hit_mech < 0 && p->bouncy[i]) {
-                /* Reflect velocity. Estimate normal: prev pos was outside,
-                 * new pos is at tile boundary; whichever axis dominates
-                 * the velocity is the one we bounce. */
-                if (fabsf(p->vel_x[i]) > fabsf(p->vel_y[i])) {
-                    p->vel_x[i] *= -0.45f;
-                    p->vel_y[i] *=  0.65f;
-                } else {
-                    p->vel_x[i] *=  0.65f;
-                    p->vel_y[i] *= -0.45f;
-                }
-                /* Pull pos a hair away from the wall so the next tick
-                 * doesn't immediately re-collide. */
-                if (p->vel_x[i] != 0.0f) p->pos_x[i] += sign_f(p->vel_x[i]) * 1.5f;
-                if (p->vel_y[i] != 0.0f) p->pos_y[i] += sign_f(p->vel_y[i]) * 1.5f;
+                /* Reflect velocity across the actual surface normal
+                 * (set by level_ray_hits_normal). Pre-fix used a
+                 * dominant-axis approximation that worked OK for tile
+                 * walls but produced wrong-direction bounces on
+                 * sloped polygons — the post-bounce nudge could
+                 * place the grenade INSIDE the slope, where no edge
+                 * crossings catch it on subsequent ticks and the
+                 * grenade visibly "falls through" the slope.
+                 *
+                 * Normal-aware reflection:
+                 *   v_n  = v · n            (normal component, scalar)
+                 *   v_t  = v - v_n × n      (tangential component)
+                 *   v'   = v_t × parallel - v_n × n × perpendicular
+                 * Tangent gets 0.90× retention (rolling friction).
+                 * Normal gets -0.70× (bounce restitution; 30% absorbed). */
+                float vx = p->vel_x[i], vy = p->vel_y[i];
+                float v_dot_n = vx * hit_nx + vy * hit_ny;
+                float vn_x = v_dot_n * hit_nx;
+                float vn_y = v_dot_n * hit_ny;
+                float vt_x = vx - vn_x;
+                float vt_y = vy - vn_y;
+                const float k_par  = 0.90f;
+                const float k_perp = 0.70f;
+                p->vel_x[i] = vt_x * k_par - vn_x * k_perp;
+                p->vel_y[i] = vt_y * k_par - vn_y * k_perp;
+                /* Nudge ALONG THE NORMAL so the grenade leaves the
+                 * surface cleanly (was nudging in velocity direction,
+                 * which could be parallel to a slope → back into it). */
+                p->pos_x[i] += hit_nx * 1.5f;
+                p->pos_y[i] += hit_ny * 1.5f;
                 /* Tiny spark on bounce. */
                 fx_spawn_spark(&w->fx,
                     (Vec2){ p->pos_x[i], p->pos_y[i] },
                     (Vec2){ p->vel_x[i] * -1.0f, p->vel_y[i] * -1.0f },
                     w->rng);
+
+                /* Settled-detonate — if the bounce left the grenade
+                 * crawling (|v| < FRAG_SETTLED_VMAG_PXS), fire NOW
+                 * instead of letting it sit and wait for the fuse.
+                 * Avoids the "grenade disappears, then explodes after
+                 * a pause" feel: as soon as energy is gone, BOOM. */
+                float vmag2 = p->vel_x[i] * p->vel_x[i] +
+                              p->vel_y[i] * p->vel_y[i];
+                if (vmag2 < FRAG_SETTLED_VMAG_PXS * FRAG_SETTLED_VMAG_PXS) {
+                    if (p->aoe_radius[i] > 0.0f) detonate(w, i);
+                    else                          p->alive[i] = 0;
+                    continue;
+                }
+
                 /* Don't detonate / die; keep fuse running. */
                 if (i > last_alive) last_alive = i;
                 continue;
@@ -528,16 +653,74 @@ int projectile_find_grapple_head(const ProjectilePool *p, int owner_mech_id) {
     return -1;
 }
 
+/* M6 ship-prep — frag grenade gets its own multi-element sprite:
+ * dark olive body with a darker outline, a metal lever cap on top
+ * (oriented opposite to the velocity vector so it reads like it's
+ * spinning with the throw), and a pulsing red fuse spark for
+ * "the fuse is lit, this thing is about to blow." Drawn instead of
+ * the generic colored circle so a frag projectile reads as a
+ * GRENADE at a glance — the previous 4-px yellow ball was easy to
+ * lose against the level art. */
+static void draw_frag_grenade_sprite(Vec2 pos, float vx, float vy, double time_s) {
+    /* Body — dark outline + olive fill + a small highlight to imply
+     * volume (light source upper-left). */
+    DrawCircleV((Vector2){ pos.x, pos.y }, 7.0f, (Color){ 18, 26, 18, 230 });
+    DrawCircleV((Vector2){ pos.x, pos.y }, 6.0f, (Color){ 78, 108, 60, 240 });
+    DrawCircleV((Vector2){ pos.x - 1.6f, pos.y - 1.6f }, 2.2f,
+                (Color){ 150, 175, 110, 220 });
+
+    /* Lever cap — small dark rectangle on the side OPPOSITE the
+     * velocity. As the grenade tumbles through its arc the cap
+     * orbits the body, reading as rotation without the cost of a
+     * sprite atlas + per-grenade angular-velocity state. */
+    float vlen = sqrtf(vx * vx + vy * vy);
+    float cx, cy;
+    if (vlen > 1e-3f) {
+        cx = -vx / vlen;   /* opposite to velocity */
+        cy = -vy / vlen;
+    } else {
+        cx = 0.0f;
+        cy = -1.0f;        /* still grenade: cap on top */
+    }
+    Vec2 cap_center = { pos.x + cx * 5.5f, pos.y + cy * 5.5f };
+    DrawCircleV((Vector2){ cap_center.x, cap_center.y }, 2.2f,
+                (Color){ 40, 45, 35, 240 });
+    DrawCircleV((Vector2){ cap_center.x, cap_center.y }, 1.4f,
+                (Color){ 110, 110, 100, 220 });
+
+    /* Pulsing fuse spark — bright red dot at the cap location,
+     * oscillates at ~6 Hz so the eye can track the grenade against
+     * busy backgrounds. Spawn a tiny halo behind it for emphasis. */
+    float pulse = 0.55f + 0.45f * sinf((float)time_s * 12.0f);
+    uint8_t spark_r = (uint8_t)(220 + 35 * pulse);
+    uint8_t spark_g = (uint8_t)(60 + 80 * pulse);
+    Color spark = (Color){ spark_r, spark_g, 30, 240 };
+    Vec2 spark_pos = { pos.x + cx * 7.5f, pos.y + cy * 7.5f };
+    DrawCircleV((Vector2){ spark_pos.x, spark_pos.y },
+                1.5f + 1.2f * pulse,
+                (Color){ 255, 200, 40, (uint8_t)(120 * pulse) });
+    DrawCircleV((Vector2){ spark_pos.x, spark_pos.y }, 1.2f, spark);
+}
+
 void projectile_draw(const ProjectilePool *p, float alpha) {
+    double now = GetTime();
     for (int i = 0; i < p->count; ++i) {
         if (!p->alive[i]) continue;
-        Color c = proj_color(p->kind[i]);
-        float sz = proj_size(p->kind[i]);
         /* P03: lerp between start-of-tick pos and latest physics pos. */
         Vec2 pos = {
             p->render_prev_x[i] + (p->pos_x[i] - p->render_prev_x[i]) * alpha,
             p->render_prev_y[i] + (p->pos_y[i] - p->render_prev_y[i]) * alpha,
         };
+
+        /* Frag grenades get a bespoke sprite — bigger + grenade-shaped
+         * so the player can actually see them mid-throw. */
+        if (p->kind[i] == PROJ_FRAG_GRENADE) {
+            draw_frag_grenade_sprite(pos, p->vel_x[i], p->vel_y[i], now);
+            continue;
+        }
+
+        Color c = proj_color(p->kind[i]);
+        float sz = proj_size(p->kind[i]);
         DrawCircleV(pos, sz, c);
         /* Trailing line for fast projectiles so they read at speed. */
         float vx = p->vel_x[i], vy = p->vel_y[i];
@@ -559,25 +742,80 @@ void explosion_spawn(World *w, Vec2 pos, float radius, float damage,
 {
     if (radius <= 0.0f) return;
 
-    /* Visuals — sparks + smoke fan-out + screen shake within ~800 px. */
-    for (int k = 0; k < 28; ++k) {
-        float ang = (float)k / 28.0f * 6.283185f;
+    /* M6 ship-prep — record for the camera linger. Lets update_camera()
+     * keep the focus biased toward the impact for a short window after
+     * the projectile dies (otherwise the camera snaps back to the mech
+     * the same tick the explosion fires, and the player misses the
+     * sparks). Both the authoritative path and the client-side
+     * prediction populate this; the client-receive path (net.c
+     * client_handle_explosion) also writes here so remote explosions
+     * we observe locally also benefit. */
+    w->last_explosion_pos = pos;
+    w->last_explosion_tick = w->tick;
+    w->last_explosion_owner_mech = owner_mech_id;
+
+    /* Visuals — three-tier blast: a bright flash ring (impossible to
+     * miss against busy/foggy backgrounds), shrapnel sparks, and
+     * smoke puffs that linger. Pre-M6 the explosion was just 28
+     * small yellow sparks and a no-op smoke loop — easy to lose
+     * against concourse's green atrium or any ambient-zone overlay.
+     * The user saw "hear it but don't see it" because the sparks
+     * faded in 0.15 s and the smoke wasn't being spawned at all. */
+
+    /* 12 large bright flash particles — short life, fast outward
+     * velocity, vivid orange. These read as the "fireball" instant. */
+    for (int k = 0; k < 12; ++k) {
+        float ang = ((float)k / 12.0f) * 6.283185f
+                  + (pcg32_float01(w->rng) - 0.5f) * 0.3f;
+        Vec2 dir = { cosf(ang), sinf(ang) };
+        int idx = fx_spawn_spark(&w->fx, pos,
+            (Vec2){ dir.x * 220.0f, dir.y * 220.0f }, w->rng);
+        if (idx >= 0) {
+            FxParticle *fp = &w->fx.items[idx];
+            fp->size     = 5.0f + pcg32_float01(w->rng) * 3.0f;   /* 5-8 px */
+            fp->color    = 0xFFC840FFu;                            /* bright orange */
+            fp->life     = 0.28f;
+            fp->life_max = 0.28f;
+        }
+    }
+
+    /* 36 shrapnel sparks — wide cone, medium life, fine particles
+     * that read as "fragments flying outward." */
+    for (int k = 0; k < 36; ++k) {
+        float ang = ((float)k / 36.0f) * 6.283185f;
         Vec2 dir = { cosf(ang), sinf(ang) };
         fx_spawn_spark(&w->fx, pos,
-            (Vec2){ dir.x * 320.0f, dir.y * 320.0f }, w->rng);
+            (Vec2){ dir.x * 360.0f, dir.y * 360.0f }, w->rng);
     }
-    for (int k = 0; k < 6; ++k) {
-        Vec2 d = { (float)((int)k - 3) * 18.0f,
-                   -(float)k * 8.0f };
-        /* Smoke is cosmetic — we currently render smoke as a blood-like
-         * particle (gray/black tint). The blood path's color randomizer
-         * gives orange/red here; close enough for M3 first pass. */
-        (void)d;
+
+    /* 7 smoke puffs — lingering grey clouds, bias upward + outward
+     * to read as rising debris. Per-puff velocity has a randomized
+     * angle so the cloud looks irregular. */
+    for (int k = 0; k < 7; ++k) {
+        float ang = ((float)k / 7.0f) * 6.283185f
+                  + (pcg32_float01(w->rng) - 0.5f) * 0.4f;
+        Vec2 vel = { cosf(ang) * 60.0f,
+                     sinf(ang) * 60.0f - 30.0f };  /* upward bias */
+        fx_spawn_smoke(&w->fx, pos, vel, w->rng);
     }
     SHOT_LOG("t=%llu explosion at (%.1f,%.1f) r=%.1f dmg=%.1f imp=%.1f owner=%d weapon=%d",
              (unsigned long long)w->tick, pos.x, pos.y,
              radius, damage, impulse, owner_mech_id, weapon_id);
-    w->shake_intensity = fminf(1.0f, w->shake_intensity + 0.4f);
+    /* M6 P10 follow-up — tier explosion shake by AOE damage so heavy
+     * weapons feel chunkier than incidental small splashes. Pre-tier
+     * value was a flat +0.4 for every detonation; user feedback was
+     * that Mass Driver / Frag Grenade reads as "polite" against the
+     * post-fix camera. Three buckets matched to the actual weapon
+     * roster: ≥100 dmg → Mass Driver-class (heaviest hit), ≥50 dmg →
+     * Frag Grenade-class (medium AOE), <50 dmg → Plasma Cannon /
+     * Micro-Rockets (small splashes — unchanged). Decay is ×0.92/tick
+     * so even 0.60 is back below 0.10 in under 0.5 s — chunky on the
+     * impulse, gone before the next salvo. */
+    float shake_add;
+    if      (damage >= 100.0f) shake_add = 0.60f;
+    else if (damage >=  50.0f) shake_add = 0.50f;
+    else                       shake_add = 0.40f;
+    w->shake_intensity = fminf(1.0f, w->shake_intensity + shake_add);
 
     /* P14 — explosion SFX. Size buckets per spec: large = Mass Driver
      * + ≥150 dmg AOE; medium = Frag Grenade / Plasma Cannon mid-tier
@@ -643,11 +881,15 @@ void explosion_spawn(World *w, Vec2 pos, float radius, float damage,
 
         /* Friendly-fire / self-damage rules. The mass driver self-
          * damages the firer (intended), but we still respect the
-         * friendly-fire toggle for teammates. */
+         * friendly-fire toggle for teammates. FFA carve-out matches
+         * mech_apply_damage's — in FFA every slot is on team 1, so
+         * without the is_ffa gate the friendly_fire check would block
+         * ALL inter-player AOE damage. */
+        bool is_ffa = (w->match_mode_cached == 0 /* MATCH_MODE_FFA */);
         bool same_team = (owner_mech_id != mi)
                       && (owner_team >= 0)
                       && (m->team == owner_team);
-        if (same_team && !w->friendly_fire) continue;
+        if (!is_ffa && same_team && !w->friendly_fire) continue;
 
         /* Find the closest body part to the explosion center; that
          * decides hit_location_mult and gives us a particle to

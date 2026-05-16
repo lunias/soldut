@@ -280,14 +280,26 @@ void simulate_step(World *w, float dt) {
         }
     } else if (w->local_mech_id >= 0) {
         /* Client-only: visual tracer for predicted shots. The server
-         * will overrule with the real hit on the next snapshot. */
+         * will overrule with the real hit on the next snapshot.
+         * WFIRE_THROW is skipped — its press doesn't fire a one-shot
+         * (it starts charging); the predict accumulator below handles
+         * the local meter, and the server fires authoritatively on the
+         * release-edge. */
         Mech *m = &w->mechs[w->local_mech_id];
-        if ((m->latched_input.buttons & BTN_FIRE) &&
+        const Weapon *act_wpn = weapon_def(m->weapon_id);
+        bool active_is_throw = act_wpn && act_wpn->fire == WFIRE_THROW;
+        if (!active_is_throw &&
+            (m->latched_input.buttons & BTN_FIRE) &&
             m->fire_cooldown <= 0.0f && m->reload_timer <= 0.0f &&
             m->ammo > 0) {
             weapons_predict_local_fire(w, w->local_mech_id);
             m->ammo--;
         }
+        /* M6 ship-prep — keep the local throw_charge accumulator in
+         * sync so the hold-to-charge meter renders without a snapshot
+         * round-trip. Server fires authoritatively from its own
+         * accumulator (same input stream → same value). */
+        mech_predict_throw_charge(w, w->local_mech_id, m->latched_input);
         /* Pure-client path: also latch prev_buttons so the predicted
          * mech sees edges correctly during replay. */
         for (int i = 0; i < w->mech_count; ++i) {

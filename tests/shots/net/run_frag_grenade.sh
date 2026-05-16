@@ -145,7 +145,11 @@ asrt "both clients connect" \
     "grep -qE 'ACCEPT client_id=' '$A_LOG' && grep -qE 'ACCEPT client_id=' '$B_LOG'"
 
 # Server-side detonation. Three frag grenades thrown by mech=0.
-SRV_EXPLOSION_COUNT=$(grep -cE '^\[SHOT \] t=[0-9]+ explosion at \([0-9.]+,[0-9.]+\) r=140\.0 .* weapon=10' "$S_LOG" 2>/dev/null || echo 0)
+# (Radius is intentionally NOT pinned — the M6 ship-prep frag-buff
+# bumped aoe_radius 140 → 180 and we don't want to chase the literal
+# here when the assertion is "this many AOE detonations from weapon=10
+# happened.")
+SRV_EXPLOSION_COUNT=$(grep -cE '^\[SHOT \] t=[0-9]+ explosion at \([0-9.]+,[0-9.]+\) r=[0-9.]+ .* weapon=10' "$S_LOG" 2>/dev/null || echo 0)
 asrt "server logs at least 3 frag explosions" \
     "[[ $SRV_EXPLOSION_COUNT -ge 3 ]]"
 
@@ -172,7 +176,7 @@ asrt "client_b's explosion-visual count matches its handler count (no double-exp
 # Position parity — first explosion's server pos should match what the
 # clients show. Extract first server-side position; both clients should
 # report the same value (with 1/4 px wire-quantization rounding).
-SRV_POS=$(grep -E '^\[SHOT \] t=[0-9]+ explosion at \([0-9.]+,[0-9.]+\) r=140\.0' "$S_LOG" 2>/dev/null | head -1 | sed -E 's/.*at \(([0-9.]+),([0-9.]+)\).*/\1 \2/')
+SRV_POS=$(grep -E '^\[SHOT \] t=[0-9]+ explosion at \([0-9.]+,[0-9.]+\) r=[0-9.]+' "$S_LOG" 2>/dev/null | head -1 | sed -E 's/.*at \(([0-9.]+),([0-9.]+)\).*/\1 \2/')
 A_POS=$(grep -E 'client_handle_explosion .* at=\([0-9.]+,[0-9.]+\)' "$A_LOG" 2>/dev/null | head -1 | sed -E 's/.*at=\(([0-9.]+),([0-9.]+)\).*/\1 \2/')
 B_POS=$(grep -E 'client_handle_explosion .* at=\([0-9.]+,[0-9.]+\)' "$B_LOG" 2>/dev/null | head -1 | sed -E 's/.*at=\(([0-9.]+),([0-9.]+)\).*/\1 \2/')
 

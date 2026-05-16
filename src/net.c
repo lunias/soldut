@@ -2345,33 +2345,72 @@ static void client_handle_explosion(NetState *ns, const uint8_t *body, int blen,
              (unsigned long long)g->world.tick, (int)owner, (int)weapon,
              pos.x, pos.y);
 
-    /* Find + kill any AOE projectile from this shooter that hasn't
-     * already detonated. Most rounds have ≤2 in flight per owner so a
-     * linear scan is fine. Match by owner+kind; same-owner same-kind
-     * projectiles in quick succession are extremely rare (frag fire
-     * rate 0.6 s = 36 ticks > typical RTT). */
+    /* Find the in-flight AOE projectile that matches this server-side
+     * detonation. Used for: (a) inheriting its current position so the
+     * FX spawns at the LOCAL visible pos rather than the server's
+     * (which may have diverged), (b) applying the dying-frame fix to
+     * the local projectile so the sprite reads at the explosion
+     * center for one frame. */
     ProjectilePool *pp = &g->world.projectiles;
+    int local_idx = -1;
     for (int i = 0; i < pp->count; ++i) {
         if (!pp->alive[i]) continue;
         if (pp->aoe_radius[i] <= 0.0f) continue;
         if ((int)pp->owner_mech[i] != (int)owner) continue;
         if ((int)pp->kind[i] != (int)wpn->projectile_kind) continue;
-        pp->alive[i]    = 0;
-        pp->exploded[i] = 1;
+        local_idx = i;
+        break;
     }
 
-    /* wan-fixes-21 — de-dup against a recent CLIENT prediction. */
+    /* wan-fixes-21 — de-dup against a recent CLIENT prediction.
+     * M6 ship-prep: window bumped 30 → 600 ticks to cover bouncy frag
+     * fuses (1.5 s) plus client/server bounce-path divergence plus
+     * shot-mode local-tick drift (independent client world.tick when
+     * not running snapshots in lockstep). Without the bigger window
+     * the wire event would re-spawn the FX (and overwrite
+     * last_explosion_pos), causing the camera to jump from the
+     * client-predicted impact point to the server's impact point —
+     * the bug the user described as "camera goes to explosion area
+     * (sometimes wrong) then back to the mech."
+     *
+     * When the predict already fired we leave the local projectile
+     * alone — projectile_step's exploded-flag path handles its
+     * dying frame + kill on the next tick. */
     ExplosionRecord *pred = explosion_record_find_consume(
         &g->world, (int)owner, (int)weapon,
-        EXPL_SRC_PREDICTED, /*max_age_ticks*/30);
+        EXPL_SRC_PREDICTED, /*max_age_ticks*/600);
     if (pred) {
         pred->valid = false;  /* consume; don't re-match a later event */
         return;
     }
 
-    /* No prediction in flight — spawn normally and remember that
-     * the server's visual fired (so a later client detonate that
-     * matches this projectile skips its prediction). */
+    /* No client predict in flight. Server's wire event is the only
+     * detonation signal we have. Use SERVER pos for the FX (matches
+     * where damage was actually applied — bouncy grenades diverge
+     * between client and server sim, so a "visible hit but no
+     * damage" symptom can only be resolved by trusting the server's
+     * authoritative position for BOTH damage and visual).
+     *
+     * Visual continuity: snap the local projectile's pos to the
+     * server's pos for the dying frame. render_prev keeps the OLD
+     * local pos so the next render frame lerps from LOCAL → SERVER
+     * over alpha — the grenade visibly "snaps" to where it actually
+     * exploded over ~16 ms. For small sim divergence (a few px) the
+     * snap is invisible; for larger divergence (hundreds of px,
+     * after several bounces in tight geometry) the player sees the
+     * grenade rapidly translate to the true detonation point, then
+     * boom. Better than "grenade vanishes here, sparks appear there
+     * with no connection." */
+    if (local_idx >= 0) {
+        pp->exploded[local_idx]      = 1;
+        pp->render_prev_x[local_idx] = pp->pos_x[local_idx];
+        pp->render_prev_y[local_idx] = pp->pos_y[local_idx];
+        pp->pos_x[local_idx]         = pos.x;
+        pp->pos_y[local_idx]         = pos.y;
+        /* alive stays 1 — projectile_step's top-of-loop check kills
+         * it on the next tick after rendering the dying frame. */
+    }
+
     int owner_team = ((int)owner < g->world.mech_count)
                          ? (int)g->world.mechs[owner].team : 0;
     explosion_spawn(&g->world, pos, wpn->aoe_radius, wpn->aoe_damage,
