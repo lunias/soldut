@@ -230,7 +230,11 @@ static void push_deco(int wx, int wy, float scale, float rot_turns,
     };
 }
 
-/* ---- META populate ---- */
+/* ---- META populate ----
+ *
+ * M6 P09 — set_meta is the legacy path that leaves atmospherics zero
+ * (= theme 0 / no fog / no vignette / no weather). set_meta_atmos is
+ * the per-map atmosphere recook entry point. */
 static void set_meta(const char *display_name, const char *blurb,
                      const char *kit_short, uint16_t mode_mask) {
     Level *L = &g_cooker.world.level;
@@ -245,9 +249,40 @@ static void set_meta(const char *display_name, const char *blurb,
         .ambient_loop_str_idx = (uint16_t)strt_intern(amb_path),
         .reverb_amount_q      = (uint16_t)(0.20f * 65535.0f),
         .mode_mask            = mode_mask,
-        .reserved             = {0},
     };
     L->string_table_size = g_cooker.strt_used;
+}
+
+/* M6 P09 — overlay an atmosphere profile on top of an already-set
+ * meta. Call AFTER set_meta. RGB565 helpers + Q0.16 helpers keep the
+ * recook table readable. Pass theme_id alone for "use theme defaults
+ * everywhere"; pass theme_id + per-field overrides to deviate. */
+static inline uint16_t rgb565(int r, int g, int b) {
+    if (r <   0) r =   0;
+    if (r > 255) r = 255;
+    if (g <   0) g =   0;
+    if (g > 255) g = 255;
+    if (b <   0) b =   0;
+    if (b > 255) b = 255;
+    return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+}
+static inline uint16_t q0_16(float v) {
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    return (uint16_t)(v * 65535.0f);
+}
+static void set_meta_atmos(uint16_t theme_id,
+                           uint16_t fog_density_q, uint16_t fog_color_rgb565,
+                           uint16_t vignette_q,
+                           uint16_t weather_kind, uint16_t weather_density_q)
+{
+    Level *L = &g_cooker.world.level;
+    L->meta.theme_id          = theme_id;
+    L->meta.fog_density_q     = fog_density_q;
+    L->meta.fog_color_rgb565  = fog_color_rgb565;
+    L->meta.vignette_q        = vignette_q;
+    L->meta.weather_kind      = weather_kind;
+    L->meta.weather_density_q = weather_density_q;
 }
 
 /* Tile-to-world helpers. */
@@ -382,6 +417,11 @@ static void build_foundry(void) {
              "Open floor with cover columns. Ground-game.",
              "foundry",
              (uint16_t)((1u << MATCH_MODE_FFA) | (1u << MATCH_MODE_TDM)));
+    /* M6 P09 — INDUSTRIAL: brass + steel, no weather, mild vignette. */
+    set_meta_atmos(/*theme*/ 6,
+                   /*fog_density*/ 0,        /*fog_color*/ 0,
+                   /*vignette*/    q0_16(0.18f),
+                   /*weather_kind*/ 0,       /*weather_density*/ 0);
 }
 
 /* ===================================================================== */
@@ -562,6 +602,11 @@ static void build_slipstream(void) {
              "Stacked catwalks. Vertical jet beats.",
              "maintenance",
              (uint16_t)((1u << MATCH_MODE_FFA) | (1u << MATCH_MODE_TDM)));
+    /* M6 P09 — ICE_SHEET: snow weather at 0.30, cool blue palette. */
+    set_meta_atmos(/*theme*/ 2,
+                   /*fog_density*/ 0,        /*fog_color*/ 0,
+                   /*vignette*/    q0_16(0.20f),
+                   /*weather_kind*/ 1,       /*weather_density*/ q0_16(0.30f));
 }
 
 /* ===================================================================== */
@@ -712,6 +757,12 @@ static void build_reactor(void) {
              "Central pillar, two flanking platforms.",
              "reactor",
              (uint16_t)((1u << MATCH_MODE_FFA) | (1u << MATCH_MODE_TDM)));
+    /* M6 P09 — RUST: oranges, embers @ 0.4, warm fog. */
+    set_meta_atmos(/*theme*/ 4,
+                   /*fog_density*/ q0_16(0.12f),
+                   /*fog_color*/   rgb565(200, 140, 90),
+                   /*vignette*/    q0_16(0.30f),
+                   /*weather_kind*/ 4,       /*weather_density*/ q0_16(0.40f));
 
     /* unused-loc warnings */
     (void)bowl_low;
@@ -897,6 +948,11 @@ static void build_concourse(void) {
              "Long sightlines through the atrium. Mid-range fight.",
              "atrium",
              (uint16_t)((1u << MATCH_MODE_FFA) | (1u << MATCH_MODE_TDM)));
+    /* M6 P09 — CONCRETE: neutral default, no weather. */
+    set_meta_atmos(/*theme*/ 0,
+                   /*fog_density*/ 0,        /*fog_color*/ 0,
+                   /*vignette*/    q0_16(0.12f),
+                   /*weather_kind*/ 0,       /*weather_density*/ 0);
 }
 
 /* ===================================================================== */
@@ -1061,6 +1117,12 @@ static void build_catwalk(void) {
              "Vertical TDM. Ground game + risk/reward catwalks.",
              "exterior",
              (uint16_t)(1u << MATCH_MODE_TDM));
+    /* M6 P09 — NEON: purple/cyan cyber, dim ambient. No weather. */
+    set_meta_atmos(/*theme*/ 3,
+                   /*fog_density*/ q0_16(0.08f),
+                   /*fog_color*/   rgb565(130, 80, 200),
+                   /*vignette*/    q0_16(0.40f),
+                   /*weather_kind*/ 0,       /*weather_density*/ 0);
 }
 
 /* ===================================================================== */
@@ -1283,6 +1345,12 @@ static void build_aurora(void) {
              "Open arena. Hills + central pit, skyline at distance.",
              "aurora",
              (uint16_t)((1u << MATCH_MODE_FFA) | (1u << MATCH_MODE_TDM)));
+    /* M6 P09 — NEON sky + dust drift at 0.20. */
+    set_meta_atmos(/*theme*/ 3,
+                   /*fog_density*/ q0_16(0.05f),
+                   /*fog_color*/   rgb565(150, 100, 220),
+                   /*vignette*/    q0_16(0.30f),
+                   /*weather_kind*/ 3,       /*weather_density*/ q0_16(0.20f));
 
     (void)strut_pick_a; (void)strut_pick_b;
 }
@@ -1458,6 +1526,11 @@ static void build_crossfire(void) {
              "Mirror CTF arena. Two bases, central battleground.",
              "foundry",
              (uint16_t)((1u << MATCH_MODE_TDM) | (1u << MATCH_MODE_CTF)));
+    /* M6 P09 — CONCRETE: keep the mirror-symmetric look clean. */
+    set_meta_atmos(/*theme*/ 0,
+                   /*fog_density*/ 0,        /*fog_color*/ 0,
+                   /*vignette*/    q0_16(0.15f),
+                   /*weather_kind*/ 0,       /*weather_density*/ 0);
 }
 
 /* ===================================================================== */
@@ -1649,6 +1722,12 @@ static void build_citadel(void) {
              "Large CTF. Castle keeps, plaza bowl, sky bridge.",
              "citadel",
              (uint16_t)(1u << MATCH_MODE_CTF));
+    /* M6 P09 — BUNKER: warm browns + dust drift at 0.30, heavy vignette. */
+    set_meta_atmos(/*theme*/ 1,
+                   /*fog_density*/ q0_16(0.10f),
+                   /*fog_color*/   rgb565(200, 180, 150),
+                   /*vignette*/    q0_16(0.40f),
+                   /*weather_kind*/ 3,       /*weather_density*/ q0_16(0.30f));
 }
 
 /* ===================================================================== */

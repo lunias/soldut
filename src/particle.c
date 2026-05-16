@@ -490,6 +490,47 @@ void fx_update(World *w, float dt) {
             continue;
         }
 
+        /* M6 P09 — Atmosphere/weather particles. These integrate in
+         * screen-space (pos.x / pos.y are normalized 0..1) or world-
+         * space (ambient zones) but NEITHER consults world gravity or
+         * tile collision — the latter would catch a snow flake on every
+         * roof tile and die immediately. Each kind has its own integrate
+         * pattern. */
+        if (fp->kind == FX_WEATHER_SNOW || fp->kind == FX_WEATHER_RAIN ||
+            fp->kind == FX_WEATHER_DUST || fp->kind == FX_WEATHER_EMBER)
+        {
+            /* Screen-space: pos is in [0..1] normalized coords; vel is
+             * in pixels/sec relative to a notional 1080-line viewport.
+             * Convert per-tick by dt × (1.0f / 1080.0f). */
+            float yscale = 1.0f / 1080.0f;
+            fp->pos.x += fp->vel.x * dt * yscale;   /* x uses the same scale */
+            fp->pos.y += fp->vel.y * dt * yscale;
+            /* Wind sway for snow + drift for dust — modulate horizontal
+             * velocity per-tick so the path isn't a straight line. */
+            if (fp->kind == FX_WEATHER_SNOW) {
+                fp->vel.x = sinf((fp->pos.y * 18.0f) + (float)w->tick * 0.012f) * 25.0f;
+            } else if (fp->kind == FX_WEATHER_EMBER) {
+                fp->vel.x = sinf((fp->pos.y * 12.0f) + (float)w->tick * 0.015f) * 14.0f;
+            }
+            /* Off-bottom (or off-top for embers) → kill. */
+            if (fp->pos.y > 1.1f || fp->pos.y < -0.15f ||
+                fp->pos.x < -0.1f || fp->pos.x > 1.1f) fp->alive = 0;
+            if (i > last_alive && fp->alive) last_alive = i;
+            continue;
+        }
+        if (fp->kind == FX_AMBIENT_WIND_STREAK ||
+            fp->kind == FX_AMBIENT_ZEROG_MOTE  ||
+            fp->kind == FX_AMBIENT_ACID_BUBBLE)
+        {
+            /* World-space; no gravity (these are decorative). Simple
+             * integrate; tile collision would kill the bubbles instantly
+             * against the floor of the ACID rect. */
+            fp->pos.x += fp->vel.x * dt;
+            fp->pos.y += fp->vel.y * dt;
+            if (i > last_alive) last_alive = i;
+            continue;
+        }
+
         if (fp->kind != FX_TRACER) {
             /* semi-implicit Euler: v += g*dt; p += v*dt */
             fp->vel.x += g.x * dt;
@@ -574,8 +615,13 @@ void fx_draw(const FxPool *pool, float alpha) {
         const FxParticle *fp = &pool->items[i];
         if (!fp->alive) continue;
         FxKind kind = (FxKind)fp->kind;
-        /* Skip kinds handled in later passes. STUMP is invisible. */
+        /* Skip kinds handled in later passes. STUMP is invisible.
+         * M6 P09 — Weather is drawn in atmosphere_draw_weather at
+         * window resolution (sharp pixels outside the internal RT
+         * upscale); ambient zones get their own pass below. */
         if (kind == FX_JET_EXHAUST || kind == FX_STUMP) continue;
+        if (kind == FX_WEATHER_SNOW || kind == FX_WEATHER_RAIN ||
+            kind == FX_WEATHER_DUST || kind == FX_WEATHER_EMBER) continue;
 
         float life_frac = fp->life /
                           (fp->life_max > 0.0f ? fp->life_max : 1.0f);
@@ -618,6 +664,49 @@ void fx_draw(const FxPool *pool, float alpha) {
                 fx_draw_particle(pos, fp->size, (Color){ r, g, b, a });
                 break;
             }
+            /* M6 P09 — ambient zone particles (world-space). WIND
+             * streaks are short lines; ZERO_G + ACID are alpha discs.
+             * Render here inside the world-camera-transform so the
+             * particles pan with the camera. */
+            case FX_AMBIENT_WIND_STREAK: {
+                unsigned char r = (unsigned char)((fp->color >> 24) & 0xFF);
+                unsigned char g = (unsigned char)((fp->color >> 16) & 0xFF);
+                unsigned char b = (unsigned char)((fp->color >>  8) & 0xFF);
+                unsigned char a = (unsigned char)(((fp->color >> 0) & 0xFF) * life_frac);
+                /* Streak length proportional to velocity for a sense
+                 * of motion. */
+                float len = fp->size;
+                float vlen = sqrtf(fp->vel.x * fp->vel.x +
+                                   fp->vel.y * fp->vel.y);
+                Vec2 unit = (vlen > 1e-4f)
+                          ? (Vec2){ fp->vel.x / vlen, fp->vel.y / vlen }
+                          : (Vec2){ 1.0f, 0.0f };
+                Vector2 a0 = { pos.x, pos.y };
+                Vector2 a1 = { pos.x - unit.x * len, pos.y - unit.y * len };
+                DrawLineEx(a0, a1, 1.5f, (Color){ r, g, b, a });
+                break;
+            }
+            case FX_AMBIENT_ZEROG_MOTE: {
+                unsigned char r = (unsigned char)((fp->color >> 24) & 0xFF);
+                unsigned char g = (unsigned char)((fp->color >> 16) & 0xFF);
+                unsigned char b = (unsigned char)((fp->color >>  8) & 0xFF);
+                unsigned char a = (unsigned char)(((fp->color >> 0) & 0xFF) * life_frac);
+                fx_draw_particle(pos, fp->size, (Color){ r, g, b, a });
+                break;
+            }
+            case FX_AMBIENT_ACID_BUBBLE: {
+                unsigned char r = (unsigned char)((fp->color >> 24) & 0xFF);
+                unsigned char g = (unsigned char)((fp->color >> 16) & 0xFF);
+                unsigned char b = (unsigned char)((fp->color >>  8) & 0xFF);
+                unsigned char a = (unsigned char)(((fp->color >> 0) & 0xFF) * life_frac);
+                fx_draw_particle(pos, fp->size, (Color){ r, g, b, a });
+                /* Highlight on the upward edge for the "bubble" read. */
+                fx_draw_particle((Vector2){ pos.x - fp->size * 0.3f,
+                                            pos.y - fp->size * 0.3f },
+                                 fp->size * 0.3f,
+                                 (Color){ 220, 255, 200, (unsigned char)(a * 0.7f) });
+                break;
+            }
             case FX_JET_EXHAUST:
             case FX_STUMP:
             /* M6 P04 — damage numbers render in fx_draw_damage_numbers,
@@ -625,6 +714,12 @@ void fx_draw(const FxPool *pool, float alpha) {
              * the glyphs land at sharp window pixels. fx_draw runs
              * inside the internal-RT world pass; skip here. */
             case FX_DAMAGE_NUMBER:
+            /* M6 P09 — weather is drawn separately in atmosphere_draw_
+             * weather at window resolution (sharp pixels post-upscale). */
+            case FX_WEATHER_SNOW:
+            case FX_WEATHER_RAIN:
+            case FX_WEATHER_DUST:
+            case FX_WEATHER_EMBER:
             case FX_KIND_COUNT: break;
         }
     }

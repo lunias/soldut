@@ -1,5 +1,6 @@
 #include "render.h"
 
+#include "atmosphere.h"
 #include "audio.h"
 #include "decal.h"
 #include "hud.h"
@@ -58,6 +59,15 @@ static int             g_halftone_loc_density    = -1;
 static int             g_halftone_loc_hot_zones  = -1;
 static int             g_halftone_loc_jet_time   = -1;
 static int             g_halftone_loc_hot_zone_count = -1;
+/* M6 P09 — atmospherics uniforms. Same -1 graceful-skip pattern: an
+ * older shader file missing these uniforms still loads, the locations
+ * stay -1, and the SetShaderValue calls are skipped. */
+static int             g_halftone_loc_fog_density   = -1;
+static int             g_halftone_loc_fog_color     = -1;
+static int             g_halftone_loc_fog_zones     = -1;
+static int             g_halftone_loc_fog_zone_count= -1;
+static int             g_halftone_loc_vignette      = -1;
+static int             g_halftone_loc_atmos_time    = -1;
 static bool            g_halftone_loaded         = false;
 static bool            g_halftone_load_attempted = false;
 
@@ -100,10 +110,19 @@ static void halftone_load_once(void) {
     g_halftone_loc_hot_zones      = GetShaderLocation(s, "jet_hot_zones");
     g_halftone_loc_jet_time       = GetShaderLocation(s, "jet_time");
     g_halftone_loc_hot_zone_count = GetShaderLocation(s, "jet_hot_zone_count");
+    /* M6 P09 — atmosphere uniforms. Missing locations are fine —
+     * see the comment at the static declarations. */
+    g_halftone_loc_fog_density    = GetShaderLocation(s, "fog_density");
+    g_halftone_loc_fog_color      = GetShaderLocation(s, "fog_color");
+    g_halftone_loc_fog_zones      = GetShaderLocation(s, "fog_zones");
+    g_halftone_loc_fog_zone_count = GetShaderLocation(s, "fog_zone_count");
+    g_halftone_loc_vignette       = GetShaderLocation(s, "vignette_strength");
+    g_halftone_loc_atmos_time     = GetShaderLocation(s, "atmos_time");
     g_halftone_loaded             = true;
-    LOG_I("halftone: shader loaded; density=%.2f shimmer=%s",
+    LOG_I("halftone: shader loaded; density=%.2f shimmer=%s atmos=%s",
           (double)HALFTONE_DENSITY,
-          (g_halftone_loc_hot_zones >= 0 ? "ok" : "missing"));
+          (g_halftone_loc_hot_zones >= 0 ? "ok" : "missing"),
+          (g_halftone_loc_fog_density >= 0 ? "ok" : "missing"));
 }
 
 /* M6 P03 — Ensure both internal RTs exist at (iw, ih). Returns:
@@ -281,14 +300,84 @@ static void update_camera(Renderer *r, World *w, int sw, int sh, float dt) {
 
 /* ---- Drawing helpers ---------------------------------------------- */
 
-/* P13 — Tile rendering with optional kit atlas. When g_map_kit.tiles is
- * loaded, each solid tile draws a 32x32 sub-rect from the 8x8-grid atlas
- * indexed by `LvlTile.id`. When not, falls back to the M4 flat 2-tone
- * checkerboard so a fresh checkout without per-map art still reads. */
+/* M6 P09 — Paint the per-flag overlay on top of a freshly-drawn tile.
+ * `mat` comes from atmosphere_tile_material(t->flags) — its pattern
+ * field picks the overlay style.
+ *
+ * Cost budget: 2-4 DrawLineEx per ICE/ONE_WAY tile, 4-6 short lines
+ * per DEADLY tile, zero for SOLID/BACKGROUND. Worst case (110×60
+ * Concourse fully filled with DEADLY tiles, which never happens) is
+ * ~6600 × 6 ≈ 40k DrawLineEx; raylib batches these, and the per-frame
+ * cost on a 1080p internal RT measures sub-ms in the perf overlay. */
+static void draw_tile_overlay(float wx, float wy, float ts,
+                              TileMaterial mat, double time) {
+    switch (mat.pattern) {
+        case TILE_PAT_ICE_GLINT: {
+            float t = (float)time;
+            float a = 0.5f + 0.5f * sinf(t * 1.5f + (wx + wy) * 0.04f);
+            Color hi = (Color){ mat.accent.r, mat.accent.g, mat.accent.b,
+                                (unsigned char)((float)mat.accent.a * a) };
+            Vector2 p0 = { wx + ts * 0.2f, wy + ts * 0.2f };
+            Vector2 p1 = { wx + ts * 0.8f, wy + ts * 0.4f };
+            DrawLineEx(p0, p1, 1.5f, hi);
+            break;
+        }
+        case TILE_PAT_DEADLY_HATCH: {
+            /* 45° amber-red stripes across the tile. Each tile draws
+             * 2 short stripes that visually clip themselves to the
+             * tile body (the stripe goes corner-to-near-corner, well
+             * inside ts). NO scissor — each BeginScissorMode call
+             * forces a GPU batch flush, and the original "scissor per
+             * stripe" path produced 5-10 flushes per DEADLY tile per
+             * frame, which lagged the editor's F5 test-play on a map
+             * with ~20 DEADLY tiles (200+ flushes/frame). The stripes
+             * fit within the tile body anyway, so clipping is moot. */
+            Color hatch = mat.accent;
+            float pad = ts * 0.15f;
+            float a = ts - pad * 2.0f;
+            Vector2 p0a = { wx + pad,         wy + pad };
+            Vector2 p1a = { wx + pad + a,     wy + pad + a };
+            Vector2 p0b = { wx + pad,         wy + pad + a * 0.5f };
+            Vector2 p1b = { wx + pad + a * 0.5f, wy + pad + a };
+            DrawLineEx(p0a, p1a, 2.0f, hatch);
+            DrawLineEx(p0b, p1b, 2.0f, hatch);
+            break;
+        }
+        case TILE_PAT_ONE_WAY_CHEVRON: {
+            /* '^' centered on the tile, pointing up. */
+            Color chev = mat.accent;
+            Vector2 tip = { wx + ts * 0.5f, wy + ts * 0.25f };
+            Vector2 l   = { wx + ts * 0.30f, wy + ts * 0.55f };
+            Vector2 r   = { wx + ts * 0.70f, wy + ts * 0.55f };
+            DrawLineEx(l, tip, 2.0f, chev);
+            DrawLineEx(r, tip, 2.0f, chev);
+            break;
+        }
+        case TILE_PAT_BACKGROUND_ALPHA:
+            /* Alpha is folded into mat.base.a; no extra overlay. */
+            break;
+        case TILE_PAT_NONE:
+        default:
+            break;
+    }
+}
+
+/* M6 P09 — Tile rendering. Replaces the P13 path: each tile now picks
+ * its base color from the atmosphere theme palette (via the per-flag
+ * material) so ICE/DEADLY/ONE_WAY/BACKGROUND tiles read as
+ * categorically different from a SOLID tile even in the no-atlas
+ * fallback. Atlas path multiplies the material base into the atlas
+ * sub-rect tint (designer art still wins, but the per-flag color
+ * still announces the material).
+ *
+ * BACKGROUND tiles are PURELY decorative — physics already skips
+ * them per the §5.4 wiring; they paint with alpha so the player can
+ * see through. */
 static void draw_level_tiles(const Level *L) {
     const float ts = (float)L->tile_size;
     Texture2D atlas = g_map_kit.tiles;
     bool has_atlas = (atlas.id != 0);
+    double time = GetTime();
 
     if (has_atlas) {
         const float src_tile_px = 32.0f;
@@ -296,56 +385,84 @@ static void draw_level_tiles(const Level *L) {
             for (int x = 0; x < L->width; ++x) {
                 const LvlTile *t = &L->tiles[y * L->width + x];
                 if (!(t->flags & TILE_F_SOLID)) continue;
+                TileMaterial mat = atmosphere_tile_material(t->flags);
                 int aid = (int)t->id;
                 int ax  = (aid % 8) * (int)src_tile_px;
                 int ay  = (aid / 8) * (int)src_tile_px;
                 DrawTexturePro(atlas,
                     (Rectangle){ (float)ax, (float)ay, src_tile_px, src_tile_px },
                     (Rectangle){ (float)x * ts, (float)y * ts, ts, ts },
-                    (Vector2){0, 0}, 0.0f, WHITE);
+                    (Vector2){0, 0}, 0.0f, mat.base);
+                draw_tile_overlay((float)x * ts, (float)y * ts, ts, mat, time);
             }
         }
         return;
     }
 
-    /* Fallback: M4 2-tone checkerboard with a 1-px edge. */
-    Color floor_a = (Color){ 32,  38,  46, 255 };
-    Color floor_b = (Color){ 24,  28,  34, 255 };
-    Color edge    = (Color){ 80,  90, 110, 255 };
+    /* Fallback: theme-tinted 2-tone checkerboard with per-flag
+     * overlays. The 2-tone variation stays so within-flag visual
+     * texture survives even without an atlas. */
     for (int y = 0; y < L->height; ++y) {
         for (int x = 0; x < L->width; ++x) {
-            if (!(L->tiles[y * L->width + x].flags & TILE_F_SOLID)) continue;
-            Color c = ((x + y) & 1) ? floor_a : floor_b;
+            const LvlTile *t = &L->tiles[y * L->width + x];
+            if (!(t->flags & TILE_F_SOLID)) continue;
+            TileMaterial mat = atmosphere_tile_material(t->flags);
+            Color a = mat.base;
+            /* Variant tone: darken by 20% on odd cells for the within-
+             * flag checkerboard texture. */
+            Color b = (Color){
+                (unsigned char)((int)a.r * 80 / 100),
+                (unsigned char)((int)a.g * 80 / 100),
+                (unsigned char)((int)a.b * 80 / 100),
+                a.a,
+            };
+            Color fill = ((x + y) & 1) ? a : b;
+            Color edge = (Color){
+                (unsigned char)((int)a.r * 130 / 100 > 255 ? 255 : (int)a.r * 130 / 100),
+                (unsigned char)((int)a.g * 130 / 100 > 255 ? 255 : (int)a.g * 130 / 100),
+                (unsigned char)((int)a.b * 130 / 100 > 255 ? 255 : (int)a.b * 130 / 100),
+                a.a,
+            };
             DrawRectangle((int)((float)x * ts), (int)((float)y * ts),
-                          (int)ts, (int)ts, c);
+                          (int)ts, (int)ts, fill);
             DrawRectangleLines((int)((float)x * ts), (int)((float)y * ts),
                                (int)ts, (int)ts, edge);
+            draw_tile_overlay((float)x * ts, (float)y * ts, ts, mat, time);
         }
     }
 }
 
-/* P13 — Free polygon rendering, refactored out of the P02 stopgap.
- * Color-by-kind per `documents/m5/08-rendering.md` §"Free polygons".
+/* P13 / M6 P09 — Free polygon rendering. Per-kind fill colors come
+ * from the atmosphere theme palette via
+ * `atmosphere_tile_material(kind_to_flag)`, so a NEON map paints a
+ * magenta DEADLY poly + a cyan ICE poly that match the tile vocabulary.
+ * The DEADLY color is now {200,60,60} red (was {80,200,80} green —
+ * which clashed with the editor's red and the thumbnail painter's red).
  * BACKGROUND polygons are skipped here; `draw_polys_background` paints
  * them in a separate pass after the mechs so they sit visually in front
- * of the playfield (alpha-blended foreground silhouettes). */
+ * of the playfield. */
 static void draw_polys(const Level *L) {
-    Color poly_solid = (Color){ 32,  38,  46, 255 };
-    Color poly_ice   = (Color){180, 220, 240, 255 };
-    Color poly_dead  = (Color){ 80, 200,  80, 255 };
-    Color poly_one   = (Color){ 80,  80, 100, 200 };
-    Color poly_edge  = (Color){180, 200, 230, 255 };
+    double time = GetTime();
+    /* Translate poly kind → tile flag bit so the same material table
+     * picks the fill color for both tile and poly geometry. */
+    static const uint16_t kind_to_flag[] = {
+        [POLY_KIND_SOLID]      = TILE_F_SOLID,
+        [POLY_KIND_ICE]        = TILE_F_SOLID | TILE_F_ICE,
+        [POLY_KIND_DEADLY]     = TILE_F_SOLID | TILE_F_DEADLY,
+        [POLY_KIND_ONE_WAY]    = TILE_F_SOLID | TILE_F_ONE_WAY,
+        [POLY_KIND_BACKGROUND] = TILE_F_SOLID | TILE_F_BACKGROUND,
+    };
+    Color poly_edge = (Color){180, 200, 230, 255 };
     for (int i = 0; i < L->poly_count; ++i) {
         const LvlPoly *poly = &L->polys[i];
         if ((PolyKind)poly->kind == POLY_KIND_BACKGROUND) continue;
-        Color fill;
-        switch ((PolyKind)poly->kind) {
-            case POLY_KIND_ICE:        fill = poly_ice;   break;
-            case POLY_KIND_DEADLY:     fill = poly_dead;  break;
-            case POLY_KIND_ONE_WAY:    fill = poly_one;   break;
-            case POLY_KIND_SOLID:
-            default:                   fill = poly_solid; break;
-        }
+        uint16_t pk = (uint16_t)poly->kind;
+        uint16_t flag = (pk < sizeof(kind_to_flag)/sizeof(kind_to_flag[0]))
+                      ? kind_to_flag[pk] : TILE_F_SOLID;
+        TileMaterial mat = atmosphere_tile_material(flag);
+        Color fill = mat.base;
+        /* ONE_WAY gets a translucent fill so the chevron stripe reads. */
+        if ((PolyKind)poly->kind == POLY_KIND_ONE_WAY) fill.a = 200;
         Vector2 v0 = { (float)poly->v_x[0], (float)poly->v_y[0] };
         Vector2 v1 = { (float)poly->v_x[1], (float)poly->v_y[1] };
         Vector2 v2 = { (float)poly->v_x[2], (float)poly->v_y[2] };
@@ -355,6 +472,8 @@ static void draw_polys(const Level *L) {
         DrawLineEx(v0, v1, 2.0f, poly_edge);
         DrawLineEx(v1, v2, 2.0f, poly_edge);
         DrawLineEx(v2, v0, 2.0f, poly_edge);
+        /* M6 P09 — per-kind overlay (chevron / glint / hatch). */
+        atmosphere_draw_poly_overlay(poly, time);
     }
 }
 
@@ -1336,6 +1455,12 @@ static void draw_world_pass(Renderer *r, World *w, float alpha,
         draw_decorations(&w->level, 1);
         draw_level_tiles(&w->level);
         draw_polys(&w->level);
+        /* M6 P09 — Ambient zone visuals (WIND streaks via FxPool;
+         * ZERO_G + ACID tints painted here; FOG drawn as a soft volume
+         * with the shader handling the per-fragment haze). Drawn before
+         * decals so blood splats sit on top, and before mechs so the
+         * volume reads as a backdrop. */
+        atmosphere_draw_ambient_zones(&w->level, GetTime());
         /* P13 — Decoration layer 2 sits BETWEEN tiles and mechs (near
          * silhouettes that read in front of geometry but behind action). */
         draw_decorations(&w->level, 2);
@@ -1466,10 +1591,16 @@ void renderer_draw_frame(Renderer *r, World *w,
 
     /* (1) World pass → g_internal_target at internal resolution.
      * ClearBackground inside BeginTextureMode targets the RT, not the
-     * backbuffer — keeps the post-pass blend predictable. */
+     * backbuffer — keeps the post-pass blend predictable.
+     *
+     * M6 P09 — the sky gradient replaces the flat clear. When sky_top
+     * == sky_bot the call collapses to a single-color fill, so legacy
+     * maps with zero atmosphere data still get the hardcoded
+     * {12,14,18} backdrop via the THEME_CONCRETE default. */
     profile_zone_begin(PROF_DRAW_WORLD);
     BeginTextureMode(g_internal_target);
         ClearBackground((Color){12, 14, 18, 255});
+        atmosphere_draw_sky(internal_w, internal_h);
         draw_world_pass(r, w, alpha, local_visual_offset,
                         internal_w, internal_h);
     EndTextureMode();
@@ -1529,6 +1660,48 @@ void renderer_draw_frame(Renderer *r, World *w,
             }
         }
 
+        /* M6 P09 — Per-map atmospherics uniforms. All zero-default
+         * (theme 0 / no fog / no vignette) so a stock map costs zero
+         * extra shader work past the short-circuits in the shader. */
+        if (g_halftone_loc_fog_density >= 0) {
+            float fd = g_atmosphere.fog_density;
+            SetShaderValue(g_halftone_post, g_halftone_loc_fog_density,
+                           &fd, SHADER_UNIFORM_FLOAT);
+        }
+        if (g_halftone_loc_fog_color >= 0) {
+            Color fc = g_atmosphere.fog_color;
+            float rgb[3] = { fc.r / 255.0f, fc.g / 255.0f, fc.b / 255.0f };
+            SetShaderValue(g_halftone_post, g_halftone_loc_fog_color,
+                           rgb, SHADER_UNIFORM_VEC3);
+        }
+        if (g_halftone_loc_vignette >= 0) {
+            float vg = g_atmosphere.vignette;
+            SetShaderValue(g_halftone_post, g_halftone_loc_vignette,
+                           &vg, SHADER_UNIFORM_FLOAT);
+        }
+        if (g_halftone_loc_atmos_time >= 0) {
+            float at = (float)GetTime();
+            SetShaderValue(g_halftone_post, g_halftone_loc_atmos_time,
+                           &at, SHADER_UNIFORM_FLOAT);
+        }
+        /* Fog zone array: peer of jet_hot_zones. Each zone is
+         * (center_screen_x, center_screen_y, radius_px, density) in
+         * the same internal-RT pixel space the shimmer pass uses. */
+        if (g_halftone_loc_fog_zones >= 0 && g_halftone_loc_fog_zone_count >= 0) {
+            AtmosFogZone fzones[16];
+            int fz_n = 0;
+            if (!g_shot_mode || true) {   /* fog deterministic — runs in shotmode too */
+                fz_n = atmosphere_collect_fog_zones(&w->level, r->camera,
+                                                    fzones, 16);
+            }
+            if (fz_n > 0) {
+                SetShaderValueV(g_halftone_post, g_halftone_loc_fog_zones,
+                                fzones, SHADER_UNIFORM_VEC4, fz_n);
+            }
+            SetShaderValue(g_halftone_post, g_halftone_loc_fog_zone_count,
+                           &fz_n, SHADER_UNIFORM_INT);
+        }
+
         BeginTextureMode(g_post_target);
             ClearBackground((Color){0, 0, 0, 0});
             BeginShaderMode(g_halftone_post);
@@ -1586,6 +1759,18 @@ void renderer_draw_frame(Renderer *r, World *w,
          * is folded into PROF_DRAW_HUD's window for now — typical cost
          * is <50 µs per frame, well below adding a new ProfSection. */
         profile_zone_begin(PROF_DRAW_HUD);
+        /* M6 P09 — Weather particles. Drawn at window resolution
+         * BEFORE the HUD + damage numbers so:
+         *   1. weather sits in front of the world (over the halftoned
+         *      upscale) but behind text overlays — same layering
+         *      rationale as M6 P04's damage numbers
+         *   2. screen-space scaling stays sharp regardless of the
+         *      internal-RT cap (drawing into the RT would bilinear-
+         *      blur small rain/snow particles on upscale).
+         * The pool stores normalized (0..1) screen coords — atmosphere_
+         * draw_weather scales to the live window dimensions each frame
+         * so resize Just Works. */
+        atmosphere_draw_weather(&w->fx, window_w, window_h);
         fx_draw_damage_numbers(&w->fx, r->camera,
                                r->blit_scale, r->blit_dx, r->blit_dy);
 

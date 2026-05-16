@@ -39,6 +39,15 @@ bool level_point_solid(const Level *level, Vec2 p);
  * unobstructed. BACKGROUND polygons are skipped. */
 bool level_ray_hits(const Level *level, Vec2 a, Vec2 b, float *out_t);
 
+/* M6 P09 — Kinematic-physics ray-cast. Treats TILE_F_ONE_WAY as
+ * non-blocking when the ray is moving UPWARD (dy < 0), so an
+ * integrate-time sweep doesn't pre-clamp a jet'ing particle just
+ * below an editor-painted ONE_WAY platform. Used by physics_integrate
+ * (the tunneling-prevention sweep). Non-physics callers — grapple
+ * rope swept-test, line-of-sight checks — stick with the conservative
+ * `level_ray_hits` above. */
+bool level_ray_hits_kinematic(const Level *level, Vec2 a, Vec2 b, float *out_t);
+
 /* World-space bounds. */
 float level_width_px(const Level *level);
 float level_height_px(const Level *level);

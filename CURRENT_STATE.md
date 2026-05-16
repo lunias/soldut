@@ -5,9 +5,31 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-15** (M6 ctf-fixes — round-shape redesign:
-universal mid-round respawn, score_limit unified across modes,
-rounds_per_match host UI, HUD score banner sync, per-round slot reset).
+Last updated: **2026-05-15** (M6 P09 — editor-runtime parity +
+atmospherics). New tunables block below; everything from the M6
+ctf-fixes notes still applies underneath.
+
+## Atmospherics (M6 P09)
+
+| Tunable                         | Value     | Where                              |
+|---------------------------------|-----------|------------------------------------|
+| `g_themes[]`                    | 7 themes  | `src/atmosphere.c`                 |
+| `g_tile_materials` (impl)       | per-flag  | `src/atmosphere.c::atmosphere_tile_material` |
+| FxPool capacity                 | 10500     | `src/world.h::MAX_BLOOD` (was 8500) |
+| Weather spawn / density × 1 / tick | SNOW × 8, RAIN × 16, DUST × 4, EMBERS × 6 | `src/atmosphere.c::atmosphere_tick` |
+| Ambient spawn / zone / tick     | WIND × 4·strength, ZERO_G × 1, ACID × 1.5  | `src/atmosphere.c::atmosphere_tick` |
+| `fog_zones[16]` shader uniform  | 16 slots  | `assets/shaders/halftone_post.fs.glsl` |
+| New shader uniforms             | 5 globals + `fog_zones[16]` + `atmos_time` | `assets/shaders/halftone_post.fs.glsl` |
+| New FxKinds                     | 7         | `src/world.h` (3 ambient + 4 weather) |
+| Atmosphere RAM                  | ~280 B    | `g_atmosphere` (struct + zone_audio_state) |
+| New SFX manifest entries        | 52 total  | `src/audio.c` (+SFX_ENV_ZEROG_HUM/_ACID_BUBBLE) |
+| Tile flag → material priority   | DEADLY > ICE > ONE_WAY > BACKGROUND > SOLID | `atmosphere_tile_material` |
+| LvlMeta atmosphere block        | 9 × u16 = 18 B | `src/world.h::LvlMeta` (fits in former `reserved[9]`) |
+
+### Previously: M6 ctf-fixes round-shape redesign
+
+(M6 ctf-fixes — universal mid-round respawn, score_limit unified across modes,
+rounds_per_match host UI, HUD score banner sync, per-round slot reset.)
 Five commits on `m6-ctf-fixes` rebuild what "a round" means so FFA /
 TDM / CTF all share the same shape — kill / get captured / die →
 respawn after 3 s; round ends when someone hits `score_limit` (kills

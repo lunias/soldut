@@ -75,6 +75,8 @@ void ui_draw_poly_palette  (ToolCtx *c, const UIDims *D);
 void ui_draw_pickup_palette(ToolCtx *c, const UIDims *D);
 void ui_draw_spawn_palette (ToolCtx *c, const UIDims *D);
 void ui_draw_ambi_palette  (ToolCtx *c, const UIDims *D);
+/* M6 P09 — DECO palette: layer / scale / rotation / flip / additive. */
+void ui_draw_deco_palette  (ToolCtx *c, const UIDims *D);
 void ui_draw_empty_palette (const UIDims *D);
 
 /* ---- Meta modal (Map metadata). */
@@ -87,6 +89,17 @@ typedef struct MetaModal {
     bool mode_ctf;
     bool name_edit;
     bool blurb_edit;
+    /* M6 P09 — atmosphere overrides. theme_id picks the palette;
+     * sliders are 0..1 fractional (mapped to Q0.16 on apply). */
+    int   theme_id;        /* AtmosphereTheme enum */
+    float fog_density;     /* 0..1 */
+    float vignette;        /* 0..1 */
+    int   weather_kind;    /* WeatherKind enum */
+    float weather_density; /* 0..1 */
+    char  music_path[96];
+    char  ambient_path[96];
+    bool  music_edit;
+    bool  ambient_edit;
 } MetaModal;
 
 void ui_meta_open      (MetaModal *m, const EditorDoc *d);

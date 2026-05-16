@@ -48,10 +48,11 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-map-placement test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade test-riot-cannon-sfx test-damage-numbers test-mech-ik test-pose-compute test-bot-nav test-bot-playtest host-overlay-preview lobby-overlay-preview title-overlay-preview loadout-preview-overlay summary-overlay-preview bot-tier-preview cook-maps cook-thumbs bake bake-all shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-map-placement test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade test-riot-cannon-sfx test-damage-numbers test-mech-ik test-pose-compute test-bot-nav test-bot-playtest test-atmosphere-parity host-overlay-preview lobby-overlay-preview title-overlay-preview loadout-preview-overlay summary-overlay-preview bot-tier-preview cook-maps cook-thumbs bake bake-all shot \
         debug gdb gdb-host gdb-client valgrind editor \
         assets-palettes assets-process \
         audio-inventory audio-normalize audio-credits test-audio-smoke \
+        sprite-inventory \
         perf-bench perf-bench-uncapped perf-bench-stress perf-flamegraph
 
 all: $(BIN)
@@ -235,6 +236,21 @@ test-prefs: $(BUILD_DIR)/prefs_test
 test-frag-grenade: $(BIN)
 	bash tests/shots/net/run_frag_grenade.sh
 	bash tests/shots/net/run_frag_grenade.sh -b
+
+# M6 P09 — atmosphere wire-replication parity. Spawns a dedicated
+# server running Slipstream (ICE_SHEET + SNOW) + two clients; asserts
+# both clients log identical atmosphere parameters from
+# atmosphere_init_for_map. Wire-only; no rendering assertions (the
+# screenshots are the human-review payload).
+test-atmosphere-parity: $(BIN)
+	bash tests/shots/net/run_atmosphere_parity.sh
+
+# M6 P09 — sprite asset sourcing stub. Documents which Kenney /
+# OpenGameArt CC0 packs feed the atmospheric overlays (tiles_default,
+# decorations, caustic_acid, fog_noise). Idempotent — if raw packs
+# aren't downloaded yet, the runtime falls back to procedural visuals.
+sprite-inventory:
+	bash tools/sprite_inventory/source_map.sh
 
 # M6 Bug B — non-hitscan self-fire SFX suppressed on the firer's
 # window. Client fires Riot Cannon (WFIRE_SPREAD) and asserts the

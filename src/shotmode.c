@@ -1,5 +1,6 @@
 #include "shotmode.h"
 
+#include "atmosphere.h"
 #include "audio.h"
 #include "config.h"
 #include "ctf.h"
@@ -210,6 +211,33 @@ typedef struct {
         float x, y;
     }       extra_chassis[6];
     int     extra_chassis_count;
+
+    /* M6 P09 — tile painters. Applied after world build, before tick 0
+     * so per-flag overlay regression tests can author a small row of
+     * each tile flag (ICE / DEADLY / ONE_WAY / BACKGROUND) on top of
+     * whatever map was loaded.
+     *   `paint_tile <tx> <ty> <flags_hex>`
+     *   `paint_rect <tx0> <ty0> <tx1> <ty1> <flags_hex>` (half-open)
+     * flags_hex is the TILE_F_* bitmask in hex (e.g. 0x09 = SOLID|ONE_WAY).
+     * Capped at 32 paints per script.
+     *
+     * `paint_ambi <kind> <wx0> <wy0> <wx1> <wy1>` appends a fresh
+     * LvlAmbi rect after world build; the runtime's atmosphere_init_for_
+     * map will re-read it. Caps at 8. */
+#define SHOTMODE_MAX_PAINTS 32
+    struct {
+        bool     is_rect;
+        int      tx0, ty0, tx1, ty1;
+        uint16_t flags;
+    }       paints[SHOTMODE_MAX_PAINTS];
+    int     paint_count;
+#define SHOTMODE_MAX_PAINT_AMBIS 8
+    struct {
+        uint16_t kind;
+        int      x0, y0, x1, y1;
+        float    strength, dir_x, dir_y;
+    }       paint_ambis[SHOTMODE_MAX_PAINT_AMBIS];
+    int     paint_ambi_count;
 } Script;
 
 static const struct { const char *name; uint16_t bit; } BUTTON_TABLE[] = {
@@ -333,6 +361,8 @@ static bool parse_script(const char *path, Script *out) {
     out->internal_h   = 0;       /* M6 P03 — 0 = identity (no cap). */
     out->no_parallax  = false;  /* M6 P07 — see Shot struct comment. */
     out->countdown_seconds = 0.0f; /* M6 countdown-fix — 0 = keep shot default (1s). */
+    out->paint_count = 0;       /* M6 P09 — paint_tile / paint_rect cache */
+    out->paint_ambi_count = 0;  /* M6 P09 — paint_ambi cache */
 
     char line[512];
     int lineno = 0;
@@ -803,6 +833,64 @@ static bool parse_script(const char *path, Script *out) {
                 ok = false; continue;
             }
             out->countdown_seconds = n;
+        } else if (strcmp(tok, "paint_tile") == 0) {
+            /* M6 P09 — paint_tile <tx> <ty> <flags_hex>. Stamps a single
+             * tile after world build, before tick 0. Useful for the
+             * per-flag visual differentiation shot. */
+            int tx, ty;
+            unsigned int flags;
+            if (sscanf(rest, "%d %d %x", &tx, &ty, &flags) != 3) {
+                LOG_E("shotmode: %s:%d 'paint_tile' needs <tx> <ty> <flags_hex>", path, lineno);
+                ok = false; continue;
+            }
+            if (out->paint_count >= SHOTMODE_MAX_PAINTS) {
+                LOG_W("shotmode: %s:%d 'paint_tile' cap reached (%d)", path, lineno, SHOTMODE_MAX_PAINTS);
+                continue;
+            }
+            int p = out->paint_count++;
+            out->paints[p].is_rect = false;
+            out->paints[p].tx0 = tx; out->paints[p].ty0 = ty;
+            out->paints[p].tx1 = tx + 1; out->paints[p].ty1 = ty + 1;
+            out->paints[p].flags = (uint16_t)flags;
+        } else if (strcmp(tok, "paint_rect") == 0) {
+            int tx0, ty0, tx1, ty1;
+            unsigned int flags;
+            if (sscanf(rest, "%d %d %d %d %x",
+                       &tx0, &ty0, &tx1, &ty1, &flags) != 5) {
+                LOG_E("shotmode: %s:%d 'paint_rect' needs <tx0> <ty0> <tx1> <ty1> <flags_hex>", path, lineno);
+                ok = false; continue;
+            }
+            if (out->paint_count >= SHOTMODE_MAX_PAINTS) {
+                LOG_W("shotmode: %s:%d 'paint_rect' cap reached", path, lineno);
+                continue;
+            }
+            int p = out->paint_count++;
+            out->paints[p].is_rect = true;
+            out->paints[p].tx0 = tx0; out->paints[p].ty0 = ty0;
+            out->paints[p].tx1 = tx1; out->paints[p].ty1 = ty1;
+            out->paints[p].flags = (uint16_t)flags;
+        } else if (strcmp(tok, "paint_ambi") == 0) {
+            /* paint_ambi <kind_int> <wx0> <wy0> <wx1> <wy1> [strength dirx diry] */
+            int kind;
+            int x0, y0, x1, y1;
+            float st = 0.5f, dx = 1.0f, dy = 0.0f;
+            int n = sscanf(rest, "%d %d %d %d %d %f %f %f",
+                           &kind, &x0, &y0, &x1, &y1, &st, &dx, &dy);
+            if (n < 5) {
+                LOG_E("shotmode: %s:%d 'paint_ambi' needs <kind> <wx0> <wy0> <wx1> <wy1> [strength dx dy]", path, lineno);
+                ok = false; continue;
+            }
+            if (out->paint_ambi_count >= SHOTMODE_MAX_PAINT_AMBIS) {
+                LOG_W("shotmode: %s:%d 'paint_ambi' cap reached", path, lineno);
+                continue;
+            }
+            int p = out->paint_ambi_count++;
+            out->paint_ambis[p].kind = (uint16_t)kind;
+            out->paint_ambis[p].x0 = x0; out->paint_ambis[p].y0 = y0;
+            out->paint_ambis[p].x1 = x1; out->paint_ambis[p].y1 = y1;
+            out->paint_ambis[p].strength = st;
+            out->paint_ambis[p].dir_x = dx;
+            out->paint_ambis[p].dir_y = dy;
         } else if (strcmp(tok, "network") == 0) {
             char kind[16] = {0};
             int eaten2 = 0;
@@ -1664,6 +1752,85 @@ static void seed_world(Game *g, const Script *s) {
     if (!loaded) {
         level_build_tutorial(&w->level, &g->level_arena);
     }
+
+    /* M6 P09 — Apply paint_tile/paint_rect directives AFTER the map
+     * loads but BEFORE the renderer/decal init reads the level
+     * dimensions. This stamps editor-checkbox semantics on top of
+     * whatever map shipped, useful for the per-flag visual
+     * differentiation regression test. */
+    if (s && s->paint_count > 0 && w->level.tiles) {
+        int W = w->level.width, H = w->level.height;
+        for (int p = 0; p < s->paint_count; ++p) {
+            int tx0 = s->paints[p].tx0;
+            int ty0 = s->paints[p].ty0;
+            int tx1 = s->paints[p].tx1;
+            int ty1 = s->paints[p].ty1;
+            uint16_t flags = s->paints[p].flags;
+            if (tx0 < 0) tx0 = 0;
+            if (ty0 < 0) ty0 = 0;
+            if (tx1 > W) tx1 = W;
+            if (ty1 > H) ty1 = H;
+            for (int ty = ty0; ty < ty1; ++ty) {
+                for (int tx = tx0; tx < tx1; ++tx) {
+                    LvlTile *t = &w->level.tiles[ty * W + tx];
+                    t->flags = flags;
+                }
+            }
+            SHOT_LOG("paint_tile rect=(%d,%d)-(%d,%d) flags=0x%x",
+                     tx0, ty0, tx1, ty1, (unsigned)flags);
+        }
+    }
+    /* M6 P09 — paint_ambi appends ambient zones after world build.
+     * Since LvlAmbi storage is owned by the level arena (a vector of
+     * fixed size at load time), we can't realloc; reuse the existing
+     * array if there's headroom (cook_maps reserves up to ~16 ambis
+     * per map; if the live map already used all of them, the directive
+     * silently drops with a WARN). Re-init atmosphere so it sees the
+     * new zones. */
+    if (s && s->paint_ambi_count > 0) {
+        Level *L = &w->level;
+        /* Allocate fresh ambi storage that can hold the original plus
+         * the painted ones. The level arena is reset between map
+         * loads, so allocating here is fine. */
+        int extra = s->paint_ambi_count;
+        int total = L->ambi_count + extra;
+        LvlAmbi *new_a = (LvlAmbi *)arena_alloc(&g->level_arena,
+                                                sizeof(LvlAmbi) * (size_t)total);
+        if (new_a) {
+            if (L->ambis && L->ambi_count > 0) {
+                memcpy(new_a, L->ambis, sizeof(LvlAmbi) * (size_t)L->ambi_count);
+            }
+            for (int p = 0; p < extra; ++p) {
+                int idx = L->ambi_count + p;
+                int x0 = s->paint_ambis[p].x0, y0 = s->paint_ambis[p].y0;
+                int x1 = s->paint_ambis[p].x1, y1 = s->paint_ambis[p].y1;
+                if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+                if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+                new_a[idx] = (LvlAmbi){
+                    .rect_x = (int16_t)x0,
+                    .rect_y = (int16_t)y0,
+                    .rect_w = (int16_t)(x1 - x0),
+                    .rect_h = (int16_t)(y1 - y0),
+                    .kind = s->paint_ambis[p].kind,
+                    .strength_q = (int16_t)(s->paint_ambis[p].strength * 32767.0f),
+                    .dir_x_q = (int16_t)(s->paint_ambis[p].dir_x * 32767.0f),
+                    .dir_y_q = (int16_t)(s->paint_ambis[p].dir_y * 32767.0f),
+                };
+                SHOT_LOG("paint_ambi kind=%u rect=(%d,%d)-(%d,%d) st=%.2f dir=(%.2f,%.2f)",
+                         (unsigned)s->paint_ambis[p].kind,
+                         x0, y0, x1, y1,
+                         (double)s->paint_ambis[p].strength,
+                         (double)s->paint_ambis[p].dir_x,
+                         (double)s->paint_ambis[p].dir_y);
+            }
+            L->ambis      = new_a;
+            L->ambi_count = total;
+            /* Re-run atmosphere init so g_atmosphere.zone_audio_state
+             * is sized appropriately for the painted zones. */
+            atmosphere_init_for_map(L);
+        }
+    }
+
     decal_init((int)level_width_px(&w->level), (int)level_height_px(&w->level));
 
     /* P07 — apply mode override (if any) before spawning so ctf_init_round

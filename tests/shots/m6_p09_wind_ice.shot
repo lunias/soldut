@@ -1,0 +1,41 @@
+# m6_p09_wind_ice.shot — M6 P09
+#
+# Verifies the M6 P09 WIND + ICE compound. Setup:
+#   - 20-tile-wide ICE strip at row 35 of Concourse (x=960..1600).
+#   - A WIND ambient zone covering the same area, blowing RIGHT
+#     (dir=(1,0)) at strength 1.0 (max wind = 250 px/s).
+#   - Mech spawns at the LEFT edge of the ice; no player input.
+#
+# Expected: the WIND drives the mech RIGHT across the ICE strip
+# without any input. On non-ice ground the WIND would barely budge
+# the mech (contact friction 0.92 swamps it); on ICE (friction 1.0 +
+# integrate damp 0.9995) the wind cleanly drives to ~250 px/s.
+
+window 1920 1080
+seed   42 42
+out    build/shots/m6_p09_wind_ice
+
+map concourse
+
+# ICE strip — 20 tiles wide.
+paint_rect 30 35 50 36 0x03
+
+# WIND zone covering the ICE strip + a bit of clearance above so the
+# spawn lands inside. Blowing east at strength 1.0.
+# Rect: world (960, 992) → (1600, 1152). Wind dir (1, 0) = +X.
+paint_ambi 0 960 992 1600 1152 1.0 1.0 0.0
+
+# Spawn at left edge of the ice; high enough that the mech falls
+# into the WIND zone.
+spawn_at 1024 1000
+mouse    1600 540
+
+# Captures across ~6 seconds. No input — the mech should DRIFT right
+# under WIND on ICE without ever pressing a direction key.
+at  60  shot 1_landed
+at 180  shot 2_drifting
+at 300  shot 3_sliding
+at 420  shot 4_far_right
+at 460  end
+
+contact_sheet wind_ice cols 2 cell 960 540

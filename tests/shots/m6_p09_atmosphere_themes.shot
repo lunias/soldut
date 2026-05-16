@@ -1,0 +1,36 @@
+# m6_p09_atmosphere_themes.shot — M6 P09
+#
+# Loads Slipstream — the ICE_SHEET theme with SNOW @ 0.30 — and
+# captures one screenshot showing the sky gradient + snow weather +
+# cool tile palette. cf. tests/shots/m6_p09_atmosphere_themes_*.shot
+# for the other themes (each loads a different cooked map).
+#
+# Each shipping map's LvlMeta.theme_id + weather_kind is set by
+# tools/cook_maps/cook_maps.c per the §10.7 spec table. The expected
+# atmospheres:
+#   reactor    — RUST theme, embers @ 0.40, warm orange sky
+#   slipstream — ICE_SHEET, snow @ 0.30, cool blue sky
+#   aurora     — NEON, dust @ 0.20, magenta sky
+#   catwalk    — NEON, no weather, dim purple sky
+#   citadel    — BUNKER, dust @ 0.30, warm brown sky
+#   foundry    — INDUSTRIAL, no weather, brass/steel
+#   concourse  — CONCRETE, no weather, neutral gray
+#   crossfire  — CONCRETE, no weather, neutral gray
+#
+# Run:
+#   ./soldut --shot tests/shots/m6_p09_atmosphere_themes.shot
+# Output:
+#   build/shots/m6_p09_atmosphere_themes/slipstream.png
+
+window 1920 1080
+seed   31 31
+out    build/shots/m6_p09_atmosphere_themes
+
+# ICE_SHEET + SNOW.
+map slipstream
+spawn_at 1600 1500
+mouse    960 540
+
+# Settle, let weather particle ring fill (1.5 s ~ 90 ticks).
+at  90 shot slipstream
+at 110 end

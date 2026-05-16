@@ -280,6 +280,40 @@ Each layer draws ≤2 textures per frame (wraparound). 3 layers × 2 = 6 draw ca
 
 The ratios are pulled per-map from `LvlMeta` in [01-lvl-format.md](01-lvl-format.md). The M4 render loop's `ClearBackground` is replaced by `draw_parallax`.
 
+### M6 P09 — atmosphere layer composes on top of the kit
+
+The per-map kit above owns *static* art (parallax PNGs + tile atlas).
+M6 P09 adds a second per-map source of truth that owns *runtime
+atmosphere*: sky gradient, fog density, vignette, sun angle, weather
+mode, theme palette. These compose cleanly with the kit:
+
+1. **Sky gradient** (atmosphere) — painted first into the internal RT,
+   replacing the hardcoded `{12,14,18}` clear.
+2. **Parallax FAR / MID** (kit) — drawn over the gradient.
+3. **Tiles + polys** — per-flag base color now sourced from the
+   atmosphere theme palette (`g_themes[theme_id].tile_*`), so an
+   ICE_SHEET map paints cool-blue ICE tiles + a RUST map paints
+   warm-orange DEADLY tiles. Atlas-path multiplies the theme tint
+   into `DrawTexturePro`'s colDiffuse; the no-atlas fallback uses
+   the same theme tint as the checkerboard base color.
+4. **Ambient zone overlays** (atmosphere) — drawn just before mechs.
+5. **Decals / mechs / projectiles / FX** — unchanged.
+6. **Parallax NEAR** (kit) — drawn after the world, before halftone.
+7. **Halftone shader pass** (unchanged from P13) now also reads
+   `fog_density`, `fog_color`, `fog_zones[16]` (AMBI_FOG volumes),
+   and `vignette_strength` uniforms; each is short-circuited at
+   `<= 0.001` so a zero-init map costs zero extra shader work.
+8. **Weather particles** (atmosphere) — drawn at window resolution
+   AFTER the internal-RT upscale blit, BEFORE the HUD. Screen-space
+   `pos.x`/`pos.y` are stored as 0..1 normalized coords so they
+   scale with window size without recompute on resize.
+
+Wire format: per-map atmosphere fields live in `LvlMeta` (promoted
+from `reserved[9]`). P08's `.lvl` distribution already replicates
+them — no protocol bump.
+
+Source: `src/atmosphere.{c,h}`, `documents/m6/09-editor-runtime-parity-and-atmospherics.md`.
+
 ## HUD final art
 
 Replaces the `DrawRectangle` bars + line crosshair in `src/hud.c`.

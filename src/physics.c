@@ -58,6 +58,17 @@ void physics_integrate(World *w, float dt) {
     (void)dt;   /* dt enters via the (pos - prev) implicit velocity */
     ParticlePool *p = &w->particles;
     const float damp = PHYSICS_VELOCITY_DAMP;
+    /* M6 P09 — Per-particle damp override. A particle whose last-tick
+     * contact_kind has the ICE bit set keeps almost all its momentum
+     * (0.9995 vs the default 0.99). Combined with the friction = 1.0
+     * tangential-preservation at contact_with_velocity, this makes
+     * ICE feel genuinely slippery — once you build any horizontal
+     * speed, you slide for several seconds before contact / drag
+     * stops you. Combined with WIND's target-velocity push (see
+     * apply_ambient_zone_overrides) the mech accelerates almost
+     * unopposed under wind on ice, but barely budges under wind on
+     * concrete — exactly the "wind + ice compound" the user wants. */
+    const float damp_ice = 0.9995f;
 
     /* Swept collision against tiles. The discrete inside-tile escape
      * in collide_map_one_pass only fires if the post-integrate center
@@ -78,9 +89,17 @@ void physics_integrate(World *w, float dt) {
         float px = p->pos_x[i],  py = p->pos_y[i];
         float qx = p->prev_x[i], qy = p->prev_y[i];
 
+        /* M6 P09 — ICE damp override. Read last-tick contact_kind; if
+         * the particle is touching an ICE surface, use the high-momentum
+         * damp so velocity persists across the verlet integrate. */
+        float d = damp;
+        if (p->contact_kind && (p->contact_kind[i] & TILE_F_ICE)) {
+            d = damp_ice;
+        }
+
         /* x_{n+1} = x_n + (x_n - x_{n-1}) * damp  (forces already added) */
-        float nx = px + (px - qx) * damp;
-        float ny = py + (py - qy) * damp;
+        float nx = px + (px - qx) * d;
+        float ny = py + (py - qy) * d;
 
         /* Sweep from start-of-tick prev to the integrated pos. We
          * sweep from prev (not from px, the post-force pre-integrate
@@ -93,7 +112,12 @@ void physics_integrate(World *w, float dt) {
         float seg2 = dx * dx + dy * dy;
         if (seg2 > 1.0f) {
             float t = 1.0f;
-            if (level_ray_hits(L, (Vec2){qx, qy}, (Vec2){nx, ny}, &t)) {
+            /* M6 P09 — kinematic-variant: a particle moving UPWARD
+             * through a TILE_F_ONE_WAY tile is NOT pre-clamped, so it
+             * can pass through and the runtime collide_map_one_pass
+             * stays the sole gate for ONE_WAY semantics. Falling onto
+             * an ONE_WAY platform still clamps correctly. */
+            if (level_ray_hits_kinematic(L, (Vec2){qx, qy}, (Vec2){nx, ny}, &t)) {
                 float seg_len = sqrtf(seg2);
                 /* Stop r+epsilon px before the tile boundary. */
                 float t_clamped = t - (r + 0.5f) / seg_len;
@@ -364,7 +388,15 @@ static inline void contact_with_velocity(ParticlePool *p, int i,
     float ny_abs = (ny < 0.0f) ? -ny : ny;
     float friction = 0.99f - 0.07f * ny_abs;     /* [0.92 .. 0.99] */
     if (friction > 0.998f) friction = 0.998f;
-    if (kind & TILE_F_ICE) friction = 0.998f;
+    /* M6 P09 — bumped ICE 0.998 → 1.0 (zero tangential friction). The
+     * 0.998 friction (~12 % loss / sec) was being swamped by the global
+     * PHYSICS_VELOCITY_DAMP = 0.99 (~45 % loss / sec) so the mech felt
+     * effectively the same on ice as on concrete. With friction = 1.0,
+     * contact preserves every drop of tangential momentum and the only
+     * decay is the per-integrate damp — paired with the ICE damp
+     * override at physics_integrate (~0.9985 vs the default 0.99), the
+     * mech slides convincingly for ~2 s before stopping. */
+    if (kind & TILE_F_ICE) friction = 1.0f;
 
     float vtx = (vx - vn * nx) * friction;
     float vty = (vy - vn * ny) * friction;
@@ -401,6 +433,15 @@ static void collide_map_one_pass(World *w, bool finalize_velocity) {
                 int cx = tx + dx, cy = ty + dy;
                 uint16_t tflags = level_flags_at(L, cx, cy);
                 if (!(tflags & TILE_F_SOLID)) continue;
+                /* M6 P09 — BACKGROUND tiles are purely decorative. The
+                 * polygon path already honors this (POLY_KIND_BACKGROUND
+                 * is skipped at src/physics.c:633,916). Mirror it on the
+                 * tile side so editor-authored BACKGROUND tiles stop
+                 * lying. SOLID is implied by the gate above, so a
+                 * BACKGROUND tile reads as "draws like a tile, doesn't
+                 * collide" — exactly what the editor's checkbox UI
+                 * promised. */
+                if (tflags & TILE_F_BACKGROUND) continue;
                 uint8_t  kind   = (uint8_t)(tflags & 0xff);
 
                 float minx = (float)cx * ts;
@@ -414,6 +455,34 @@ static void collide_map_one_pass(World *w, bool finalize_velocity) {
                 float ddy = py - qy;
                 float d2 = ddx * ddx + ddy * ddy;
                 if (d2 >= r * r) continue;
+
+                /* M6 P09 — ONE_WAY tile: standard floor-platform
+                 * semantics. Block when the particle is moving DOWN
+                 * onto the top surface; pass-through otherwise. Two
+                 * checks combined:
+                 *   1. Velocity sign — moving up (vy < 0) = passable;
+                 *      moving down or at rest = blocking.
+                 *   2. Center-position guard — the particle's center
+                 *      must be ABOVE the tile-top for "land on top" to
+                 *      apply. Particles whose centers are below the
+                 *      tile top pass through (they're inside or below
+                 *      the tile body, not landing on its surface).
+                 * The center-position check prevents the body from
+                 * sticking after the constraint relaxation pushes a
+                 * foot a few pixels into the tile interior — the
+                 * collide pass now only catches the genuine top-surface
+                 * landing case.
+                 *
+                 * Mirrors the poly version at src/physics.c:717-721:
+                 * "came from passable side" → skip contact. */
+                if (tflags & TILE_F_ONE_WAY) {
+                    float vy = py - p->prev_y[i];
+                    /* Moving up (vy < 0): always passable. */
+                    if (vy < -0.001f) continue;
+                    /* Center below the top edge: inside / below tile;
+                     * not a landing-on-top contact. */
+                    if (py > miny + 1.0f) continue;
+                }
 
                 float nx, ny, amount;
                 if (d2 > 1e-4f) {
@@ -747,14 +816,42 @@ void physics_constrain_and_collide(World *w) {
     }
 }
 
-/* ---- Ambient zones (P02) ------------------------------------------ */
+/* ---- Ambient zones (P02 / M6 P09) -------------------------------- */
 /*
  * apply_ambient_zone_overrides — called from physics_apply_gravity
- * before the gravity write. WIND zones nudge prev_x/prev_y to inject a
- * velocity push; ZERO_G zones flag particles for the gravity loop to
- * skip. ACID zones do nothing here (mech.c::mech_apply_environmental
- * handles the damage tick; they are fundamentally a per-mech concern).
+ * before the gravity write.
+ *
+ * M6 P09 — WIND rewritten as a target-velocity push (was a tiny
+ * per-tick prev nudge by `st * dt` ≈ 0.008 px that did nothing
+ * visible). The new model treats `strength_q` as a fraction of a
+ * MAX wind speed (250 px/s) and a MAX acceleration (600 px/s²) —
+ * particles in the rect accelerate toward `strength * 250 px/s` in
+ * the wind direction, capped per tick at `strength * 600 px/s²`.
+ *
+ * On flat concrete (contact friction 0.92 + integrate damp 0.99 →
+ * per-tick decay ≈ 8.9 %) the wind can only push the mech to
+ * ~50-60 px/s — feels like leaning into a stiff breeze.
+ *
+ * On ICE (contact friction 1.0 + per-particle integrate damp 0.9995
+ * → per-tick decay ≈ 0.05 %) the wind cleanly drives the mech to
+ * the full target. Once at target speed, no further push (the cap
+ * absorbs friction loss but doesn't accelerate past target).
+ *
+ * ZERO_G zones flag particles for the gravity loop to skip. ACID
+ * zones do nothing here (mech.c::mech_apply_environmental handles
+ * the damage tick; they are fundamentally a per-mech concern).
  */
+/* M6 P09 — WIND tuning. Reference: RUN_SPEED_PXS = 280 px/s (walking),
+ * JET_THRUST_PXS2 = 2200 px/s² (jetpack). Max wind exceeds walking
+ * speed by 2.5× so a strength=1.0 storm visibly out-drags any
+ * ground-locomotion attempt to fight it; mid-strength (0.4-0.6) winds
+ * feel like leaning into a stiff breeze. The acceleration cap is
+ * ~half jet thrust so the buildup time matches a player jet-burst —
+ * roughly 0.6 s to reach full wind speed from rest. Designers scale
+ * down via LvlAmbi.strength_q (Q1.15, 0..32767 → 0..1.0). */
+#define WIND_MAX_SPEED_PXS   700.0f   /* px/s at strength=1.0 (~2.5× walking) */
+#define WIND_MAX_ACCEL_PXS2  1500.0f  /* per-tick acceleration cap (~0.6 s ramp) */
+
 static void apply_ambient_zone_overrides(World *w, float dt,
                                          uint8_t *zero_g_mask)
 {
@@ -771,14 +868,33 @@ static void apply_ambient_zone_overrides(World *w, float dt,
             float sx = (float)a->dir_x_q / 32767.0f;
             float sy = (float)a->dir_y_q / 32767.0f;
             float st = (float)a->strength_q / 32767.0f;
-            float fx = sx * st * dt;     /* delta-prev nudge magnitude */
-            float fy = sy * st * dt;
+            /* Normalize the direction so editor-authored (.85, .5) still
+             * produces a unit-vector wind direction (was: the per-axis
+             * Q15 → float conversion left non-unit vectors that scaled
+             * the effective strength). */
+            float dlen = sqrtf(sx * sx + sy * sy);
+            if (dlen > 1e-4f) { sx /= dlen; sy /= dlen; }
+            else              { sx = 1.0f; sy = 0.0f; }
+            /* Target speed (px/tick) and per-tick acceleration cap. */
+            float target_pxtick = st * WIND_MAX_SPEED_PXS  * dt;
+            float accel_pxtick  = st * WIND_MAX_ACCEL_PXS2 * dt * dt;
             for (int i = 0; i < p->count; ++i) {
                 if (!(p->flags[i] & PARTICLE_FLAG_ACTIVE)) continue;
+                if (p->inv_mass[i] <= 0.0f) continue;
                 float px = p->pos_x[i], py = p->pos_y[i];
                 if (px < minx || px > maxx || py < miny || py > maxy) continue;
-                p->prev_x[i] -= fx;
-                p->prev_y[i] -= fy;
+                /* Project current per-tick velocity onto wind dir. */
+                float vx = px - p->prev_x[i];
+                float vy = py - p->prev_y[i];
+                float vproj = vx * sx + vy * sy;
+                float deficit = target_pxtick - vproj;
+                if (deficit <= 0.0f) continue;          /* already at speed */
+                float push = (deficit < accel_pxtick) ? deficit : accel_pxtick;
+                /* Inject the per-tick velocity gain by displacing pos
+                 * (Verlet absorbs it via the next integrate's pos-prev
+                 * delta — matches the gravity convention at line 50). */
+                p->pos_x[i] += push * sx;
+                p->pos_y[i] += push * sy;
             }
         } else { /* AMBI_ZERO_G */
             if (!zero_g_mask) continue;

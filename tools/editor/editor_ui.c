@@ -318,6 +318,106 @@ void ui_draw_ambi_palette(ToolCtx *c, const UIDims *D) {
         if (GuiButton(r, ambis[i].name)) c->ambi_kind = ambis[i].kind;
         y += row_h;
     }
+
+    /* M6 P09 — per-kind strength + direction sliders. The kind name
+     * relabels per-AmbiKind so the same UI doubles as the semantic
+     * label. WIND gets a direction slider; the others only the strength. */
+    y += D->pad;
+    const char *strength_label = "Strength";
+    switch (c->ambi_kind) {
+        case 0: strength_label = "Wind speed";    break;
+        case 1: strength_label = "Gravity scale"; break;
+        case 2: strength_label = "Damage rate";   break;
+        case 3: strength_label = "Fog density";   break;
+        default: break;
+    }
+    char buf[64];
+    snprintf(buf, sizeof buf, "%s: %.2f", strength_label, c->ambi_strength);
+    ui_draw_text(buf, x + D->pad, y, D->font_sm, COL_TEXT);
+    y += D->font_sm + D->pad / 2;
+    Rectangle sb = { (float)(x + D->pad), (float)y,
+                     (float)(D->right_w - D->pad * 2),
+                     (float)(D->palette_row_h - 4) };
+    GuiSlider(sb, "", "", &c->ambi_strength, 0.0f, 1.0f);
+    y += sb.height + D->pad;
+    if (c->ambi_kind == 0) {   /* AMBI_WIND */
+        snprintf(buf, sizeof buf, "Direction: %.0f°", c->ambi_dir_deg);
+        ui_draw_text(buf, x + D->pad, y, D->font_sm, COL_TEXT);
+        y += D->font_sm + D->pad / 2;
+        Rectangle db = { (float)(x + D->pad), (float)y,
+                         (float)(D->right_w - D->pad * 2),
+                         (float)(D->palette_row_h - 4) };
+        GuiSlider(db, "", "", &c->ambi_dir_deg, 0.0f, 360.0f);
+        y += db.height + D->pad;
+    }
+}
+
+/* M6 P09 — Full DECO palette (replaces the empty stub).
+ * Layer dropdown (0/1/2/3), scale slider (0.25–4.0), rotation slider
+ * (0–360°), flip-X toggle, additive toggle. The sprite_str_idx still
+ * inherits whatever the previous deco placed; a sprite picker grid
+ * pull from `assets/sprites/decorations.png` would be the natural
+ * next step but the placeholder rectangles already render at the
+ * configured layer/scale/rotation so designers can iterate. */
+void ui_draw_deco_palette(ToolCtx *c, const UIDims *D) {
+    int sw = GetScreenWidth(), sh = GetScreenHeight();
+    int x = sw - D->right_w;
+    DrawRectangle(x, D->top_h, D->right_w, sh - D->top_h - D->bottom_h, COL_PANEL);
+    DrawRectangle(x, D->top_h, 1, sh - D->top_h - D->bottom_h, COL_BORDER);
+    int y = D->top_h + D->pad;
+    draw_panel_title("Decoration", x + D->pad, y, D->right_w - D->pad * 2,
+                     D->font_lg, COL_TEXT_HIGH);
+    y += D->font_lg + D->pad;
+
+    /* Layer dropdown — 4 buttons in a row. */
+    ui_draw_text("Layer:", x + D->pad, y, D->font_sm, COL_TEXT);
+    y += D->font_sm + D->pad / 2;
+    int btn_w = (D->right_w - D->pad * 2 - 12) / 4;
+    for (int i = 0; i < 4; ++i) {
+        Rectangle r = { (float)(x + D->pad + i * (btn_w + 4)),
+                        (float)y,
+                        (float)btn_w,
+                        (float)D->palette_row_h };
+        char lab[8]; snprintf(lab, sizeof lab, "%d", i);
+        bool on = (c->deco_layer == (uint8_t)i);
+        if (on) {
+            DrawRectangleRec(r, COL_ACCENT_LO);
+            DrawRectangleLinesEx(r, 2.0f, COL_ACCENT);
+        }
+        if (GuiButton(r, lab)) c->deco_layer = (uint8_t)i;
+    }
+    y += D->palette_row_h + D->pad;
+
+    char buf[64];
+    snprintf(buf, sizeof buf, "Scale: %.2fx", c->deco_scale);
+    ui_draw_text(buf, x + D->pad, y, D->font_sm, COL_TEXT);
+    y += D->font_sm + D->pad / 2;
+    Rectangle sb = { (float)(x + D->pad), (float)y,
+                     (float)(D->right_w - D->pad * 2),
+                     (float)(D->palette_row_h - 4) };
+    GuiSlider(sb, "", "", &c->deco_scale, 0.25f, 4.0f);
+    y += sb.height + D->pad;
+
+    snprintf(buf, sizeof buf, "Rotation: %.0f°", c->deco_rot_deg);
+    ui_draw_text(buf, x + D->pad, y, D->font_sm, COL_TEXT);
+    y += D->font_sm + D->pad / 2;
+    Rectangle rb = { (float)(x + D->pad), (float)y,
+                     (float)(D->right_w - D->pad * 2),
+                     (float)(D->palette_row_h - 4) };
+    GuiSlider(rb, "", "", &c->deco_rot_deg, 0.0f, 360.0f);
+    y += rb.height + D->pad;
+
+    /* Flip X + Additive checkboxes. */
+    int chk = D->font_base + 6;
+    Rectangle fb = { (float)(x + D->pad),
+                     (float)(y + (D->palette_row_h - chk) / 2),
+                     (float)chk, (float)chk };
+    GuiCheckBox(fb, "Flip horizontally", &c->deco_flipped_x);
+    y += D->palette_row_h + D->pad / 2;
+    Rectangle ab = { (float)(x + D->pad),
+                     (float)(y + (D->palette_row_h - chk) / 2),
+                     (float)chk, (float)chk };
+    GuiCheckBox(ab, "Additive blend", &c->deco_additive);
 }
 
 void ui_draw_empty_palette(const UIDims *D) {
@@ -338,6 +438,19 @@ void ui_meta_open(MetaModal *m, const EditorDoc *d) {
     m->mode_ctf = (d->meta.mode_mask & 4u) != 0;
     m->name_edit = true;
     m->blurb_edit = false;
+    /* M6 P09 — atmosphere fields populate from the doc's LvlMeta.
+     * Q0.16 → float, kind enums stay as ints. */
+    m->theme_id        = (int)d->meta.theme_id;
+    m->fog_density     = (float)d->meta.fog_density_q     / 65535.0f;
+    m->vignette        = (float)d->meta.vignette_q        / 65535.0f;
+    m->weather_kind    = (int)d->meta.weather_kind;
+    m->weather_density = (float)d->meta.weather_density_q / 65535.0f;
+    snprintf(m->music_path,   sizeof m->music_path,   "%s",
+             doc_str_lookup(d, d->meta.music_str_idx));
+    snprintf(m->ambient_path, sizeof m->ambient_path, "%s",
+             doc_str_lookup(d, d->meta.ambient_loop_str_idx));
+    m->music_edit   = false;
+    m->ambient_edit = false;
 }
 
 void ui_meta_apply(MetaModal *m, EditorDoc *d) {
@@ -347,6 +460,18 @@ void ui_meta_apply(MetaModal *m, EditorDoc *d) {
         (m->mode_ffa ? 1u : 0u) |
         (m->mode_tdm ? 2u : 0u) |
         (m->mode_ctf ? 4u : 0u);
+    /* M6 P09 — atmosphere writeback. Clamp before quantising so a
+     * malformed slider drag can't overflow Q0.16. */
+    float fd = m->fog_density;  if (fd < 0) fd = 0; if (fd > 1) fd = 1;
+    float vg = m->vignette;     if (vg < 0) vg = 0; if (vg > 1) vg = 1;
+    float wd = m->weather_density; if (wd < 0) wd = 0; if (wd > 1) wd = 1;
+    d->meta.theme_id          = (uint16_t)m->theme_id;
+    d->meta.fog_density_q     = (uint16_t)(fd * 65535.0f);
+    d->meta.vignette_q        = (uint16_t)(vg * 65535.0f);
+    d->meta.weather_kind      = (uint16_t)m->weather_kind;
+    d->meta.weather_density_q = (uint16_t)(wd * 65535.0f);
+    d->meta.music_str_idx        = doc_str_intern(d, m->music_path);
+    d->meta.ambient_loop_str_idx = doc_str_intern(d, m->ambient_path);
     d->dirty = true;
 }
 
@@ -354,7 +479,9 @@ void ui_meta_modal_draw(MetaModal *m, EditorDoc *d, const UIDims *D) {
     if (!m->open) return;
     int sw = GetScreenWidth(), sh = GetScreenHeight();
     DrawRectangle(0, 0, sw, sh, (Color){0, 0, 0, 160});
-    int dlg_w = ui_scl(560, D->scale), dlg_h = ui_scl(320, D->scale);
+    /* M6 P09 — grew 560×320 → 640×620 to fit the atmospherics +
+     * music/ambient rows. */
+    int dlg_w = ui_scl(640, D->scale), dlg_h = ui_scl(620, D->scale);
     int dlg_x = (sw - dlg_w) / 2, dlg_y = (sh - dlg_h) / 2;
     GuiPanel((Rectangle){(float)dlg_x, (float)dlg_y, (float)dlg_w, (float)dlg_h},
              "Map metadata");
@@ -367,14 +494,16 @@ void ui_meta_modal_draw(MetaModal *m, EditorDoc *d, const UIDims *D) {
     ui_draw_text("Display name", label_x, y + D->pad / 2, D->font_base, COL_TEXT);
     Rectangle nb = {(float)field_x, (float)y, (float)field_w, (float)D->row_h};
     if (GuiTextBox(nb, m->name, (int)sizeof m->name, m->name_edit)) {
-        m->name_edit = !m->name_edit; m->blurb_edit = false;
+        m->name_edit = !m->name_edit;
+        m->blurb_edit = false; m->music_edit = false; m->ambient_edit = false;
     }
     y += line_h;
 
     ui_draw_text("Blurb", label_x, y + D->pad / 2, D->font_base, COL_TEXT);
     Rectangle bb = {(float)field_x, (float)y, (float)field_w, (float)D->row_h};
     if (GuiTextBox(bb, m->blurb, (int)sizeof m->blurb, m->blurb_edit)) {
-        m->blurb_edit = !m->blurb_edit; m->name_edit = false;
+        m->blurb_edit = !m->blurb_edit;
+        m->name_edit = false; m->music_edit = false; m->ambient_edit = false;
     }
     y += line_h;
 
@@ -387,6 +516,77 @@ void ui_meta_modal_draw(MetaModal *m, EditorDoc *d, const UIDims *D) {
                             (float)chk, (float)chk}, "TDM", &m->mode_tdm);
     GuiCheckBox((Rectangle){(float)(field_x + 2*gap), (float)y + (D->row_h - chk)/2.0f,
                             (float)chk, (float)chk}, "CTF", &m->mode_ctf);
+    y += line_h;
+
+    /* M6 P09 — Music + ambient_loop text fields. */
+    ui_draw_text("Music path", label_x, y + D->pad / 2, D->font_base, COL_TEXT);
+    Rectangle mb = {(float)field_x, (float)y, (float)field_w, (float)D->row_h};
+    if (GuiTextBox(mb, m->music_path, (int)sizeof m->music_path, m->music_edit)) {
+        m->music_edit = !m->music_edit;
+        m->name_edit = false; m->blurb_edit = false; m->ambient_edit = false;
+    }
+    y += line_h;
+
+    ui_draw_text("Ambient loop", label_x, y + D->pad / 2, D->font_base, COL_TEXT);
+    Rectangle ab = {(float)field_x, (float)y, (float)field_w, (float)D->row_h};
+    if (GuiTextBox(ab, m->ambient_path, (int)sizeof m->ambient_path, m->ambient_edit)) {
+        m->ambient_edit = !m->ambient_edit;
+        m->name_edit = false; m->blurb_edit = false; m->music_edit = false;
+    }
+    y += line_h;
+
+    /* ---- M6 P09 — Atmospherics block ---- */
+    ui_draw_text("Atmospherics", dlg_x + D->pad * 2,
+                 y + D->pad / 2, D->font_lg, COL_TEXT_HIGH);
+    y += D->font_lg + D->pad;
+
+    /* Theme cycle button. */
+    static const char *theme_names[] = {
+        "CONCRETE", "BUNKER", "ICE_SHEET", "NEON",
+        "RUST", "OVERGROWN", "INDUSTRIAL",
+    };
+    int n_themes = (int)(sizeof theme_names / sizeof theme_names[0]);
+    ui_draw_text("Theme", label_x, y + D->pad / 2, D->font_base, COL_TEXT);
+    Rectangle tb = {(float)field_x, (float)y, (float)field_w, (float)D->row_h};
+    int safe_theme = (m->theme_id >= 0 && m->theme_id < n_themes)
+                     ? m->theme_id : 0;
+    char tbuf[48];
+    snprintf(tbuf, sizeof tbuf, "%s  ▾", theme_names[safe_theme]);
+    if (GuiButton(tb, tbuf)) {
+        m->theme_id = (safe_theme + 1) % n_themes;
+    }
+    y += line_h;
+
+    char sbuf[64];
+    snprintf(sbuf, sizeof sbuf, "Fog density: %.2f", m->fog_density);
+    ui_draw_text(sbuf, label_x, y + D->pad / 2, D->font_sm, COL_TEXT);
+    Rectangle sb_fd = {(float)field_x, (float)y, (float)field_w, (float)(D->row_h - 4)};
+    GuiSlider(sb_fd, "", "", &m->fog_density, 0.0f, 1.0f);
+    y += line_h;
+
+    snprintf(sbuf, sizeof sbuf, "Vignette: %.2f", m->vignette);
+    ui_draw_text(sbuf, label_x, y + D->pad / 2, D->font_sm, COL_TEXT);
+    Rectangle sb_vg = {(float)field_x, (float)y, (float)field_w, (float)(D->row_h - 4)};
+    GuiSlider(sb_vg, "", "", &m->vignette, 0.0f, 1.0f);
+    y += line_h;
+
+    /* Weather cycle + density. */
+    static const char *weather_names[] = { "NONE", "SNOW", "RAIN", "DUST", "EMBERS" };
+    int n_weather = (int)(sizeof weather_names / sizeof weather_names[0]);
+    int safe_w = (m->weather_kind >= 0 && m->weather_kind < n_weather)
+                 ? m->weather_kind : 0;
+    ui_draw_text("Weather", label_x, y + D->pad / 2, D->font_base, COL_TEXT);
+    Rectangle wb = {(float)field_x, (float)y, (float)field_w, (float)D->row_h};
+    snprintf(tbuf, sizeof tbuf, "%s  ▾", weather_names[safe_w]);
+    if (GuiButton(wb, tbuf)) {
+        m->weather_kind = (safe_w + 1) % n_weather;
+    }
+    y += line_h;
+
+    snprintf(sbuf, sizeof sbuf, "Density: %.2f", m->weather_density);
+    ui_draw_text(sbuf, label_x, y + D->pad / 2, D->font_sm, COL_TEXT);
+    Rectangle sb_wd = {(float)field_x, (float)y, (float)field_w, (float)(D->row_h - 4)};
+    GuiSlider(sb_wd, "", "", &m->weather_density, 0.0f, 1.0f);
     y += line_h;
 
     int btn_w = ui_scl(110, D->scale);

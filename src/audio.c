@@ -347,6 +347,14 @@ static const SfxManifestEntry g_sfx_manifest[] = {
     /* --- M6 countdown-fix — pre-round race-start cues --- */
     { SFX_COUNTDOWN_BEEP,    "assets/sfx/countdown_beep.wav",    2, 0.65f, AUDIO_BUS_UI  },
     { SFX_COUNTDOWN_GO,      "assets/sfx/countdown_go.wav",      2, 0.85f, AUDIO_BUS_UI  },
+
+    /* --- M6 P09 — Per-zone ambient enter cues ---
+     * Quiet (0.25/0.30) so they sit underneath gunfire and don't
+     * compete. Sourced via tools/sprite_inventory/source_map.sh from
+     * Kenney sci-fi sounds + opengameart bubbling water loops; missing
+     * files no-op silently per audio_init's pattern. */
+    { SFX_ENV_ZEROG_HUM,     "assets/sfx/env_zerog_hum.ogg",     2, 0.25f, AUDIO_BUS_SFX },
+    { SFX_ENV_ACID_BUBBLE,   "assets/sfx/env_acid_bubble.ogg",   2, 0.30f, AUDIO_BUS_SFX },
 };
 
 #define SFX_MANIFEST_COUNT  (int)(sizeof g_sfx_manifest / sizeof g_sfx_manifest[0])

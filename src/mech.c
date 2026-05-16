@@ -687,8 +687,21 @@ static void apply_run_velocity(World *w, const Mech *m, float vx_pxs, float dt, 
         /* No input on slope: return — gravity-along-tangent + the
          * per-contact friction in physics.c::contact_with_velocity
          * drive passive slide. On flat: friction-decel X toward 0;
-         * leave Y to gravity / contact resolution. */
+         * leave Y to gravity / contact resolution.
+         *
+         * M6 P09 — Skip the no-input brake when EITHER foot is on
+         * ICE. The brake is the mech's CONTROL-system "auto stop"
+         * (1400 px/s² toward zero), independent of physical contact
+         * friction. Without this gate, ICE tiles can't actually slip
+         * — the brake decelerates the mech faster than gravity, wind,
+         * or any other force can accelerate it. With the gate, ICE
+         * passes momentum cleanly through to physics.c's contact +
+         * integrate damp, where friction = 1.0 + damp_ice = 0.9995
+         * preserve velocity for several seconds. */
         if (!flat) return;
+        bool on_ice = ((p->contact_kind[lf] & TILE_F_ICE) ||
+                       (p->contact_kind[rf] & TILE_F_ICE));
+        if (on_ice) return;
         float dx = -vx_now;
         float max_delta_x = GROUND_FRICTION_PXS2 * dt * dt;
         if (dx >  max_delta_x) dx =  max_delta_x;
@@ -1517,7 +1530,23 @@ void mech_apply_environmental_damage(World *w, int mid, float dt) {
         float px = p->pos_x[idx];
         float py = p->pos_y[idx];
 
-        /* Tile DEADLY check. */
+        /* M6 P09 — also fire for "standing on a DEADLY tile". The
+         * existing center-inside-tile check (below) only catches
+         * particles whose center has penetrated a DEADLY volume.
+         * That works for lava POLYGONS (the foot tip can be inside
+         * a triangle while the body is above), but a thin DEADLY
+         * TILE (1 cell tall) caps out as "foot rests on top, center
+         * never inside, no damage". The poly version of ONE_WAY at
+         * physics.c:717-721 already mirrors physics flags into
+         * `contact_kind` per particle; reading that bit here makes
+         * "the editor's DEADLY checkbox actually hurts you" true on
+         * the tile path too. */
+        if (p->contact_kind && (p->contact_kind[idx] & TILE_F_DEADLY)) {
+            in_hazard = true;
+            break;
+        }
+
+        /* Tile DEADLY check (center-inside, original behavior). */
         int tx = (int)(px / (float)ts);
         int ty = (int)(py / (float)ts);
         if (level_flags_at(L, tx, ty) & TILE_F_DEADLY) {
@@ -1559,9 +1588,29 @@ void mech_apply_environmental_damage(World *w, int mid, float dt) {
         }
     }
 
+    /* M6 P09 — Accumulate the fractional per-tick damage and only
+     * call mech_apply_damage when it crosses an integer threshold.
+     * Pre-fix: 5 HP/s × 1/60 = 0.083 HP/tick rounded to u8 = 0 in
+     * mech_apply_damage, so the damage-number FX never spawned and
+     * the HP bar visibly froze even though the float HP slowly
+     * drained. Post-fix: damage lands as a clear 1-HP tick with a
+     * visible "1" glyph every ~0.2 s of hazard contact (5 HP/s ×
+     * 0.2 s = 1 HP). Carry persists across frames so a brief contact
+     * (< 0.2 s) accumulates partial credit instead of getting lost. */
     if (in_hazard) {
-        mech_apply_damage(w, mid, PART_PELVIS, 5.0f * dt,
-                          (Vec2){0.0f, -1.0f}, /*shooter*/-1);
+        m->env_damage_carry += 5.0f * dt;
+        if (m->env_damage_carry >= 1.0f) {
+            int whole = (int)m->env_damage_carry;
+            float chunk = (float)whole;
+            m->env_damage_carry -= chunk;
+            mech_apply_damage(w, mid, PART_PELVIS, chunk,
+                              (Vec2){0.0f, -1.0f}, /*shooter*/-1);
+        }
+    } else {
+        /* Decay the carry when not in hazard so brief grazes don't
+         * permanently pre-charge the next contact. ~0.25 s drain. */
+        m->env_damage_carry *= 0.96f;
+        if (m->env_damage_carry < 0.001f) m->env_damage_carry = 0.0f;
     }
 }
 

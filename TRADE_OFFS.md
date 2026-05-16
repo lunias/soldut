@@ -13,7 +13,46 @@ Every entry follows the same structure:
 - **Revisit when** — the trigger that should bring this back to the top
   of the queue.
 
-Last updated: **2026-05-15** (M6 ctf-fixes — round-shape redesign).
+Last updated: **2026-05-15** (M6 P09 — editor-runtime parity +
+atmospherics). **Added** three new entries:
+
+- "Decoration atlas sub-rect lookup still uses hash-of-offset, not a
+  real manifest (M6 P09)" — under "Rendering". The editor now exposes
+  layer / scale / rot / flip / additive controls for every LvlDeco
+  field; runtime honors them. But `deco_src_rect_for` at
+  `src/render.c:464-470` still picks the atlas sub-rect by hashing
+  `sprite_str_idx` into a 16×16 cell grid (the P13 stopgap). The
+  designer's authored sprite NAME string doesn't reach the atlas
+  picker — only its byte offset does. This is fine for the placeholder-
+  rectangle path (designers see the right colors at the right
+  positions), but a real `assets/sprites/decorations.png` shipping
+  through `tools/sprite_inventory/source_map.sh` would benefit from a
+  `g_deco_manifest[]` table mapping sprite names to atlas rects. Spec
+  §2.4 / §17 list it as a follow-up. Revisit when decorations atlas
+  art lands.
+
+- "Editor previews atmospherics via F5 test-play, not in-editor
+  (M6 P09)" — under "Editor". The editor's debug renderer at
+  `tools/editor/render.c` doesn't run the halftone shader / sky
+  gradient / weather particles. Designers preview atmosphere by
+  pressing F5 to spawn the full game on the edited `.lvl`. Adding the
+  pipeline to the editor would duplicate the renderer; the F5 flow
+  already works end-to-end. Revisit if iteration time on atmosphere
+  tweaks becomes painful in playtesting.
+
+- "Sprite source packs (tiles_default / decorations / caustic / noise)
+  not downloaded; runtime uses procedural fallbacks (M6 P09)" — under
+  "Assets". `tools/sprite_inventory/source_map.sh` documents the
+  Kenney + OpenGameArt CC0 packs that feed the four atmospheric
+  atlases, but the raw PNGs aren't on disk. The runtime detects each
+  missing file at `LoadTexture()` time and falls back to procedural
+  visuals (per-flag tile checkerboard from theme palette, deco
+  placeholder rectangles, sin-driven caustic strip, shader-derived
+  fog haze). All four atlases are OPTIONAL — they polish the existing
+  procedural output. Revisit when bundling the raw packs becomes a
+  priority (typically when shipping a public build).
+
+Previously: **2026-05-15** (M6 ctf-fixes — round-shape redesign).
 **Added** three new entries:
 
 - "Mid-round respawn delay is a fixed 180 ticks across all modes
