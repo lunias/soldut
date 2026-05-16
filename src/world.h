@@ -243,6 +243,24 @@ typedef struct {
     bool     valid;
 } RemoteSnapBuf;
 
+/* wan-fixes-21 — explosion de-dup ring. See `World.explosion_record_ring`
+ * for the rationale. `source` is one of:
+ *   EXPL_SRC_PREDICTED  — spawned by client's projectile_step::detonate
+ *   EXPL_SRC_SERVER     — spawned by client_handle_explosion from a
+ *                          NET_MSG_EXPLOSION broadcast
+ * The opposite-source lookup suppresses double-flash. */
+#define EXPL_SRC_PREDICTED  0u
+#define EXPL_SRC_SERVER     1u
+#define EXPLOSION_RECORD_RING 16
+typedef struct {
+    Vec2     pos;
+    uint64_t at_tick;
+    uint16_t owner_mech;
+    uint8_t  weapon_id;
+    uint8_t  source;
+    bool     valid;
+} ExplosionRecord;
+
 typedef struct {
     int       id;                 /* index into world.mechs[] */
     int       chassis_id;
@@ -1072,6 +1090,36 @@ typedef struct World {
 
     /* Monotonic simulation tick. */
     uint64_t tick;
+
+    /* wan-fixes-21 — small ring of recent explosion records used to
+     * de-duplicate client-side predicted AOE detonations against the
+     * server's NET_MSG_EXPLOSION broadcast.
+     *
+     * Background: wan-fixes-10 made the client's projectile_step
+     * detonate path stop spawning the explosion VISUAL, so the
+     * server-driven `client_handle_explosion` was the single source
+     * of truth for visual placement. That avoided ~10 px divergence
+     * between client (rest-pose) and server (animated-pose) bone
+     * positions, but it also delayed all AOE feedback by 1× RTT
+     * (~86 ms on the MN ↔ AZ playtest). For Mass Driver with its
+     * slow 850 px/s rocket, long-range shots felt like a miss until
+     * the server's explosion event arrived ~85 ms later. Combined
+     * with the 150 ms remote-mech interp delay, that's 235 ms of
+     * "did I hit?" uncertainty per shot.
+     *
+     * wan-fixes-21 re-enables a *predicted* client-side spawn in
+     * detonate() — damage is still gated by `w->authoritative`
+     * inside explosion_spawn so the client can't apply false
+     * damage. To avoid double-flash when the server's event lands
+     * at the same place, every spawn pushes a record into this
+     * ring. The opposite-source lookup suppresses re-spawn when a
+     * matching record from the OTHER source is recent.
+     *
+     * 16 entries × 30-tick (500 ms) age window covers the worst
+     * observed RTT spike (~110 ms) plus a wide safety margin.
+     * O(16) scan per detonate / per server-event is free. */
+    ExplosionRecord explosion_record_ring[EXPLOSION_RECORD_RING];
+    int             explosion_record_head;
 } World;
 
 /* Convenience accessors. */

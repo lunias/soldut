@@ -204,6 +204,19 @@ bool prefs_save(const UserPrefs *p, const char *path) {
         return false;
     }
 
+    /* wan-fixes-17 — Windows POSIX rename() fails when `path` already
+     * exists (CRT shim emulates ISO C, which leaves overwrite behaviour
+     * implementation-defined; MSVCRT errors out). Production logs from
+     * the 2026-05-15 MN ↔ AZ session showed 23 of these failures in
+     * a single play session because the lobby team-toggle / loadout-
+     * change re-saves prefs on every UI mutation. Pre-deleting on
+     * Windows opens a sub-millisecond race window where neither file
+     * exists, but the worst-case is identical to today's behaviour
+     * (prefs gone until next save), so the trade is strictly an
+     * improvement. POSIX still gets the atomic rename. */
+#ifdef _WIN32
+    remove(path);
+#endif
     if (rename(tmp, path) != 0) {
         LOG_W("prefs: rename(%s -> %s) failed — prefs not persisted", tmp, path);
         remove(tmp);

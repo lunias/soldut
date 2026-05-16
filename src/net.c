@@ -1816,12 +1816,33 @@ static void client_handle_snapshot(NetState *ns, const uint8_t *body,
         LOG_W("client: snapshot decode failed (%d bytes)", blen);
         return;
     }
-    /* Drop strictly older snapshots — UDP doesn't guarantee order, and
-     * processing a stale frame would push back-in-time data into the
-     * remote ring AND re-snap the local mech backward (followed by a
-     * full input replay against a stale base). */
-    if (ns->client_render_clock_armed &&
-        snap.header.server_time_ms < ns->client_latest_server_time_ms) {
+    /* wan-fixes-20 — reorder-tolerant admission.
+     *
+     * Pre-fix: snapshots strictly older than the latest-seen
+     * server_time were dropped at the receive site. That was safe
+     * for reconcile (which can't rewind to a stale ack point) but
+     * silently threw away samples that would have been useful in
+     * the per-mech interp ring. Live MN ↔ AZ playtests showed
+     * ~10-37 reordered snapshots per second arriving in WAN
+     * micro-burst windows; rejecting them caused render_time to
+     * outpace newest_t in the ring, freezing remote-mech motion
+     * for 30-80 ms at a time.
+     *
+     * Post-fix: full reconcile + apply only for snapshots that
+     * advance server_time (existing behaviour). Reordered-but-
+     * recent snapshots (within REMOTE_SNAP_STALE_MAX_MS = 250 ms
+     * of the latest) take the ring-only path which updates each
+     * remote mech's per-mech interp ring without touching the
+     * local mech, health/weapon/team/aim fields, or the stale-
+     * sweep. Snapshots older than that → drop. */
+    bool advances = !ns->client_render_clock_armed ||
+                    snap.header.server_time_ms >= ns->client_latest_server_time_ms;
+    if (!advances) {
+        uint32_t age = ns->client_latest_server_time_ms - snap.header.server_time_ms;
+        if (age > REMOTE_SNAP_STALE_MAX_MS) return;
+        snapshot_apply_remote_ring_only(&g->world, &snap);
+        /* Don't bump snapshots_applied — this isn't a full apply
+         * (no reconcile, no state advance). Net stats stay honest. */
         return;
     }
     /* One-shot log so we can see snapshots are flowing. */
@@ -2270,14 +2291,26 @@ static void client_handle_hit_event(NetState *ns, const uint8_t *body, int blen,
     (void)dir;
 }
 
-/* wan-fixes-10 — client-side EXPLOSION handler. Spawns the visual
- * explosion (sparks + sfx + screen shake) at the SERVER's
- * authoritative pos, and kills any matching visual-only projectile
- * the client still has alive from the original FIRE_EVENT so the
- * bouncing grenade vanishes the moment the boom appears. Damage is
- * NOT applied here (already happened on the server before this
- * broadcast); explosion_spawn's authoritative gate makes the damage
- * loop a no-op on the client. */
+/* wan-fixes-10 / wan-fixes-21 — client-side EXPLOSION handler.
+ *
+ * Spawns the visual explosion (sparks + sfx + screen shake) at the
+ * SERVER's authoritative pos, and kills any matching visual-only
+ * projectile the client still has alive from the original FIRE_EVENT
+ * so the bouncing grenade vanishes the moment the boom appears.
+ * Damage is NOT applied here (already happened on the server before
+ * this broadcast); explosion_spawn's authoritative gate makes the
+ * damage loop a no-op on the client.
+ *
+ * wan-fixes-21: if the client already spawned a PREDICTED explosion
+ * for this projectile in `projectile.c::detonate`, suppress the
+ * re-spawn here to avoid a double-flash. The predicted record
+ * carries the local detonation pos; we don't care about
+ * client/server pos divergence for visual purposes (the predicted
+ * one is "good enough" and the user already saw it). The
+ * authoritative damage runs server-side regardless. If we DON'T
+ * have a prediction (because server's broadcast beat the client's
+ * detonate), spawn normally and push a SERVER record so the later
+ * detonate skips its prediction. */
 static void client_handle_explosion(NetState *ns, const uint8_t *body, int blen, Game *g) {
     (void)ns;
     if (blen < 7) return;
@@ -2290,6 +2323,13 @@ static void client_handle_explosion(NetState *ns, const uint8_t *body, int blen,
     Vec2 pos = { (float)pxq / 4.0f, (float)pyq / 4.0f };
     const Weapon *wpn = weapon_def((int)weapon);
     if (!wpn) return;
+
+    /* Always log handler entry so the test-frag-grenade asserts on
+     * handler count work regardless of whether the visual was
+     * predicted-and-suppressed or spawned normally. */
+    SHOT_LOG("t=%llu client_handle_explosion owner=%d weapon=%d at=(%.2f,%.2f)",
+             (unsigned long long)g->world.tick, (int)owner, (int)weapon,
+             pos.x, pos.y);
 
     /* Find + kill any AOE projectile from this shooter that hasn't
      * already detonated. Most rounds have ≤2 in flight per owner so a
@@ -2306,16 +2346,24 @@ static void client_handle_explosion(NetState *ns, const uint8_t *body, int blen,
         pp->exploded[i] = 1;
     }
 
-    /* Spawn the visual. explosion_spawn's authoritative gate causes
-     * the damage loop to early-return on the client; we get sparks +
-     * sfx + shake at the server-correct position with no double-damage. */
+    /* wan-fixes-21 — de-dup against a recent CLIENT prediction. */
+    ExplosionRecord *pred = explosion_record_find_consume(
+        &g->world, (int)owner, (int)weapon,
+        EXPL_SRC_PREDICTED, /*max_age_ticks*/30);
+    if (pred) {
+        pred->valid = false;  /* consume; don't re-match a later event */
+        return;
+    }
+
+    /* No prediction in flight — spawn normally and remember that
+     * the server's visual fired (so a later client detonate that
+     * matches this projectile skips its prediction). */
     int owner_team = ((int)owner < g->world.mech_count)
                          ? (int)g->world.mechs[owner].team : 0;
     explosion_spawn(&g->world, pos, wpn->aoe_radius, wpn->aoe_damage,
                     wpn->aoe_impulse, (int)owner, owner_team, (int)weapon);
-    SHOT_LOG("t=%llu client_handle_explosion owner=%d weapon=%d at=(%.2f,%.2f)",
-             (unsigned long long)g->world.tick, (int)owner, (int)weapon,
-             pos.x, pos.y);
+    explosion_record_push(&g->world, pos, (int)owner, (int)weapon,
+                          EXPL_SRC_SERVER);
 }
 
 static void client_handle_reject(NetState *ns, const uint8_t *body, int blen) {
