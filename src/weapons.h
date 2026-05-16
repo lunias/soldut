@@ -129,14 +129,14 @@ void weapons_spawn_throw_charged(World *w, int mid, int weapon_id,
 
 /* Upward "lob" bias applied to the launch direction in
  * weapons_spawn_throw_charged. Bias = MIN + (MAX-MIN) × charge_factor;
- * 0.20..0.55 yields ~11°..29° of upward rotation at horizontal aim
+ * 0.20..0.70 yields ~11°..35° of upward rotation at horizontal aim
  * (renormalized into a unit vector, so launch speed is unchanged).
- * The previous 0.15..0.40 range was too shallow — max-charge throws
- * traced an almost-flat arc that couldn't clear a small wall right
- * in front of the mech. 29° at max gives ~230 px apex height for a
- * baseball-pitch arc that flies over typical platform walls. */
+ * 35° at max charge is close to the no-drag optimal range angle (45°)
+ * but stays low enough to clear most concourse / reactor ceilings —
+ * max-charge throws reach ~3200 px laterally before the first ground
+ * hit, vs ~1800 px at the prior 0.55 max. */
 #define FRAG_LOB_MIN_BIAS        0.20f
-#define FRAG_LOB_MAX_BIAS        0.55f
+#define FRAG_LOB_MAX_BIAS        0.70f
 
 /* Post-bounce velocity magnitude (px/s) below which a bouncy grenade
  * detonates on the spot instead of sitting and waiting for the fuse.

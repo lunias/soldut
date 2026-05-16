@@ -170,7 +170,7 @@ static const Weapon g_weapons[WEAPON_COUNT] = {
          *
          * AOE damage 100, radius 180 — each round only carries 3
          * grenades, so a well-placed one should clear a small area. */
-        .projectile_speed_pxs = 700.0f, .projectile_life_sec = 2.0f,
+        .projectile_speed_pxs = 700.0f, .projectile_life_sec = 2.4f,
         .projectile_drag = 0.12f, .projectile_grav_scale = 1.05f,
         .aoe_radius = 180.0f, .aoe_damage = 100.0f, .aoe_impulse = 65.0f,
         .bouncy = true,

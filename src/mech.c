@@ -2660,10 +2660,18 @@ bool mech_apply_damage(World *w, int mid, int part, float dmg, Vec2 dir,
     if (m->powerup_godmode_remaining > 0.0f) return false;
 
     /* Friendly-fire gating. Self-damage (e.g. own rocket splash) always
-     * goes through; friendly damage is dropped when FF is off. */
+     * goes through; friendly damage is dropped when FF is off.
+     *
+     * EXCEPT in FFA: lobby_init seeds every slot with team = MATCH_TEAM_FFA
+     * (= 1, same numeric value as MATCH_TEAM_RED), so without this
+     * carve-out `shooter->team == m->team` would always be true and
+     * the friendly_fire toggle would silently disable ALL inter-player
+     * damage in 1v1 / 3-player FFA. friendly_fire is meaningless in
+     * FFA — there are no friends. */
     if (shooter_mech_id >= 0 && shooter_mech_id != mid) {
         const Mech *shooter = &w->mechs[shooter_mech_id];
-        if (shooter->team == m->team && !w->friendly_fire) {
+        bool is_ffa = (w->match_mode_cached == 0 /* MATCH_MODE_FFA */);
+        if (!is_ffa && shooter->team == m->team && !w->friendly_fire) {
             return false;
         }
     }

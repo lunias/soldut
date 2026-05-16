@@ -738,20 +738,49 @@ void explosion_spawn(World *w, Vec2 pos, float radius, float damage,
     w->last_explosion_tick = w->tick;
     w->last_explosion_owner_mech = owner_mech_id;
 
-    /* Visuals — sparks + smoke fan-out + screen shake within ~800 px. */
-    for (int k = 0; k < 28; ++k) {
-        float ang = (float)k / 28.0f * 6.283185f;
+    /* Visuals — three-tier blast: a bright flash ring (impossible to
+     * miss against busy/foggy backgrounds), shrapnel sparks, and
+     * smoke puffs that linger. Pre-M6 the explosion was just 28
+     * small yellow sparks and a no-op smoke loop — easy to lose
+     * against concourse's green atrium or any ambient-zone overlay.
+     * The user saw "hear it but don't see it" because the sparks
+     * faded in 0.15 s and the smoke wasn't being spawned at all. */
+
+    /* 12 large bright flash particles — short life, fast outward
+     * velocity, vivid orange. These read as the "fireball" instant. */
+    for (int k = 0; k < 12; ++k) {
+        float ang = ((float)k / 12.0f) * 6.283185f
+                  + (pcg32_float01(w->rng) - 0.5f) * 0.3f;
+        Vec2 dir = { cosf(ang), sinf(ang) };
+        int idx = fx_spawn_spark(&w->fx, pos,
+            (Vec2){ dir.x * 220.0f, dir.y * 220.0f }, w->rng);
+        if (idx >= 0) {
+            FxParticle *fp = &w->fx.items[idx];
+            fp->size     = 5.0f + pcg32_float01(w->rng) * 3.0f;   /* 5-8 px */
+            fp->color    = 0xFFC840FFu;                            /* bright orange */
+            fp->life     = 0.28f;
+            fp->life_max = 0.28f;
+        }
+    }
+
+    /* 36 shrapnel sparks — wide cone, medium life, fine particles
+     * that read as "fragments flying outward." */
+    for (int k = 0; k < 36; ++k) {
+        float ang = ((float)k / 36.0f) * 6.283185f;
         Vec2 dir = { cosf(ang), sinf(ang) };
         fx_spawn_spark(&w->fx, pos,
-            (Vec2){ dir.x * 320.0f, dir.y * 320.0f }, w->rng);
+            (Vec2){ dir.x * 360.0f, dir.y * 360.0f }, w->rng);
     }
-    for (int k = 0; k < 6; ++k) {
-        Vec2 d = { (float)((int)k - 3) * 18.0f,
-                   -(float)k * 8.0f };
-        /* Smoke is cosmetic — we currently render smoke as a blood-like
-         * particle (gray/black tint). The blood path's color randomizer
-         * gives orange/red here; close enough for M3 first pass. */
-        (void)d;
+
+    /* 7 smoke puffs — lingering grey clouds, bias upward + outward
+     * to read as rising debris. Per-puff velocity has a randomized
+     * angle so the cloud looks irregular. */
+    for (int k = 0; k < 7; ++k) {
+        float ang = ((float)k / 7.0f) * 6.283185f
+                  + (pcg32_float01(w->rng) - 0.5f) * 0.4f;
+        Vec2 vel = { cosf(ang) * 60.0f,
+                     sinf(ang) * 60.0f - 30.0f };  /* upward bias */
+        fx_spawn_smoke(&w->fx, pos, vel, w->rng);
     }
     SHOT_LOG("t=%llu explosion at (%.1f,%.1f) r=%.1f dmg=%.1f imp=%.1f owner=%d weapon=%d",
              (unsigned long long)w->tick, pos.x, pos.y,
@@ -836,11 +865,15 @@ void explosion_spawn(World *w, Vec2 pos, float radius, float damage,
 
         /* Friendly-fire / self-damage rules. The mass driver self-
          * damages the firer (intended), but we still respect the
-         * friendly-fire toggle for teammates. */
+         * friendly-fire toggle for teammates. FFA carve-out matches
+         * mech_apply_damage's — in FFA every slot is on team 1, so
+         * without the is_ffa gate the friendly_fire check would block
+         * ALL inter-player AOE damage. */
+        bool is_ffa = (w->match_mode_cached == 0 /* MATCH_MODE_FFA */);
         bool same_team = (owner_mech_id != mi)
                       && (owner_team >= 0)
                       && (m->team == owner_team);
-        if (same_team && !w->friendly_fire) continue;
+        if (!is_ffa && same_team && !w->friendly_fire) continue;
 
         /* Find the closest body part to the explosion center; that
          * decides hit_location_mult and gives us a particle to

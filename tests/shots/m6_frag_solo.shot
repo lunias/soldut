@@ -54,16 +54,14 @@ at 130 shot t130_charging_early
 at 160 shot t160_charging_late
 at 185 shot t185_launch
 at 200 shot t200_arc_rise
-at 215 shot t215_apex
-at 230 shot t230_descent
-at 240 shot t240_pre_impact
-at 243 shot t243_just_before_boom
-at 244 shot t244_boom_center
-at 246 shot t246_boom_plus_2
-at 250 shot t250_boom_plus_6
-at 260 shot t260_linger
-at 280 shot t280_camera_returning
-at 320 shot t320_settled
+at 230 shot t230_apex
+at 280 shot t280_descent
+at 322 shot t322_pre_impact
+at 324 shot t324_boom_center
+at 326 shot t326_boom_plus_2
+at 332 shot t332_boom_plus_8
+at 350 shot t350_linger
+at 380 shot t380_camera_returning
 
 # Second throw — short tap (10 ticks ≈ 0.17 s charge), straight
 # down at feet to see a short-lob immediate-roll case.
