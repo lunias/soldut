@@ -1,0 +1,43 @@
+# m6_p09_ambient_zones.shot — M6 P09
+#
+# Stamps the four AmbiKind volumes (WIND, ZERO_G, ACID, FOG) on top
+# of the Reactor map and captures a screenshot showing each zone's
+# visual signature:
+#   AMBI_WIND   — pale-white streak particles drifting in dir
+#   AMBI_ZERO_G — cool blue tint + slow upward dust motes
+#   AMBI_ACID   — pulsing green tint + caustic surface band + bubbles
+#   AMBI_FOG    — shader-driven soft haze tinted with fog_color
+#
+# AmbiKind enum values:
+#   AMBI_WIND   = 0
+#   AMBI_ZERO_G = 1
+#   AMBI_ACID   = 2
+#   AMBI_FOG    = 3
+#
+# Run:
+#   ./soldut --shot tests/shots/m6_p09_ambient_zones.shot
+# Output:
+#   build/shots/m6_p09_ambient_zones/four_zones.png
+
+window 1920 1080
+seed   23 23
+out    build/shots/m6_p09_ambient_zones
+
+map reactor
+
+# Four zones laid out left-to-right across the screen, each 192 px
+# wide × 192 px tall, around y=700..892 (mid-screen at the default
+# camera follow position).
+# Reactor is 110×42 → 3520×1344 px. Center zones around x=960 region.
+paint_ambi 0  640  700  960  900   0.6   1.0  0.0       # WIND right
+paint_ambi 1  1000 700 1300  900   0.7   0.0  0.0       # ZERO_G
+paint_ambi 2  1340 700 1640  900   0.5   0.0  0.0       # ACID
+paint_ambi 3  1680 700 1980  900   0.5   0.0  0.0       # FOG (density 0.5)
+
+spawn_at 960 1000
+mouse    960 540
+
+# Settle long enough that the particle ring fills + the acid pulses
+# at least one cycle.
+at 120 shot four_zones
+at 150 end

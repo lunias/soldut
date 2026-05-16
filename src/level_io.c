@@ -222,7 +222,21 @@ static void decode_meta(const uint8_t *p, LvlMeta *out) {
     out->ambient_loop_str_idx = r_u16(p +  8);
     out->reverb_amount_q      = r_u16(p + 10);
     out->mode_mask            = r_u16(p + 12);
-    for (int i = 0; i < 9; ++i) out->reserved[i] = r_u16(p + 14 + i * 2);
+    /* M6 P09 — atmosphere fields (formerly reserved[]). Old files
+     * carry zeros here, which the runtime interprets as "use theme
+     * defaults" via atmosphere_resolve(). */
+    out->theme_id             = r_u16(p + 14);
+    out->sky_top_rgb565       = r_u16(p + 16);
+    out->sky_bot_rgb565       = r_u16(p + 18);
+    out->fog_density_q        = r_u16(p + 20);
+    out->fog_color_rgb565     = r_u16(p + 22);
+    out->vignette_q           = r_u16(p + 24);
+    out->sun_angle_q          = r_u16(p + 26);
+    out->weather_kind         = r_u16(p + 28);
+    out->weather_density_q    = r_u16(p + 30);
+    /* 9 atmosphere u16s consume exactly the 18-byte reserved[9] slot
+     * the format reserved at M5 P01; LvlMeta total stays 32 B and the
+     * _Static_assert at world.h:953 still holds. */
 }
 
 /* ---- Per-record encoders ------------------------------------------ */
@@ -293,7 +307,17 @@ static void encode_meta(uint8_t *p, const LvlMeta *m) {
     w_u16(p +  8, m->ambient_loop_str_idx);
     w_u16(p + 10, m->reverb_amount_q);
     w_u16(p + 12, m->mode_mask);
-    for (int i = 0; i < 9; ++i) w_u16(p + 14 + i * 2, m->reserved[i]);
+    /* M6 P09 — atmosphere block (9 × u16 = 18 B). Fills exactly the
+     * 18 reserved bytes from the M5 P01 schema; LvlMeta stays 32 B. */
+    w_u16(p + 14, m->theme_id);
+    w_u16(p + 16, m->sky_top_rgb565);
+    w_u16(p + 18, m->sky_bot_rgb565);
+    w_u16(p + 20, m->fog_density_q);
+    w_u16(p + 22, m->fog_color_rgb565);
+    w_u16(p + 24, m->vignette_q);
+    w_u16(p + 26, m->sun_angle_q);
+    w_u16(p + 28, m->weather_kind);
+    w_u16(p + 30, m->weather_density_q);
 }
 
 /* ---- Polygon broadphase grid (P02) -------------------------------- */

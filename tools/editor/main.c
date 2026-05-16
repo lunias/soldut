@@ -438,7 +438,7 @@ int main(int argc, char **argv) {
             case TOOL_PICKUP: ui_draw_pickup_palette(&ctx, &D); break;
             case TOOL_SPAWN:  ui_draw_spawn_palette(&ctx, &D); break;
             case TOOL_AMBI:   ui_draw_ambi_palette(&ctx, &D); break;
-            case TOOL_DECO:
+            case TOOL_DECO:   ui_draw_deco_palette(&ctx, &D); break;   /* M6 P09 */
             case TOOL_META:
             default:          ui_draw_empty_palette(&D); break;
         }

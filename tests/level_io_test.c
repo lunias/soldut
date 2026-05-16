@@ -116,13 +116,25 @@ static void build_synthetic(World *w, Arena *arena) {
     L->flags[0] = (LvlFlag){ .pos_x = 100, .pos_y = 150, .team = 1, .reserved = {0,0,0} };
     L->flags[1] = (LvlFlag){ .pos_x = 700, .pos_y = 150, .team = 2, .reserved = {0,0,0} };
 
-    /* META. */
+    /* META.
+     *
+     * M6 P09 — exercises every promoted atmosphere field with
+     * distinct non-zero values so the encode/decode round-trip
+     * regresses if any one ever drifts. */
     L->meta = (LvlMeta){
         .name_str_idx = 1, .blurb_str_idx = 6,
         .background_str_idx = 14, .music_str_idx = 0,
         .ambient_loop_str_idx = 0, .reverb_amount_q = 16384,
         .mode_mask = 0x07, /* FFA | TDM | CTF */
-        .reserved = { 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        .theme_id          = 3,       /* NEON */
+        .sky_top_rgb565    = 0x4188,
+        .sky_bot_rgb565    = 0x10A4,
+        .fog_density_q     = 26214,   /* ~0.40 */
+        .fog_color_rgb565  = 0x8410,
+        .vignette_q        = 13107,   /* ~0.20 */
+        .sun_angle_q       = 16384,   /* 0.25 → π/2 */
+        .weather_kind      = 4,       /* EMBERS */
+        .weather_density_q = 32767,   /* ~0.50 */
     };
 
     /* String table. Offset 0 reserved as empty. */
@@ -249,6 +261,27 @@ int main(void) {
     if (Ll->meta.name_str_idx == Ls->meta.name_str_idx) {
         TEST(&S, memcmp(&Ll->meta, &Ls->meta, sizeof(LvlMeta)) == 0, "meta mem-equal");
     }
+    /* M6 P09 — explicit per-field assertions on the promoted
+     * atmosphere block. Catches a future schema drift even if the
+     * memcmp above is masked by padding changes. */
+    TEST(&S, Ll->meta.theme_id          == Ls->meta.theme_id,
+         "meta.theme_id round-trip");
+    TEST(&S, Ll->meta.sky_top_rgb565    == Ls->meta.sky_top_rgb565,
+         "meta.sky_top_rgb565 round-trip");
+    TEST(&S, Ll->meta.sky_bot_rgb565    == Ls->meta.sky_bot_rgb565,
+         "meta.sky_bot_rgb565 round-trip");
+    TEST(&S, Ll->meta.fog_density_q     == Ls->meta.fog_density_q,
+         "meta.fog_density_q round-trip");
+    TEST(&S, Ll->meta.fog_color_rgb565  == Ls->meta.fog_color_rgb565,
+         "meta.fog_color_rgb565 round-trip");
+    TEST(&S, Ll->meta.vignette_q        == Ls->meta.vignette_q,
+         "meta.vignette_q round-trip");
+    TEST(&S, Ll->meta.sun_angle_q       == Ls->meta.sun_angle_q,
+         "meta.sun_angle_q round-trip");
+    TEST(&S, Ll->meta.weather_kind      == Ls->meta.weather_kind,
+         "meta.weather_kind round-trip");
+    TEST(&S, Ll->meta.weather_density_q == Ls->meta.weather_density_q,
+         "meta.weather_density_q round-trip");
 
     /* ---- TEST 2 — bit-flipped file rejects with BAD_CRC ----
      * Flip the very last byte of the saved file (well past header /

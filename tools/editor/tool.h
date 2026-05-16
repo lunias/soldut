@@ -53,10 +53,23 @@ typedef struct ToolCtx {
     int      ambi_drag_start_x, ambi_drag_start_y;
     bool     ambi_dragging;
     int      ambi_kind;        /* AMBI_* */
+    /* M6 P09 — per-kind strength + direction sliders. Defaults match the
+     * pre-P09 hardcoded values so existing maps that didn't set explicit
+     * values keep getting (strength=0.5, dir=(+1, 0)). */
+    float    ambi_strength;    /* WIND speed / ZERO_G scale / ACID rate / FOG density */
+    float    ambi_dir_deg;     /* WIND only — direction in degrees (0=east) */
 
     /* Decoration tool state. */
     uint8_t  deco_layer;
     uint16_t deco_sprite_str;  /* STRT offset; 0 = no sprite (empty placeholder) */
+    /* M6 P09 — every LvlDeco field the runtime reads but the editor
+     * previously hardcoded. Defaults align with the legacy values
+     * (layer 1, scale 1.0, rot 0, no flip, no additive) so a designer
+     * who doesn't touch the new controls gets identical output. */
+    float    deco_scale;       /* world scale, default 1.0 */
+    float    deco_rot_deg;     /* rotation in degrees, default 0 */
+    bool     deco_flipped_x;   /* horizontal flip */
+    bool     deco_additive;    /* additive blend */
 
     /* Flag tool state. P07 — CTF flag bases. The team auto-toggles on
      * each placement so a designer can drop one of each side without

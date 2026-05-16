@@ -1,0 +1,19 @@
+# 2p_atmosphere_parity.client_a.shot — M6 P09
+#
+# Paired with 2p_atmosphere_parity.client_b.shot — both clients
+# connect to a dedicated server running Slipstream (ICE_SHEET theme +
+# SNOW weather @ 0.30 baked in by cook_maps).
+# Asserts: atmosphere_init_for_map runs identically on both ends and
+# the snow weather visibly accumulates.
+
+window 1280 720
+out build/shots/net/dedi/2p_atmosphere_parity.client_a
+network connect 127.0.0.1:{{PORT}}
+name SnowA
+
+at 30  shot lobby
+at 200 shot match_t200
+at 350 shot match_t350
+at 500 end
+
+contact_sheet sheet cols 3 cell 640 360

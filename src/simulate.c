@@ -1,5 +1,6 @@
 #include "simulate.h"
 
+#include "atmosphere.h"
 #include "hash.h"
 #include "log.h"
 #include "mech.h"
@@ -456,6 +457,13 @@ void simulate_step(World *w, float dt) {
 
     /* FX particles (blood, sparks, tracers). */
     fx_update(w, dt);
+
+    /* M6 P09 — Atmospherics: weather + ambient-zone particle spawn
+     * + per-zone audio gating. Runs on every runtime; no-ops on the
+     * dedicated server (no GL context) so the headless sim cost is
+     * zero. Reads g_atmosphere (populated by atmosphere_init_for_map
+     * at map_build time). */
+    atmosphere_tick(w, dt);
 
     /* P12 — Smoke from heavily damaged limbs. Tick-gated to every 8th
      * tick (~7.5 Hz cap), with a square-of-deficit RNG roll so light

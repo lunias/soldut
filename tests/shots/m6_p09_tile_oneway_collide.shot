@@ -1,0 +1,57 @@
+# m6_p09_tile_oneway_collide.shot — M6 P09
+#
+# Regression for the TILE_F_ONE_WAY collision wire-up at
+# src/physics.c::collide_map_one_pass + the kinematic ray-cast in
+# src/level.c::level_ray_hits_kinematic.
+#
+# Scenario: Concourse map (clean overhead, mid-screen empty rows).
+# Paint a 10-tile-wide ONE_WAY strip at row 35 (y=1120..1152). Spawn
+# mech high above the strip. Three captures:
+#   t=80  — mech has fallen and LANDED on top of the strip (proves
+#           "from above" still blocks).
+#   t=140 — mech is JET-ing up through the strip (proves "from below"
+#           is passable).
+#   t=200 — mech rests above the strip again (proves the constraint
+#           solver doesn't permanently sandwich it).
+#
+# Pre-fix: TILE_F_ONE_WAY was honored by polys but ignored by the
+# tile branch — the editor's checkbox lied. Post-fix:
+#   - physics_integrate uses level_ray_hits_kinematic which lets the
+#     particle pass through on upward sweeps.
+#   - collide_map_one_pass adds a velocity-sign check so falling
+#     contacts block but rising contacts pass.
+
+window 1920 1080
+seed   42 42
+out    build/shots/m6_p09_tile_oneway_collide
+
+# Concourse: 100×60 = 3200×1920 px. Plenty of clean air in the
+# middle. The atrium is mostly open between rows 20 and 50.
+map concourse
+
+# Paint a one-tile-tall ONE_WAY strip at row 35 (y=1120..1152), tiles
+# x=44..54 (centered around the map middle at column 50).
+# Flags: 0x09 = TILE_F_SOLID | TILE_F_ONE_WAY.
+paint_rect 44 35 55 36 0x09
+
+# Spawn high above the strip — well above any of concourse's existing
+# atrium geometry (highest mid-platform is row 22 at y=704; spawn at
+# y=720 puts the mech in the open atrium just below that).
+spawn_at 1600 720
+mouse    1600 540
+
+# t=80 (~1.3 s of fall): mech has landed on the strip. Pelvis should
+# be at y ≈ (35*32) - 36 = 1084.
+at  80 shot 1_landed
+
+# Jet up from t=85 — start a sustained jet to escape the strip.
+at  85 press jet
+at 130 release jet
+# t=140: jet released; mech should be well above the strip.
+at 140 shot 2_jetted_up
+
+# t=200: mech falls back; settles on top of the strip again.
+at 200 shot 3_resettled
+at 230 end
+
+contact_sheet oneway_collide cols 3 cell 640 360

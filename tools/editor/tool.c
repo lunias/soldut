@@ -21,7 +21,15 @@ void tool_ctx_init(ToolCtx *c) {
     c->spawn_lane_hint = 0;
     c->pickup_variant  = PICK_HEALTH_S;
     c->ambi_kind    = AMBI_WIND;
+    /* M6 P09 — defaults match the pre-P09 hardcoded ambi values so an
+     * unmodified placement produces identical bytes. */
+    c->ambi_strength = 0.5f;
+    c->ambi_dir_deg  = 0.0f;     /* east; +1 in dir_x_q */
     c->deco_layer   = 1;
+    c->deco_scale       = 1.0f;
+    c->deco_rot_deg     = 0.0f;
+    c->deco_flipped_x   = false;
+    c->deco_additive    = false;
     c->flag_team    = 1;        /* P07 — start on RED so first click drops Red */
 }
 
@@ -313,15 +321,31 @@ static void ambi_release(EditorDoc *d, UndoStack *u, ToolCtx *c, int wx, int wy)
     if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
     if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
     if (x1 - x0 < 16 || y1 - y0 < 16) return;        /* too small */
+    /* M6 P09 — pull strength + direction from ToolCtx (was hardcoded). */
+    float st = c->ambi_strength;
+    if (st < 0.0f) st = 0.0f;
+    if (st > 1.0f) st = 1.0f;
+    float ang = c->ambi_dir_deg * 3.14159265f / 180.0f;
+    float dx  = cosf(ang);
+    float dy  = sinf(ang);
+    /* Q1.15 conversion with clamp so a slider near +1 doesn't overflow
+     * to -32768 via the signed-int cast. */
+    int s_q  = (int)(st * 32767.0f);
+    int dx_q = (int)(dx * 32767.0f);
+    int dy_q = (int)(dy * 32767.0f);
+    if (dx_q >  32767) dx_q =  32767;
+    if (dx_q < -32768) dx_q = -32768;
+    if (dy_q >  32767) dy_q =  32767;
+    if (dy_q < -32768) dy_q = -32768;
     LvlAmbi a = {0};
     a.rect_x = (int16_t)x0;
     a.rect_y = (int16_t)y0;
     a.rect_w = (int16_t)(x1 - x0);
     a.rect_h = (int16_t)(y1 - y0);
     a.kind   = (uint16_t)c->ambi_kind;
-    a.strength_q = 16384;        /* 0.5 */
-    a.dir_x_q    = 32767;        /* +1 (wind to the right) */
-    a.dir_y_q    = 0;
+    a.strength_q = (int16_t)s_q;
+    a.dir_x_q    = (int16_t)dx_q;
+    a.dir_y_q    = (int16_t)dy_q;
     arrput(d->ambis, a);
     undo_record_obj_add(u, UC_AMBI_ADD, (int)arrlen(d->ambis) - 1, &a);
     d->dirty = true;
@@ -343,14 +367,30 @@ static void ambi_overlay(const EditorDoc *d, const ToolCtx *c, const EditorView 
 /* ---- Deco tool ---------------------------------------------------- */
 
 static void deco_press(EditorDoc *d, UndoStack *u, ToolCtx *c, int wx, int wy) {
+    /* M6 P09 — pull scale, rot, flip, additive from ToolCtx (was
+     * hardcoded). */
+    float scale = c->deco_scale;
+    if (scale < 0.05f) scale = 0.05f;
+    if (scale > 16.0f) scale = 16.0f;
+    int scale_q = (int)(scale * 32768.0f);
+    if (scale_q < 0)      scale_q = 0;
+    if (scale_q > 32767)  scale_q = 32767;
+    /* rot stored as 1/256ths of a turn per .lvl spec. Normalize first. */
+    float rot_turns = c->deco_rot_deg / 360.0f;
+    rot_turns -= floorf(rot_turns);
+    int rot_q = (int)(rot_turns * 256.0f);
+    if (rot_q > 255) rot_q = 255;
+    uint8_t flags = 0;
+    if (c->deco_flipped_x) flags |= 0x01;   /* DECO_FLIPPED_X */
+    if (c->deco_additive)  flags |= 0x02;   /* DECO_ADDITIVE */
     LvlDeco e = {0};
     e.pos_x = (int16_t)wx;
     e.pos_y = (int16_t)wy;
-    e.scale_q = 32767;       /* 1.0 in Q1.15 (max +int16_t) */
-    e.rot_q   = 0;
+    e.scale_q = (int16_t)scale_q;
+    e.rot_q   = (int16_t)rot_q;
     e.sprite_str_idx = c->deco_sprite_str;
     e.layer = c->deco_layer;
-    e.flags = 0;
+    e.flags = flags;
     arrput(d->decos, e);
     undo_record_obj_add(u, UC_DECO_ADD, (int)arrlen(d->decos) - 1, &e);
     d->dirty = true;

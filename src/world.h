@@ -172,9 +172,16 @@ typedef struct {
  * M6 P04 — bumped 8000 → 8500 to keep a clean 200-slot reserve above
  * the worst combined case (~7680 jet + ~320 damage-number particles
  * simultaneously airborne in a 16-mech firefight). +32 KB; trivial.
+ *
+ * M6 P09 — bumped 8500 → 10500 to cover weather + ambient-zone particles
+ * stacking on top of combat: worst case ~1500 weather/ambient particles
+ * (density 1.0 RAIN @ 16/tick × 60 Hz × 0.5 s avg = ~480; doubled for
+ * other modes overlapping; plus ~1150 WIND streaks across 8 zones at
+ * max strength). Adds 2000 slots × ~56 B = +112 KB.
+ *
  * The constant is misnamed — it's the FxPool cap not the blood cap —
  * but the rename is a 5-call churn left as a follow-up. */
-#define MAX_BLOOD         8500
+#define MAX_BLOOD         10500
 
 /* P12 — Persistent damage decals composited over each visible mech
  * part. Decals are stored in sprite-local space (i8 px relative to the
@@ -441,6 +448,17 @@ typedef struct {
      * stays as the killing-blow amount for `KILLFLAG_OVERKILL`. */
     float     hit_flash_timer;
 
+    /* M6 P09 — Environmental (DEADLY tile / poly / ACID zone) damage
+     * accumulator. The hazard tick fires every frame (dt = 1/60),
+     * which would otherwise produce ~0.083 HP/frame — rounds to 0 in
+     * `mech_apply_damage`'s u8 quantization, so the damage-number FX
+     * never spawned + the HP bar visibly froze. Carry the fractional
+     * HP per-mech and only call `mech_apply_damage` when the carry
+     * crosses 1.0; per-frame HP drain still averages to 5 HP/s (or
+     * whatever rate the caller applies) but lands as a clear 1-HP
+     * tick with a visible "1" damage number every ~0.2 s of contact. */
+    float     env_damage_carry;
+
     /* P12 — Persistent damage decals, one ring per visible mech part
      * (indexed by `MechSpriteId`). The first MECH_RENDER_PART_COUNT
      * slots are the "real" parts; stump-cap slots are unused but kept
@@ -660,6 +678,15 @@ typedef enum {
     FX_JET_EXHAUST,      /* M6 P02: additive, color lerps color_hot → color_cool over life */
     FX_GROUND_DUST,      /* M6 P02: alpha-blended, heavy drag, brief upward lift */
     FX_DAMAGE_NUMBER,    /* M6 P04: flying damage-number glyph — gravity + 2-bounce + tumble + fade. See documents/m6/08-damage-numbers.md */
+    /* M6 P09 — Ambient zone visuals (rect-scoped, world-space). */
+    FX_AMBIENT_WIND_STREAK,   /* short alpha-fading lines drifting in wind dir */
+    FX_AMBIENT_ZEROG_MOTE,    /* slow upward dust motes inside ZERO_G rect */
+    FX_AMBIENT_ACID_BUBBLE,   /* bubbles rising from ACID rect bottom */
+    /* M6 P09 — Weather (screen-space, decoupled from camera). */
+    FX_WEATHER_SNOW,
+    FX_WEATHER_RAIN,
+    FX_WEATHER_DUST,
+    FX_WEATHER_EMBER,
     FX_KIND_COUNT
 } FxKind;
 
@@ -939,7 +966,26 @@ typedef struct {
     uint16_t ambient_loop_str_idx;
     uint16_t reverb_amount_q;      /* Q0.16 */
     uint16_t mode_mask;            /* FFA=1, TDM=2, CTF=4 */
-    uint16_t reserved[9];
+    /* M6 P09 — Per-map atmospherics. Promoted from reserved[9] (the
+     * file format always carried these 18 bytes; pre-P09 binaries read
+     * them as reserved[]). All fields are zero-defaulted on legacy
+     * files; a zero in any one means "use theme default" (so a
+     * partially-customised map can opt in to a single field and inherit
+     * the rest from theme_id). See documents/m6/09-editor-runtime-parity-
+     * and-atmospherics.md §2.1.
+     *
+     * Wire format stays additive — LvlMeta is still 32 bytes; the .lvl
+     * loader reads each new field unconditionally and old files just
+     * see zeros (= defaults). No LVL_VERSION bump. */
+    uint16_t theme_id;             /* AtmosphereTheme enum; 0 = THEME_CONCRETE */
+    uint16_t sky_top_rgb565;       /* RGB565; 0 = use theme */
+    uint16_t sky_bot_rgb565;       /* RGB565; 0 = use theme */
+    uint16_t fog_density_q;        /* Q0.16; 0 = none */
+    uint16_t fog_color_rgb565;     /* RGB565; 0 = use theme */
+    uint16_t vignette_q;           /* Q0.16; 0 = none */
+    uint16_t sun_angle_q;          /* Q0.16; encodes [0, 2π) */
+    uint16_t weather_kind;         /* WeatherKind enum; 0 = none */
+    uint16_t weather_density_q;    /* Q0.16; 0 = none */
 } LvlMeta;
 
 /* Wire-format guarantees. If any of these fail the .lvl format breaks. */

@@ -1,6 +1,7 @@
 #include "maps.h"
 
 #include "arena.h"
+#include "atmosphere.h"  /* M6 P09 — atmosphere_init_for_map */
 #include "level.h"
 #include "level_io.h"
 #include "log.h"
@@ -646,6 +647,7 @@ void map_build(MapId id, World *world, Arena *arena) {
          * the expected case until P15/P16 ships authored art; the kit
          * falls back gracefully and the renderer paints M4 flats. */
         map_kit_load(def->short_name);
+        atmosphere_init_for_map(&world->level);
         return;
     }
 
@@ -674,11 +676,13 @@ void map_build(MapId id, World *world, Arena *arena) {
          * — designers can author parallax for `foundry` even before the
          * `.lvl` file does. */
         map_kit_load(def->short_name);
+        atmosphere_init_for_map(&world->level);
     } else {
         LOG_E("map_build(%s): custom map's .lvl unavailable (%s) — falling back to Foundry",
               def->short_name, level_io_result_str(r));
         build_fallback(MAP_FOUNDRY, &world->level, arena);
         map_kit_load("foundry");
+        atmosphere_init_for_map(&world->level);
     }
 }
 
@@ -694,12 +698,14 @@ bool map_build_from_path(World *world, Arena *arena, const char *path) {
         char short_name[24];
         basename_no_ext(path, short_name, sizeof short_name);
         map_kit_load(short_name);
+        atmosphere_init_for_map(&world->level);
         return true;
     }
     LOG_E("map_build_from_path(%s): level_load failed (%s) — falling back to Foundry",
           path, level_io_result_str(r));
     build_fallback(MAP_FOUNDRY, &world->level, arena);
     map_kit_load("foundry");
+    atmosphere_init_for_map(&world->level);
     return false;
 }
 

@@ -123,6 +123,15 @@ typedef enum {
     SFX_COUNTDOWN_BEEP,
     SFX_COUNTDOWN_GO,
 
+    /* M6 P09 — Per-ambient-zone enter cue. Fired by atmosphere_tick
+     * the first frame the local mech crosses INTO an AMBI_ACID /
+     * AMBI_ZERO_G rect. Single short hit, not a continuous loop —
+     * positional, sourced at the mech's chest. WIND uses the existing
+     * SFX_FOOTSTEP_* + jet ambience; FOG is silent. Missing-asset
+     * fallback no-ops silently per the audio.c manifest pattern. */
+    SFX_ENV_ZEROG_HUM,
+    SFX_ENV_ACID_BUBBLE,
+
     SFX_COUNT
 } SfxId;
 

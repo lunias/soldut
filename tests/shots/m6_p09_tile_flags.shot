@@ -1,0 +1,57 @@
+# m6_p09_tile_flags.shot — M6 P09
+#
+# Stamps a row of each TILE_F_* flag on top of the Reactor map and
+# captures one screenshot showing them all side by side. The
+# atmosphere theme is RUST (from the recook) so the warm tile_solid
+# base reads consistently across the row.
+#
+# Tile flag values:
+#   TILE_F_SOLID      = 0x01   (control)
+#   TILE_F_ICE        = 0x03   (SOLID | ICE  — cool blue + glint stripe)
+#   TILE_F_DEADLY     = 0x05   (SOLID | DEADLY — warm red + amber hatch)
+#   TILE_F_ONE_WAY    = 0x09   (SOLID | ONE_WAY — soft fill + '^' chevron)
+#   TILE_F_BACKGROUND = 0x11   (SOLID | BACKGROUND — alpha-blended, no collide)
+#
+# Run:
+#   ./soldut --shot tests/shots/m6_p09_tile_flags.shot
+# Output:
+#   build/shots/m6_p09_tile_flags/tile_row.png
+#
+# Verification — eyeball:
+#   - Each tile reads visually distinct from its neighbour
+#   - DEADLY tiles paint a 45° amber-red hatch
+#   - ICE tiles show a pale highlight stripe (animated; whatever phase
+#     this frame catches it on)
+#   - ONE_WAY tiles show a small '^' chevron
+#   - BACKGROUND tile reads at lower alpha (the player is visible through
+#     it if standing behind)
+#   - The mech can walk THROUGH the BACKGROUND tile (no collision)
+
+window 1920 1080
+seed   17 17
+out    build/shots/m6_p09_tile_flags
+
+# RUST map per cook_maps recook — warm palette.
+map reactor
+
+# Paint a row of single-flag tiles at the mid-floor of Reactor. The
+# reactor floor is at row H-3 (= row 39 for 42-tall map). Use row 25
+# (which is open air) so the stamps don't conflict with existing
+# floor geometry. Each tile is one cell wide — 12 cells across.
+# tile_x positions chosen so the row is clearly visible at default
+# camera framing.
+paint_rect 30 25 33 26 0x01   # SOLID — control
+paint_rect 34 25 37 26 0x03   # SOLID | ICE
+paint_rect 38 25 41 26 0x05   # SOLID | DEADLY
+paint_rect 42 25 45 26 0x09   # SOLID | ONE_WAY
+paint_rect 46 25 49 26 0x11   # SOLID | BACKGROUND
+
+# Spawn the local mech under the row so the screenshot frames it.
+# Reactor's floor sits at y = (H-3)*32 = 39*32 = 1248. Pelvis is 36
+# above feet so spawn at row 26 → y ~= 26*32 - 36 = 796.
+spawn_at 1280 1000
+mouse    960 540
+
+# Settle, then capture.
+at  60 shot tile_row
+at  90 end

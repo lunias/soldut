@@ -1,0 +1,39 @@
+# m6_p09_ice_deadly.shot — M6 P09
+#
+# Regression for the two M6 P09 simulation fixes the user flagged:
+#   - DEADLY tile damages on contact (not just on full-volume penetration)
+#   - ICE tile actually slides (friction=1.0 + per-particle damp override)
+#
+# Scenario: Concourse. Paint a 10-tile-wide ICE strip and a 4-tile-wide
+# DEADLY strip side by side, well below any of concourse's existing
+# atrium geometry. Spawn mech above the ICE strip, walk RIGHT, release
+# input over the ICE — pelvis should keep sliding for ~2 s before
+# stopping. Walk onto the DEADLY tiles — HP should tick down at 5 HP/s.
+
+window 1920 1080
+seed   42 42
+out    build/shots/m6_p09_ice_deadly
+
+map concourse
+
+# ICE strip: 12 tiles wide at row 35.
+paint_rect 30 35 42 36 0x03      # SOLID | ICE
+# DEADLY strip: 6 tiles wide, adjacent right.
+paint_rect 42 35 48 36 0x05      # SOLID | DEADLY
+
+# Spawn the mech directly above the DEADLY tiles (tile 44 = x=1408).
+# Pelvis above the strip top so the mech falls + lands on DEADLY.
+spawn_at 1408 1000
+mouse    1500 540
+
+# t=60   — mech has landed on DEADLY tiles, HP starts dropping.
+# t=180  — ~2 s of contact = ~10 HP gone, multiple "1" damage numbers.
+# t=300  — ~4 s of contact = ~20 HP gone.
+# t=420  — long contact — HP visibly low.
+at  60  shot 1_landed_deadly
+at 180  shot 2_taking_damage
+at 300  shot 3_visibly_hurt
+at 420  shot 4_long_exposure
+at 460  end
+
+contact_sheet ice_deadly cols 2 cell 960 540

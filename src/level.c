@@ -155,16 +155,32 @@ float level_width_px (const Level *l) { return (float)(l->width  * l->tile_size)
 float level_height_px(const Level *l) { return (float)(l->height * l->tile_size); }
 
 /* DDA traversal, classic Amanatides & Woo. We cap iterations so a
- * pathological diagonal can't loop forever. */
-static bool level_ray_hits_tile(const Level *l, Vec2 a, Vec2 b, float *out_t) {
+ * pathological diagonal can't loop forever.
+ *
+ * M6 P09 — `allow_oneway_up` (passed from level_ray_hits_kinematic)
+ * lets a particle move UPWARD through a TILE_F_ONE_WAY tile without
+ * the integrate-time clamp catching it. Without this gate,
+ * physics_integrate clamps a jet'ing particle to just below an
+ * ONE_WAY platform, then constraint relaxation pushes it INTO the
+ * platform — the foot ends up sandwiched. Mirrors the poly-side
+ * "came from passable side" check at src/physics.c:717. The
+ * TILE_F_BACKGROUND case is uniformly non-blocking (decorative). */
+static bool level_ray_hits_tile_filtered(const Level *l, Vec2 a, Vec2 b,
+                                         bool allow_oneway_up, float *out_t) {
     float ts = (float)l->tile_size;
     float dx = b.x - a.x, dy = b.y - a.y;
+    bool moving_up = (dy < -0.001f);
 
     int tx = (int)(a.x / ts);
     int ty = (int)(a.y / ts);
 
-    /* Already inside a solid? Treat as hit at t=0. */
-    if (level_tile_at(l, tx, ty) == TILE_SOLID) {
+    /* Check the start tile; treat ONE_WAY as non-solid when we're
+     * already inside and moving up (jet from below) — the collide
+     * pass will gate appropriately. BACKGROUND is always non-solid. */
+    uint16_t start_f = level_flags_at(l, tx, ty);
+    if ((start_f & TILE_F_SOLID) && !(start_f & TILE_F_BACKGROUND) &&
+        !(allow_oneway_up && moving_up && (start_f & TILE_F_ONE_WAY)))
+    {
         if (out_t) *out_t = 0.0f;
         return true;
     }
@@ -194,7 +210,10 @@ static bool level_ray_hits_tile(const Level *l, Vec2 a, Vec2 b, float *out_t) {
         if (t_max_x < t_max_y) {
             tx += step_x;
             if (t_max_x > 1.0f) return false;
-            if (level_tile_at(l, tx, ty) == TILE_SOLID) {
+            uint16_t f = level_flags_at(l, tx, ty);
+            if ((f & TILE_F_SOLID) && !(f & TILE_F_BACKGROUND) &&
+                !(allow_oneway_up && moving_up && (f & TILE_F_ONE_WAY)))
+            {
                 if (out_t) *out_t = t_max_x;
                 return true;
             }
@@ -202,7 +221,10 @@ static bool level_ray_hits_tile(const Level *l, Vec2 a, Vec2 b, float *out_t) {
         } else {
             ty += step_y;
             if (t_max_y > 1.0f) return false;
-            if (level_tile_at(l, tx, ty) == TILE_SOLID) {
+            uint16_t f = level_flags_at(l, tx, ty);
+            if ((f & TILE_F_SOLID) && !(f & TILE_F_BACKGROUND) &&
+                !(allow_oneway_up && moving_up && (f & TILE_F_ONE_WAY)))
+            {
                 if (out_t) *out_t = t_max_y;
                 return true;
             }
@@ -210,6 +232,13 @@ static bool level_ray_hits_tile(const Level *l, Vec2 a, Vec2 b, float *out_t) {
         }
     }
     return false;
+}
+
+/* Wrapper kept for back-compat; uses the conservative (treats ONE_WAY
+ * as solid) behavior so non-kinematic callers like grapple rope sweep
+ * and line-of-sight checks still see all solid tiles. */
+static bool level_ray_hits_tile(const Level *l, Vec2 a, Vec2 b, float *out_t) {
+    return level_ray_hits_tile_filtered(l, a, b, /*allow_oneway_up*/ false, out_t);
 }
 
 /* Segment-vs-segment intersection in 2D. Returns true if segments
@@ -256,6 +285,28 @@ static bool level_ray_hits_poly(const Level *l, Vec2 a, Vec2 b, float *out_t) {
 bool level_ray_hits(const Level *l, Vec2 a, Vec2 b, float *out_t) {
     float t_tile = 1.0f, t_poly = 1.0f;
     bool tile_hit = level_ray_hits_tile(l, a, b, &t_tile);
+    bool poly_hit = level_ray_hits_poly(l, a, b, &t_poly);
+    if (!tile_hit && !poly_hit) return false;
+    float t = (tile_hit && poly_hit) ? (t_tile < t_poly ? t_tile : t_poly)
+            :  tile_hit              ? t_tile
+                                     : t_poly;
+    if (out_t) *out_t = t;
+    return true;
+}
+
+/* M6 P09 — kinematic variant. Treats TILE_F_ONE_WAY as non-blocking
+ * when the ray is moving UP (dy < 0) so a jetting particle isn't
+ * pre-clamped just below the platform by the integrate sweep. The
+ * poly side already supports this — POLY_KIND_ONE_WAY's `dprev > 0`
+ * check in collide_polys_one_pass is the runtime gate; physics_integrate
+ * never pre-clamps for polys because level_ray_hits_poly always returns
+ * the geometric hit (the runtime sorts by direction later). The tile
+ * branch needs this dedicated entry so jet-through-ONE_WAY works on
+ * tile-flag ONE_WAY just as well as it works on poly ONE_WAY. */
+bool level_ray_hits_kinematic(const Level *l, Vec2 a, Vec2 b, float *out_t) {
+    float t_tile = 1.0f, t_poly = 1.0f;
+    bool tile_hit = level_ray_hits_tile_filtered(
+        l, a, b, /*allow_oneway_up*/ true, &t_tile);
     bool poly_hit = level_ray_hits_poly(l, a, b, &t_poly);
     if (!tile_hit && !poly_hit) return false;
     float t = (tile_hit && poly_hit) ? (t_tile < t_poly ? t_tile : t_poly)
