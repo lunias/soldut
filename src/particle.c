@@ -1,12 +1,15 @@
 #include "particle.h"
 
 #include "arena.h"
+#include "audio.h"
 #include "decal.h"
 #include "hash.h"
 #include "level.h"
 #include "log.h"
+#include "platform.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 void fx_pool_init(FxPool *pool, Arena *arena, int capacity) {
@@ -35,6 +38,62 @@ static int fx_alloc(FxPool *pool) {
     /* Pool full — overwrite the oldest. Not glamorous, but FX drop
      * gracefully and we hit this only in extreme spew. */
     return 0;
+}
+
+/* M6 P04 — Damage-number color/size tiers. The threshold cliffs
+ * (10 / 30 / 60 / 100) intentionally mirror the M5 P12 decal cliffs in
+ * src/mech.c::mech_record_damage_decal so a 75-damage Frag paints a
+ * SCORCH decal AND shows an orange-red "75". Color choices stay in the
+ * yellow→red blood-family per documents/00-vision.md §Aesthetic.
+ *
+ * RGBA8 packed as 0xRRGGBBAA. The outline alpha climbs by tier so
+ * crits punch through any decal/blood/jet noise behind them; light
+ * hits get a softer outline so they don't hammer the screen.
+ *
+ * speed_min/max + upward_bias drive the spew velocity at spawn (per
+ * fx_spawn_damage_number); life_s sets the total visible duration
+ * including the 0.50 s alpha-fade tail. */
+typedef enum {
+    DMG_TIER_LIGHT = 0,    /* 1-9 dmg — pale yellow */
+    DMG_TIER_NORMAL,       /* 10-29 dmg — yellow */
+    DMG_TIER_MEDIUM,       /* 30-59 dmg — orange */
+    DMG_TIER_HEAVY,        /* 60-99 dmg — red-orange */
+    DMG_TIER_CRIT,         /* >=100 dmg — bright red */
+    DMG_TIER_COUNT
+} DamageTier;
+
+typedef struct {
+    uint32_t color;            /* RGBA8 glyph color */
+    uint32_t outline;          /* RGBA8 outline color (tier-rising alpha) */
+    float    font_px;          /* point size for DrawTextPro */
+    float    speed_min;        /* initial speed (px/s) lower bound */
+    float    speed_max;        /* initial speed upper bound */
+    float    upward_bias;      /* extra -Y velocity at spawn (px/s) */
+    float    life_s;           /* total life including fade */
+} DmgTierDef;
+
+/* font_px values are the base size at 1× camera zoom (the spec's
+ * stated frame of reference, §6). At runtime fx_draw_damage_numbers
+ * scales by camera.zoom (default 1.4×) and the M6 P03 blit_scale,
+ * so a 30 px MEDIUM glyph reads at ~42 px on a 1080p window and
+ * ~84 px on a 4K-windowed run with the 1080-cap internal RT. The
+ * spec's 10..18 range read too small on contemporary monitors —
+ * bumped first to 14..32, then to 20..44 after the user reported
+ * "still a bit hard to read" on 4K. */
+static const DmgTierDef g_dmg_tier[DMG_TIER_COUNT] = {
+    /* LIGHT  */ { 0xFFF0B4FFu, 0x00000080u, 20.0f,  60.0f,  90.0f,  50.0f, 1.4f },
+    /* NORMAL */ { 0xFFDC50FFu, 0x000000A0u, 24.0f,  80.0f, 110.0f,  70.0f, 1.7f },
+    /* MEDIUM */ { 0xFF8C28FFu, 0x000000C0u, 30.0f, 100.0f, 140.0f,  90.0f, 1.9f },
+    /* HEAVY  */ { 0xFF5018FFu, 0x000000E0u, 36.0f, 120.0f, 170.0f, 110.0f, 2.1f },
+    /* CRIT   */ { 0xFF2828FFu, 0x000000FFu, 44.0f, 140.0f, 200.0f, 130.0f, 2.4f },
+};
+
+static inline DamageTier dmg_tier_for(uint8_t dmg) {
+    if (dmg >= 100) return DMG_TIER_CRIT;
+    if (dmg >=  60) return DMG_TIER_HEAVY;
+    if (dmg >=  30) return DMG_TIER_MEDIUM;
+    if (dmg >=  10) return DMG_TIER_NORMAL;
+    return DMG_TIER_LIGHT;
 }
 
 int fx_spawn_blood(FxPool *pool, Vec2 pos, Vec2 vel, pcg32_t *rng) {
@@ -177,6 +236,72 @@ int fx_spawn_ground_dust(FxPool *pool, Vec2 pos, Vec2 vel,
     return idx;
 }
 
+int fx_spawn_damage_number(FxPool *pool, Vec2 pos, Vec2 dir,
+                           uint8_t damage_u8, uint8_t weapon_id,
+                           pcg32_t *rng)
+{
+    /* Don't render fully-absorbed-by-armor hits — those still spew a
+     * few sparks via mech_apply_damage's "armor ate it" branch but the
+     * meaningful "you took 0 damage" feedback is the spark + the unchanged
+     * HP bar, not a "+0" glyph. */
+    if (damage_u8 == 0) return -1;
+
+    int idx = fx_alloc(pool);
+    if (idx < 0) return -1;
+    FxParticle *fp = &pool->items[idx];
+
+    DamageTier tier = dmg_tier_for(damage_u8);
+    const DmgTierDef *def = &g_dmg_tier[tier];
+
+    /* Spew direction: perpendicular to dir, then random-flipped sign so
+     * sequential hits alternate sides (anti-stack), plus a small ±0.3 rad
+     * cone jitter so two identical hits don't trace the same arc. dir is
+     * the bullet direction (toward victim); perpendicular is (-dir.y,
+     * +dir.x). When dir is degenerate (dir.x == dir.y == 0 — e.g. an
+     * environmental damage tick from a DEADLY tile), default to straight
+     * up so the glyph still reads as airborne. */
+    float dlen = sqrtf(dir.x * dir.x + dir.y * dir.y);
+    Vec2  ndir = (dlen > 1e-4f)
+                 ? (Vec2){ dir.x / dlen, dir.y / dlen }
+                 : (Vec2){ 0.0f, -1.0f };
+    float perp_sign = (pcg32_next(rng) & 1u) ? 1.0f : -1.0f;
+    Vec2  perp = { -ndir.y * perp_sign, ndir.x * perp_sign };
+    float cone = pcg32_float01(rng) * 0.6f - 0.3f;   /* ±0.3 rad ≈ ±17° */
+    float c = cosf(cone), s = sinf(cone);
+    Vec2  spew = { perp.x * c - perp.y * s, perp.x * s + perp.y * c };
+
+    float speed = def->speed_min +
+                  (def->speed_max - def->speed_min) * pcg32_float01(rng);
+
+    fp->pos             = (Vec2){ pos.x, pos.y - 8.0f };   /* lift 8 px so spawn isn't inside the limb */
+    fp->vel             = (Vec2){ spew.x * speed,
+                                  spew.y * speed - def->upward_bias };
+    fp->render_prev_pos = fp->pos;
+    fp->life            = def->life_s;
+    fp->life_max        = def->life_s;
+    fp->size            = def->font_px;
+    fp->color           = def->color;
+    fp->color_cool      = def->outline;
+    fp->kind            = FX_DAMAGE_NUMBER;
+    fp->alive           = 1;
+    fp->pin_mech_id     = (int16_t)damage_u8;   /* digits to render */
+    fp->pin_limb        = 0;                    /* bounce counter */
+    fp->pin_pad         = (uint8_t)(((tier == DMG_TIER_CRIT)  ? 0x1u : 0u) |
+                                    ((tier == DMG_TIER_HEAVY) ? 0x2u : 0u));
+    fp->angle           = (pcg32_float01(rng) * 0.4f) - 0.2f;     /* tiny initial tilt */
+    /* ±1.0 rad/s ≈ ±57°/s — a gentle tumble (~1/6 revolution per
+     * second). The earlier ±3 rad/s spec value spun the glyphs faster
+     * than the eye could read at 60 Hz (full rotation every 2 s).
+     * Bounce friction (0.60×) damps it further on each contact. */
+    fp->ang_vel         = (pcg32_float01(rng) * 2.0f) - 1.0f;
+
+    SHOT_LOG("dmgnum spawn pos=%.1f,%.1f dir=%.2f,%.2f dmg=%u tier=%d",
+             pos.x, pos.y, dir.x, dir.y, (unsigned)damage_u8, (int)tier);
+
+    (void)weapon_id;   /* reserved — v1 ignores; HIT_EVENT doesn't carry it */
+    return idx;
+}
+
 int fx_spawn_tracer(FxPool *pool, Vec2 a, Vec2 b) {
     int idx = fx_alloc(pool);
     if (idx < 0) return -1;
@@ -288,6 +413,79 @@ void fx_update(World *w, float dt) {
             fp->vel.y += GROUND_DUST_GRAVITY_PXS2 * dt * 0.3f;
             fp->pos.x += fp->vel.x * dt;
             fp->pos.y += fp->vel.y * dt;
+            if (i > last_alive) last_alive = i;
+            continue;
+        }
+
+        if (fp->kind == FX_DAMAGE_NUMBER) {
+            /* M6 P04 — flying damage glyph: gravity + mild drag,
+             * tile-collide BOUNCE (not die) up to 2 times, then rest.
+             * Matches blood's gravity (`g.y`) so the digit falls with
+             * the same gravity-feel as the blood it spawns alongside.
+             *
+             * Hover phase: gravity ramps from 0 → full over the first
+             * DMGNUM_HOVER_S seconds of life. The initial upward-bias
+             * launches the glyph; with gravity damped during this
+             * window the number genuinely *pops up and hangs* for a
+             * beat before falling — closer to the spec's "pops" feel
+             * than a pure-projectile arc, which read as "falls
+             * immediately" because the up-bias is small relative to
+             * gravity at 60 Hz.
+             *
+             * Bounce model: per-axis solid-cell test on the next-tick
+             * candidate position. Walls flip and damp x; floors/ceilings
+             * flip and damp y. Crude but sufficient — the numbers
+             * spend <2.4 s airborne and the §15 trade-off accepts that
+             * weird 45° geometry can occasionally fall through. */
+            const float DMGNUM_HOVER_S = 0.30f;
+            float age = fp->life_max - fp->life;
+            float grav_scale = (age < DMGNUM_HOVER_S)
+                               ? (age / DMGNUM_HOVER_S)
+                               : 1.0f;
+            fp->ang_vel *= 0.995f;
+            fp->angle   += fp->ang_vel * dt;
+            fp->vel.x   *= 0.99f;
+            fp->vel.x   += g.x * dt * grav_scale;
+            fp->vel.y   += g.y * dt * grav_scale;
+
+            Vec2 next = { fp->pos.x + fp->vel.x * dt,
+                          fp->pos.y + fp->vel.y * dt };
+
+            uint8_t bounces = fp->pin_limb;
+            bool hit = level_point_solid(&w->level, next);
+
+            if (bounces < 2 && hit) {
+                /* Resolve which axis the contact came from by probing
+                 * each axis independently against the candidate. */
+                bool hit_x = level_point_solid(&w->level,
+                                               (Vec2){ next.x, fp->pos.y });
+                bool hit_y = level_point_solid(&w->level,
+                                               (Vec2){ fp->pos.x, next.y });
+                if (hit_x) fp->vel.x = -fp->vel.x * 0.55f;
+                if (hit_y) fp->vel.y = -fp->vel.y * 0.55f;
+                if (!hit_x && !hit_y) {
+                    /* Diagonal contact — flip both for a corner bounce. */
+                    fp->vel.x = -fp->vel.x * 0.55f;
+                    fp->vel.y = -fp->vel.y * 0.55f;
+                }
+                fp->vel.x   *= 0.70f;     /* friction on horizontal */
+                fp->ang_vel *= 0.60f;     /* spin damps on hit */
+                fp->pin_limb = (uint8_t)(bounces + 1);
+
+                /* Quiet metallic clink. 0.30 base volume in the manifest;
+                 * audio_play_at silently no-ops if the asset failed to
+                 * load (fresh checkout / asset PR not yet landed). */
+                audio_play_at(SFX_DAMAGE_TINK, fp->pos);
+            } else if (bounces >= 2 &&
+                       level_point_solid(&w->level,
+                                         (Vec2){ next.x, next.y + 1.0f })) {
+                /* Rest contact — pin to ground and let the life-fade
+                 * carry the glyph out. */
+                fp->vel.x = fp->vel.y = 0.0f;
+                fp->ang_vel = 0.0f;
+            } else {
+                fp->pos = next;
+            }
             if (i > last_alive) last_alive = i;
             continue;
         }
@@ -422,6 +620,11 @@ void fx_draw(const FxPool *pool, float alpha) {
             }
             case FX_JET_EXHAUST:
             case FX_STUMP:
+            /* M6 P04 — damage numbers render in fx_draw_damage_numbers,
+             * a separate pass run AFTER the internal-RT upscale blit so
+             * the glyphs land at sharp window pixels. fx_draw runs
+             * inside the internal-RT world pass; skip here. */
+            case FX_DAMAGE_NUMBER:
             case FX_KIND_COUNT: break;
         }
     }
@@ -444,4 +647,110 @@ void fx_draw(const FxPool *pool, float alpha) {
         fx_draw_particle(pos, fp->size, cc);
     }
     EndBlendMode();
+}
+
+/* M6 P04 — render pass for FX_DAMAGE_NUMBER particles. Runs OUTSIDE the
+ * internal-RT world pass (called from renderer_draw_frame after the
+ * upscale blit, before hud_draw) so glyphs land at sharp window pixels.
+ * `internal_cam` is the same camera the world pass used (in internal
+ * pixels); blit_scale + blit_dx + blit_dy are the M6 P03 letterbox
+ * numbers that map internal → window. */
+void fx_draw_damage_numbers(const FxPool *pool,
+                            Camera2D internal_cam,
+                            float blit_scale,
+                            float blit_dx, float blit_dy)
+{
+    if (pool->count == 0) return;
+
+    /* Steps Mono Thin atlas — M5 P13 vendored at 32 px source size, the
+     * size used everywhere HUD numerics render. We scale at draw time
+     * via DrawTextPro's fontSize. Falls back to raylib's default font
+     * if the TTF didn't load (fresh checkout / missing assets). */
+    Font font = (g_ui_fonts_loaded && g_ui_font_mono.texture.id != 0)
+                ? g_ui_font_mono
+                : GetFontDefault();
+
+    for (int i = 0; i < pool->count; ++i) {
+        const FxParticle *fp = &pool->items[i];
+        if (!fp->alive) continue;
+        if (fp->kind != FX_DAMAGE_NUMBER) continue;
+
+        /* World → internal-RT pixels via raylib's GetWorldToScreen2D
+         * against the internal camera, then internal → window via the
+         * letterbox numbers. */
+        Vector2 internal_xy = GetWorldToScreen2D(
+            (Vector2){ fp->pos.x, fp->pos.y }, internal_cam);
+        Vector2 screen_xy = {
+            internal_xy.x * blit_scale + blit_dx,
+            internal_xy.y * blit_scale + blit_dy,
+        };
+
+        /* Decode tier from the flag bits set at spawn. The CRIT/HEAVY
+         * flags are explicit so the render pass doesn't have to redo
+         * the threshold compare; LIGHT/NORMAL/MEDIUM fall back to
+         * dmg_tier_for on the damage value itself. */
+        DamageTier tier;
+        if      (fp->pin_pad & 0x1u) tier = DMG_TIER_CRIT;
+        else if (fp->pin_pad & 0x2u) tier = DMG_TIER_HEAVY;
+        else                         tier = dmg_tier_for((uint8_t)fp->pin_mech_id);
+        const DmgTierDef *def = &g_dmg_tier[tier];
+
+        /* "%d" of the damage value lives in pin_mech_id (i16, 0..255). */
+        char buf[8];
+        int dmg = (int)fp->pin_mech_id;
+        if (dmg < 0)   dmg = 0;
+        if (dmg > 999) dmg = 999;   /* future-proofs against >u8 widening */
+        snprintf(buf, sizeof buf, "%d", dmg);
+
+        /* Alpha fade in the last 0.5 s of life. Before that, glyph
+         * holds full alpha so it's readable while it's still moving. */
+        float alpha = (fp->life < 0.5f) ? (fp->life / 0.5f) : 1.0f;
+        if (alpha < 0.0f) alpha = 0.0f;
+
+        Color glyph = (Color){
+            (unsigned char)((def->color   >> 24) & 0xFF),
+            (unsigned char)((def->color   >> 16) & 0xFF),
+            (unsigned char)((def->color   >>  8) & 0xFF),
+            (unsigned char)(((def->color  >>  0) & 0xFF) * alpha),
+        };
+        Color outln = (Color){
+            (unsigned char)((def->outline >> 24) & 0xFF),
+            (unsigned char)((def->outline >> 16) & 0xFF),
+            (unsigned char)((def->outline >>  8) & 0xFF),
+            (unsigned char)(((def->outline >> 0) & 0xFF) * alpha),
+        };
+        float deg = fp->angle * (180.0f / 3.14159265358979323846f);
+
+        /* Bounce-squash: each ground contact compresses the glyph by 5%
+         * vertically. Free game-feel beat — the digit visibly squishes
+         * on the floor. Caps at 2 so bounces × 0.05 ≤ 0.10. */
+        float bounce_squash = 1.0f - 0.05f * (float)fp->pin_limb;
+        /* Render-pixel font size:
+         *   font_px            — tier-defined base (10..18 px @ 1× zoom)
+         *   * internal_cam.zoom — scale with player zoom so the glyph
+         *     feels world-attached (default cam zoom is 1.4×, so a CRIT
+         *     reads at ~25 px — matches the spec §6 "~1/4 mech height"
+         *     intent which assumed 1× zoom in its math).
+         *   * blit_scale       — match the window upscale so on a 4K
+         *     monitor with a 1080-cap internal RT, a 25 px logical
+         *     glyph paints at 50 window-px (sharp text either way).
+         *   * bounce_squash    — vertical compression on ground contact. */
+        float fs = def->font_px * internal_cam.zoom * blit_scale * bounce_squash;
+        if (fs < 4.0f) fs = 4.0f;   /* never sub-pixel */
+
+        Vector2 origin = { 0, 0 };
+
+        /* 4-pass cardinal-offset outline at +/-1 px. Cheaper than a
+         * shader; visually equivalent at 10–18 px font sizes. */
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                if (dx == 0 && dy == 0) continue;
+                if (dx != 0 && dy != 0) continue;
+                Vector2 off = { screen_xy.x + (float)dx,
+                                screen_xy.y + (float)dy };
+                DrawTextPro(font, buf, off, origin, deg, fs, 1.0f, outln);
+            }
+        }
+        DrawTextPro(font, buf, screen_xy, origin, deg, fs, 1.0f, glyph);
+    }
 }

@@ -1,0 +1,50 @@
+# 2p_damage_numbers — HOST. M6 P04.
+#
+# Pulse Rifle is hitscan, fires a fixed 12 dmg/hit (no crit/falloff
+# variance), and is the cleanest weapon to assert "the host fired 3
+# shots → 3 hits → 3 NORMAL-tier damage-number spawns on host AND
+# client". Asserts in the runner verify the wire round-trip — same
+# numeric value spawned from both sides via mech_apply_damage on the
+# host and client_handle_hit_event on the client (per spec §3.1).
+#
+# Host fires; client peer stays passive. Both processes log
+# `dmgnum spawn ... dmg=12 tier=1` lines (one set on the host's UI
+# client via HIT_EVENT loopback, one set on the remote client via
+# the same broadcast). Tier 1 = DMG_TIER_NORMAL per
+# src/particle.c::dmg_tier_for(uint8_t).
+
+window 1280 720
+out build/shots/net/2p_damage_numbers_host
+network host 24091
+name HostA
+# Use aurora — outdoor map with a long central flat-floor section
+# (free of foundry's parallax-noise / slipstream's basement walls)
+# so the host's hitscan ray has unobstructed line-of-sight to the
+# client peer 200 px away.
+map aurora
+
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+
+# Aurora floor at row 86 → world y = 86*32 = 2752; pelvis 40 above
+# feet (36 px feet_below + 4 clearance) = 2712. Mid-map x cols 50–73
+# is clear of both mountain peaks (cols 2–10 / W-10..W-2) and central
+# pit (cols 74–86), so a 200 px gap puts both mechs on flat ground
+# with no terrain between them.
+spawn_at 1600 2712
+peer_spawn 1 1800 2712
+
+# Aim at the client peer's chest. Slight upward bias (screen-y −10
+# from pelvis) places the ray on the torso, not the head.
+aim 1800 2702
+
+at 130 shot pre_match
+
+# Three Pulse Rifle taps at 60-tick intervals (1 s apart) so each
+# fire has cleared its cooldown. Each tap = one hitscan ray = one
+# 12-dmg hit on mech 1's chest = one NORMAL-tier damage-number spawn.
+at 200 tap fire
+at 260 tap fire
+at 320 tap fire
+
+at 360 shot post_3_hits
+at 420 end

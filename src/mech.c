@@ -2461,6 +2461,31 @@ bool mech_apply_damage(World *w, int mid, int part, float dmg, Vec2 dir,
     for (int k = 0; k < 8; ++k) fx_spawn_blood(&w->fx, hp, dir, w->rng);
     for (int k = 0; k < 4; ++k) fx_spawn_spark(&w->fx, hp, dir, w->rng);
 
+    /* M6 P04 — flying damage-number glyph. Server-side spawn into the
+     * server-thread FxPool: visible in single-process / offline runs
+     * (shotmode without `network host`, --test-play, future practice
+     * mode); invisible in multiplayer where the server thread runs
+     * separately from the UI client and the visible spawn happens via
+     * the HIT_EVENT loopback in net.c::client_handle_hit_event. Same
+     * two-caller pattern as blood/sparks above — no dedup needed.
+     *
+     * weapon_id = 0 because mech_apply_damage's signature doesn't carry
+     * a weapon id and v1 of damage numbers ignores it (reserved for a
+     * future per-weapon glyph treatment, per spec §3.1). The clamp
+     * mirrors HIT_EVENT's wire u8 so server- and client-side spawns
+     * agree on the displayed digits. */
+    {
+        int dmg_byte = (int)(final_dmg + 0.5f);
+        if (dmg_byte < 0)   dmg_byte = 0;
+        if (dmg_byte > 255) dmg_byte = 255;
+        if (dmg_byte > 0) {
+            fx_spawn_damage_number(&w->fx, hp, dir,
+                                   (uint8_t)dmg_byte,
+                                   /*weapon_id=*/0,
+                                   w->rng);
+        }
+    }
+
     /* Queue a hit event for clients (server-only — clients re-spawn
      * the same FX from the broadcast). main.c drains the queue post-
      * simulate and broadcasts via NET_MSG_HIT_EVENT. */

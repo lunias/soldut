@@ -48,7 +48,7 @@ BIN := soldut$(EXE_SUFFIX)
 RAYLIB_LIB := third_party/raylib/src/libraylib.a
 ENET_LIB   := third_party/enet/libenet.a
 
-.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-map-placement test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade test-riot-cannon-sfx test-mech-ik test-pose-compute test-bot-nav test-bot-playtest host-overlay-preview lobby-overlay-preview title-overlay-preview loadout-preview-overlay summary-overlay-preview bot-tier-preview cook-maps cook-thumbs bake bake-all shot \
+.PHONY: all clean distclean raylib enet windows macos help test-physics test-level-io test-spawn test-spawn-e2e test-editor test-pickups test-ctf test-ctf-editor-flow test-grapple-ceiling test-map-share test-map-chunks test-map-registry test-map-placement test-meet-custom test-meet-named test-snapshot test-prefs test-frag-grenade test-riot-cannon-sfx test-damage-numbers test-mech-ik test-pose-compute test-bot-nav test-bot-playtest host-overlay-preview lobby-overlay-preview title-overlay-preview loadout-preview-overlay summary-overlay-preview bot-tier-preview cook-maps cook-thumbs bake bake-all shot \
         debug gdb gdb-host gdb-client valgrind editor \
         assets-palettes assets-process \
         audio-inventory audio-normalize audio-credits test-audio-smoke \
@@ -245,6 +245,15 @@ test-frag-grenade: $(BIN)
 # played audio for HITSCAN.
 test-riot-cannon-sfx: $(BIN)
 	bash tests/shots/net/run_riot_cannon_sfx.sh
+
+# M6 P04 — damage-number cross-client sync. Host fires 3 Pulse Rifle
+# (hitscan, 12 dmg) shots at a stationary client peer; both peers
+# must spawn 3 FX_DAMAGE_NUMBER particles with matching (dmg, tier)
+# columns from the SAME wire byte (HIT_EVENT.damage_u8). 5 assertions
+# in the runner cover spawn-line counts + cross-side diff of decoded
+# values. See documents/m6/08-damage-numbers.md §13.2.
+test-damage-numbers: $(BIN)
+	bash tests/shots/net/run_damage_numbers.sh
 
 # wan-fixes-9 — visual preview for the "Starting server..." overlay.
 # Opens a real raylib window (needs DISPLAY); saves three PNGs to

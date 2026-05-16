@@ -167,8 +167,14 @@ typedef struct {
  * spew: 16 mechs × 2 nozzles × 8 particles/tick × 60 Hz × ~0.5 s
  * average life = ~7680 live FX particles peak. ~384 KB permanent at
  * the new sizeof(FxParticle) (~48 B with the M6 P02 color_cool field).
- * Inside the 256 MB resident budget by a wide margin. */
-#define MAX_BLOOD         8000
+ * Inside the 256 MB resident budget by a wide margin.
+ *
+ * M6 P04 — bumped 8000 → 8500 to keep a clean 200-slot reserve above
+ * the worst combined case (~7680 jet + ~320 damage-number particles
+ * simultaneously airborne in a 16-mech firefight). +32 KB; trivial.
+ * The constant is misnamed — it's the FxPool cap not the blood cap —
+ * but the rename is a 5-call churn left as a follow-up. */
+#define MAX_BLOOD         8500
 
 /* P12 — Persistent damage decals composited over each visible mech
  * part. Decals are stored in sprite-local space (i8 px relative to the
@@ -653,6 +659,7 @@ typedef enum {
     FX_STUMP,            /* P12: pinned dismemberment emitter — pin_mech_id / pin_limb track the parent particle each tick */
     FX_JET_EXHAUST,      /* M6 P02: additive, color lerps color_hot → color_cool over life */
     FX_GROUND_DUST,      /* M6 P02: alpha-blended, heavy drag, brief upward lift */
+    FX_DAMAGE_NUMBER,    /* M6 P04: flying damage-number glyph — gravity + 2-bounce + tumble + fade. See documents/m6/08-damage-numbers.md */
     FX_KIND_COUNT
 } FxKind;
 
@@ -676,10 +683,25 @@ typedef struct {
      * own integrate path; each tick it spawns 1–2 blood particles at
      * the parent particle position so the trail tracks the still-moving
      * torso (not the tumbling severed limb). Self-deactivates when
-     * pin_mech_id is invalid or the body's particle base disappears. */
+     * pin_mech_id is invalid or the body's particle base disappears.
+     *
+     * M6 P04 — FX_DAMAGE_NUMBER overlays the same three slots without
+     * a union (zero-init plays nicer; the kind switch already
+     * dispatches the field meaning):
+     *   pin_mech_id  — damage value 0..255 (i16 leaves headroom if the
+     *                  wire field ever widens past u8).
+     *   pin_limb     — bounce counter (0,1,2; ≥2 = at rest).
+     *   pin_pad      — flags byte: bit 0 = CRIT tier, bit 1 = HEAVY tier
+     *                  (other tiers fall back to dmg_tier_for at draw).
+     *                  bits 2-7 reserved for future kill_glow / weapon icon. */
     int16_t  pin_mech_id;
     uint8_t  pin_limb;   /* LIMB_* bit (HEAD/L_ARM/R_ARM/L_LEG/R_LEG) */
     uint8_t  pin_pad;
+    /* M6 P04 — FX_DAMAGE_NUMBER only: tumble state. Other kinds leave
+     * these at zero (their draw path doesn't read them). +8 B/particle =
+     * +68 KB at the 8500 cap; negligible. */
+    float    angle;       /* current rotation in radians */
+    float    ang_vel;     /* angular velocity in rad/s; bounce damps */
 } FxParticle;
 
 typedef struct {

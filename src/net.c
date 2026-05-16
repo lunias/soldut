@@ -2252,6 +2252,20 @@ static void client_handle_hit_event(NetState *ns, const uint8_t *body, int blen,
     if (n_sparks > 8) n_sparks = 8;
     for (int k = 0; k < n_blood; ++k) fx_spawn_blood(&g->world.fx, hp, dir, g->world.rng);
     for (int k = 0; k < n_sparks; ++k) fx_spawn_spark(&g->world.fx, hp, dir, g->world.rng);
+
+    /* M6 P04 — flying damage-number glyph. Client-side / loopback spawn
+     * into the UI-thread FxPool — this is the visible one on the host's
+     * UI as well as every remote peer (per the wan-fixes-16 thread
+     * split, the host's server thread runs on its own Game/FxPool which
+     * never reaches the renderer). HIT_EVENT carries the post-armor
+     * final damage byte, so host and client agree on digits + tier
+     * without any new wire bytes. weapon_id = 0 because HIT_EVENT
+     * doesn't carry a weapon id and v1 ignores it anyway. */
+    if (dmg > 0) {
+        fx_spawn_damage_number(&g->world.fx, hp, dir,
+                               dmg, /*weapon_id=*/0, g->world.rng);
+    }
+
     /* P14 — flesh-impact SFX on the client side. Server-authoritative
      * fire paths (weapons_fire_hitscan etc.) play this on the host;
      * client mirrors it via the wire. */

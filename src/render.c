@@ -1576,13 +1576,25 @@ void renderer_draw_frame(Renderer *r, World *w,
         DrawTexturePro(src_tex, src, dst, (Vector2){0, 0}, 0.0f, WHITE);
         profile_zone_end(PROF_DRAW_BLIT);
 
+        /* M6 P04 — flying damage-number glyphs. Drawn AFTER the upscale
+         * blit so DrawTextPro lands at sharp window pixels (drawing
+         * inside the internal RT would bilinear-blur the text on
+         * upscale); BEFORE the HUD so a number that spawned over a
+         * HUD-occluded part of the world doesn't render on top of the
+         * HP bar. Uses r->camera (internal-pixel coord system) +
+         * blit_scale/dx/dy to map world → window each frame. The pass
+         * is folded into PROF_DRAW_HUD's window for now — typical cost
+         * is <50 µs per frame, well below adding a new ProfSection. */
+        profile_zone_begin(PROF_DRAW_HUD);
+        fx_draw_damage_numbers(&w->fx, r->camera,
+                               r->blit_scale, r->blit_dx, r->blit_dy);
+
         /* HUD draws at WINDOW resolution on top — sharp text and HUD
          * geometry regardless of the internal cap. The cursor_screen
          * passed in is window coords; HUD layout uses window_w/h;
          * world-to-screen inside the HUD uses the synthesised
          * `hud_cam` so off-screen indicators (CTF compass) land at the
          * correct window position. */
-        profile_zone_begin(PROF_DRAW_HUD);
         hud_draw(w, window_w, window_h, cursor_screen, hud_cam);
         profile_zone_end(PROF_DRAW_HUD);
         if (overlay_cb) {

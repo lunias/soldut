@@ -8,7 +8,8 @@
 #   - assets/raw/audio/oga_music/<kit>.{mp3,ogg}      (opengameart CC0)
 #
 # Writes to:
-#   - assets/sfx/<entry>.wav   (the 47 SFX manifest entries)
+#   - assets/sfx/<entry>.wav   (the 50 SFX manifest entries: 47 base
+#                              + 2 jet ignition (M6 P02) + 1 damage_tink (M6 P04))
 #   - assets/sfx/ambient_<kit>.ogg
 #   - assets/music/<kit>.ogg
 #   - assets/sfx/mech_servo_loop.wav
@@ -118,10 +119,14 @@ mkwav "$K/kenney_sci-fi-sounds/Audio/thrusterFire_001.ogg"      "$SFX/micro_rock
 mkwav "$K/kenney_impact-sounds/Audio/impactMetal_heavy_000.ogg" "$SFX/knife_melee.wav"
 mkwav "$K/kenney_impact-sounds/Audio/impactMetal_medium_000.ogg" "$SFX/knife_throw.wav"
 
-# ----- Hits (3) ----------------------------------------------------
+# ----- Hits (4) ----------------------------------------------------
 mkwav "$K/kenney_sci-fi-sounds/Audio/slime_000.ogg"             "$SFX/hit_flesh.wav"
 mkwav "$K/kenney_sci-fi-sounds/Audio/impactMetal_000.ogg"       "$SFX/hit_metal.wav"
 mkwav "$K/kenney_impact-sounds/Audio/impactGeneric_light_000.ogg" "$SFX/hit_concrete.wav"
+# M6 P04 — damage-number bounce. impactMetal_light_000 is a sharp
+# high-frequency clink ~150 ms, capped at 180 ms with a 50 ms fade
+# so 30+/s saturation doesn't bake into a continuous drone.
+mkwav "$K/kenney_impact-sounds/Audio/impactMetal_light_000.ogg" "$SFX/damage_tink.wav"        0.18
 
 # ----- Explosions (3) ----------------------------------------------
 mkwav "$K/kenney_sci-fi-sounds/Audio/lowFrequency_explosion_000.ogg" "$SFX/explosion_large.wav"  1.20
@@ -237,4 +242,4 @@ mkambient "$K/kenney_sci-fi-sounds/Audio/spaceEngineLow_000.ogg" "$SFX/ambient_e
 mkambient "$K/kenney_sci-fi-sounds/Audio/forceField_002.ogg"     "$SFX/ambient_aurora.ogg"
 mkambient "$K/kenney_sci-fi-sounds/Audio/spaceEngineLow_002.ogg" "$SFX/ambient_citadel.ogg"
 
-echo "audio_source_map: 47 SFX + 1 servo + 7 music + 7 ambient = 62 entries materialized"
+echo "audio_source_map: 50 SFX + 1 servo + 7 music + 7 ambient = 65 entries materialized"
