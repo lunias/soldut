@@ -61,6 +61,11 @@ typedef struct {
                                        window. Defaults to 1080. Falls back to
                                        the same value in ServerConfig when this
                                        prefs file is missing. */
+    float       shake_scale;        /* M6 P10 — scalar multiplier on screen
+                                       shake amplitude + rotation. [0.0, 2.0].
+                                       0 disables shake entirely; 1.0 is the
+                                       baseline; CLI `--shake-scale F`
+                                       overrides. Defaults to 1.0. */
 } UserPrefs;
 
 /* Fill `out` with the compile-time defaults. Always succeeds. */

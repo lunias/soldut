@@ -225,6 +225,7 @@ void renderer_init(Renderer *r, int sw, int sh, Vec2 follow) {
     r->blit_scale = 1.0f;
     r->blit_dx    = 0.0f;
     r->blit_dy    = 0.0f;
+    r->shake_scale = 1.0f;  /* M6 P10 — main.c overrides from prefs. */
 }
 
 Vec2 renderer_screen_to_world(const Renderer *r, Vec2 screen) {
@@ -296,12 +297,16 @@ static void update_camera(Renderer *r, World *w, int sw, int sh, float dt) {
     r->camera.offset = (Vector2){ sw * 0.5f, sh * 0.5f };
 
     /* Screen shake — low-frequency sine, amplitude proportional to
-     * intensity. The intensity decays inside simulate(). */
+     * intensity. The intensity decays inside simulate(). M6 P10:
+     * `shake_scale` multiplies amp + rotation so the user (or the
+     * --shake-scale CLI) can dial total intensity. 0 disables shake;
+     * 1.0 is the baseline; values above 1 amplify big events too. */
     r->shake_phase += dt * 35.0f;
-    float amp = w->shake_intensity * 6.0f;
+    float scale = r->shake_scale;
+    float amp = w->shake_intensity * 6.0f * scale;
     r->camera.target.x += sinf(r->shake_phase * 1.7f) * amp;
     r->camera.target.y += cosf(r->shake_phase * 2.1f) * amp;
-    r->camera.rotation  = sinf(r->shake_phase * 1.3f) * w->shake_intensity * 1.2f;
+    r->camera.rotation  = sinf(r->shake_phase * 1.3f) * w->shake_intensity * 1.2f * scale;
 }
 
 /* ---- Drawing helpers ---------------------------------------------- */

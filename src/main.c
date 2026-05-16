@@ -146,6 +146,10 @@ typedef struct {
      * clean for users who don't need it. Forwarded to the in-process
      * server thread via s_in_proc_args = *args. */
     uint32_t    net_log_interval_ms;
+    /* M6 P10 — `--shake-scale FLOAT` overrides UserPrefs.shake_scale
+     * (and the built-in default). -1 = not set, use prefs/default. */
+    float       shake_scale_override;
+    bool        shake_scale_set;
 } LaunchArgs;
 
 static void parse_args(int argc, char **argv, LaunchArgs *out) {
@@ -235,6 +239,13 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
         }
         else if (strcmp(argv[i], "--perf-overlay") == 0) {
             out->perf_overlay = true;
+        }
+        else if (strcmp(argv[i], "--shake-scale") == 0 && i + 1 < argc) {
+            float v = (float)atof(argv[++i]);
+            if (v < 0.0f) v = 0.0f;
+            if (v > 2.0f) v = 2.0f;
+            out->shake_scale_override = v;
+            out->shake_scale_set      = true;
         }
         else if (strcmp(argv[i], "--window") == 0 && i + 1 < argc) {
             int w = 0, h = 0;
@@ -2356,6 +2367,7 @@ int main(int argc, char **argv) {
 
     LobbyUIState ui = (LobbyUIState){0};
     lobby_ui_init(&ui);
+    float s_shake_scale_initial = 1.0f;  /* M6 P10 — overridden by prefs below. */
     /* wan-fixes-8 — load persisted prefs from soldut-prefs.cfg (next
      * to the executable, cwd-relative). Player name + loadout draft
      * + team + last-connected address survive between client
@@ -2380,12 +2392,20 @@ int main(int argc, char **argv) {
             snprintf(ui.connect_addr, sizeof ui.connect_addr, "%s",
                      prefs.connect_addr);
         }
+        s_shake_scale_initial = prefs.shake_scale;
     }
     /* CLI --name overrides the persisted value. */
     if (args.name[0]) snprintf(ui.player_name, sizeof ui.player_name, "%s", args.name);
 
     Renderer rd;
     renderer_init(&rd, GetScreenWidth(), GetScreenHeight(), (Vec2){640, 360});
+    /* M6 P10 — shake intensity scale. Order: --shake-scale CLI flag >
+     * soldut-prefs.cfg > built-in default (1.0 in renderer_init). */
+    rd.shake_scale = s_shake_scale_initial;
+    if (args.shake_scale_set) rd.shake_scale = args.shake_scale_override;
+    LOG_I("renderer: shake_scale=%.2f%s",
+          rd.shake_scale,
+          args.shake_scale_set ? " (--shake-scale)" : " (prefs)");
 
     /* Initial mode: title (unless CLI shortcut). */
     if (args.skip_title) {
