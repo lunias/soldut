@@ -769,8 +769,16 @@ void fx_draw(const FxPool *pool, float alpha) {
             /* M6 P04 — damage numbers render in fx_draw_damage_numbers,
              * a separate pass run AFTER the internal-RT upscale blit so
              * the glyphs land at sharp window pixels. fx_draw runs
-             * inside the internal-RT world pass; skip here. */
+             * inside the internal-RT world pass; skip here.
+             *
+             * IMPORTANT: this case MUST `break` so the switch doesn't
+             * fall through into FX_WEATHER_SNOW's body below — the
+             * fall-through bug was rendering each damage number as a
+             * 20-44 px tan-colored circle (the font_px size + tier
+             * glyph color), producing a "tan blob artifact" the user
+             * flagged after the weather rework added the WEATHER cases. */
             case FX_DAMAGE_NUMBER:
+                break;
             /* M6 P09 — weather flakes (world-space, post-user-feedback).
              * Each kind has a distinct render: snow = small white
              * circles, rain = thin diagonal lines, dust = warm tan
