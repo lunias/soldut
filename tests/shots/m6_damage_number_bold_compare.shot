@@ -1,0 +1,35 @@
+# m6_damage_number_bold_compare.shot — side-by-side weight comparison
+#
+# Drives one damage event of each tier from a stationary mech so that
+# all five glyphs share a frame at roughly the same height. Used to
+# eyeball the per-tier outline + fake-bold weight progression.
+
+window 1280 720
+seed 1 1
+out build/shots/m6_damage_number_bold_compare
+map slipstream
+no_parallax
+loadout Trooper "Pulse Rifle" Sidearm Light Standard
+
+spawn_at 1500 1176
+mouse 1180 360
+
+extra_chassis Heavy 1700 1176
+
+at 30 shot pre_damage
+
+# Stagger 1 tick apart so all five glyphs hang together near spawn,
+# tier order left→right LIGHT → CRIT.
+at 35 damage 2 CHEST 5      # LIGHT
+at 36 damage 2 CHEST 20     # NORMAL
+at 37 damage 2 CHEST 45     # MEDIUM
+at 38 damage 2 CHEST 75     # HEAVY
+at 39 damage 2 CHEST 150    # CRIT
+
+at 42 shot t000_all_airborne
+at 50 shot t008_just_after
+at 75 shot t033_midflight
+
+contact_sheet bold_compare cols 4 cell 480 270
+
+at 120 end
