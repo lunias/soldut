@@ -12,10 +12,11 @@ map concourse
 
 loadout - "Pulse Rifle" "Frag Grenades" Light Standard
 
-spawn_at 1824 1100
+spawn_at 2100 1500
 
-# Aim back at host
-aim 1024 1090
+# Aim back at host (target y at floor level so the throw lands AT
+# the mech, not at the higher spawn-Y).
+aim 1300 1700
 
 at 130 press swap
 at 138 release swap

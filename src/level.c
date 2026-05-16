@@ -294,6 +294,141 @@ bool level_ray_hits(const Level *l, Vec2 a, Vec2 b, float *out_t) {
     return true;
 }
 
+/* DDA tile test that returns BOTH t AND the cardinal normal at the
+ * hit face. Mirrors level_ray_hits_tile_filtered (no ONE_WAY-up
+ * filtering — bouncy projectiles treat ONE_WAY as solid in both
+ * directions). The normal is the axis-aligned face we crossed,
+ * pointing back toward `a`. */
+static bool level_ray_hits_tile_with_normal(const Level *l, Vec2 a, Vec2 b,
+                                            float *out_t,
+                                            float *out_nx, float *out_ny) {
+    float ts = (float)l->tile_size;
+    float dx = b.x - a.x, dy = b.y - a.y;
+
+    int tx = (int)(a.x / ts);
+    int ty = (int)(a.y / ts);
+
+    /* Already inside a solid tile at start — output an approximate
+     * normal pointing back along the ray (best-effort). */
+    uint16_t start_f = level_flags_at(l, tx, ty);
+    if ((start_f & TILE_F_SOLID) && !(start_f & TILE_F_BACKGROUND)) {
+        if (out_t) *out_t = 0.0f;
+        float mag = sqrtf(dx*dx + dy*dy);
+        if (mag > 1e-4f) {
+            if (out_nx) *out_nx = -dx / mag;
+            if (out_ny) *out_ny = -dy / mag;
+        } else {
+            if (out_nx) *out_nx = 0.0f;
+            if (out_ny) *out_ny = -1.0f;
+        }
+        return true;
+    }
+
+    int step_x = (dx > 0) ? 1 : (dx < 0 ? -1 : 0);
+    int step_y = (dy > 0) ? 1 : (dy < 0 ? -1 : 0);
+
+    float t_max_x = 1e30f, t_delta_x = 1e30f;
+    float t_max_y = 1e30f, t_delta_y = 1e30f;
+    if (dx != 0.0f) {
+        float next_x = (step_x > 0) ? (float)(tx + 1) * ts : (float)tx * ts;
+        t_max_x   = (next_x - a.x) / dx;
+        t_delta_x = ts / (dx > 0 ? dx : -dx);
+    }
+    if (dy != 0.0f) {
+        float next_y = (step_y > 0) ? (float)(ty + 1) * ts : (float)ty * ts;
+        t_max_y   = (next_y - a.y) / dy;
+        t_delta_y = ts / (dy > 0 ? dy : -dy);
+    }
+
+    for (int i = 0; i < 4096; ++i) {
+        if (t_max_x < t_max_y) {
+            tx += step_x;
+            if (t_max_x > 1.0f) return false;
+            uint16_t f = level_flags_at(l, tx, ty);
+            if ((f & TILE_F_SOLID) && !(f & TILE_F_BACKGROUND)) {
+                if (out_t)  *out_t  = t_max_x;
+                /* X-face hit — normal opposes step_x (points back to
+                 * the tile we came from along x). */
+                if (out_nx) *out_nx = (float)(-step_x);
+                if (out_ny) *out_ny = 0.0f;
+                return true;
+            }
+            t_max_x += t_delta_x;
+        } else {
+            ty += step_y;
+            if (t_max_y > 1.0f) return false;
+            uint16_t f = level_flags_at(l, tx, ty);
+            if ((f & TILE_F_SOLID) && !(f & TILE_F_BACKGROUND)) {
+                if (out_t)  *out_t  = t_max_y;
+                if (out_nx) *out_nx = 0.0f;
+                if (out_ny) *out_ny = (float)(-step_y);
+                return true;
+            }
+            t_max_y += t_delta_y;
+        }
+    }
+    return false;
+}
+
+/* Same as level_ray_hits_poly but ALSO writes the unit-vector normal
+ * of the closest hit edge (pointing AWAY from the polygon interior,
+ * using the precomputed normal_x/normal_y arrays). */
+static bool level_ray_hits_poly_with_normal(const Level *l, Vec2 a, Vec2 b,
+                                            float *out_t,
+                                            float *out_nx, float *out_ny) {
+    if (l->poly_count == 0) return false;
+    float t_min   = 1.0f;
+    float hit_nx  = 0.0f;
+    float hit_ny  = -1.0f;
+    bool  hit     = false;
+    for (int i = 0; i < l->poly_count; ++i) {
+        const LvlPoly *poly = &l->polys[i];
+        if ((PolyKind)poly->kind == POLY_KIND_BACKGROUND) continue;
+        Vec2 v0 = { (float)poly->v_x[0], (float)poly->v_y[0] };
+        Vec2 v1 = { (float)poly->v_x[1], (float)poly->v_y[1] };
+        Vec2 v2 = { (float)poly->v_x[2], (float)poly->v_y[2] };
+        float t;
+        if (seg_seg_intersect(a, b, v0, v1, &t) && t < t_min) {
+            t_min  = t; hit = true;
+            hit_nx = poly->normal_x[0] / 32767.0f;
+            hit_ny = poly->normal_y[0] / 32767.0f;
+        }
+        if (seg_seg_intersect(a, b, v1, v2, &t) && t < t_min) {
+            t_min  = t; hit = true;
+            hit_nx = poly->normal_x[1] / 32767.0f;
+            hit_ny = poly->normal_y[1] / 32767.0f;
+        }
+        if (seg_seg_intersect(a, b, v2, v0, &t) && t < t_min) {
+            t_min  = t; hit = true;
+            hit_nx = poly->normal_x[2] / 32767.0f;
+            hit_ny = poly->normal_y[2] / 32767.0f;
+        }
+    }
+    if (hit) {
+        if (out_t)  *out_t  = t_min;
+        if (out_nx) *out_nx = hit_nx;
+        if (out_ny) *out_ny = hit_ny;
+    }
+    return hit;
+}
+
+bool level_ray_hits_normal(const Level *l, Vec2 a, Vec2 b,
+                           float *out_t, float *out_nx, float *out_ny) {
+    float t_tile = 1.0f, t_poly = 1.0f;
+    float nx_tile = 0.0f, ny_tile = -1.0f;
+    float nx_poly = 0.0f, ny_poly = -1.0f;
+    bool tile_hit = level_ray_hits_tile_with_normal(l, a, b,
+                                                     &t_tile, &nx_tile, &ny_tile);
+    bool poly_hit = level_ray_hits_poly_with_normal(l, a, b,
+                                                     &t_poly, &nx_poly, &ny_poly);
+    if (!tile_hit && !poly_hit) return false;
+    bool use_tile = tile_hit && (!poly_hit || t_tile < t_poly);
+    if (out_t)  *out_t  = use_tile ? t_tile  : t_poly;
+    if (out_nx) *out_nx = use_tile ? nx_tile : nx_poly;
+    if (out_ny) *out_ny = use_tile ? ny_tile : ny_poly;
+    return true;
+}
+
 /* M6 P09 — kinematic variant. Treats TILE_F_ONE_WAY as non-blocking
  * when the ray is moving UP (dy < 0) so a jetting particle isn't
  * pre-clamped just below the platform by the integrate sweep. The

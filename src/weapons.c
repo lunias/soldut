@@ -142,7 +142,15 @@ static const Weapon g_weapons[WEAPON_COUNT] = {
         .name = "Frag Grenades",
         .klass = WEAPON_CLASS_SECONDARY,
         .fire = WFIRE_THROW,
-        .damage = 0.0f, .fire_rate_sec = 0.60f, .reload_sec = 0.0f,
+        /* M6 ship-prep — DIRECT damage (was 0). When the grenade's
+         * swept-segment hits a mech bone, projectile.c::projectile_step
+         * applies this through mech_apply_damage and THEN detonates.
+         * Without direct damage, a grenade that visibly contacted a
+         * mech but happened to detonate just outside the AOE radius
+         * dealt zero damage — "I hit them in the face, no damage."
+         * 40 dmg + AOE-on-detonate means a clean direct hit deals
+         * guaranteed damage + the AOE on top. */
+        .damage = 40.0f, .fire_rate_sec = 0.60f, .reload_sec = 0.0f,
         .mag_size = 3, .range_px = 0.0f,
         .recoil_impulse = 0.4f, .bink = 0.0f, .self_bink = 0.0f,
         .muzzle_offset = 16.0f,
@@ -172,7 +180,12 @@ static const Weapon g_weapons[WEAPON_COUNT] = {
          * grenades, so a well-placed one should clear a small area. */
         .projectile_speed_pxs = 700.0f, .projectile_life_sec = 2.4f,
         .projectile_drag = 0.12f, .projectile_grav_scale = 1.05f,
-        .aoe_radius = 180.0f, .aoe_damage = 100.0f, .aoe_impulse = 65.0f,
+        /* AOE radius bumped 180 → 240 px. Bouncy frags diverge between
+         * client and server sim over the 2.4 s fuse — a wider AOE
+         * means damage still lands when the server's detonation pos
+         * is a few dozen px off from where the client thinks the
+         * grenade went. */
+        .aoe_radius = 240.0f, .aoe_damage = 100.0f, .aoe_impulse = 65.0f,
         .bouncy = true,
     },
     [WEAPON_MICRO_ROCKETS] = {
@@ -708,43 +721,23 @@ void weapons_spawn_throw_charged(World *w, int mid, int weapon_id,
     float speed = wpn->projectile_speed_pxs * speed_mul;
 
     Vec2 hand = mech_hand_pos(w, mid);
-    Vec2 dir  = apply_self_bink(w, me, mech_aim_dir(w, mid));
-
-    /* Upward lob bias — pivots the launch direction toward "up" so the
-     * grenade leaves the hand UP-and-forward rather than straight at
-     * the cursor. Combined with gravity this yields a pronounced
-     * parabolic arc the player reads as a throw (vs. a shot).
+    /* Direct aim with a small constant upward bias. The aim direction
+     * IS the launch direction — Worms-style player control. To throw
+     * far, aim ~45° up (max range from no-drag formula). To clear a
+     * wall, aim higher than 45° (more arc, less range). To hit a
+     * close target, aim AT it (gravity drops the grenade onto it).
      *
-     * Lob amount scales with TWO factors:
-     *   1. charge — a quick tap is a flat lob (mostly direct, useful
-     *      for point-blank), max charge is a high arc.
-     *   2. aim distance — close targets get little lob (so a grenade
-     *      thrown in an enemy's face goes STRAIGHT AT them, doesn't
-     *      arc over their head), far targets get full lob (so the
-     *      throw clears walls / gaps on the way).
-     *
-     * Math: build a biased vector (dir.x, dir.y - lob_amount) and
-     * renormalize. When the player aims straight up (dir.y ≈ -1) the
-     * bias is along the same axis so the throw direction doesn't
-     * change. When the player aims straight down (dir.y ≈ +1) the
-     * bias subtracts magnitude but stays in the same direction after
-     * renormalization — straight-down throws still go down. Only
-     * horizontal / shallow-down aims get the visible lift. */
+     * The 0.12 fixed upward bias (~7°) gives even a perfectly
+     * horizontal aim a modest arc so the grenade doesn't immediately
+     * drop at the player's feet — pure direct aim with vy=0 yields
+     * zero range. The bias is small enough that 45° aim still
+     * throws near max range (the resulting angle becomes ~50°,
+     * slightly past optimal but well within the parabola). */
+    Vec2 dir = apply_self_bink(w, me, mech_aim_dir(w, mid));
     {
-        float dx_aim = me->aim_world.x - hand.x;
-        float dy_aim = me->aim_world.y - hand.y;
-        float aim_dist = sqrtf(dx_aim * dx_aim + dy_aim * dy_aim);
-        /* 0 at point-blank (≤ 80 px), 1 at ≥ 480 px — smoothly fades
-         * the lob in as the aim moves away. */
-        float dist_scale = (aim_dist - 80.0f) / 400.0f;
-        if (dist_scale < 0.0f) dist_scale = 0.0f;
-        if (dist_scale > 1.0f) dist_scale = 1.0f;
-
-        float lob_amount = (FRAG_LOB_MIN_BIAS +
-                            (FRAG_LOB_MAX_BIAS - FRAG_LOB_MIN_BIAS) * charge_factor)
-                           * dist_scale;
+        const float UPWARD_BIAS = 0.12f;
         float lx = dir.x;
-        float ly = dir.y - lob_amount;
+        float ly = dir.y - UPWARD_BIAS;
         float lmag = sqrtf(lx * lx + ly * ly);
         if (lmag > 1e-4f) {
             dir.x = lx / lmag;

@@ -15,13 +15,16 @@ map concourse
 
 loadout - "Pulse Rifle" "Frag Grenades" Light Standard
 
-# Concourse main floor ~y=1100 (from existing shot tests).
-# Host on left, client 800 px right (both within central play area).
-spawn_at 1024 1100
-peer_spawn 1 1824 1100
+# Concourse main floor sits around y=1700 (cf. m6_p09_snow_drag.shot
+# which spawns at 1600,1500 and falls onto the floor). Spawn host
+# at x=1300 and client 800 px right at x=2100 — both over solid
+# floor near the center of the atrium, no pits between them.
+spawn_at 1300 1500
+peer_spawn 1 2100 1500
 
-# Aim at client
-aim 1824 1090
+# Aim at client (use a target y close to the actual floor so the
+# throw arc lands AT the mech, not at the spawn-Y above the floor).
+aim 2100 1700
 
 at 130 press swap
 at 138 release swap

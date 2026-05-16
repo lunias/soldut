@@ -289,9 +289,15 @@ void projectile_step(World *w, float dt) {
         Vec2 a = { p->pos_x[i], p->pos_y[i] };
         Vec2 b = { a.x + p->vel_x[i] * dt, a.y + p->vel_y[i] * dt };
 
-        /* Tile collision via DDA ray. */
+        /* Tile + polygon collision via DDA ray + edge tests. Also
+         * captures the surface normal at the hit point so the bouncy
+         * reflection below can use the actual normal (slopes!) instead
+         * of the axis-aligned dominant-axis approximation that used
+         * to nudge grenades INTO sloped polygons. */
         float t_wall;
-        bool hit_wall = level_ray_hits(&w->level, a, b, &t_wall);
+        float hit_nx = 0.0f, hit_ny = -1.0f;
+        bool hit_wall = level_ray_hits_normal(&w->level, a, b,
+                                              &t_wall, &hit_nx, &hit_ny);
 
         /* Bone collision against every other mech. The lower of the two
          * hit times wins; AOE projectiles detonate at the contact, non-
@@ -504,25 +510,36 @@ void projectile_step(World *w, float dt) {
              * below, so a grenade that bounces and THEN strikes a mech
              * on a later tick also detonates immediately. */
             if (hit_wall && hit_mech < 0 && p->bouncy[i]) {
-                /* Reflect velocity. Estimate normal by the dominant
-                 * axis at the moment of contact (cheap approximation
-                 * for tile-aligned maps). Damping factors are tuned
-                 * for "skipping rock" feel — 0.70 perpendicular (30 %
-                 * absorbed per bounce so a max-charge throw skips 3-4
-                 * times across a flat floor), 0.90 parallel (10 %
-                 * rolling friction so it keeps drifting on the
-                 * follow-through). */
-                if (fabsf(p->vel_x[i]) > fabsf(p->vel_y[i])) {
-                    p->vel_x[i] *= -0.70f;
-                    p->vel_y[i] *=  0.90f;
-                } else {
-                    p->vel_x[i] *=  0.90f;
-                    p->vel_y[i] *= -0.70f;
-                }
-                /* Pull pos a hair away from the wall so the next tick
-                 * doesn't immediately re-collide. */
-                if (p->vel_x[i] != 0.0f) p->pos_x[i] += sign_f(p->vel_x[i]) * 1.5f;
-                if (p->vel_y[i] != 0.0f) p->pos_y[i] += sign_f(p->vel_y[i]) * 1.5f;
+                /* Reflect velocity across the actual surface normal
+                 * (set by level_ray_hits_normal). Pre-fix used a
+                 * dominant-axis approximation that worked OK for tile
+                 * walls but produced wrong-direction bounces on
+                 * sloped polygons — the post-bounce nudge could
+                 * place the grenade INSIDE the slope, where no edge
+                 * crossings catch it on subsequent ticks and the
+                 * grenade visibly "falls through" the slope.
+                 *
+                 * Normal-aware reflection:
+                 *   v_n  = v · n            (normal component, scalar)
+                 *   v_t  = v - v_n × n      (tangential component)
+                 *   v'   = v_t × parallel - v_n × n × perpendicular
+                 * Tangent gets 0.90× retention (rolling friction).
+                 * Normal gets -0.70× (bounce restitution; 30% absorbed). */
+                float vx = p->vel_x[i], vy = p->vel_y[i];
+                float v_dot_n = vx * hit_nx + vy * hit_ny;
+                float vn_x = v_dot_n * hit_nx;
+                float vn_y = v_dot_n * hit_ny;
+                float vt_x = vx - vn_x;
+                float vt_y = vy - vn_y;
+                const float k_par  = 0.90f;
+                const float k_perp = 0.70f;
+                p->vel_x[i] = vt_x * k_par - vn_x * k_perp;
+                p->vel_y[i] = vt_y * k_par - vn_y * k_perp;
+                /* Nudge ALONG THE NORMAL so the grenade leaves the
+                 * surface cleanly (was nudging in velocity direction,
+                 * which could be parallel to a slope → back into it). */
+                p->pos_x[i] += hit_nx * 1.5f;
+                p->pos_y[i] += hit_ny * 1.5f;
                 /* Tiny spark on bounce. */
                 fx_spawn_spark(&w->fx,
                     (Vec2){ p->pos_x[i], p->pos_y[i] },
