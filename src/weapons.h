@@ -125,7 +125,7 @@ void weapons_spawn_throw_charged(World *w, int mid, int weapon_id,
 /* Hold-to-charge timings for WFIRE_THROW (frag grenade). */
 #define FRAG_CHARGE_MAX_SEC      1.0f   /* seconds to reach full power */
 #define FRAG_THROW_SPEED_MIN_MUL 0.5f   /* multiplier at 0% charge (quick tap) */
-#define FRAG_THROW_SPEED_MAX_MUL 3.0f   /* multiplier at 100% charge (2100 px/s max) */
+#define FRAG_THROW_SPEED_MAX_MUL 4.0f   /* multiplier at 100% charge (2800 px/s max — bullets are ~1900) */
 
 /* Upward "lob" bias applied to the launch direction in
  * weapons_spawn_throw_charged. Bias = MIN + (MAX-MIN) × charge_factor;

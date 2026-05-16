@@ -353,15 +353,14 @@ void projectile_step(World *w, float dt) {
             }
 
             /* Bone-collision radius. Bullets stay tight (8 px) but
-             * frag grenades use a wider radius — the sprite itself
-             * is ~7 px wide and the player expects a grenade that
-             * VISUALLY touches a mech to detonate, even when rolling
-             * along the floor next to a foot or grazing a hand. 18 px
-             * gives a generous bubble that captures sprite-edge
-             * contact AND the typical mech-bone motion (walk / pose
-             * anim can move a bone 5-10 px/tick — bumping the radius
-             * is cheaper than a true moving-vs-moving CCD). */
-            float bone_r = (p->kind[i] == PROJ_FRAG_GRENADE) ? 18.0f : 8.0f;
+             * frag grenades use 22 px — wide enough that "I threw it
+             * in their face" reliably registers even when the
+             * grenade is moving fast and the bone is moving (walk /
+             * pose anim can move a bone 5-10 px per tick). The
+             * sprite itself is ~7 px wide, so 22 px captures
+             * sprite-edge contact plus a comfortable bone-motion
+             * buffer. Cheaper than a true moving-vs-moving CCD. */
+            float bone_r = (p->kind[i] == PROJ_FRAG_GRENADE) ? 22.0f : 8.0f;
             for (int bi = 0; bi < NUM_BONES; ++bi) {
                 int pa = m->particle_base + g_bones[bi].parent;
                 int pb = m->particle_base + g_bones[bi].child;

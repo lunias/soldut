@@ -148,9 +148,10 @@ static const Weapon g_weapons[WEAPON_COUNT] = {
          * Without direct damage, a grenade that visibly contacted a
          * mech but happened to detonate just outside the AOE radius
          * dealt zero damage — "I hit them in the face, no damage."
-         * 40 dmg + AOE-on-detonate means a clean direct hit deals
-         * guaranteed damage + the AOE on top. */
-        .damage = 40.0f, .fire_rate_sec = 0.60f, .reload_sec = 0.0f,
+         * 60 dmg + AOE-on-detonate means a clean direct hit deals
+         * guaranteed damage + the AOE on top. Light armor absorbs
+         * 40 % → 36 dmg to health from the direct portion alone. */
+        .damage = 60.0f, .fire_rate_sec = 0.60f, .reload_sec = 0.0f,
         .mag_size = 3, .range_px = 0.0f,
         .recoil_impulse = 0.4f, .bink = 0.0f, .self_bink = 0.0f,
         .muzzle_offset = 16.0f,

@@ -116,15 +116,16 @@ asrt "at least one throw is medium charge (≤ 0.60)" "[[ $HAS_LOW  -eq 1 ]]"
 asrt "at least one throw is max charge (≥ 0.95)"    "[[ $HAS_HIGH -eq 1 ]]"
 
 # Speed range covers both buckets. After the FRAG_THROW_SPEED_MAX_MUL
-# bump (2.4 → 3.0) max-charge throws are now ~2100 px/s.
+# bumps (now 4.0) max-charge throws are ~2800 px/s, medium charges
+# ~1500-2000 px/s.
 HAS_SLOW=0; HAS_FAST=0
 for L in "${CHARGE_LINES[@]}"; do
     V=$(echo "$L" | sed -E 's/.*v=([0-9.]+).*/\1/')
-    if awk -v v="$V" 'BEGIN{exit !(v <= 1500)}'; then HAS_SLOW=1; fi
-    if awk -v v="$V" 'BEGIN{exit !(v >= 1800)}'; then HAS_FAST=1; fi
+    if awk -v v="$V" 'BEGIN{exit !(v <= 2000)}'; then HAS_SLOW=1; fi
+    if awk -v v="$V" 'BEGIN{exit !(v >= 2400)}'; then HAS_FAST=1; fi
 done
-asrt "at least one throw is sub-max speed (≤ 1500 px/s)" "[[ $HAS_SLOW -eq 1 ]]"
-asrt "at least one throw is full-charge speed (≥ 1800 px/s)" "[[ $HAS_FAST -eq 1 ]]"
+asrt "at least one throw is sub-max speed (≤ 2000 px/s)" "[[ $HAS_SLOW -eq 1 ]]"
+asrt "at least one throw is full-charge speed (≥ 2400 px/s)" "[[ $HAS_FAST -eq 1 ]]"
 
 # AOE detonations (host). With the longer fuse (1.5s → 2.0s) some
 # throws may not detonate before the round's time-limit ends — require
