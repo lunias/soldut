@@ -139,6 +139,13 @@ typedef struct {
     char        bench_csv[256];
     char        bench_map[24];
     int         bench_bots;
+    /* wan-fixes-17 — `--net-log [INTERVAL_MS]` emits one NET_STATS
+     * LOG_I line per active peer every INTERVAL_MS ms (default 1000).
+     * 0 = disabled (the default). Cheap (a few branches per poll +
+     * one printf per peer per interval); opt-in so release logs stay
+     * clean for users who don't need it. Forwarded to the in-process
+     * server thread via s_in_proc_args = *args. */
+    uint32_t    net_log_interval_ms;
 } LaunchArgs;
 
 static void parse_args(int argc, char **argv, LaunchArgs *out) {
@@ -312,6 +319,16 @@ static void parse_args(int argc, char **argv, LaunchArgs *out) {
             if (n < 0) n = 0;
             if (n > 31) n = 31;
             out->bench_bots = n;
+        }
+        else if (strcmp(argv[i], "--net-log") == 0) {
+            uint32_t ms = 1000u;
+            if (i + 1 < argc && argv[i+1][0] != '-') {
+                int n = atoi(argv[++i]);
+                if (n < 100)    n = 100;
+                if (n > 60000)  n = 60000;
+                ms = (uint32_t)n;
+            }
+            out->net_log_interval_ms = ms;
         }
     }
 }
@@ -1204,6 +1221,9 @@ static bool bootstrap_host(Game *g, const LaunchArgs *args, bool offline) {
         if (g->config.snapshot_hz > 0) {
             net_server_set_snapshot_hz(&g->net, g->config.snapshot_hz);
         }
+        if (args && args->net_log_interval_ms > 0) {
+            net_set_stats_log_interval(&g->net, args->net_log_interval_ms);
+        }
         net_discovery_open(&g->net);
         LOG_I("host: ready on port %u", (unsigned)g->config.port);
     } else {
@@ -1275,6 +1295,9 @@ static bool bootstrap_client(Game *g, const LaunchArgs *args) {
     {
         LOG_E("client: connect to %s:%u failed", args->host, (unsigned)args->port);
         return false;
+    }
+    if (args->net_log_interval_ms > 0) {
+        net_set_stats_log_interval(&g->net, args->net_log_interval_ms);
     }
     /* Initial state has been applied in net.c — local_slot_id is set,
      * mode is MODE_LOBBY. */
@@ -1457,6 +1480,9 @@ static int dedicated_run(const LaunchArgs *args, const DedicatedRunOptions *opts
     if (game.config.interp_delay_ms > 0) {
         net_set_interp_delay_override(&game.net,
             (uint32_t)game.config.interp_delay_ms);
+    }
+    if (args->net_log_interval_ms > 0) {
+        net_set_stats_log_interval(&game.net, args->net_log_interval_ms);
     }
     net_discovery_open(&game.net);
 
@@ -1838,6 +1864,11 @@ static bool host_start_begin(Game *g, const LaunchArgs *args,
      * otherwise reset to soldut.cfg defaults). */
     server_args.bots_override     = g->config.bots;
     server_args.bot_tier_override = g->config.bot_tier;
+    /* wan-fixes-17 — propagate the --net-log knob from the launching
+     * CLI into the in-process server thread, so a single flag on the
+     * host's command line dumps NET_STATS on BOTH the in-process
+     * server's log file and the UI client's log file. */
+    server_args.net_log_interval_ms = args->net_log_interval_ms;
 
     if (!in_process_server_start(&server_args)) {
         LOG_E("host_start: in_process_server_start failed");

@@ -207,6 +207,14 @@ typedef struct NetPeer {
     uint32_t     bytes_sent;
     uint32_t     bytes_recv;
 
+    /* wan-fixes-17 — periodic-dump deltas + ENet packet loss view.
+     * The dumper reads (current - prev) for the NET_STATS line, then
+     * copies current → prev. packet_loss_ratio is enet's per-peer
+     * `packetLoss` field renormalized to [0,1]. */
+    uint32_t     prev_bytes_sent;
+    uint32_t     prev_bytes_recv;
+    float        packet_loss_ratio;
+
     /* M5 P08 — server tracks which map crc each peer has signaled
      * MAP_READY for. The auto-start countdown reads this: a peer is
      * "not ready to start" until they've ack'd the current map's crc.
@@ -262,6 +270,22 @@ typedef struct NetState {
     uint32_t packets_sent;
     uint32_t packets_recv;
     double   server_time;         /* seconds since net_server_start */
+
+    /* wan-fixes-17 — periodic NET_STATS dump for WAN debugging.
+     * Opt-in via --net-log; 0 = disabled. The dump prints one
+     * LOG_I line per active peer with rtt / loss / KB-per-second
+     * deltas computed from `prev_*` snapshots taken at the last
+     * dump tick. snapshots_applied is bumped client-side in
+     * client_handle_snapshot so we can compare apply-rate to the
+     * configured snapshot_hz (gaps point at delivery loss). */
+    double   stats_log_interval_s;
+    double   stats_log_accum_s;
+    uint32_t prev_packets_sent;
+    uint32_t prev_packets_recv;
+    uint32_t prev_bytes_sent_global;
+    uint32_t prev_bytes_recv_global;
+    uint32_t snapshots_applied;
+    uint32_t prev_snapshots_applied;
 
     /* Snapshot rate gate (server-only). */
     double   snapshot_accum;
@@ -375,6 +399,15 @@ void net_server_set_snapshot_hz(NetState *ns, int hz);
  * default leaves on the table; hosts on jittery WAN can go higher.
  * Clamped to [40, 200] ms when applied. */
 void net_set_interp_delay_override(NetState *ns, uint32_t ms);
+
+/* wan-fixes-17 — enable periodic NET_STATS LOG_I lines for WAN
+ * debugging. Pass ms = 0 to disable, otherwise net_poll dumps one
+ * line per active peer every `ms` milliseconds with current RTT,
+ * ENet packet-loss ratio, and KB/s + packets/s deltas since the
+ * last dump. Cheap (a few branches per poll + one printf per peer
+ * per interval); opt-in via `--net-log [INTERVAL_MS]` so release
+ * logs stay clean for users who don't need it. */
+void net_set_stats_log_interval(NetState *ns, uint32_t ms);
 
 /* Connect to host:port. Returns true on connect ACK; populates
  * ns->local_mech_id_assigned with the server's choice (>=0). On
