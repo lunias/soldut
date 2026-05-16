@@ -2345,19 +2345,21 @@ static void client_handle_explosion(NetState *ns, const uint8_t *body, int blen,
              (unsigned long long)g->world.tick, (int)owner, (int)weapon,
              pos.x, pos.y);
 
-    /* Find + kill any AOE projectile from this shooter that hasn't
-     * already detonated. Most rounds have ≤2 in flight per owner so a
-     * linear scan is fine. Match by owner+kind; same-owner same-kind
-     * projectiles in quick succession are extremely rare (frag fire
-     * rate 0.6 s = 36 ticks > typical RTT). */
+    /* Find the in-flight AOE projectile that matches this server-side
+     * detonation. Used for: (a) inheriting its current position so the
+     * FX spawns at the LOCAL visible pos rather than the server's
+     * (which may have diverged), (b) applying the dying-frame fix to
+     * the local projectile so the sprite reads at the explosion
+     * center for one frame. */
     ProjectilePool *pp = &g->world.projectiles;
+    int local_idx = -1;
     for (int i = 0; i < pp->count; ++i) {
         if (!pp->alive[i]) continue;
         if (pp->aoe_radius[i] <= 0.0f) continue;
         if ((int)pp->owner_mech[i] != (int)owner) continue;
         if ((int)pp->kind[i] != (int)wpn->projectile_kind) continue;
-        pp->alive[i]    = 0;
-        pp->exploded[i] = 1;
+        local_idx = i;
+        break;
     }
 
     /* wan-fixes-21 — de-dup against a recent CLIENT prediction.
@@ -2369,7 +2371,11 @@ static void client_handle_explosion(NetState *ns, const uint8_t *body, int blen,
      * last_explosion_pos), causing the camera to jump from the
      * client-predicted impact point to the server's impact point —
      * the bug the user described as "camera goes to explosion area
-     * (sometimes wrong) then back to the mech." */
+     * (sometimes wrong) then back to the mech."
+     *
+     * When the predict already fired we leave the local projectile
+     * alone — projectile_step's exploded-flag path handles its
+     * dying frame + kill on the next tick. */
     ExplosionRecord *pred = explosion_record_find_consume(
         &g->world, (int)owner, (int)weapon,
         EXPL_SRC_PREDICTED, /*max_age_ticks*/600);
@@ -2378,14 +2384,37 @@ static void client_handle_explosion(NetState *ns, const uint8_t *body, int blen,
         return;
     }
 
-    /* No prediction in flight — spawn normally and remember that
-     * the server's visual fired (so a later client detonate that
-     * matches this projectile skips its prediction). */
+    /* No client predict in flight. Server's wire event is the only
+     * detonation signal we have. Apply the dying-frame + FX-at-
+     * local-pos treatment so the player sees a continuous visual:
+     *
+     *  - Snap render_prev to the local projectile's current pos so
+     *    the next render frame lerps to that pos exactly.
+     *  - Mark exploded=1 (projectile_step will kill it next tick).
+     *  - Leave alive=1 for one more render frame so the sprite sits
+     *    AT the explosion center with the spark FX fanning out.
+     *  - Spawn the FX at LOCAL pos when we have one (matches the
+     *    visible grenade location); fall back to server pos only if
+     *    the local projectile is gone (pool overflow / desync).
+     *
+     * Damage is server-authoritative — already applied before this
+     * broadcast — so using local pos for the FX center has no
+     * gameplay consequence; it's purely visual continuity. */
+    Vec2 fx_pos = pos;
+    if (local_idx >= 0) {
+        fx_pos = (Vec2){ pp->pos_x[local_idx], pp->pos_y[local_idx] };
+        pp->exploded[local_idx]      = 1;
+        pp->render_prev_x[local_idx] = pp->pos_x[local_idx];
+        pp->render_prev_y[local_idx] = pp->pos_y[local_idx];
+        /* alive stays 1 — projectile_step's top-of-loop check kills
+         * it on the next tick after rendering the dying frame. */
+    }
+
     int owner_team = ((int)owner < g->world.mech_count)
                          ? (int)g->world.mechs[owner].team : 0;
-    explosion_spawn(&g->world, pos, wpn->aoe_radius, wpn->aoe_damage,
+    explosion_spawn(&g->world, fx_pos, wpn->aoe_radius, wpn->aoe_damage,
                     wpn->aoe_impulse, (int)owner, owner_team, (int)weapon);
-    explosion_record_push(&g->world, pos, (int)owner, (int)weapon,
+    explosion_record_push(&g->world, fx_pos, (int)owner, (int)weapon,
                           EXPL_SRC_SERVER);
 }
 

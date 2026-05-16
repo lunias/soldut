@@ -372,8 +372,13 @@ static void update_camera(Renderer *r, World *w, int sw, int sh,
         float dy_g = follow_pt.y - focus.y;
         float gdist = sqrtf(dx_g * dx_g + dy_g * dy_g);
         if (gdist > 1.0f) {
-            const float kFollowFrac  = 0.80f;
-            const float kFollowMaxPx = 800.0f;
+            /* Bumped 0.80 / 800 → 0.95 / 1400 so the camera stays on
+             * the grenade even for long max-charge throws. The mech
+             * may drop fully off-screen for the brief duration of
+             * the throw — that's the accepted trade now: the player
+             * is throwing, the grenade IS the action, follow it. */
+            const float kFollowFrac  = 0.95f;
+            const float kFollowMaxPx = 1400.0f;
             float shift = gdist * kFollowFrac;
             if (shift > kFollowMaxPx) shift = kFollowMaxPx;
             focus.x += (dx_g / gdist) * shift;

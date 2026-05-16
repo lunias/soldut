@@ -350,10 +350,12 @@ void projectile_step(World *w, float dt) {
              * frag grenades use a wider radius — the sprite itself
              * is ~7 px wide and the player expects a grenade that
              * VISUALLY touches a mech to detonate, even when rolling
-             * along the floor next to a foot or grazing a hand. 8 px
-             * left grenades rolling past mechs un-detonated; 14 px
-             * catches contact at the sprite edge. */
-            float bone_r = (p->kind[i] == PROJ_FRAG_GRENADE) ? 14.0f : 8.0f;
+             * along the floor next to a foot or grazing a hand. 18 px
+             * gives a generous bubble that captures sprite-edge
+             * contact AND the typical mech-bone motion (walk / pose
+             * anim can move a bone 5-10 px/tick — bumping the radius
+             * is cheaper than a true moving-vs-moving CCD). */
+            float bone_r = (p->kind[i] == PROJ_FRAG_GRENADE) ? 18.0f : 8.0f;
             for (int bi = 0; bi < NUM_BONES; ++bi) {
                 int pa = m->particle_base + g_bones[bi].parent;
                 int pb = m->particle_base + g_bones[bi].child;
@@ -367,7 +369,27 @@ void projectile_step(World *w, float dt) {
                     va = (Vec2){ w->particles.pos_x[pa], w->particles.pos_y[pa] };
                     vb = (Vec2){ w->particles.pos_x[pb], w->particles.pos_y[pb] };
                 }
+                /* Test against the END-of-tick bone position. */
                 float th = swept_seg_vs_bone(a, b, va, vb, bone_r);
+
+                /* Also test against the START-of-tick bone position
+                 * (render_prev). When the mech is walking / animating
+                 * the bones can sweep ~10 px per tick. The static
+                 * end-of-tick test alone misses contacts where the
+                 * bone SWEPT THROUGH the projectile during the tick
+                 * — taking the closer-t hit between the two static
+                 * tests is a cheap proxy for moving-vs-moving CCD. */
+                if (!bx_lookup) {
+                    Vec2 va_p = (Vec2){ w->particles.render_prev_x[pa],
+                                        w->particles.render_prev_y[pa] };
+                    Vec2 vb_p = (Vec2){ w->particles.render_prev_x[pb],
+                                        w->particles.render_prev_y[pb] };
+                    float th_prev = swept_seg_vs_bone(a, b, va_p, vb_p, bone_r);
+                    if (th_prev >= 0.0f && (th < 0.0f || th_prev < th)) {
+                        th = th_prev;
+                    }
+                }
+
                 if (th < 0.0f) continue;
                 if (th < t_hit) {
                     t_hit = th;
