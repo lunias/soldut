@@ -2,8 +2,10 @@
 #
 # Verifies the Foundry map kit (parallax + tile assets) end-to-end:
 #   - parallax_far drawn behind world (orange clouds on dark sky)
-#   - parallax_mid + parallax_near alpha-keyed (foreground silhouettes
-#     only, no opaque canvas covering the world)
+#   - parallax_mid + parallax_near drawn as additional background layers
+#     (M6 P10 2026-05-16 — near layer moved pre-world; the shipped foundry
+#     parallax_near.png is a dense opaque factory silhouette, not edge
+#     art, so painting it post-world was hiding the playable geometry)
 #   - halftone post-process screen over the whole frame
 #   - Trooper chassis sprite + Pulse Rifle held in R_HAND
 #   - HUD: HP bar, jet bar, armor pip, crosshair, ammo text, weapon labels

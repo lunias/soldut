@@ -545,9 +545,9 @@ static void draw_parallax_far_mid(Camera2D cam, int sw, int sh) {
 }
 
 static void draw_parallax_near(Camera2D cam, int sw, int sh) {
-    /* Near: 0.95 — foreground silhouettes that sit visually in front of
-     * the action. Drawn AFTER the world but inside the post-target so
-     * the halftone screen catches it too. */
+    /* Near: 0.95 — background layer that scrolls almost 1:1 with the
+     * camera (the "near distance" backdrop, not foreground silhouettes).
+     * Drawn before the world so level geometry and mechs paint on top. */
     draw_parallax_layer(cam, g_map_kit.parallax_near, 0.95f, sw, sh);
 }
 
@@ -1452,11 +1452,16 @@ static void draw_pickups(const PickupPool *pool, double now_s) {
 static void draw_world_pass(Renderer *r, World *w, float alpha,
                             Vec2 local_visual_offset, int sw, int sh)
 {
-    /* P13 — Parallax FAR + MID first, in screen space, before any world
-     * draw. No BeginMode2D — the parallax draw computes its own scroll
+    /* P13 — Parallax FAR + MID + NEAR all draw in screen space before the
+     * world. No BeginMode2D — the parallax draw computes its own scroll
      * from r->camera.target and the parallax ratio. Each layer no-ops
-     * if its texture isn't loaded. */
+     * if its texture isn't loaded. M6 P10 (2026-05-16): NEAR moved from
+     * post-world to pre-world. The shipped foundry parallax_near.png is
+     * a dense opaque factory silhouette, not edge art — drawing it
+     * after the world obscured the playable level geometry. Treat all
+     * three layers as background; level tiles + polys win over parallax. */
     draw_parallax_far_mid(r->camera, sw, sh);
+    draw_parallax_near(r->camera, sw, sh);
 
     BeginMode2D(r->camera);
         /* P13 — Decoration layers 0 + 1 sit BEHIND the tile sprites
@@ -1519,10 +1524,6 @@ static void draw_world_pass(Renderer *r, World *w, float alpha,
          * inside the world camera transform. */
         draw_flags(w, alpha);
     EndMode2D();
-
-    /* P13 — Parallax NEAR last (foreground silhouettes), screen-space
-     * over the world. No-op when the texture isn't loaded. */
-    draw_parallax_near(r->camera, sw, sh);
 }
 
 void renderer_draw_frame(Renderer *r, World *w,
