@@ -490,31 +490,90 @@ void fx_update(World *w, float dt) {
             continue;
         }
 
-        /* M6 P09 — Atmosphere/weather particles. These integrate in
-         * screen-space (pos.x / pos.y are normalized 0..1) or world-
-         * space (ambient zones) but NEITHER consults world gravity or
-         * tile collision — the latter would catch a snow flake on every
-         * roof tile and die immediately. Each kind has its own integrate
-         * pattern. */
+        /* M6 P09 — Weather particles (WORLD-space, post-user-feedback).
+         *
+         * Per-kind gravity + AMBI_WIND zone push + tile-collide death.
+         * Flakes visibly hit the ground (where they die at the contact
+         * point) — paired with the global snow_accum pile growing via
+         * atmosphere_advance_accumulators, the user sees both "snow
+         * falling" and "snow accumulating" in lockstep.
+         *
+         * Spawn always happens above the local mech viewport (the
+         * atmosphere.c spawn helper) so particles only burn cycles in
+         * the player's visible region. */
         if (fp->kind == FX_WEATHER_SNOW || fp->kind == FX_WEATHER_RAIN ||
             fp->kind == FX_WEATHER_DUST || fp->kind == FX_WEATHER_EMBER)
         {
-            /* Screen-space: pos is in [0..1] normalized coords; vel is
-             * in pixels/sec relative to a notional 1080-line viewport.
-             * Convert per-tick by dt × (1.0f / 1080.0f). */
-            float yscale = 1.0f / 1080.0f;
-            fp->pos.x += fp->vel.x * dt * yscale;   /* x uses the same scale */
-            fp->pos.y += fp->vel.y * dt * yscale;
-            /* Wind sway for snow + drift for dust — modulate horizontal
-             * velocity per-tick so the path isn't a straight line. */
-            if (fp->kind == FX_WEATHER_SNOW) {
-                fp->vel.x = sinf((fp->pos.y * 18.0f) + (float)w->tick * 0.012f) * 25.0f;
-            } else if (fp->kind == FX_WEATHER_EMBER) {
-                fp->vel.x = sinf((fp->pos.y * 12.0f) + (float)w->tick * 0.015f) * 14.0f;
+            /* Per-kind gravity (px/s²). SNOW gentle, RAIN heavy, DUST
+             * buoyant, EMBER inverted. */
+            float grav_pxs2 = 0.0f;
+            switch (fp->kind) {
+                case FX_WEATHER_SNOW:  grav_pxs2 =  120.0f; break;
+                case FX_WEATHER_RAIN:  grav_pxs2 =  900.0f; break;
+                case FX_WEATHER_DUST:  grav_pxs2 =   -8.0f; break;
+                case FX_WEATHER_EMBER: grav_pxs2 = -180.0f; break;
+                default: break;
             }
-            /* Off-bottom (or off-top for embers) → kill. */
-            if (fp->pos.y > 1.1f || fp->pos.y < -0.15f ||
-                fp->pos.x < -0.1f || fp->pos.x > 1.1f) fp->alive = 0;
+            fp->vel.y += grav_pxs2 * dt;
+
+            /* Apply each AMBI_WIND zone the particle is currently in.
+             * Same wind direction the mech feels — visible streak when
+             * a strong wind blows across falling snow. The strength
+             * cap here (300 px/s²) is a fraction of the mech wind
+             * (1500 px/s²) so flakes don't get swept off-screen. */
+            const Level *L = &w->level;
+            for (int z = 0; z < L->ambi_count; ++z) {
+                const LvlAmbi *a = &L->ambis[z];
+                if (a->kind != AMBI_WIND) continue;
+                if (fp->pos.x < a->rect_x ||
+                    fp->pos.x > a->rect_x + a->rect_w ||
+                    fp->pos.y < a->rect_y ||
+                    fp->pos.y > a->rect_y + a->rect_h) continue;
+                float sx = (float)a->dir_x_q / 32767.0f;
+                float sy = (float)a->dir_y_q / 32767.0f;
+                float st = (float)a->strength_q / 32767.0f;
+                fp->vel.x += sx * st * 300.0f * dt;
+                fp->vel.y += sy * st * 300.0f * dt;
+            }
+            /* Sinusoidal sway breaks the linearity for snow + dust. */
+            if (fp->kind == FX_WEATHER_SNOW) {
+                fp->vel.x += sinf((fp->pos.y * 0.02f) +
+                                  (float)w->tick * 0.012f) * 6.0f * dt;
+            } else if (fp->kind == FX_WEATHER_DUST) {
+                fp->vel.x += sinf((fp->pos.y * 0.015f) +
+                                  (float)w->tick * 0.010f) * 4.0f * dt;
+            }
+
+            /* Integrate. */
+            fp->pos.x += fp->vel.x * dt;
+            fp->pos.y += fp->vel.y * dt;
+
+            /* Tile-collide: a SOLID, non-BACKGROUND tile kills the
+             * particle at the contact point. The persistent snow pile
+             * comes from atmosphere_advance_accumulators (a global
+             * 0..1 depth that grows over the round); these dying
+             * flakes provide the immediate "the snow landed here"
+             * visual. */
+            int ts = w->level.tile_size;
+            if (ts > 0) {
+                int tx = (int)(fp->pos.x / (float)ts);
+                int ty = (int)(fp->pos.y / (float)ts);
+                uint16_t f = level_flags_at(&w->level, tx, ty);
+                if ((f & TILE_F_SOLID) && !(f & TILE_F_BACKGROUND)) {
+                    fp->alive = 0;
+                    continue;
+                }
+            }
+            /* Off-world bounds: die so we don't leak particles. */
+            if (ts > 0) {
+                float wpx = (float)w->level.width  * (float)ts;
+                float wph = (float)w->level.height * (float)ts;
+                if (fp->pos.y > wph + 100.0f || fp->pos.y < -1200.0f ||
+                    fp->pos.x < -400.0f || fp->pos.x > wpx + 400.0f) {
+                    fp->alive = 0;
+                    continue;
+                }
+            }
             if (i > last_alive && fp->alive) last_alive = i;
             continue;
         }
@@ -620,8 +679,6 @@ void fx_draw(const FxPool *pool, float alpha) {
          * window resolution (sharp pixels outside the internal RT
          * upscale); ambient zones get their own pass below. */
         if (kind == FX_JET_EXHAUST || kind == FX_STUMP) continue;
-        if (kind == FX_WEATHER_SNOW || kind == FX_WEATHER_RAIN ||
-            kind == FX_WEATHER_DUST || kind == FX_WEATHER_EMBER) continue;
 
         float life_frac = fp->life /
                           (fp->life_max > 0.0f ? fp->life_max : 1.0f);
@@ -714,22 +771,56 @@ void fx_draw(const FxPool *pool, float alpha) {
              * the glyphs land at sharp window pixels. fx_draw runs
              * inside the internal-RT world pass; skip here. */
             case FX_DAMAGE_NUMBER:
-            /* M6 P09 — weather is drawn separately in atmosphere_draw_
-             * weather at window resolution (sharp pixels post-upscale). */
-            case FX_WEATHER_SNOW:
-            case FX_WEATHER_RAIN:
-            case FX_WEATHER_DUST:
+            /* M6 P09 — weather flakes (world-space, post-user-feedback).
+             * Each kind has a distinct render: snow = small white
+             * circles, rain = thin diagonal lines, dust = warm tan
+             * discs, ember = (additive — handled in pass 2 below). */
+            case FX_WEATHER_SNOW: {
+                unsigned char r = (unsigned char)((fp->color >> 24) & 0xFF);
+                unsigned char g = (unsigned char)((fp->color >> 16) & 0xFF);
+                unsigned char b = (unsigned char)((fp->color >>  8) & 0xFF);
+                unsigned char a = (unsigned char)((fp->color >>  0) & 0xFF);
+                fx_draw_particle(pos, fp->size, (Color){ r, g, b, a });
+                break;
+            }
+            case FX_WEATHER_RAIN: {
+                unsigned char r = (unsigned char)((fp->color >> 24) & 0xFF);
+                unsigned char g = (unsigned char)((fp->color >> 16) & 0xFF);
+                unsigned char b = (unsigned char)((fp->color >>  8) & 0xFF);
+                unsigned char a = (unsigned char)((fp->color >>  0) & 0xFF);
+                /* Streak along velocity direction. */
+                float vlen = sqrtf(fp->vel.x * fp->vel.x +
+                                   fp->vel.y * fp->vel.y);
+                if (vlen > 1e-3f) {
+                    Vector2 tail = {
+                        pos.x - (fp->vel.x / vlen) * fp->size,
+                        pos.y - (fp->vel.y / vlen) * fp->size,
+                    };
+                    DrawLineEx(pos, tail, 1.2f, (Color){ r, g, b, a });
+                }
+                break;
+            }
+            case FX_WEATHER_DUST: {
+                unsigned char r = (unsigned char)((fp->color >> 24) & 0xFF);
+                unsigned char g = (unsigned char)((fp->color >> 16) & 0xFF);
+                unsigned char b = (unsigned char)((fp->color >>  8) & 0xFF);
+                unsigned char a = (unsigned char)((fp->color >>  0) & 0xFF);
+                fx_draw_particle(pos, fp->size, (Color){ r, g, b, a });
+                break;
+            }
             case FX_WEATHER_EMBER:
+                /* Additive pass below handles embers — skip here. */
+                break;
             case FX_KIND_COUNT: break;
         }
     }
 
-    /* ---- Pass 2: additive (FX_JET_EXHAUST) ---- */
+    /* ---- Pass 2: additive (FX_JET_EXHAUST + FX_WEATHER_EMBER) ---- */
     BeginBlendMode(BLEND_ADDITIVE);
     for (int i = 0; i < pool->count; ++i) {
         const FxParticle *fp = &pool->items[i];
         if (!fp->alive) continue;
-        if (fp->kind != FX_JET_EXHAUST) continue;
+        if (fp->kind != FX_JET_EXHAUST && fp->kind != FX_WEATHER_EMBER) continue;
 
         float life_frac = fp->life /
                           (fp->life_max > 0.0f ? fp->life_max : 1.0f);
@@ -737,9 +828,17 @@ void fx_draw(const FxPool *pool, float alpha) {
             fp->render_prev_pos.x + (fp->pos.x - fp->render_prev_pos.x) * alpha,
             fp->render_prev_pos.y + (fp->pos.y - fp->render_prev_pos.y) * alpha,
         };
-        Color cc = fx_lerp_hot_cool(fp->color, fp->color_cool,
-                                    1.0f - life_frac);
-        fx_draw_particle(pos, fp->size, cc);
+        if (fp->kind == FX_JET_EXHAUST) {
+            Color cc = fx_lerp_hot_cool(fp->color, fp->color_cool,
+                                        1.0f - life_frac);
+            fx_draw_particle(pos, fp->size, cc);
+        } else {
+            unsigned char r = (unsigned char)((fp->color >> 24) & 0xFF);
+            unsigned char g = (unsigned char)((fp->color >> 16) & 0xFF);
+            unsigned char b = (unsigned char)((fp->color >>  8) & 0xFF);
+            unsigned char a = (unsigned char)(((fp->color >>  0) & 0xFF) * life_frac);
+            fx_draw_particle(pos, fp->size, (Color){ r, g, b, a });
+        }
     }
     EndBlendMode();
 }

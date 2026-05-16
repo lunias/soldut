@@ -80,6 +80,22 @@ uniform int   fog_zone_count     = 0;
 uniform float vignette_strength  = 0.0;
 uniform float atmos_time         = 0.0;
 
+/* M6 P09 (post-user-feedback) — weather scene tinting. Each is a
+ * 0..1 fraction matching g_atmosphere.snow_accum / .rain_wetness
+ * respectively, advanced by atmosphere_advance_accumulators on every
+ * peer (deterministic across multiplayer).
+ *
+ *   snow_intensity — cool tint + shadow lift + sparkle on bright
+ *                    pixels (the accumulated snow pile + the snow
+ *                    flake particles together read as a cohesive
+ *                    snowscape under this pass).
+ *   rain_intensity — slight darken + cool blue cast (wet surfaces
+ *                    appear darker + more reflective).
+ *
+ * Both behind <= 0.001 short-circuits so default maps cost nothing. */
+uniform float snow_intensity     = 0.0;
+uniform float rain_intensity     = 0.0;
+
 out vec4 finalColor;
 
 /* 8x8 Bayer matrix, normalized to [0, 1). Standard ordered-dither layout
@@ -194,6 +210,54 @@ void main() {
         vec3  dark  = color * 0.6;
         vec3  light = color;
         color = mix(dark, light, t);
+    }
+
+    /* M6 P09 — SNOW scene treatment. Three blended effects, all
+     * scaled by snow_intensity (= g_atmosphere.snow_accum):
+     *   1. Cool blue-white tint over the whole frame (snowy days
+     *      look slightly desaturated + blue-shifted).
+     *   2. Shadow lift — snow surfaces reflect a lot of light, so
+     *      the contrast between darks and lights compresses.
+     *   3. Sparkle on bright pixels — a sin/cos noise gated above
+     *      a luminance threshold drops glittering specs on the
+     *      snow pile, animated by atmos_time. Self-skips when no
+     *      bright pixels are on screen so a dark mid-scene doesn't
+     *      pay for sparkle. */
+    if (snow_intensity > 0.001) {
+        /* Tint: blend toward a cool slightly-cyan grey-white. */
+        vec3 snow_tint = vec3(0.92, 0.96, 1.04);
+        color = mix(color, color * snow_tint, snow_intensity * 0.6);
+        /* Shadow lift: add a small constant scaled by snow_intensity. */
+        color += vec3(0.04, 0.05, 0.06) * snow_intensity;
+        color = clamp(color, 0.0, 1.0);
+        /* Sparkle on bright pixels (the accumulated pile). */
+        float lum = dot(color, vec3(0.299, 0.587, 0.114));
+        if (lum > 0.65) {
+            vec2 ip2 = frag_px * 0.35;
+            float s = sin(ip2.x + atmos_time * 4.5) *
+                      cos(ip2.y - atmos_time * 3.7);
+            s = s * s * s;                /* sharpen peaks */
+            float spark_gate = (lum - 0.65) * 2.0;
+            if (s > 0.55) {
+                color += vec3(0.35, 0.38, 0.42) *
+                         snow_intensity * spark_gate;
+            }
+        }
+    }
+
+    /* M6 P09 — RAIN scene treatment. Wet surfaces look darker
+     * (water absorbs light, then specularly reflects bright
+     * highlights). At full rain we slightly darken + cool the
+     * frame; a per-fragment noise adds a faint scatter texture
+     * that reads as falling rain haze. */
+    if (rain_intensity > 0.001) {
+        vec3 rain_tint = vec3(0.85, 0.90, 1.00);
+        color = mix(color, color * rain_tint, rain_intensity * 0.5);
+        /* Faint scatter for the rain haze look. */
+        float n = sin(frag_px.x * 0.5 + atmos_time * 12.0) *
+                  cos(frag_px.y * 0.7 - atmos_time * 9.0);
+        color += vec3(n) * 0.015 * rain_intensity;
+        color = clamp(color, 0.0, 1.0);
     }
 
     /* M6 P09 — Vignette. Standard `pow(distance_from_center, 2) *

@@ -140,6 +140,30 @@ typedef struct Atmosphere {
     /* Ambient zone audio handles per zone, indexed by ambi list. -1
      * when no loop currently playing. Cleared on init_for_map. */
     int8_t   zone_audio_state[32];   /* 1 = currently playing, 0 = idle */
+    /* M6 P09 — Sim-affecting weather state. Both sides advance these
+     * each tick from atmosphere_tick → atmosphere_advance_accumulators
+     * (which runs on the headless dedicated server too — the visual
+     * gates that follow do NOT). Read by physics.c::contact_with_velocity
+     * to bias the per-contact friction based on weather conditions:
+     *
+     *   snow_accum   — [0..1] depth of snow on the ground. Grows when
+     *                  weather_kind == SNOW; melts back when not.
+     *                  Adds drag to non-ICE floor contacts, ONLY when
+     *                  grounded — jumping/jetting bypasses the drag,
+     *                  which is the intended Soldat-feel for snowy
+     *                  maps (you slog on the ground, jet to move).
+     *   rain_wetness — [0..1] surface wetness. Grows when weather_kind
+     *                  == RAIN; dries when not. Raises every surface's
+     *                  friction-retention toward 1.0 (slipperier
+     *                  coast, slightly faster slide after releasing
+     *                  input). ICE stays at max (already slippery).
+     *
+     * Both accumulators are deterministic functions of (weather_kind,
+     * weather_density, dt) — identical on every peer that loaded the
+     * same .lvl, so multiplayer friction agrees without wire bytes.
+     * Round-resets via atmosphere_init_for_map. */
+    float    snow_accum;
+    float    rain_wetness;
 } Atmosphere;
 
 extern Atmosphere g_atmosphere;
@@ -188,6 +212,13 @@ void atmosphere_draw_weather(const FxPool *fx, int window_w, int window_h);
  * tile path lives inside draw_level_tiles; the poly path is split out
  * so render.c can call it after each triangle fill. */
 void atmosphere_draw_poly_overlay(const LvlPoly *poly, double time);
+
+/* M6 P09 — Snow pile renderer. Paints a thin white strip on top of
+ * every SOLID tile whose neighbour-above is empty, scaled by the
+ * live g_atmosphere.snow_accum. Called from render.c::draw_level_tiles
+ * after the tile body is drawn so the pile sits ON TOP of the surface.
+ * Skipped when snow_accum < 0.05 (visually nothing to see). */
+void atmosphere_draw_snow_pile(const Level *L);
 
 /* RGB565 → Color helpers (exported because the editor's atmospherics
  * panel needs to round-trip them for the color-picker UI). */

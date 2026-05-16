@@ -1,5 +1,6 @@
 #include "physics.h"
 
+#include "atmosphere.h"   /* M6 P09 — g_atmosphere weather modifiers */
 #include "level.h"
 #include "log.h"
 
@@ -388,6 +389,33 @@ static inline void contact_with_velocity(ParticlePool *p, int i,
     float ny_abs = (ny < 0.0f) ? -ny : ny;
     float friction = 0.99f - 0.07f * ny_abs;     /* [0.92 .. 0.99] */
     if (friction > 0.998f) friction = 0.998f;
+
+    /* M6 P09 — Weather friction modifiers. RAIN raises every surface's
+     * friction-retention toward 1.0 (slipperier coast); SNOW lowers
+     * non-ICE floor friction (drag through accumulated powder). Both
+     * read g_atmosphere.* — advanced deterministically on every peer
+     * by atmosphere_advance_accumulators, so multiplayer agrees on the
+     * exact friction value at every tick without wire bytes.
+     *
+     * Snow drag ONLY applies when the contact normal points up
+     * (ny < -0.5 = a floor contact), so wall + ceiling contacts pass
+     * through. Combined with the "skip when not grounded" semantics
+     * (a particle airborne mid-jump has no contact, so this branch
+     * doesn't fire), snow encourages jet/jump to escape the drag —
+     * the Soldat-feel the user asked for. */
+    bool is_floor_contact = (ny < -0.5f);
+    bool is_ice           = (kind & TILE_F_ICE) != 0;
+    if (g_atmosphere.rain_wetness > 0.001f) {
+        float slip = g_atmosphere.rain_wetness * 0.05f;     /* up to +0.05 */
+        friction += slip;
+        if (friction > 1.0f) friction = 1.0f;
+    }
+    if (is_floor_contact && !is_ice && g_atmosphere.snow_accum > 0.001f) {
+        float drag = g_atmosphere.snow_accum * 0.15f;       /* up to -0.15 */
+        friction -= drag;
+        if (friction < 0.70f) friction = 0.70f;             /* hard floor */
+    }
+
     /* M6 P09 — bumped ICE 0.998 → 1.0 (zero tangential friction). The
      * 0.998 friction (~12 % loss / sec) was being swamped by the global
      * PHYSICS_VELOCITY_DAMP = 0.99 (~45 % loss / sec) so the mech felt
@@ -395,8 +423,11 @@ static inline void contact_with_velocity(ParticlePool *p, int i,
      * contact preserves every drop of tangential momentum and the only
      * decay is the per-integrate damp — paired with the ICE damp
      * override at physics_integrate (~0.9985 vs the default 0.99), the
-     * mech slides convincingly for ~2 s before stopping. */
-    if (kind & TILE_F_ICE) friction = 1.0f;
+     * mech slides convincingly for ~2 s before stopping.
+     *
+     * ICE override fires LAST so the rain/snow modifiers above can't
+     * accidentally dent the ice's perfect slippage. */
+    if (is_ice) friction = 1.0f;
 
     float vtx = (vx - vn * nx) * friction;
     float vty = (vy - vn * ny) * friction;

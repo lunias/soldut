@@ -1,6 +1,7 @@
 #include "atmosphere.h"
 
 #include "audio.h"
+#include "level.h"   /* level_flags_at */
 #include "log.h"
 #include "particle.h"
 
@@ -266,15 +267,25 @@ static int consume_spawn(float *carry, float n_frac) {
     return n;
 }
 
-/* Spawn a single weather particle of `kind`. Screen-space spawn — the
- * spawn coords are stored as pos.x = screen_x_0..1, pos.y = screen_y_0..1
- * relative coords so the renderer can scale them to the live window
- * size each frame without an init recompute on resize. */
-static void spawn_weather_particle(FxPool *pool, uint8_t kind, pcg32_t *rng) {
+/* Spawn a single weather particle of `kind`. M6 P09 (post-user-feedback)
+ * — WORLD-space spawn around the local mech's viewport so falling
+ * flakes visibly land on tiles + accumulate, get pushed by AMBI_WIND
+ * zones, and tile-die at the contact point. The screen-space scheme
+ * the original P09 shipped with had flakes pass right through tiles
+ * (no world coord, no collide) — visually nothing reached the ground.
+ *
+ * Spawn region: ±SPAWN_HALF_W horizontally and SPAWN_TOP_PX above
+ * the local mech's pelvis. With the camera following the pelvis,
+ * this is "the visible viewport plus generous overshoot so flakes
+ * appear naturally from above the screen." Falls under gravity
+ * (gentler than mech gravity for snow), tile-collides via
+ * particle.c::fx_update's new world-space branch. */
+#define SNOW_SPAWN_HALF_W   1400.0f
+#define SNOW_SPAWN_TOP_PX    300.0f
+#define SNOW_SPAWN_BOT_PX    500.0f
+static void spawn_weather_particle(FxPool *pool, World *w,
+                                   uint8_t kind, pcg32_t *rng) {
     int idx = -1;
-    /* Mirror fx_alloc's simple linear scan + extend. We use a custom
-     * spawn so the particle ignores the world gravity / decal pipeline
-     * the standard FX kinds care about. */
     for (int i = 0; i < pool->count; ++i) {
         if (!pool->items[i].alive) { idx = i; break; }
     }
@@ -288,46 +299,66 @@ static void spawn_weather_particle(FxPool *pool, uint8_t kind, pcg32_t *rng) {
     fp->kind  = kind;
     fp->pin_mech_id = -1;
 
-    /* Screen-space spawn: x ∈ [0, 1], y depends on weather kind. */
-    float u = pcg32_float01(rng);
+    /* Spawn anchor: local mech pelvis when known, else map center. */
+    float anchor_x, anchor_y;
+    int lid = w->local_mech_id;
+    if (lid >= 0 && lid < w->mech_count && w->mechs[lid].alive) {
+        int b = w->mechs[lid].particle_base;
+        anchor_x = w->particles.pos_x[b + PART_PELVIS];
+        anchor_y = w->particles.pos_y[b + PART_PELVIS];
+    } else {
+        anchor_x = (float)w->level.width  * (float)w->level.tile_size * 0.5f;
+        anchor_y = (float)w->level.height * (float)w->level.tile_size * 0.5f;
+    }
+
+    float u01 = pcg32_float01(rng);
+    float v01 = pcg32_float01(rng);
+    float spawn_x = anchor_x + (u01 - 0.5f) * SNOW_SPAWN_HALF_W * 2.0f;
+    float spawn_y = anchor_y - SNOW_SPAWN_TOP_PX
+                  - v01 * SNOW_SPAWN_BOT_PX;        /* spawn ABOVE pelvis */
 
     switch (kind) {
         case FX_WEATHER_SNOW: {
-            fp->pos = (Vec2){ u, -0.05f };
+            fp->pos = (Vec2){ spawn_x, spawn_y };
             float wind = (pcg32_float01(rng) - 0.5f) * 30.0f;
-            fp->vel = (Vec2){ wind, 30.0f + pcg32_float01(rng) * 20.0f };
-            fp->life     = 8.0f;
-            fp->life_max = 8.0f;
+            fp->vel = (Vec2){ wind, 60.0f + pcg32_float01(rng) * 30.0f };
+            fp->life     = 12.0f;          /* generous — fall the full screen */
+            fp->life_max = 12.0f;
             fp->size     = 1.5f + pcg32_float01(rng) * 1.5f;
-            fp->color    = 0xF0F8FFB0u;  /* white @ 70% */
+            fp->color    = 0xF0F8FFE0u;    /* white, high alpha */
             break;
         }
         case FX_WEATHER_RAIN: {
-            fp->pos = (Vec2){ u, -0.05f };
-            fp->vel = (Vec2){ 80.0f, 400.0f };
-            fp->life     = 3.0f;
-            fp->life_max = 3.0f;
-            fp->size     = 4.0f + pcg32_float01(rng) * 2.0f;  /* line length */
-            fp->color    = 0xC8DCFF99u;  /* pale blue */
+            fp->pos = (Vec2){ spawn_x, spawn_y };
+            fp->vel = (Vec2){ 80.0f + pcg32_float01(rng) * 40.0f,
+                              700.0f + pcg32_float01(rng) * 200.0f };
+            fp->life     = 6.0f;
+            fp->life_max = 6.0f;
+            fp->size     = 6.0f + pcg32_float01(rng) * 4.0f;  /* line length */
+            fp->color    = 0xC8DCFFC8u;
             break;
         }
         case FX_WEATHER_DUST: {
-            fp->pos = (Vec2){ u, pcg32_float01(rng) };
+            /* Dust drifts; spawn anywhere in the viewport region. */
+            fp->pos = (Vec2){ spawn_x, anchor_y - 200.0f
+                                       + (v01 - 0.5f) * 600.0f };
             float dir = pcg32_float01(rng) * 6.2832f;
-            fp->vel = (Vec2){ cosf(dir) * 5.0f, sinf(dir) * 5.0f - 2.0f };
-            fp->life     = 3.0f;
-            fp->life_max = 3.0f;
-            fp->size     = 1.0f + pcg32_float01(rng);
-            fp->color    = 0xC8B48066u;  /* warm tan @ 40% */
+            fp->vel = (Vec2){ cosf(dir) * 8.0f, sinf(dir) * 8.0f - 5.0f };
+            fp->life     = 5.0f;
+            fp->life_max = 5.0f;
+            fp->size     = 1.5f + pcg32_float01(rng) * 1.5f;
+            fp->color    = 0xC8B480AAu;
             break;
         }
         case FX_WEATHER_EMBER: {
-            fp->pos = (Vec2){ u, 1.05f };
-            fp->vel = (Vec2){ (pcg32_float01(rng) - 0.5f) * 10.0f, -15.0f };
-            fp->life     = 2.5f;
-            fp->life_max = 2.5f;
+            /* Embers rise from below the camera. */
+            fp->pos = (Vec2){ spawn_x, anchor_y + SNOW_SPAWN_TOP_PX };
+            fp->vel = (Vec2){ (pcg32_float01(rng) - 0.5f) * 30.0f,
+                              -40.0f - pcg32_float01(rng) * 30.0f };
+            fp->life     = 4.0f;
+            fp->life_max = 4.0f;
             fp->size     = 2.5f + pcg32_float01(rng) * 1.5f;
-            fp->color    = 0xFFAA40FFu;  /* glowing red-orange */
+            fp->color    = 0xFFAA40FFu;
             break;
         }
         default: fp->alive = 0; return;
@@ -405,8 +436,51 @@ static void spawn_ambient_particle(FxPool *pool, uint8_t kind,
     fp->render_prev_pos = fp->pos;
 }
 
+/* M6 P09 — Sim-affecting weather state. Runs on EVERY runtime
+ * (dedicated server, in-process server thread, client, single-process,
+ * cooker) before the IsWindowReady() gate that follows, so server-side
+ * physics uses the same friction weights the client expects. Pure
+ * function of (weather_kind, weather_density, dt) — both peers compute
+ * identical results from the replicated LvlMeta with no wire bytes. */
+#define SNOW_FULL_S       60.0f   /* secs at density=1.0 to reach full accumulation */
+#define SNOW_MELT_S       30.0f   /* secs to fully melt when not snowing */
+#define RAIN_FULL_S       20.0f   /* secs at density=1.0 to fully wet surfaces */
+#define RAIN_DRY_S        30.0f   /* secs to fully dry */
+
+static void atmosphere_advance_accumulators(float dt) {
+    /* Snow: only the SNOW kind grows the accumulator; any other
+     * weather (including NONE) drains it. Grow rate proportional to
+     * current weather_density so a "light flurries" map (density 0.2)
+     * takes 5x as long to fully pile up as a blizzard (density 1.0).
+     * Drain is unconditional (snow eventually melts even if weather
+     * stops). Both clamps protect against runaway floating point. */
+    bool is_snowing = (g_atmosphere.weather_kind == WEATHER_SNOW);
+    float snow_dt   = dt * g_atmosphere.weather_density / SNOW_FULL_S;
+    if (is_snowing) {
+        g_atmosphere.snow_accum += snow_dt;
+        if (g_atmosphere.snow_accum > 1.0f) g_atmosphere.snow_accum = 1.0f;
+    } else {
+        g_atmosphere.snow_accum -= dt / SNOW_MELT_S;
+        if (g_atmosphere.snow_accum < 0.0f) g_atmosphere.snow_accum = 0.0f;
+    }
+
+    /* Rain: same shape. RAIN weather grows wetness; absence drains. */
+    bool is_raining = (g_atmosphere.weather_kind == WEATHER_RAIN);
+    float rain_dt   = dt * g_atmosphere.weather_density / RAIN_FULL_S;
+    if (is_raining) {
+        g_atmosphere.rain_wetness += rain_dt;
+        if (g_atmosphere.rain_wetness > 1.0f) g_atmosphere.rain_wetness = 1.0f;
+    } else {
+        g_atmosphere.rain_wetness -= dt / RAIN_DRY_S;
+        if (g_atmosphere.rain_wetness < 0.0f) g_atmosphere.rain_wetness = 0.0f;
+    }
+}
+
 void atmosphere_tick(World *w, float dt) {
     if (!w) return;
+    /* SIM-AFFECTING — runs on the headless dedicated server too. */
+    atmosphere_advance_accumulators(dt);
+
     /* The dedicated server / cooker has no window — skip particle work
      * to avoid burning CPU on visuals nothing reads. The sim-side effect
      * of ambient zones (WIND nudge, ZERO_G mask, ACID damage) lives in
@@ -434,7 +508,7 @@ void atmosphere_tick(World *w, float dt) {
             if (carry_idx >= 0 && carry_idx < WEATHER_COUNT) {
                 int n = consume_spawn(&g_atmosphere.spawn_carry[carry_idx], per_tick * dt * 60.0f);
                 for (int i = 0; i < n; ++i) {
-                    spawn_weather_particle(&w->fx, kind, w->rng);
+                    spawn_weather_particle(&w->fx, w, kind, w->rng);
                 }
             }
         }
@@ -704,6 +778,48 @@ static void edge_midpoint(const LvlPoly *p, int e, float *cx, float *cy) {
     int a = e, b = (e + 1) % 3;
     *cx = (float)(p->v_x[a] + p->v_x[b]) * 0.5f;
     *cy = (float)(p->v_y[a] + p->v_y[b]) * 0.5f;
+}
+
+void atmosphere_draw_snow_pile(const Level *L) {
+    if (!L || !L->tiles) return;
+    float depth = g_atmosphere.snow_accum;
+    if (depth < 0.05f) return;          /* nothing visible yet */
+    int ts = L->tile_size;
+    if (ts <= 0) return;
+
+    /* Pile thickness scales with accumulator, capped so a fully-snowed
+     * map doesn't paint a full-tile snow layer. ~25 % of the tile at max
+     * — a clearly visible pile that still leaves the tile body readable. */
+    float thickness = (float)ts * 0.05f + (float)ts * 0.20f * depth;
+    /* Wetter snow (longer in scene) gets a slight blue tint; fresh snow
+     * is bright white. Both at high alpha so the pile reads cleanly. */
+    Color pile = {
+        (unsigned char)(245 - 10 * depth),
+        (unsigned char)(248 - 8  * depth),
+        255,
+        (unsigned char)(200 + 40 * depth),
+    };
+    /* Tiny shadow strip just below the pile gives it depth (no need
+     * for a full normal-mapped fluffy texture). */
+    Color shadow = { 180, 195, 215, 90 };
+
+    for (int y = 0; y < L->height; ++y) {
+        for (int x = 0; x < L->width; ++x) {
+            const LvlTile *t = &L->tiles[y * L->width + x];
+            if (!(t->flags & TILE_F_SOLID)) continue;
+            if (t->flags & TILE_F_BACKGROUND) continue;
+            /* Pile only on tiles with an empty cell above (the top
+             * face). Side / bottom faces get nothing — snow can't
+             * cling to a vertical wall. */
+            uint16_t above = level_flags_at(L, x, y - 1);
+            if ((above & TILE_F_SOLID) && !(above & TILE_F_BACKGROUND)) continue;
+            int wx = x * ts;
+            int wy = y * ts;
+            DrawRectangle(wx, wy, ts, (int)thickness, pile);
+            /* Soft shadow band underneath the pile to anchor it. */
+            DrawRectangle(wx, wy + (int)thickness, ts, 2, shadow);
+        }
+    }
 }
 
 void atmosphere_draw_poly_overlay(const LvlPoly *poly, double time) {

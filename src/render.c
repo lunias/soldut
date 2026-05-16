@@ -68,6 +68,10 @@ static int             g_halftone_loc_fog_zones     = -1;
 static int             g_halftone_loc_fog_zone_count= -1;
 static int             g_halftone_loc_vignette      = -1;
 static int             g_halftone_loc_atmos_time    = -1;
+/* M6 P09 (post-user-feedback) — snow + rain scene treatment uniforms.
+ * Same -1 graceful-skip pattern. */
+static int             g_halftone_loc_snow_intensity = -1;
+static int             g_halftone_loc_rain_intensity = -1;
 static bool            g_halftone_loaded         = false;
 static bool            g_halftone_load_attempted = false;
 
@@ -118,6 +122,8 @@ static void halftone_load_once(void) {
     g_halftone_loc_fog_zone_count = GetShaderLocation(s, "fog_zone_count");
     g_halftone_loc_vignette       = GetShaderLocation(s, "vignette_strength");
     g_halftone_loc_atmos_time     = GetShaderLocation(s, "atmos_time");
+    g_halftone_loc_snow_intensity = GetShaderLocation(s, "snow_intensity");
+    g_halftone_loc_rain_intensity = GetShaderLocation(s, "rain_intensity");
     g_halftone_loaded             = true;
     LOG_I("halftone: shader loaded; density=%.2f shimmer=%s atmos=%s",
           (double)HALFTONE_DENSITY,
@@ -1455,6 +1461,11 @@ static void draw_world_pass(Renderer *r, World *w, float alpha,
         draw_decorations(&w->level, 1);
         draw_level_tiles(&w->level);
         draw_polys(&w->level);
+        /* M6 P09 — Snow pile on top of solid tiles. Reads
+         * g_atmosphere.snow_accum (advanced deterministically on
+         * every peer by atmosphere_advance_accumulators). Self-skips
+         * when accum < 0.05 so it costs nothing on no-snow maps. */
+        atmosphere_draw_snow_pile(&w->level);
         /* M6 P09 — Ambient zone visuals (WIND streaks via FxPool;
          * ZERO_G + ACID tints painted here; FOG drawn as a soft volume
          * with the shader handling the per-fragment haze). Drawn before
@@ -1684,6 +1695,16 @@ void renderer_draw_frame(Renderer *r, World *w,
             SetShaderValue(g_halftone_post, g_halftone_loc_atmos_time,
                            &at, SHADER_UNIFORM_FLOAT);
         }
+        if (g_halftone_loc_snow_intensity >= 0) {
+            float si = g_atmosphere.snow_accum;
+            SetShaderValue(g_halftone_post, g_halftone_loc_snow_intensity,
+                           &si, SHADER_UNIFORM_FLOAT);
+        }
+        if (g_halftone_loc_rain_intensity >= 0) {
+            float ri = g_atmosphere.rain_wetness;
+            SetShaderValue(g_halftone_post, g_halftone_loc_rain_intensity,
+                           &ri, SHADER_UNIFORM_FLOAT);
+        }
         /* Fog zone array: peer of jet_hot_zones. Each zone is
          * (center_screen_x, center_screen_y, radius_px, density) in
          * the same internal-RT pixel space the shimmer pass uses. */
@@ -1759,18 +1780,16 @@ void renderer_draw_frame(Renderer *r, World *w,
          * is folded into PROF_DRAW_HUD's window for now — typical cost
          * is <50 µs per frame, well below adding a new ProfSection. */
         profile_zone_begin(PROF_DRAW_HUD);
-        /* M6 P09 — Weather particles. Drawn at window resolution
-         * BEFORE the HUD + damage numbers so:
-         *   1. weather sits in front of the world (over the halftoned
-         *      upscale) but behind text overlays — same layering
-         *      rationale as M6 P04's damage numbers
-         *   2. screen-space scaling stays sharp regardless of the
-         *      internal-RT cap (drawing into the RT would bilinear-
-         *      blur small rain/snow particles on upscale).
-         * The pool stores normalized (0..1) screen coords — atmosphere_
-         * draw_weather scales to the live window dimensions each frame
-         * so resize Just Works. */
-        atmosphere_draw_weather(&w->fx, window_w, window_h);
+        /* M6 P09 (post-user-feedback) — Weather particles now render
+         * in WORLD-space inside fx_draw (called from draw_world_pass).
+         * Originally they were screen-space here so they'd land at
+         * sharp window pixels, but that meant they never touched the
+         * world (flakes never reached the ground / never accumulated
+         * the visual pile). The user asked for flakes that "look like
+         * they are hitting the ground"; world-space + tile-collide is
+         * what makes that read. The pixel-fidelity loss from going
+         * through the internal-RT bilinear upscale is invisible at
+         * the small flake sizes we use. */
         fx_draw_damage_numbers(&w->fx, r->camera,
                                r->blit_scale, r->blit_dx, r->blit_dy);
 

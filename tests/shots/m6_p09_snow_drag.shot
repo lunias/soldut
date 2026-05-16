@@ -1,0 +1,45 @@
+# m6_p09_snow_drag.shot — M6 P09
+#
+# Validates the M6 P09 SNOW friction model:
+#   - snow_accum grows over the round (5 s at density 1.0 with the
+#     SNOW_FULL_S = 60 / density formula gives ~8 % accum; long
+#     burst at density 1.0 lets us see full accumulation)
+#   - friction lowers as snow piles → mech walking speed drops on
+#     the ground
+#   - jumping/jetting bypasses snow drag — encourages jet to move
+#   - VISIBLE snow pile on top of solid tiles scales with accum
+#
+# Scenario: Concourse map, weather override = SNOW @ 1.0 (fastest
+# accumulation). The mech walks RIGHT for the duration; we screenshot
+# at increasing intervals to see the pile grow + the mech slow.
+#
+# Run:
+#   ./soldut --shot tests/shots/m6_p09_snow_drag.shot
+
+window 1920 1080
+seed   42 42
+out    build/shots/m6_p09_snow_drag
+
+map concourse
+weather 1 1.0            # SNOW @ density 1.0 — full accum after ~60 s
+
+# Spawn on the concourse main floor.
+spawn_at 1600 1500
+mouse    1700 540
+
+# Walk right throughout so we can see how movement degrades.
+at  10 press right
+
+# Snapshots show pile growth + mech speed over a generous duration.
+# 60 s × 60 ticks = 3600 ticks for full accum, but we can compress
+# by reading the early-mid arc.
+at  60   shot 1_fresh         #  1 s — snow_accum ≈ 0.017, barely visible
+at 600   shot 2_light_pile    # 10 s — snow_accum ≈ 0.17, pile starts to show
+at 1800  shot 3_mid_pile      # 30 s — snow_accum ≈ 0.50, clear drag
+at 3000  shot 4_thick_pile    # 50 s — snow_accum ≈ 0.83, deep drag
+at 3600  shot 5_full_pile     # 60 s — snow_accum ≈ 1.00, max drag
+
+at 3700 release right
+at 3720 end
+
+contact_sheet snow_drag cols 3 cell 640 360

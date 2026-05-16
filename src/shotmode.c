@@ -238,6 +238,12 @@ typedef struct {
         float    strength, dir_x, dir_y;
     }       paint_ambis[SHOTMODE_MAX_PAINT_AMBIS];
     int     paint_ambi_count;
+    /* M6 P09 — atmosphere weather override. Applied AFTER world build
+     * by clobbering g_atmosphere fields. Useful for testing snow/rain
+     * accumulation without authoring a dedicated .lvl. */
+    bool    have_weather_override;
+    int     weather_kind_override;        /* WeatherKind */
+    float   weather_density_override;     /* [0..1] */
 } Script;
 
 static const struct { const char *name; uint16_t bit; } BUTTON_TABLE[] = {
@@ -363,6 +369,7 @@ static bool parse_script(const char *path, Script *out) {
     out->countdown_seconds = 0.0f; /* M6 countdown-fix — 0 = keep shot default (1s). */
     out->paint_count = 0;       /* M6 P09 — paint_tile / paint_rect cache */
     out->paint_ambi_count = 0;  /* M6 P09 — paint_ambi cache */
+    out->have_weather_override = false;
 
     char line[512];
     int lineno = 0;
@@ -869,6 +876,30 @@ static bool parse_script(const char *path, Script *out) {
             out->paints[p].tx0 = tx0; out->paints[p].ty0 = ty0;
             out->paints[p].tx1 = tx1; out->paints[p].ty1 = ty1;
             out->paints[p].flags = (uint16_t)flags;
+        } else if (strcmp(tok, "weather") == 0) {
+            /* M6 P09 — weather <kind_int> <density_float>. Overrides
+             * the loaded map's atmosphere weather AFTER world build
+             * (via direct g_atmosphere mutation in seed_world). 1=SNOW,
+             * 2=RAIN, 3=DUST, 4=EMBERS, 0=NONE. Used by tests that
+             * need a specific weather setup without authoring a
+             * dedicated .lvl. Density 0..1. */
+            int kind;
+            float density;
+            if (sscanf(rest, "%d %f", &kind, &density) != 2) {
+                LOG_E("shotmode: %s:%d 'weather' needs <kind> <density>", path, lineno);
+                ok = false; continue;
+            }
+            if (kind < 0 || kind > 4) {
+                LOG_W("shotmode: %s:%d 'weather kind %d' out of range; clamping",
+                      path, lineno, kind);
+                if (kind < 0) kind = 0;
+                if (kind > 4) kind = 4;
+            }
+            if (density < 0.0f) density = 0.0f;
+            if (density > 1.0f) density = 1.0f;
+            out->weather_kind_override     = kind;
+            out->weather_density_override  = density;
+            out->have_weather_override     = true;
         } else if (strcmp(tok, "paint_ambi") == 0) {
             /* paint_ambi <kind_int> <wx0> <wy0> <wx1> <wy1> [strength dirx diry] */
             int kind;
@@ -1829,6 +1860,20 @@ static void seed_world(Game *g, const Script *s) {
              * is sized appropriately for the painted zones. */
             atmosphere_init_for_map(L);
         }
+    }
+    /* M6 P09 — weather override (per shotmode `weather <kind> <density>`
+     * directive). Clobbers g_atmosphere AFTER init_for_map so the
+     * shot author can swap in SNOW/RAIN on any map without recooking.
+     * Applied to BOTH the live g_atmosphere AND L->meta so a host's
+     * snapshot stream replicates the override to remote clients. */
+    if (s && s->have_weather_override) {
+        g_atmosphere.weather_kind    = (uint8_t)s->weather_kind_override;
+        g_atmosphere.weather_density = s->weather_density_override;
+        w->level.meta.weather_kind      = (uint16_t)s->weather_kind_override;
+        w->level.meta.weather_density_q = (uint16_t)(s->weather_density_override * 65535.0f);
+        SHOT_LOG("weather override: kind=%d density=%.2f",
+                 s->weather_kind_override,
+                 (double)s->weather_density_override);
     }
 
     decal_init((int)level_width_px(&w->level), (int)level_height_px(&w->level));
