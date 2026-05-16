@@ -1940,6 +1940,13 @@ static void seed_world(Game *g, const Script *s) {
         }
     }
 
+    /* Populate the pickup pool from the level's PICK records so
+     * pickup-aware shots see the same runtime state as the lobby →
+     * match transition does in main.c. Without this `w->pickups.count`
+     * stays at 0 and `draw_pickups` walks an empty pool. */
+    pickup_init_round(w);
+    w->pickupfeed_count = 0;
+
     /* P07 — populate flags[] when in CTF mode. ctf_init_round bails
      * silently if the level lacks a Red+Blue flag pair. */
     ctf_init_round(w, g->match.mode);

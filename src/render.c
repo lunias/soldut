@@ -1421,14 +1421,37 @@ static void draw_flags(const World *w, float alpha) {
 }
 
 /* P05 — placeholder pickup sprite. Bobs at 0.5 Hz / ±4 px for
- * available pickups; cooldown entries draw nothing. The "real" sprite
- * art lands at P13 with the atlas pipeline. PRACTICE_DUMMY entries
- * aren't drawn either (the dummy is a real mech, not a pickup). */
+ * available pickups; cooldown entries draw nothing. PRACTICE_DUMMY
+ * entries aren't drawn either (the dummy is a real mech, not a pickup).
+ *
+ * PICKUP_WEAPON renders the actual atlas sprite (variant = WeaponId) so
+ * players can identify the weapon at a glance; other kinds keep the
+ * colored-circle placeholder until per-kind art lands. Atlas-missing or
+ * out-of-range variants fall back to the placeholder. */
 static void draw_pickups(const PickupPool *pool, double now_s) {
     for (int i = 0; i < pool->count; ++i) {
         const PickupSpawner *s = &pool->items[i];
         if (s->state != PICKUP_STATE_AVAILABLE) continue;
         if (s->kind == PICKUP_PRACTICE_DUMMY)   continue;
+        float bob = 4.0f * sinf((float)now_s * 3.14159f);
+        float cx = s->pos.x;
+        float cy = s->pos.y + bob;
+
+        if (s->kind == PICKUP_WEAPON && g_weapons_atlas.id != 0) {
+            const WeaponSpriteDef *wp = weapon_sprite_def((int)s->variant);
+            if (wp) {
+                /* Center the sprite on the pickup position, drawn flat
+                 * (no aim rotation — the weapon is lying on the ground,
+                 * not being held). Origin is sprite-center so bob lifts
+                 * the silhouette uniformly. */
+                Rectangle dst = { cx, cy, wp->draw_w, wp->draw_h };
+                Vector2   org = { wp->draw_w * 0.5f, wp->draw_h * 0.5f };
+                DrawTexturePro(g_weapons_atlas, wp->src, dst, org, 0.0f,
+                               (Color){255, 255, 255, 255});
+                continue;
+            }
+        }
+
         uint32_t rgba = pickup_kind_color(s->kind);
         Color c = (Color){
             (uint8_t)(rgba & 0xff),
@@ -1436,10 +1459,8 @@ static void draw_pickups(const PickupPool *pool, double now_s) {
             (uint8_t)((rgba >> 16) & 0xff),
             (uint8_t)((rgba >> 24) & 0xff),
         };
-        float bob = 4.0f * sinf((float)now_s * 3.14159f);
-        DrawCircle((int)s->pos.x, (int)(s->pos.y + bob), 12.0f, c);
-        DrawCircleLines((int)s->pos.x, (int)(s->pos.y + bob), 12.0f,
-                        (Color){20, 20, 20, 255});
+        DrawCircle((int)cx, (int)cy, 12.0f, c);
+        DrawCircleLines((int)cx, (int)cy, 12.0f, (Color){20, 20, 20, 255});
     }
 }
 

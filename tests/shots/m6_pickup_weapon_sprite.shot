@@ -1,0 +1,25 @@
+# M6 — Weapon pickups render the atlas sprite (variant = WeaponId)
+# instead of the kind-colored circle. Other kinds keep the circle.
+#
+# Reactor's pillar-base has PLASMA_SMG (weapon) at x=1600 and
+# HEALTH_SMALL (circle) at x=1280. Spawn between them; aim flat so
+# camera lookahead stays horizontal.
+
+window 1280 720
+seed 1 1
+out build/shots/m6_pickup_weapon_sprite
+map reactor
+
+# Standing flat between HEALTH and PLASMA_SMG.
+spawn_at 1440 1176
+aim 2000 1176
+
+# Three frames across the bob cycle so reviewers see the sprite at
+# multiple vertical offsets and confirm bob still drives the new path.
+at 30 shot bob_phase_a
+at 60 shot bob_phase_b
+at 90 shot bob_phase_c
+
+contact_sheet contact cols 3 cell 1280 720
+
+at 120 end

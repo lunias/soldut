@@ -1,0 +1,20 @@
+# M6 — Weapon pickups render as atlas sprites on BOTH host and remote
+# client. Pair with 2p_pickup_weapon_sprite.host.shot.
+#
+# The client receives pickup variant + state via the MAP_REQUEST flow
+# (level bytes) + per-pickup PICKUP_STATE updates. Identical PNGs at
+# the same tick on both sides confirms the wire path delivers the
+# WeaponId byte intact.
+
+window 1280 720
+out build/shots/net/client
+network connect 127.0.0.1:24081
+name ClientB
+
+at 60   shot lobby
+at 240  shot match_t240
+at 360  shot match_t360
+at 540  shot summary
+at 600  end
+
+contact_sheet sheet cols 2 cell 1280 720
