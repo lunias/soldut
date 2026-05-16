@@ -66,6 +66,8 @@ typedef struct {
     uint32_t color;            /* RGBA8 glyph color */
     uint32_t outline;          /* RGBA8 outline color (tier-rising alpha) */
     float    font_px;          /* point size for DrawTextPro */
+    float    outline_px;       /* outline ring radius @ 1× base (scales with fs) */
+    float    bold_px;          /* fake-bold body stamp offset @ 1× base */
     float    speed_min;        /* initial speed (px/s) lower bound */
     float    speed_max;        /* initial speed upper bound */
     float    upward_bias;      /* extra -Y velocity at spawn (px/s) */
@@ -79,13 +81,21 @@ typedef struct {
  * ~84 px on a 4K-windowed run with the 1080-cap internal RT. The
  * spec's 10..18 range read too small on contemporary monitors —
  * bumped first to 14..32, then to 20..44 after the user reported
- * "still a bit hard to read" on 4K. */
+ * "still a bit hard to read" on 4K.
+ *
+ * outline_px + bold_px scale with damage so heavy hits read as
+ * geometrically bolder, not just bigger. Stored in the same "1× base
+ * zoom" units as font_px so the render code multiplies by
+ * (fs / font_px) and the stroke stays proportional at any window
+ * scale. Outline alphas also climb harder than the original spec so
+ * the heavier ring punches through behind decals/blood. */
 static const DmgTierDef g_dmg_tier[DMG_TIER_COUNT] = {
-    /* LIGHT  */ { 0xFFF0B4FFu, 0x00000080u, 20.0f,  60.0f,  90.0f,  50.0f, 1.4f },
-    /* NORMAL */ { 0xFFDC50FFu, 0x000000A0u, 24.0f,  80.0f, 110.0f,  70.0f, 1.7f },
-    /* MEDIUM */ { 0xFF8C28FFu, 0x000000C0u, 30.0f, 100.0f, 140.0f,  90.0f, 1.9f },
-    /* HEAVY  */ { 0xFF5018FFu, 0x000000E0u, 36.0f, 120.0f, 170.0f, 110.0f, 2.1f },
-    /* CRIT   */ { 0xFF2828FFu, 0x000000FFu, 44.0f, 140.0f, 200.0f, 130.0f, 2.4f },
+    /*                  color       outline    font   out   bld  spd_min spd_max upbias  life */
+    /* LIGHT  */ { 0xFFF0B4FFu, 0x000000B0u, 20.0f, 1.4f, 0.5f,  60.0f,  90.0f,  50.0f, 1.4f },
+    /* NORMAL */ { 0xFFDC50FFu, 0x000000C8u, 24.0f, 1.8f, 0.7f,  80.0f, 110.0f,  70.0f, 1.7f },
+    /* MEDIUM */ { 0xFF8C28FFu, 0x000000DCu, 30.0f, 2.2f, 1.0f, 100.0f, 140.0f,  90.0f, 1.9f },
+    /* HEAVY  */ { 0xFF5018FFu, 0x000000F0u, 36.0f, 2.6f, 1.3f, 120.0f, 170.0f, 110.0f, 2.1f },
+    /* CRIT   */ { 0xFF2828FFu, 0x000000FFu, 44.0f, 3.0f, 1.6f, 140.0f, 200.0f, 130.0f, 2.4f },
 };
 
 static inline DamageTier dmg_tier_for(uint8_t dmg) {
@@ -942,17 +952,47 @@ void fx_draw_damage_numbers(const FxPool *pool,
 
         Vector2 origin = { 0, 0 };
 
-        /* 4-pass cardinal-offset outline at +/-1 px. Cheaper than a
-         * shader; visually equivalent at 10–18 px font sizes. */
-        for (int dx = -1; dx <= 1; ++dx) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                if (dx == 0 && dy == 0) continue;
-                if (dx != 0 && dy != 0) continue;
-                Vector2 off = { screen_xy.x + (float)dx,
-                                screen_xy.y + (float)dy };
+        /* Per-tier outline + fake-bold body. Both radii are stored in
+         * "1× base zoom" units and scaled here by (fs / font_px) so the
+         * stroke stays proportional at any window/internal-RT scale
+         * (4K-windowed renders fs ≈ 124 px for CRIT — a literal 1-px
+         * outline reads as a thin hairline at that scale).
+         *
+         * The outline is stamped as concentric 8-direction rings — one
+         * ring per ceil(r_out) integer px so the interior of the ring
+         * fills solidly even at radius 3 (CRIT). The fake-bold body
+         * is a single 8-direction stamp at the smaller `r_bld` radius,
+         * which thickens the glyph stroke without smearing it.
+         *
+         * Worst case (CRIT at 4K): 3 outline rings × 8 + 8 bold + 1
+         * main = 33 DrawTextPro calls per glyph. Damage numbers are
+         * rare enough that this is well inside the FX budget. */
+        float scale  = fs / def->font_px;
+        float r_out  = def->outline_px * scale;
+        float r_bld  = def->bold_px    * scale;
+        if (r_out < 1.0f) r_out = 1.0f;
+
+        int n_layers = (int)ceilf(r_out);
+        if (n_layers < 1) n_layers = 1;
+        for (int layer = 1; layer <= n_layers; ++layer) {
+            float lr = (float)layer * (r_out / (float)n_layers);
+            for (int k = 0; k < 8; ++k) {
+                float a = (float)k * (3.14159265358979323846f / 4.0f);
+                Vector2 off = { screen_xy.x + cosf(a) * lr,
+                                screen_xy.y + sinf(a) * lr };
                 DrawTextPro(font, buf, off, origin, deg, fs, 1.0f, outln);
             }
         }
+
+        if (r_bld > 0.4f) {
+            for (int k = 0; k < 8; ++k) {
+                float a = (float)k * (3.14159265358979323846f / 4.0f);
+                Vector2 off = { screen_xy.x + cosf(a) * r_bld,
+                                screen_xy.y + sinf(a) * r_bld };
+                DrawTextPro(font, buf, off, origin, deg, fs, 1.0f, glyph);
+            }
+        }
+
         DrawTextPro(font, buf, screen_xy, origin, deg, fs, 1.0f, glyph);
     }
 }
