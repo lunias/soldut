@@ -1,0 +1,54 @@
+# 2p_bot_frag_charge — HOST (stationary target). M6 P13.
+#
+# A Champion-tier bot, added by the client via `add_bot`, faces this
+# host across ~1800 px on Aurora's central flat floor. The bot's
+# loadout (Pulse Rifle + Frag Grenades) is the default for index 0
+# at tier ≥ Veteran, so the off-hand frag is the WFIRE_THROW path
+# under test. Pre-M6-P13 the bot fired BTN_FIRE_SECONDARY through
+# the existing 5-on/5-off duty cycle and threw at ~0.08 charge
+# (350 px/s lobs). Post-fix the motor holds the button for the
+# tier × distance target charge (Champion ≥ 0.9 at 1800 px), the
+# release-edge in mech_try_fire fires at ~2700 px/s, and the
+# grenade arcs across the gap.
+#
+# Host plays passive — fixed spawn, neutral aim, no fire. The bot
+# is mech_id 2; we use `peer_spawn 2` so the bot lands at a known
+# x and the test geometry is deterministic. The client (mech_id 1)
+# parks far enough away that the bot's nearest-enemy selection
+# locks onto host first.
+
+window 1600 900
+out build/shots/net/2p_bot_frag_charge_host
+network host 24320
+name HostA
+map aurora
+
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+
+# Aurora central floor sits at y=2712. Host at x=1700 (target);
+# client far away to bias bot's target selection toward host.
+# Slot assignment (cfg bot-fill runs at host bootstrap, before any
+# client connects): 0=host, 1=bot, 2=client.
+spawn_at 1700 2712
+peer_spawn 1 3500 2712
+peer_spawn 2 5500 2712
+
+# Neutral aim so the host doesn't fire forward; bot ignores us not
+# shooting back.
+aim 1800 2712
+
+# === captures (shared names with the client script for side-by-side
+#     compositing) ===
+at 120 shot t120_match_start
+at 200 shot t200_charge_1
+at 260 shot t260_throw_1
+at 320 shot t320_impact_1
+at 380 shot t380_charge_2
+at 440 shot t440_throw_2
+at 500 shot t500_charge_3
+at 560 shot t560_throw_3
+at 620 shot t620_aftermath
+
+contact_sheet bot_frag_charge_host cols 5
+
+at 720 end

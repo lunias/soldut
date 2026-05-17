@@ -1124,6 +1124,24 @@ static void networked_shot_bootstrap(Game *g, const Script *s) {
         if (s->have_loadout && slot >= 0) {
             lobby_set_loadout(&g->lobby, slot, s->loadout);
         }
+        /* M6 P13 — honor cfg `bots=N bot_tier=...` in shot tests
+         * (mirrors main.c::bootstrap_host's bot-fill block). Without
+         * this, the only way to add bots to a shotmode host is via
+         * the wire ADD_BOT from a client — which the server rejects
+         * for non-host slots (see `server: non-host slot N tried
+         * ADD_BOT` warning). With it, bot frag-charge / nav tests can
+         * declare `bots=1 bot_tier=champion` in a per-test cfg and the
+         * host bootstraps with the bot already in the lobby. */
+        if (g->config.bots > 0) {
+            bool team_balance = (g->match.mode == MATCH_MODE_TDM ||
+                                 g->match.mode == MATCH_MODE_CTF);
+            lobby_apply_bot_fill(&g->lobby, g->config.bots,
+                                 (uint8_t)g->config.bot_tier,
+                                 team_balance);
+            LOG_I("shotmode: bot fill — %d slot(s) at tier %s",
+                  lobby_bot_count(&g->lobby),
+                  bot_tier_name((BotTier)g->config.bot_tier));
+        }
         /* Pre-build the level so the lobby has something to draw the
          * world frame against. ROUND_START rebuilds for the chosen map.
          * wan-fixes-3 — honors the `map` directive (via map_rotation[0]
@@ -1456,6 +1474,28 @@ static void shot_host_flow(Game *g, float dt) {
                                         g->match.map_id, g->local_slot_id,
                                         g->match.mode);
                 g->lobby.dirty = true;
+
+                /* M6 P13 — bot driver wiring (mirrors main.c::start_round).
+                 * Pre-P13 shotmode never built the nav graph or attached
+                 * BotMinds, so any cfg-spawned or wire-added bot stood
+                 * motionless throughout the round. Without this, bot-AI
+                 * regression tests in shotmode have no observable bot
+                 * behavior. Server-only — clients render the bot's mech
+                 * through the snapshot stream like any other peer. */
+                if (g->net.role == NET_ROLE_SERVER) {
+                    bot_system_reset_minds(&g->bots);
+                    bot_system_build_nav(&g->bots, &g->world.level,
+                                          &g->level_arena);
+                    for (int i = 0; i < MAX_LOBBY_SLOTS; ++i) {
+                        LobbySlot *s = &g->lobby.slots[i];
+                        if (!s->in_use || !s->is_bot) continue;
+                        if (s->mech_id < 0)            continue;
+                        bot_attach(&g->bots, s->mech_id,
+                                    (BotTier)s->bot_tier,
+                                    (uint64_t)i * 0xBF58476D1CE4E5B9uLL);
+                    }
+                    bot_assign_team_roles(&g->bots, &g->world);
+                }
 
                 /* P05 — pickup pool. */
                 pickup_init_round(&g->world);
@@ -2516,6 +2556,10 @@ int shotmode_run(const char *script_path) {
                     if (game.match.phase == MATCH_PHASE_COUNTDOWN) {
                         match_lock_inputs(&game.world);
                     }
+                    /* M6 P13 — drive bot AI before simulate so the
+                     * latched_input for each bot mech is populated for
+                     * this tick. Mirrors main.c::poll_and_simulate. */
+                    bot_step(&game.bots, &game.world, &game, TICK_DT);
                     simulate_step(&game.world, TICK_DT);
                 }
                 break;
