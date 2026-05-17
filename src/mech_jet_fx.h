@@ -80,6 +80,15 @@ void mech_jet_fx_step(World *w, int mech_id, float dt);
  * mech body silhouettes against the plume. */
 void mech_jet_fx_draw_plumes(const World *w, float interp_alpha);
 
+/* Render every live FX_GROUND_DUST particle in the pool as a textured
+ * alpha-blended quad in a single texture binding (raylib auto-batches
+ * the DrawTexturePro calls into one VBO flush). Called from
+ * particle.c::fx_draw between pass 1 and pass 2 so dust sits behind
+ * additive exhaust sparks. Falls back to flat octagons inside this
+ * function when the dust atlas isn't loaded — particle.c's own pass 1
+ * skips FX_GROUND_DUST entirely so we never double-draw. */
+void mech_jet_fx_draw_ground_dust(const FxPool *pool, float interp_alpha);
+
 /* Returns true if any nozzle on any alive mech is currently active.
  * Used by the renderer to gate the heat-shimmer uniform push. */
 bool mech_jet_fx_any_active(const World *w);

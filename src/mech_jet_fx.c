@@ -224,8 +224,17 @@ const ChassisNozzleSet g_chassis_nozzles[CHASSIS_COUNT] = {
  * straight down and find the first SOLID tile. Returns the surface
  * flag bits via *out_flags so the caller can pick the right dust color
  * + ignition SFX variant. Slope polygons aren't covered today; tile
- * coverage handles the bulk of authored map area. */
-#define JET_IMPINGE_MAX_DIST   48.0f
+ * coverage handles the bulk of authored map area.
+ *
+ * The reach (80 px) is set so a Trooper's chest-back nozzle (10 px
+ * above pelvis, pelvis ~36 px above feet → nozzle ~46 px above floor
+ * when fully grounded) still finds the floor on the ignition-tick
+ * (one tick after liftoff, when the mech has risen another ~0.5 px
+ * and the nozzle is ~50 px up). The original 48 px reach was a
+ * fence-post short by ~3 px and silently swallowed every Trooper
+ * ignition impingement — no dust burst, no scorch decal, no ignition
+ * SFX. Cost: 20 raycasts per query vs 12 before — in the noise. */
+#define JET_IMPINGE_MAX_DIST   80.0f
 #define JET_IMPINGE_STEP_PX     4.0f
 
 static bool jet_fx_ground_query(World *w, Vec2 from,
@@ -287,6 +296,13 @@ static void emit_ground_dust(World *w, Vec2 hit, uint16_t surf_flags,
      * on TILE_F_ICE, warm grey-brown elsewhere. */
     uint32_t color = (surf_flags & TILE_F_ICE) ? 0xE0F0FFC0u   /* pale steam */
                                                : 0xA08060C0u; /* warm dust */
+    /* SHOT_LOG so the runner can assert dust ground-impingement
+     * actually fired. Surface kind picks the cue + the color: ICE
+     * vs CONCRETE prints distinguish the two paths. */
+    SHOT_LOG("t=%llu jet_dust hit=(%.0f,%.0f) n=%d surf=%s boost=%d",
+             (unsigned long long)w->tick, hit.x, hit.y, n,
+             (surf_flags & TILE_F_ICE) ? "ice" : "concrete",
+             is_boosting ? 1 : 0);
     for (int k = 0; k < n; ++k) {
         /* Fan outward horizontally with a small upward component.
          * Angles in (-PI/2 - 0.45*PI .. -PI/2 + 0.45*PI) = roughly
@@ -381,6 +397,11 @@ void mech_jet_fx_step(World *w, int mech_id, float dt) {
                           ? SFX_JET_IGNITION_ICE
                           : SFX_JET_IGNITION_CONCRETE;
                 audio_play_at(cue, noz);
+                SHOT_LOG("t=%llu mech=%d jet_ignition surf=%s sfx=%s",
+                         (unsigned long long)w->tick, mech_id,
+                         (surf_flags & TILE_F_ICE) ? "ice" : "concrete",
+                         (surf_flags & TILE_F_ICE) ? "jet_ignition_ice"
+                                                   : "jet_ignition_concrete");
             }
         }
 
@@ -398,6 +419,19 @@ void mech_jet_fx_step(World *w, int mech_id, float dt) {
             }
         }
     }
+
+    /* Consume the one-tick IGNITION edge so it never re-fires. The
+     * owner side rebuilds jet_state_bits from scratch each tick in
+     * mech_step_drive, so this clear is a no-op there — but on the
+     * client, snapshot_apply writes IGNITION_TICK once and the bit
+     * persists across the (typically 3) ticks between snapshot
+     * applies, which used to cause emit_ground_dust + audio_play_at
+     * to fire on every intermediate tick. The shimmer-collect reader
+     * runs in render right after simulate; it sees `boosting` for
+     * the Burst-ignition case (boost_timer > 0 implies BOOSTING bit
+     * stays on) which keeps the shimmer ring wide, so dropping
+     * IGNITION before the render pass doesn't visibly shrink it. */
+    m->jet_state_bits &= (uint8_t)~MECH_JET_IGNITION_TICK;
 }
 
 /* ---- Render helpers ---------------------------------------------- */
@@ -507,6 +541,91 @@ void mech_jet_fx_draw_plumes(const World *w, float interp_alpha) {
         }
     }
     EndBlendMode();
+}
+
+/* Lerp two RGBA8 values to a raylib Color (for FX_GROUND_DUST: hot →
+ * cool ramps the alpha to 0 over the particle's life). Same shape as
+ * particle.c::fx_lerp_hot_cool — duplicated here so the dust draw stays
+ * encapsulated in this module without needing to expose the helper. */
+static Color fx_dust_lerp(uint32_t hot, uint32_t cool, float t) {
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    float hr = (float)((hot  >> 24) & 0xFF);
+    float hg = (float)((hot  >> 16) & 0xFF);
+    float hb = (float)((hot  >>  8) & 0xFF);
+    float ha = (float)((hot       ) & 0xFF);
+    float cr = (float)((cool >> 24) & 0xFF);
+    float cg = (float)((cool >> 16) & 0xFF);
+    float cb = (float)((cool >>  8) & 0xFF);
+    float ca = (float)((cool      ) & 0xFF);
+    return (Color){
+        (unsigned char)(hr + (cr - hr) * t),
+        (unsigned char)(hg + (cg - hg) * t),
+        (unsigned char)(hb + (cb - hb) * t),
+        (unsigned char)(ha + (ca - ha) * t),
+    };
+}
+
+void mech_jet_fx_draw_ground_dust(const FxPool *pool, float interp_alpha) {
+    /* Restore the M6 P02-spec textured dust path that the P02-perf
+     * collapse to fx_draw_particle silently dropped. Single texture
+     * binding for the entire pool sweep — raylib's auto-batcher folds
+     * every DrawTexturePro into one default-VBO flush. Default blend
+     * is alpha (per spec §1.4: "dust, not heat"); we don't push a
+     * BeginBlendMode pair because that would force an extra GPU flush
+     * for no behavior change. */
+    if (!pool || pool->count == 0) return;
+    try_load_dust_atlas();
+
+    if (s_dust_atlas.id == 0) {
+        /* Atlas-missing fallback: keep the M6 P02-perf octagon shape
+         * so a corrupted install still shows *something* under the
+         * jet. fx_draw used to draw this in its pass 1; we hold that
+         * fallback here now that pass 1 skips FX_GROUND_DUST. */
+        for (int i = 0; i < pool->count; ++i) {
+            const FxParticle *fp = &pool->items[i];
+            if (!fp->alive || fp->kind != FX_GROUND_DUST) continue;
+            float life_frac = fp->life /
+                              (fp->life_max > 0.0f ? fp->life_max : 1.0f);
+            Vector2 pos = {
+                fp->render_prev_pos.x + (fp->pos.x - fp->render_prev_pos.x) * interp_alpha,
+                fp->render_prev_pos.y + (fp->pos.y - fp->render_prev_pos.y) * interp_alpha,
+            };
+            Color cc = fx_dust_lerp(fp->color, fp->color_cool, 1.0f - life_frac);
+            DrawCircleSector(pos, fp->size, 0.0f, 360.0f, 8, cc);
+        }
+        return;
+    }
+
+    /* Textured path. Source rect = full atlas (16×16 radial gradient
+     * with alpha falloff); dest sized 2× the particle radius so the
+     * gradient's soft edge does the cloud reading rather than the
+     * hard polygon edge. Pivot at the quad centre so rotation = 0
+     * keeps the sprite axis-aligned around the particle position. */
+    Rectangle src = { 0.0f, 0.0f,
+                      (float)s_dust_atlas.width,
+                      (float)s_dust_atlas.height };
+    for (int i = 0; i < pool->count; ++i) {
+        const FxParticle *fp = &pool->items[i];
+        if (!fp->alive || fp->kind != FX_GROUND_DUST) continue;
+        float life_frac = fp->life /
+                          (fp->life_max > 0.0f ? fp->life_max : 1.0f);
+        Vector2 pos = {
+            fp->render_prev_pos.x + (fp->pos.x - fp->render_prev_pos.x) * interp_alpha,
+            fp->render_prev_pos.y + (fp->pos.y - fp->render_prev_pos.y) * interp_alpha,
+        };
+        Color cc = fx_dust_lerp(fp->color, fp->color_cool, 1.0f - life_frac);
+        /* Textured quad reads as a soft gradient cloud — the M6 P02
+         * spec's "alpha-blended dust, not additive heat" shape. Size
+         * is 3× the particle radius so the gradient's transparent
+         * edge tapers visibly past the opaque core. (2.5× looked too
+         * pointy in shot tests; 3.5× washed out into the floor; 3×
+         * lands a recognisable puff at every spawn site.) */
+        float r = fp->size * 3.0f;
+        Rectangle dst = { pos.x, pos.y, r * 2.0f, r * 2.0f };
+        Vector2 origin = { r, r };
+        DrawTexturePro(s_dust_atlas, src, dst, origin, 0.0f, cc);
+    }
 }
 
 bool mech_jet_fx_any_active(const World *w) {
