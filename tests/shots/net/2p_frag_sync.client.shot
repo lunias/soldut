@@ -1,0 +1,47 @@
+# 2p_frag_sync — CLIENT (slot 1). M6 P12 paired-shot.
+#
+# Passive observer: stays still on the flat central floor of Aurora
+# while the host lobs three frag grenades over. The client's mech
+# IS the target of the throws — successful direct-hit damage would
+# count as the strongest sync signal (pre-fix the grenade often
+# rolled past the client without damage because client-side bone
+# bones were 5–10 px off from where the server's swept-segment test
+# saw them).
+
+window 1600 900
+out build/shots/net/dedi/2p_frag_sync.client
+network connect 127.0.0.1:{{PORT}}
+name ClientSync
+map aurora
+
+loadout - "Pulse Rifle" "Frag Grenades" Light Standard
+
+spawn_at 2300 2712
+
+# Aim toward the host (purely cosmetic — we don't fire).
+aim 1600 2680
+
+# Shared capture names with host.shot.
+at 150 shot t150_idle
+at 180 shot t180_post_swap
+
+at 205 shot t205_throw1_charging
+at 220 shot t220_throw1_launch
+at 280 shot t280_throw1_arc
+at 350 shot t350_throw1_boom
+
+at 385 shot t385_throw2_charging
+at 400 shot t400_throw2_launch
+at 460 shot t460_throw2_arc
+at 530 shot t530_throw2_boom
+
+at 565 shot t565_throw3_charging
+at 580 shot t580_throw3_launch
+at 640 shot t640_throw3_arc
+at 710 shot t710_throw3_boom
+
+at 780 shot t780_done
+
+contact_sheet client_sheet cols 4
+
+at 840 end

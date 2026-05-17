@@ -5,10 +5,86 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-16** (frag grenade: hold-to-charge throw +
-AOE buff). Camera smoothness fix and tiered explosion shake from
-earlier today still apply underneath. M6 P10 still applies underneath
-that.
+Last updated: **2026-05-16** (M6 P12 — projectile snapshot
+replication for bouncy AOE). Frag grenade hold-to-charge throw +
+AOE buff from earlier today still applies underneath. Camera
+smoothness fix and tiered explosion shake further underneath. M6 P10
+underneath that.
+
+## M6 P12 — Per-tick projectile snapshot replication
+
+Bouncy AOE projectiles (frag grenades today; any future
+`wpn->bouncy = true` weapon) now ride the snapshot stream instead of
+being independently re-simulated on the client off the
+`NET_MSG_FIRE_EVENT` spawn. Pre-fix the client and server sims
+diverged across the fuse window — bounce reflections are sensitive
+to float-precision and remote-mech bone positions on the client lag
+~150 ms behind the server's authoritative state, so collision
+outcomes differed and trajectories drifted apart over a few bounces.
+User-reported symptom: "I threw the grenade in their face and took no
+damage" / "the grenade visually rolled past, then exploded somewhere
+else."
+
+**Wire format** (`snapshot.h`, `snapshot.c`). The server's snapshot
+encoder appends a `u16 proj_count + N × 14 byte ProjectileSnapshot`
+array after the EntitySnapshot stream. Each entry carries the
+projectile's stable `net_id`, kind, owner mech, pos+vel (same 1/4 px /
+1/16 px/tick quant as mechs), a flags byte (`bouncy`, `exploded`),
+and a clamped fuse-ticks count. Only projectiles with
+`bouncy == true && alive == true` ride here — non-bouncy AOE
+(rockets / plasma orbs) and hitscan tracers stay on the existing
+FIRE_EVENT + NET_MSG_EXPLOSION path. Cap is 64 entries per snapshot.
+
+**Protocol id** bumped `S0LK → S0LL` (`version.h`). Old clients
+reject the new stream rather than misparse the trailing projectile
+array.
+
+**Server** (`projectile.c::projectile_spawn`). Each `bouncy` spawn
+gets a monotonic 16-bit `net_id` from `world.next_projectile_net_id`
+(0 reserved for "unassigned", wraps after 65535 with the dedupe
+window so collisions are vanishingly unlikely).
+
+**Client** (`snapshot.c::snapshot_apply` projectile branch +
+`snapshot_interp_projectiles`). Match incoming entries by stable
+`net_id` (not pool slot — pool layouts differ between sides). A
+fresh net_id allocates a visual-only local projectile; matched
+already-killed-locally net_ids are skipped (prevents a double-detonate
+when the server's dying-frame snapshot arrives after the local
+fuse-expire predict has already fired). Position interpolates between
+the per-projectile (snap_a, snap_b) pair at the client's render time
+(same `INTERP_DELAY_MS` clock as mechs).
+
+**Client `projectile_step`**. Snapshot-replicated bouncy projectiles
+skip drag / gravity / integrate / collide / bounce. Fuse decrement
+still runs as a fallback so a dropped `NET_MSG_EXPLOSION` doesn't
+leave the visual sitting forever — when the local fuse hits 0 the
+existing `EXPL_SRC_PREDICTED` dedupe path against the server's
+arrived event takes over.
+
+**Client `FIRE_EVENT` spawn**. The visual-only `projectile_spawn`
+call in `client_handle_fire_event` is gated on `!wpn->bouncy`. The
+snapshot is the sole spawn path for bouncy projectiles, so the local
+player sees the muzzle flash immediately but the rendered grenade
+appears ~INTERP_DELAY_MS later at the server's authoritative
+position. Acceptable trade for "grenade in the face → reliable
+damage."
+
+**Tests**. New paired test `tests/shots/net/run_frag_sync.sh` throws
+three grenades and asserts every paired `client_handle_explosion`
+position is within ≤ 4 px of the server's authoritative explosion
+position; on loopback the worst observed Δ is 0.05–0.10 px (wire
+quant). `run_frag_concourse.sh` (4 grenades each direction) no
+longer reports the post-fuse double-spawn it used to flake on. The
+existing `run_frag_grenade.sh -a` flavor goes from 5/9 flake to
+consistent 9/9; the `-b` flavor is the same pre-existing wire-event
+delivery flake the spec doc flags (test ends before the third event
+arrives) and is unrelated to gameplay correctness.
+
+**Bandwidth**. At 14 B/entry × 10 in-flight grenades × 60 Hz =
+~8.4 KB/s of new traffic. Each snapshot's total wire size grows by
+the projectile section; combined with mech entries the worst-case
+snapshot can exceed MTU and rely on ENet fragmentation. See
+TRADE_OFFS.md → "Snapshot bandwidth: no projectile delta encoding".
 
 ## Frag grenade — hold-to-charge throw + AOE buff
 

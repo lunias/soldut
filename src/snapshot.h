@@ -131,6 +131,70 @@ typedef struct {
 #define ENTITY_SNAPSHOT_WIRE_BYTES         31
 #define ENTITY_SNAPSHOT_GRAPPLE_BYTES       8
 
+/* ---- ProjectileSnapshot (M6 P12) ---------------------------------- *
+ *
+ * One entry per replicated projectile in the snapshot stream, appended
+ * after the EntitySnapshot array as `u16 proj_count + N × 14 bytes`.
+ *
+ * Today only bouncy projectiles ride here (PROJ_FRAG_GRENADE — see
+ * spec doc 12-projectile-snapshot-replication.md for why). Non-bouncy
+ * AOE projectiles (rockets, plasma orbs) follow deterministic
+ * gravity+drag trajectories with no surface reflections, so client/
+ * server divergence stays within a pixel or two and the existing
+ * FIRE_EVENT + NET_MSG_EXPLOSION dedup is sufficient. The wire format
+ * is generic on `kind` so adding more kinds later is a server-side
+ * filter change.
+ *
+ * Quantization mirrors EntitySnapshot — pos: 1/4 px, vel: 1/16 px/tick
+ * — so the dequant helpers in snapshot.c are reused.
+ *
+ * Wire layout (14 bytes, little-endian):
+ *   u16 net_id        — stable per-projectile id (0 reserved for
+ *                       "unassigned"; server's monotonic counter
+ *                       skips 0 on wrap).
+ *   u8  kind          — ProjectileKind enum.
+ *   u8  owner_mech    — mech_id (0..MAX_MECHS-1).
+ *   i16 pos_x_q       — 1/4 px.
+ *   i16 pos_y_q
+ *   i16 vel_x_q       — 1/16 px/tick.
+ *   i16 vel_y_q
+ *   u8  flags         — bit 0: bouncy, bit 1: exploded
+ *                       (forward-compat hook — server populates the
+ *                       bouncy bit so a future client that decides
+ *                       on bouncy at receive time can route without
+ *                       re-reading the weapon table).
+ *   u8  fuse_ticks    — remaining `life * 60` clamped to 255. Used
+ *                       by the client to fade the sprite as the fuse
+ *                       runs out (purely cosmetic — server still owns
+ *                       the kill).
+ */
+typedef struct {
+    uint16_t net_id;
+    uint8_t  kind;
+    uint8_t  owner_mech;
+    int16_t  pos_x_q;
+    int16_t  pos_y_q;
+    int16_t  vel_x_q;
+    int16_t  vel_y_q;
+    uint8_t  flags;
+    uint8_t  fuse_ticks;
+} ProjectileSnapshot;
+
+#define PROJECTILE_SNAPSHOT_WIRE_BYTES 14
+
+enum {
+    PROJ_SNAP_F_BOUNCY   = 1u << 0,
+    PROJ_SNAP_F_EXPLODED = 1u << 1,
+};
+
+/* Cap on projectiles per snapshot. Worst-case `64 × 14 = 896 bytes` of
+ * projectile payload plus the existing mech entries. At realistic
+ * combat density (4-8 mechs, ≤10 grenades airborne) we ship ~300 bytes
+ * total — comfortably under typical MTU. The cap is a safety bound for
+ * adversarial bot-spam scenarios; over it the server drops the oldest
+ * alive projectiles silently. */
+#define SNAPSHOT_PROJECTILE_CAP 64
+
 enum {
     /* Original 8-bit set (M2). */
     SNAP_STATE_ALIVE       = 1u << 0,
@@ -192,11 +256,14 @@ enum {
  * peer for delta encoding; the client keeps a ring of these for
  * interpolation. */
 typedef struct {
-    SnapshotHeader  header;
-    EntitySnapshot  ents[MAX_MECHS];
-    int             ent_count;
-    bool            valid;
-    double          recv_time;     /* client-side: real seconds when received */
+    SnapshotHeader     header;
+    EntitySnapshot     ents[MAX_MECHS];
+    int                ent_count;
+    /* M6 P12 — Replicated projectile array. Same lifetime as `ents`. */
+    ProjectileSnapshot projs[SNAPSHOT_PROJECTILE_CAP];
+    int                proj_count;
+    bool               valid;
+    double             recv_time;     /* client-side: real seconds when received */
 } SnapshotFrame;
 
 /* ---- Sample a SnapshotFrame from the live World (server-side) ----- */
@@ -268,6 +335,17 @@ void snapshot_apply_remote_ring_only(World *w, const SnapshotFrame *frame);
  * dt_ms to keep motion smooth between snapshot arrivals. Skips the
  * local mech and any mech whose ring is empty. */
 void snapshot_interp_remotes(World *w, uint32_t render_time_ms);
+
+/* M6 P12 — interpolate snapshot-replicated projectiles. Walks
+ * `world.projectiles` for alive slots with `net_id != 0` (= server-
+ * replicated) and writes pos_x/pos_y + vel_x/vel_y from the
+ * per-projectile (snap_a, snap_b) pair at render_time_ms. Slots with
+ * net_id == 0 (locally-spawned, non-replicated projectiles — non-
+ * bouncy AOE / pellets / hitscan tracers in the future) are skipped
+ * untouched. Should be called each client sim tick AFTER
+ * snapshot_interp_remotes and BEFORE the next simulate_step's
+ * projectile_step. */
+void snapshot_interp_projectiles(World *w, uint32_t render_time_ms);
 
 /* ---- Lag-comp lookup (server-side) ------------------------------- */
 

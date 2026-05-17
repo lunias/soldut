@@ -5,7 +5,7 @@
 #define SOLDUT_VERSION_MAJOR  0
 #define SOLDUT_VERSION_MINOR  0
 #define SOLDUT_VERSION_PATCH  9
-#define SOLDUT_VERSION_STRING "0.0.9-m6p03"
+#define SOLDUT_VERSION_STRING "0.0.9-m6p12"
 
 /* 'S0LD' — stamped on every connection handshake. Bump on netcode
  * changes. Lineage:
@@ -39,8 +39,19 @@
  *                                  leading-edge SFX_JET_BOOST cue
  *                                  on remote mechs. No wire-size
  *                                  change; older clients ignore the
- *                                  bit and miss the visual spike). */
-#define SOLDUT_PROTOCOL_ID    ((uint32_t)0x53304C4Bu)   /* 'S0LK' */
+ *                                  bit and miss the visual spike).
+ *   M6/P12 = 0x53304C4C ('S0LL')   (Snapshot stream gains a
+ *                                  ProjectileSnapshot array after the
+ *                                  EntitySnapshot array — u16 count +
+ *                                  14 bytes per entry — replicating
+ *                                  bouncy AOE projectiles each tick.
+ *                                  Stops the client's local bouncy-
+ *                                  grenade physics from diverging
+ *                                  from the server's authoritative
+ *                                  sim across the fuse window. See
+ *                                  documents/m6/12-projectile-
+ *                                  snapshot-replication.md). */
+#define SOLDUT_PROTOCOL_ID    ((uint32_t)0x53304C4Cu)   /* 'S0LL' */
 
 /* Default UDP port for the listen socket. 23073 is a Soldat homage
  * (the original used the same port). */

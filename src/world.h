@@ -561,6 +561,35 @@ typedef struct {
     uint8_t  alive [PROJECTILE_CAPACITY];
     uint8_t  bouncy[PROJECTILE_CAPACITY];     /* Frag grenade: bounces on tile hit */
     uint8_t  exploded[PROJECTILE_CAPACITY];   /* set when AOE has been spawned */
+    /* M6 P12 — Stable per-projectile id for snapshot replication. Server
+     * assigns a non-zero value at projectile_spawn from World.next_projectile_
+     * net_id (monotonic 16-bit; wrap is fine — collisions inside the
+     * dedupe window are vanishingly unlikely with <10 projectiles
+     * airborne). Client copies the assignment off the wire and uses it
+     * to match incoming server projectiles to the local pool slot.
+     * 0 = unassigned (local-only projectile: a hitscan tracer, a non-
+     * bouncy projectile spawned from FIRE_EVENT, or a server-side
+     * spawn that hasn't been broadcast yet). */
+    uint16_t net_id[PROJECTILE_CAPACITY];
+    /* M6 P12 — Per-projectile snapshot interp ring (client-side only).
+     * Snapshots arrive with the server's authoritative pos at server_
+     * time_ms = `snap_b_time_ms`. On the next snapshot the current b
+     * demotes to a; the new one becomes b. snapshot_interp_projectiles
+     * lerps between (a, b) at `render_time_ms` and writes the result
+     * into pos_x/pos_y + vel_x/vel_y. snap_state tracks how many of
+     * the slots are valid: 0 = none yet, 1 = b only (first snapshot),
+     * 2 = both valid (interp). Reset to 0 on slot reuse. */
+    uint32_t snap_a_time_ms[PROJECTILE_CAPACITY];
+    float    snap_a_x      [PROJECTILE_CAPACITY];
+    float    snap_a_y      [PROJECTILE_CAPACITY];
+    float    snap_a_vx     [PROJECTILE_CAPACITY];
+    float    snap_a_vy     [PROJECTILE_CAPACITY];
+    uint32_t snap_b_time_ms[PROJECTILE_CAPACITY];
+    float    snap_b_x      [PROJECTILE_CAPACITY];
+    float    snap_b_y      [PROJECTILE_CAPACITY];
+    float    snap_b_vx     [PROJECTILE_CAPACITY];
+    float    snap_b_vy     [PROJECTILE_CAPACITY];
+    uint8_t  snap_state    [PROJECTILE_CAPACITY];
     int      count;
 } ProjectilePool;
 
@@ -1201,6 +1230,21 @@ typedef struct World {
      * O(16) scan per detonate / per server-event is free. */
     ExplosionRecord explosion_record_ring[EXPLOSION_RECORD_RING];
     int             explosion_record_head;
+
+    /* M6 P12 — Monotonic counter for `ProjectilePool.net_id` assignment.
+     * Server-side only (`w->authoritative == true`); client never
+     * writes here. Pre-incremented before each spawn so 0 stays
+     * reserved for "unassigned." Wraps at 16 bits — even a 60-throws-
+     * per-second fire rate takes 18 minutes to wrap, and the snapshot
+     * dedupe window is 600 ticks (10 s), so a wrap-collision would
+     * require >600 throws in 10 s by a single peer. Not a realistic
+     * gameplay scenario.
+     *
+     * Kept on World (not NetState) so non-net (single-process / shot
+     * mode) runs of the sim still assign ids deterministically — the
+     * snapshot encode path can run even when nobody's listening
+     * (test-snapshot exercises that path). */
+    uint16_t        next_projectile_net_id;
 } World;
 
 /* Convenience accessors. */

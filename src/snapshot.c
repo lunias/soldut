@@ -5,6 +5,7 @@
 #include "mech.h"
 #include "particle.h"
 #include "physics.h"
+#include "projectile.h"
 #include "weapons.h"
 
 #include <math.h>
@@ -176,6 +177,44 @@ void snapshot_capture(const World *w, SnapshotFrame *out, uint16_t ack_input_seq
         e->gait_phase_q = quant_phase(m->gait_phase_l);
     }
     out->ent_count = n;
+
+    /* M6 P12 — capture replicated projectiles. Only bouncy projectiles
+     * ride the snapshot today (see ProjectileSnapshot doc in snapshot.h);
+     * everything else stays on the FIRE_EVENT / NET_MSG_EXPLOSION path.
+     * `net_id == 0` is the sentinel for "spawn happened on the client
+     * (via FIRE_EVENT visual) and the server has no authoritative twin"
+     * — those shouldn't appear here because this runs on the
+     * authoritative World whose projectile_spawn always assigns a
+     * non-zero net_id, but defensively skip them. */
+    int pn = 0;
+    const ProjectilePool *pp = &w->projectiles;
+    for (int i = 0; i < pp->count && pn < SNAPSHOT_PROJECTILE_CAP; ++i) {
+        if (!pp->alive[i])      continue;
+        if (!pp->bouncy[i])     continue;     /* non-bouncy on FIRE_EVENT path */
+        if (pp->net_id[i] == 0) continue;     /* unassigned — shouldn't happen server-side */
+        ProjectileSnapshot *ps = &out->projs[pn++];
+        ps->net_id     = pp->net_id[i];
+        ps->kind       = pp->kind[i];
+        ps->owner_mech = (uint8_t)((pp->owner_mech[i] >= 0
+                                    && pp->owner_mech[i] < MAX_MECHS)
+                                       ? pp->owner_mech[i] : 0);
+        ps->pos_x_q    = quant_pos(pp->pos_x[i]);
+        ps->pos_y_q    = quant_pos(pp->pos_y[i]);
+        /* Velocity quant scale matches mechs (1/16 px/tick). Server
+         * stores vel in px/sec; divide by 60 (Hz) for the wire. */
+        ps->vel_x_q    = quant_vel(pp->vel_x[i] * (1.0f / 60.0f));
+        ps->vel_y_q    = quant_vel(pp->vel_y[i] * (1.0f / 60.0f));
+        uint8_t flags = 0;
+        if (pp->bouncy[i])    flags |= PROJ_SNAP_F_BOUNCY;
+        if (pp->exploded[i])  flags |= PROJ_SNAP_F_EXPLODED;
+        ps->flags      = flags;
+        /* fuse_ticks: clamp life (seconds) × 60 to 255. */
+        float lt = pp->life[i] * 60.0f;
+        if (lt < 0.0f)   lt = 0.0f;
+        if (lt > 255.0f) lt = 255.0f;
+        ps->fuse_ticks = (uint8_t)(lt + 0.5f);
+    }
+    out->proj_count = pn;
     out->valid = true;
 }
 
@@ -272,6 +311,29 @@ int snapshot_encode(const SnapshotFrame *cur,
         }
     }
 
+    /* M6 P12 — ProjectileSnapshot array. u16 count + N × 14 bytes. */
+    int proj_count = cur->proj_count;
+    if (proj_count > SNAPSHOT_PROJECTILE_CAP) proj_count = SNAPSHOT_PROJECTILE_CAP;
+    if (p + 2 + proj_count * PROJECTILE_SNAPSHOT_WIRE_BYTES > end) {
+        LOG_E("snapshot_encode: buffer overflow at proj_count=%d", proj_count);
+        return 0;
+    }
+    *p++ = (uint8_t)proj_count;
+    *p++ = (uint8_t)(proj_count >> 8);
+    for (int i = 0; i < proj_count; ++i) {
+        const ProjectileSnapshot *ps = &cur->projs[i];
+        *p++ = (uint8_t)ps->net_id;
+        *p++ = (uint8_t)(ps->net_id >> 8);
+        *p++ = ps->kind;
+        *p++ = ps->owner_mech;
+        *p++ = (uint8_t)ps->pos_x_q; *p++ = (uint8_t)((uint16_t)ps->pos_x_q >> 8);
+        *p++ = (uint8_t)ps->pos_y_q; *p++ = (uint8_t)((uint16_t)ps->pos_y_q >> 8);
+        *p++ = (uint8_t)ps->vel_x_q; *p++ = (uint8_t)((uint16_t)ps->vel_x_q >> 8);
+        *p++ = (uint8_t)ps->vel_y_q; *p++ = (uint8_t)((uint16_t)ps->vel_y_q >> 8);
+        *p++ = ps->flags;
+        *p++ = ps->fuse_ticks;
+    }
+
     return (int)(p - buf);
 }
 
@@ -356,6 +418,39 @@ bool snapshot_decode(const uint8_t *buf, int len,
         }
     }
     out->ent_count = cnt;
+
+    /* M6 P12 — ProjectileSnapshot array. Treat absence as 0 — pre-S0LL
+     * (or a malformed body trimmed at the entity boundary) just yields
+     * proj_count = 0 and the client's per-projectile snap rings stay
+     * untouched. */
+    out->proj_count = 0;
+    if (end - p >= 2) {
+        uint16_t pcnt = (uint16_t)(p[0] | (p[1] << 8)); p += 2;
+        if (pcnt > SNAPSHOT_PROJECTILE_CAP) {
+            LOG_E("snapshot_decode: proj_count %u > cap %d",
+                  (unsigned)pcnt, SNAPSHOT_PROJECTILE_CAP);
+            return false;
+        }
+        if (end - p < (int)pcnt * PROJECTILE_SNAPSHOT_WIRE_BYTES) {
+            LOG_E("snapshot_decode: short projectile body (%d left, need %d)",
+                  (int)(end - p), (int)pcnt * PROJECTILE_SNAPSHOT_WIRE_BYTES);
+            return false;
+        }
+        for (int i = 0; i < (int)pcnt; ++i) {
+            ProjectileSnapshot *ps = &out->projs[i];
+            ps->net_id     = (uint16_t)(p[0] | (p[1] << 8));      p += 2;
+            ps->kind       = *p++;
+            ps->owner_mech = *p++;
+            ps->pos_x_q    = (int16_t)((uint16_t)(p[0] | (p[1] << 8))); p += 2;
+            ps->pos_y_q    = (int16_t)((uint16_t)(p[0] | (p[1] << 8))); p += 2;
+            ps->vel_x_q    = (int16_t)((uint16_t)(p[0] | (p[1] << 8))); p += 2;
+            ps->vel_y_q    = (int16_t)((uint16_t)(p[0] | (p[1] << 8))); p += 2;
+            ps->flags      = *p++;
+            ps->fuse_ticks = *p++;
+        }
+        out->proj_count = (int)pcnt;
+    }
+
     out->valid = true;
     return true;
 }
@@ -796,6 +891,184 @@ void snapshot_apply(World *w, const SnapshotFrame *frame) {
             w->mechs[i].alive = false;
         }
     }
+
+    /* M6 P12 — Apply replicated projectiles. Match by stable `net_id`
+     * (not pool slot — server's pool layout is independent of ours).
+     * Missing matches spawn a fresh local visual; orphaned local
+     * slots (ours but not in this frame) are left alone — the
+     * NET_MSG_EXPLOSION event drives their dying frame, same path as
+     * pre-M6-P12. The two-slot interp pair (snap_a, snap_b) gets a
+     * standard demote-on-update; duplicates (same server_time_ms)
+     * drop. The client's pool capacity (512) is ≫ the snapshot cap
+     * (64) so spawning never fails in steady state.
+     *
+     * Local-only projectiles (`net_id == 0` — non-bouncy AOE,
+     * pellets, hitscan tracers visualised via FIRE_EVENT) are left
+     * untouched. */
+    ProjectilePool *pp = &w->projectiles;
+    for (int i = 0; i < frame->proj_count; ++i) {
+        const ProjectileSnapshot *ps = &frame->projs[i];
+        if (ps->net_id == 0) continue;
+
+        /* Match by stable id. Track both alive matches (steady state)
+         * and dead-but-id-matched slots: when our local projectile
+         * has already detonated (fuse-expire predict) but the server
+         * is still sending the grenade in its dying-frame snapshot
+         * tick, the wire entry would otherwise allocate a NEW local
+         * slot that would also fuse-expire-detonate, double-firing
+         * the explosion FX. The dead-slot branch below silences that
+         * by ignoring the re-arriving entry — the matching
+         * NET_MSG_EXPLOSION drives any remaining visual via the
+         * existing record/dedupe path.
+         *
+         * Scan the full pool capacity (not just `pp->count`):
+         * projectile_step trims `count` back to last_alive+1 each
+         * tick, which can hide a dead net_id'd slot from a `count`-
+         * bounded loop. Without this widening the next snapshot for
+         * that net_id would skip the dead-slot match, allocate a
+         * fresh slot via proj_alloc — which would happily REUSE the
+         * trimmed-out slot 2 — and detonate again on fuse-expire,
+         * yielding the same double-spawn bug. The scan cost is
+         * 512 array reads per projectile per snapshot — trivial.
+         * (See documents/m6/12-projectile-snapshot-replication.md
+         * for context.) */
+        int slot = -1;
+        int slot_dead = -1;
+        for (int k = 0; k < PROJECTILE_CAPACITY; ++k) {
+            if (pp->net_id[k] != ps->net_id) continue;
+            if (pp->alive[k]) { slot = k; break; }
+            slot_dead = k;
+        }
+        if (slot < 0 && slot_dead >= 0) {
+            /* Already-killed local twin — drop. */
+            continue;
+        }
+
+        float new_x  = dequant_pos(ps->pos_x_q);
+        float new_y  = dequant_pos(ps->pos_y_q);
+        /* Wire vel is 1/16 px/TICK; rehydrate to px/sec for the
+         * projectile pool's units (which matches weapon spawn). */
+        float new_vx = dequant_vel(ps->vel_x_q) * 60.0f;
+        float new_vy = dequant_vel(ps->vel_y_q) * 60.0f;
+        uint32_t snap_time = frame->header.server_time_ms;
+
+        if (slot < 0) {
+            /* First time we've seen this id — spawn a local visual.
+             * We look up a weapon whose `projectile_kind` matches so
+             * the dying-frame FX (driven by client_handle_explosion's
+             * weapon_def lookup) and the projectile's render path
+             * agree. For PROJ_FRAG_GRENADE that resolves to
+             * WEAPON_FRAG_GRENADE. */
+            int wid = 0;
+            const Weapon *wpn = NULL;
+            for (int wi = 0; wi < WEAPON_COUNT; ++wi) {
+                const Weapon *cand = weapon_def(wi);
+                if (cand && cand->projectile_kind == ps->kind) {
+                    wid = wi;
+                    wpn = cand;
+                    break;
+                }
+            }
+            float aoe_r   = wpn ? wpn->aoe_radius  : 0.0f;
+            float aoe_d   = wpn ? wpn->aoe_damage  : 0.0f;
+            float aoe_imp = wpn ? wpn->aoe_impulse : 0.0f;
+            float grav    = wpn ? wpn->projectile_grav_scale : 0.0f;
+            float drg     = wpn ? wpn->projectile_drag       : 0.0f;
+            float life    = (float)ps->fuse_ticks / 60.0f;
+
+            int owner_mech = (int)ps->owner_mech;
+            int owner_team = (owner_mech >= 0 && owner_mech < w->mech_count)
+                                 ? (int)w->mechs[owner_mech].team : 0;
+
+            ProjectileSpawn spawn = {
+                .kind           = ps->kind,
+                .weapon_id      = wid,
+                .owner_mech_id  = owner_mech,
+                .owner_team     = owner_team,
+                .origin         = (Vec2){ new_x, new_y },
+                .velocity       = (Vec2){ new_vx, new_vy },
+                .damage         = wpn ? wpn->damage : 0.0f,
+                .aoe_radius     = aoe_r,
+                .aoe_damage     = aoe_d,
+                .aoe_impulse    = aoe_imp,
+                .life           = life,
+                .gravity_scale  = grav,
+                .drag           = drg,
+                .bouncy         = (ps->flags & PROJ_SNAP_F_BOUNCY) != 0,
+            };
+            slot = projectile_spawn(w, spawn);
+            if (slot < 0) continue;
+            pp->net_id[slot] = ps->net_id;
+            /* Initialise the interp pair with the b slot only — the
+             * next snapshot will populate a. snapshot_interp_projectiles
+             * clamps to b for state == 1 so the first rendered frame
+             * sits exactly at the snapshot pos. */
+            pp->snap_a_time_ms[slot] = 0;
+            pp->snap_a_x      [slot] = 0.0f; pp->snap_a_y [slot] = 0.0f;
+            pp->snap_a_vx     [slot] = 0.0f; pp->snap_a_vy[slot] = 0.0f;
+            pp->snap_b_time_ms[slot] = snap_time;
+            pp->snap_b_x      [slot] = new_x; pp->snap_b_y [slot] = new_y;
+            pp->snap_b_vx     [slot] = new_vx; pp->snap_b_vy[slot] = new_vy;
+            pp->snap_state    [slot] = 1;
+            /* Also seed pos + render_prev so the renderer has the
+             * right pos on the very first frame before the interp pass
+             * runs. */
+            pp->pos_x[slot]          = new_x;
+            pp->pos_y[slot]          = new_y;
+            pp->vel_x[slot]          = new_vx;
+            pp->vel_y[slot]          = new_vy;
+            pp->render_prev_x[slot]  = new_x;
+            pp->render_prev_y[slot]  = new_y;
+        } else {
+            /* Existing local slot — push to the (a, b) interp pair.
+             * Dup-drop on same server_time (rare, but a peer that
+             * received the same snapshot twice via reorder would
+             * otherwise overwrite the more recent b with the older
+             * dup). */
+            if (pp->snap_state[slot] >= 1 &&
+                pp->snap_b_time_ms[slot] == snap_time) {
+                /* duplicate, ignore */
+            } else if (pp->snap_state[slot] == 0) {
+                pp->snap_b_time_ms[slot] = snap_time;
+                pp->snap_b_x      [slot] = new_x; pp->snap_b_y [slot] = new_y;
+                pp->snap_b_vx     [slot] = new_vx; pp->snap_b_vy[slot] = new_vy;
+                pp->snap_state    [slot] = 1;
+            } else if (snap_time < pp->snap_b_time_ms[slot]) {
+                /* Out-of-order arrival older than current b — only
+                 * useful if it lands between a and b. Treat as a if
+                 * newer than current a; else drop. Keeps interp pair
+                 * span tight without elaborate ring logic. */
+                if (pp->snap_state[slot] == 1 ||
+                    snap_time > pp->snap_a_time_ms[slot])
+                {
+                    pp->snap_a_time_ms[slot] = snap_time;
+                    pp->snap_a_x      [slot] = new_x; pp->snap_a_y [slot] = new_y;
+                    pp->snap_a_vx     [slot] = new_vx; pp->snap_a_vy[slot] = new_vy;
+                    pp->snap_state    [slot] = 2;
+                }
+            } else {
+                /* Monotonic case: demote b → a, write new to b. */
+                pp->snap_a_time_ms[slot] = pp->snap_b_time_ms[slot];
+                pp->snap_a_x      [slot] = pp->snap_b_x      [slot];
+                pp->snap_a_y      [slot] = pp->snap_b_y      [slot];
+                pp->snap_a_vx     [slot] = pp->snap_b_vx     [slot];
+                pp->snap_a_vy     [slot] = pp->snap_b_vy     [slot];
+                pp->snap_b_time_ms[slot] = snap_time;
+                pp->snap_b_x      [slot] = new_x;  pp->snap_b_y [slot] = new_y;
+                pp->snap_b_vx     [slot] = new_vx; pp->snap_b_vy[slot] = new_vy;
+                pp->snap_state    [slot] = 2;
+            }
+        }
+
+        /* Refresh fuse so the fuse-expire fallback (in projectile_step
+         * if NET_MSG_EXPLOSION is dropped on the wire) detonates near
+         * when the server would have. The dying-frame trigger still
+         * comes from the explosion msg in steady state. */
+        pp->life[slot] = (float)ps->fuse_ticks / 60.0f;
+        /* Server-set exploded bit drives the dying frame even if the
+         * (reliable) NET_MSG_EXPLOSION is still in flight. */
+        if (ps->flags & PROJ_SNAP_F_EXPLODED) pp->exploded[slot] = 1;
+    }
 }
 
 void snapshot_apply_remote_ring_only(World *w, const SnapshotFrame *frame) {
@@ -977,6 +1250,83 @@ void snapshot_interp_remotes(World *w, uint32_t render_time_ms) {
             physics_set_velocity_x(pp, idx, target_vx);
             physics_set_velocity_y(pp, idx, target_vy);
         }
+    }
+}
+
+/* M6 P12 — Interpolate snapshot-replicated projectiles. For each
+ * alive pool slot with `net_id != 0`, lerp pos/vel between the per-
+ * projectile (snap_a, snap_b) pair at render_time_ms. State semantics:
+ *   0 → no snapshots yet → leave pos untouched.
+ *   1 → only b is valid (first snapshot just landed) → clamp pos to b.
+ *   2 → both a and b valid → linear interp between them. When
+ *        render_time outpaces b (jitter / drop) extrapolate forward
+ *        with b's velocity for up to EXTRAP_CAP_MS so the projectile
+ *        keeps flying instead of freezing mid-air (mirrors the
+ *        wan-fixes-20 mech-interp behaviour). */
+void snapshot_interp_projectiles(World *w, uint32_t render_time_ms) {
+    ProjectilePool *pp = &w->projectiles;
+    /* Same cap as mech interp — projectiles share the WAN-jitter
+     * domain so the same forward-dead-reckon budget applies. */
+    const float EXTRAP_CAP_MS = 100.0f;
+    for (int i = 0; i < pp->count; ++i) {
+        if (!pp->alive[i])      continue;
+        if (pp->net_id[i] == 0) continue;
+        uint8_t st = pp->snap_state[i];
+        if (st == 0) continue;
+
+        float target_x, target_y, target_vx, target_vy;
+        if (st == 1 || render_time_ms <= pp->snap_a_time_ms[i]) {
+            /* Pre-history clamp to a (or to b when state==1). */
+            uint32_t bt = pp->snap_b_time_ms[i];
+            if (st == 1 || render_time_ms >= bt) {
+                target_x  = pp->snap_b_x [i];
+                target_y  = pp->snap_b_y [i];
+                target_vx = pp->snap_b_vx[i];
+                target_vy = pp->snap_b_vy[i];
+                /* Extrapolate forward past b (capped) so a brief
+                 * snapshot gap doesn't freeze the grenade mid-arc. */
+                if (st == 2 && render_time_ms > bt) {
+                    float dt_ms = (float)(render_time_ms - bt);
+                    if (dt_ms > EXTRAP_CAP_MS) dt_ms = EXTRAP_CAP_MS;
+                    float dt_s = dt_ms * 0.001f;
+                    target_x += target_vx * dt_s;
+                    target_y += target_vy * dt_s;
+                }
+            } else {
+                target_x  = pp->snap_a_x [i];
+                target_y  = pp->snap_a_y [i];
+                target_vx = pp->snap_a_vx[i];
+                target_vy = pp->snap_a_vy[i];
+            }
+        } else {
+            uint32_t at = pp->snap_a_time_ms[i];
+            uint32_t bt = pp->snap_b_time_ms[i];
+            if (render_time_ms >= bt) {
+                target_x  = pp->snap_b_x [i];
+                target_y  = pp->snap_b_y [i];
+                target_vx = pp->snap_b_vx[i];
+                target_vy = pp->snap_b_vy[i];
+                float dt_ms = (float)(render_time_ms - bt);
+                if (dt_ms > EXTRAP_CAP_MS) dt_ms = EXTRAP_CAP_MS;
+                float dt_s = dt_ms * 0.001f;
+                target_x += target_vx * dt_s;
+                target_y += target_vy * dt_s;
+            } else {
+                uint32_t span = (bt > at) ? (bt - at) : 1u;
+                float t = (float)((double)(render_time_ms - at) / (double)span);
+                if (t < 0.0f) t = 0.0f;
+                if (t > 1.0f) t = 1.0f;
+                target_x  = pp->snap_a_x [i] + (pp->snap_b_x [i] - pp->snap_a_x [i]) * t;
+                target_y  = pp->snap_a_y [i] + (pp->snap_b_y [i] - pp->snap_a_y [i]) * t;
+                target_vx = pp->snap_a_vx[i] + (pp->snap_b_vx[i] - pp->snap_a_vx[i]) * t;
+                target_vy = pp->snap_a_vy[i] + (pp->snap_b_vy[i] - pp->snap_a_vy[i]) * t;
+            }
+        }
+
+        pp->pos_x[i] = target_x;
+        pp->pos_y[i] = target_y;
+        pp->vel_x[i] = target_vx;
+        pp->vel_y[i] = target_vy;
     }
 }
 
