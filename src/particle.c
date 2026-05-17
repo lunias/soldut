@@ -6,6 +6,7 @@
 #include "hash.h"
 #include "level.h"
 #include "log.h"
+#include "mech_jet_fx.h"
 #include "platform.h"
 
 #include <math.h>
@@ -687,8 +688,14 @@ void fx_draw(const FxPool *pool, float alpha) {
         /* Skip kinds handled in later passes. STUMP is invisible.
          * M6 P09 — Weather is drawn in atmosphere_draw_weather at
          * window resolution (sharp pixels outside the internal RT
-         * upscale); ambient zones get their own pass below. */
-        if (kind == FX_JET_EXHAUST || kind == FX_STUMP) continue;
+         * upscale); ambient zones get their own pass below.
+         *
+         * M6 jet-fx-polish — FX_GROUND_DUST moved to a textured
+         * single-binding pass (mech_jet_fx_draw_ground_dust below)
+         * so the M6 P02 spec's "soft alpha cloud" character lands
+         * instead of the perf-fix's flat octagon stand-in. */
+        if (kind == FX_JET_EXHAUST || kind == FX_STUMP ||
+            kind == FX_GROUND_DUST) continue;
 
         float life_frac = fp->life /
                           (fp->life_max > 0.0f ? fp->life_max : 1.0f);
@@ -710,12 +717,12 @@ void fx_draw(const FxPool *pool, float alpha) {
                            1.5f, (Color){ r, g, b, a });
                 break;
             }
-            case FX_GROUND_DUST: {
-                Color cc = fx_lerp_hot_cool(fp->color, fp->color_cool,
-                                            1.0f - life_frac);
-                fx_draw_particle(pos, fp->size, cc);
+            case FX_GROUND_DUST:
+                /* Handled by mech_jet_fx_draw_ground_dust between
+                 * pass 1 and pass 2 so the textured atlas batches
+                 * into one VBO flush instead of being interleaved
+                 * with octagons and per-particle texture binds. */
                 break;
-            }
             case FX_SMOKE: {
                 unsigned char a = (unsigned char)(((fp->color >> 0) & 0xFF) * life_frac);
                 fx_draw_particle(pos, fp->size * 1.4f,
@@ -832,6 +839,15 @@ void fx_draw(const FxPool *pool, float alpha) {
             case FX_KIND_COUNT: break;
         }
     }
+
+    /* ---- Pass 1.5: textured FX_GROUND_DUST ---- *
+     *
+     * Lives between the alpha-blended pass and the additive pass so
+     * dust sits behind exhaust sparks per spec §1 layering. One
+     * texture binding for the whole sweep — the dust loop is a
+     * single switch from default-VBO to the dust atlas (and back
+     * after), not a per-particle bind change. */
+    mech_jet_fx_draw_ground_dust(pool, alpha);
 
     /* ---- Pass 2: additive (FX_JET_EXHAUST + FX_WEATHER_EMBER) ---- */
     BeginBlendMode(BLEND_ADDITIVE);

@@ -1848,8 +1848,16 @@ void renderer_draw_frame(Renderer *r, World *w,
          * frag_px uses (`fragTexCoord * resolution`). No extra
          * scaling needed. */
         if (g_halftone_loc_hot_zones >= 0 && g_halftone_loc_jet_time >= 0) {
-            /* Skip shimmer in shot mode for deterministic screenshots. */
-            bool any = !g_shot_mode && mech_jet_fx_any_active(w);
+            /* M6 jet-fx-polish — shimmer runs in shot mode too, but the
+             * jet_time clock is seeded from world.tick (a deterministic
+             * 60 Hz counter the sim advances) instead of wall-clock
+             * GetTime() so the captured PNGs stay byte-identical across
+             * runs of the same .shot script. Without this gate the
+             * paired host/client shot pairs picked up tiny per-pixel
+             * shimmer noise depending on the wall clock, defeating the
+             * "re-runs produce byte-identical PNGs" guarantee in
+             * src/shotmode.c. */
+            bool any = mech_jet_fx_any_active(w);
             int  zone_count = 0;
             if (any) {
                 JetHotZone zones[JET_HOT_ZONE_MAX] = {0};
@@ -1860,7 +1868,9 @@ void renderer_draw_frame(Renderer *r, World *w,
                                     g_halftone_loc_hot_zones, zones,
                                     SHADER_UNIFORM_VEC4, zone_count);
                 }
-                float jt = (float)GetTime();
+                float jt = g_shot_mode
+                    ? ((float)w->tick * (1.0f / 60.0f))
+                    : (float)GetTime();
                 SetShaderValue(g_halftone_post, g_halftone_loc_jet_time,
                                &jt, SHADER_UNIFORM_FLOAT);
             }
