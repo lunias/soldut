@@ -57,6 +57,30 @@ int projectile_spawn(World *w, ProjectileSpawn s) {
     p->bouncy        [i] = (uint8_t)(s.bouncy ? 1 : 0);
     p->exploded      [i] = 0;
     p->alive         [i] = 1;
+    /* M6 P12 — Server stamps a stable net_id; client side leaves it 0
+     * and lets snapshot_apply assign one when the matching wire entry
+     * arrives. Pre-increment skips 0 across the 16-bit wrap so the
+     * client's "unassigned" sentinel stays unambiguous. */
+    if (w->authoritative && s.bouncy) {
+        uint16_t id = (uint16_t)(w->next_projectile_net_id + 1);
+        if (id == 0) id = 1;
+        w->next_projectile_net_id = id;
+        p->net_id[i] = id;
+    } else {
+        p->net_id[i] = 0;
+    }
+    /* Reset the snap-interp ring — the slot may have been reused from
+     * a previously-dead projectile, and stale (snap_a, snap_b) values
+     * would otherwise drag the new projectile to wherever the old one
+     * was rendered. snapshot_apply re-seeds these when it observes
+     * this net_id. */
+    p->snap_a_time_ms[i] = 0;
+    p->snap_a_x      [i] = 0.0f; p->snap_a_y [i] = 0.0f;
+    p->snap_a_vx     [i] = 0.0f; p->snap_a_vy[i] = 0.0f;
+    p->snap_b_time_ms[i] = 0;
+    p->snap_b_x      [i] = 0.0f; p->snap_b_y [i] = 0.0f;
+    p->snap_b_vx     [i] = 0.0f; p->snap_b_vy[i] = 0.0f;
+    p->snap_state    [i] = 0;
     return i;
 }
 
@@ -118,6 +142,11 @@ static void detonate(World *w, int i) {
     ProjectilePool *p = &w->projectiles;
     if (p->exploded[i]) return;
     p->exploded[i] = 1;
+    SHOT_LOG("t=%llu proj_detonate slot=%d net_id=%u kind=%d owner=%d auth=%d "
+             "pos=(%.2f,%.2f) life=%.3f",
+             (unsigned long long)w->tick, i, (unsigned)p->net_id[i],
+             (int)p->kind[i], (int)p->owner_mech[i], (int)w->authoritative,
+             p->pos_x[i], p->pos_y[i], p->life[i]);
     /* M6 ship-prep — keep the grenade ALIVE for one more render frame
      * after detonation so the player sees the grenade sprite AT the
      * explosion center, with the spark/smoke FX fanning out from the
@@ -272,6 +301,24 @@ void projectile_step(World *w, float dt) {
             }
             if (p->aoe_radius[i] > 0.0f) detonate(w, i);
             else                          p->alive[i] = 0;
+            continue;
+        }
+
+        /* M6 P12 — Snapshot-replicated bouncy projectile on the client.
+         * Position + velocity come from snapshot_interp_projectiles
+         * each tick; skip the local physics (drag, gravity, integrate,
+         * tile + bone collision, bounce reflection) so the client's
+         * grenade stays glued to the server's authoritative pos.
+         * Direct-hit damage and the dying-frame transition both ride
+         * NET_MSG_EXPLOSION / the snapshot's exploded bit, so nothing
+         * downstream needs this path to run. The fuse decrement above
+         * still fires — on the rare case NET_MSG_EXPLOSION is dropped,
+         * the local fuse-expire path detonates at the snapshot-interp
+         * pos, which is close enough to where the server would have
+         * detonated that the EXPL_SRC_PREDICTED dedupe still catches
+         * the server's late-arriving event. */
+        if (!w->authoritative && p->bouncy[i] && p->net_id[i] != 0) {
+            if (i > last_alive) last_alive = i;
             continue;
         }
 

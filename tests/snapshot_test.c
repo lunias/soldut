@@ -33,6 +33,13 @@
  * Burst-jet plume FX spike + leading-edge SFX_JET_BOOST cue on
  * remote mechs. No wire-size change; bit lives in slots previously
  * unused at S0LJ.
+ *
+ * M6 P12: protocol id bumped S0LK → S0LL (0x53304C4B → 0x53304C4C)
+ * for the new ProjectileSnapshot array (u16 count + N × 14 bytes
+ * appended after the EntitySnapshot stream). A snapshot with zero
+ * mechs and zero projectiles now writes header + 2 (proj_count) =
+ * 26 bytes; with N mechs and zero projectiles it's
+ * SNAPSHOT_HEADER_WIRE_BYTES + N*ENTITY_SNAPSHOT_WIRE_BYTES + 2.
  */
 
 #include "../src/log.h"
@@ -59,9 +66,9 @@ static int g_failed = 0;
 int main(void) {
     log_init("/tmp/snapshot_test.log");
 
-    /* ---- Test 1: protocol id bumped to S0LK (M6 P02) ------------- */
-    ASSERT_EQ("SOLDUT_PROTOCOL_ID == 'S0LK'", SOLDUT_PROTOCOL_ID,
-              0x53304C4Bu);
+    /* ---- Test 1: protocol id bumped to S0LL (M6 P12) ------------- */
+    ASSERT_EQ("SOLDUT_PROTOCOL_ID == 'S0LL'", SOLDUT_PROTOCOL_ID,
+              0x53304C4Cu);
 
     /* ---- Test 2: ENTITY_SNAPSHOT_WIRE_BYTES grew to 31 ----------- */
     ASSERT_EQ("ENTITY_SNAPSHOT_WIRE_BYTES == 31",
@@ -98,8 +105,9 @@ int main(void) {
 
         uint8_t buf[256];
         int n = snapshot_encode(&in, NULL, buf, sizeof buf);
-        ASSERT_EQ("encoded byte count == header + 1 entity", n,
-                  SNAPSHOT_HEADER_WIRE_BYTES + ENTITY_SNAPSHOT_WIRE_BYTES);
+        ASSERT_EQ("encoded byte count == header + 1 entity + proj_count(2)",
+                  n,
+                  SNAPSHOT_HEADER_WIRE_BYTES + ENTITY_SNAPSHOT_WIRE_BYTES + 2);
 
         SnapshotFrame out = {0};
         bool ok = snapshot_decode(buf, n, NULL, &out);
@@ -223,6 +231,100 @@ int main(void) {
                         (unsigned)in.ents[0].gait_phase_q);
             }
         }
+    }
+
+    /* ---- Test 7 (M6 P12): ProjectileSnapshot round-trips ---------- *
+     * Encode 3 projectiles with distinct net_ids + kinds + flags and
+     * verify the decoder reconstructs each entry byte-for-byte. The
+     * wire layout is fixed-width 14 bytes/entry; any drift in the
+     * encoder/decoder pair would corrupt the entry across the
+     * boundary. */
+    {
+        SnapshotFrame in = {0};
+        in.valid                   = true;
+        in.ent_count               = 0;
+        in.header.entity_count     = 0;
+        in.proj_count              = 3;
+        in.projs[0] = (ProjectileSnapshot){
+            .net_id     = 0x1234,
+            .kind       = 7,            /* PROJ_FRAG_GRENADE */
+            .owner_mech = 0,
+            .pos_x_q    = 1024,         /* 256 px */
+            .pos_y_q    = -800,         /* -200 px */
+            .vel_x_q    = 320,          /* 20 px/tick */
+            .vel_y_q    = -160,
+            .flags      = PROJ_SNAP_F_BOUNCY,
+            .fuse_ticks = 144,          /* 2.4 s */
+        };
+        in.projs[1] = (ProjectileSnapshot){
+            .net_id     = 0xFFFE,       /* near wrap */
+            .kind       = 7,
+            .owner_mech = 3,
+            .pos_x_q    = -32000,
+            .pos_y_q    = 30000,
+            .vel_x_q    = -50,
+            .vel_y_q    = 50,
+            .flags      = PROJ_SNAP_F_BOUNCY | PROJ_SNAP_F_EXPLODED,
+            .fuse_ticks = 0,
+        };
+        in.projs[2] = (ProjectileSnapshot){
+            .net_id     = 1,
+            .kind       = 4,            /* PROJ_ROCKET (hypothetical) */
+            .owner_mech = 1,
+            .pos_x_q    = 0,
+            .pos_y_q    = 0,
+            .vel_x_q    = 0,
+            .vel_y_q    = 0,
+            .flags      = 0,
+            .fuse_ticks = 255,
+        };
+
+        uint8_t buf[1024];
+        int n = snapshot_encode(&in, NULL, buf, sizeof buf);
+        ASSERT_EQ("proj-only encoded byte count == header + 0 ents + 2 + 3*14",
+                  n, SNAPSHOT_HEADER_WIRE_BYTES + 0 + 2
+                     + 3 * PROJECTILE_SNAPSHOT_WIRE_BYTES);
+
+        SnapshotFrame out = {0};
+        bool ok = snapshot_decode(buf, n, NULL, &out);
+        ASSERT_EQ("proj round-trip: decode ok", (int)ok, 1);
+        ASSERT_EQ("proj round-trip: proj_count == 3", out.proj_count, 3);
+        for (int k = 0; k < 3; ++k) {
+            ASSERT_EQ("proj round-trip: net_id",     out.projs[k].net_id,     in.projs[k].net_id);
+            ASSERT_EQ("proj round-trip: kind",       out.projs[k].kind,       in.projs[k].kind);
+            ASSERT_EQ("proj round-trip: owner_mech", out.projs[k].owner_mech, in.projs[k].owner_mech);
+            ASSERT_EQ("proj round-trip: pos_x_q",    out.projs[k].pos_x_q,    in.projs[k].pos_x_q);
+            ASSERT_EQ("proj round-trip: pos_y_q",    out.projs[k].pos_y_q,    in.projs[k].pos_y_q);
+            ASSERT_EQ("proj round-trip: vel_x_q",    out.projs[k].vel_x_q,    in.projs[k].vel_x_q);
+            ASSERT_EQ("proj round-trip: vel_y_q",    out.projs[k].vel_y_q,    in.projs[k].vel_y_q);
+            ASSERT_EQ("proj round-trip: flags",      out.projs[k].flags,      in.projs[k].flags);
+            ASSERT_EQ("proj round-trip: fuse_ticks", out.projs[k].fuse_ticks, in.projs[k].fuse_ticks);
+        }
+    }
+
+    /* ---- Test 8 (M6 P12): an old-format snapshot (no proj_count
+     * trailer — pre-S0LL) should still decode to proj_count = 0 rather
+     * than fail. Simulate by trimming the encoded body to just header
+     * + entities. */
+    {
+        SnapshotFrame in = {0};
+        in.valid               = true;
+        in.ent_count           = 1;
+        in.header.entity_count = 1;
+        in.ents[0].weapon_id   = 1;
+        in.ents[0].primary_id  = 1;
+        in.ents[0].state_bits  = SNAP_STATE_ALIVE;
+
+        uint8_t buf[256];
+        int n = snapshot_encode(&in, NULL, buf, sizeof buf);
+        /* Strip the trailing proj_count(2) so it looks pre-S0LL. */
+        int trimmed = n - 2;
+
+        SnapshotFrame out = {0};
+        bool ok = snapshot_decode(buf, trimmed, NULL, &out);
+        ASSERT_EQ("legacy frame (no proj_count): decode ok", (int)ok, 1);
+        ASSERT_EQ("legacy frame: proj_count == 0", out.proj_count, 0);
+        ASSERT_EQ("legacy frame: ent_count == 1", out.ent_count, 1);
     }
 
     if (g_failed > 0) {

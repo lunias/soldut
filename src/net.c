@@ -2100,30 +2100,44 @@ static void client_handle_fire_event(NetState *ns, const uint8_t *body, int blen
                wpn->fire == WFIRE_BURST      ||
                wpn->fire == WFIRE_THROW)
     {
-        /* Spawn a visual-only projectile. w->authoritative is false
-         * on the client so projectile_step won't apply damage when
-         * it hits a mech; it just renders + leaves sparks at impact.
-         * Spawned for self too (predict didn't). */
-        int sm = (int)shooter;
-        ProjectileSpawn ps = {
-            .kind          = wpn->projectile_kind,
-            .weapon_id     = (int)weapon,
-            .owner_mech_id = sm,
-            .owner_team    = (sm < g->world.mech_count)
-                              ? g->world.mechs[sm].team : 0,
-            .origin        = origin,
-            .velocity      = (Vec2){ dir.x * wpn->projectile_speed_pxs,
-                                     dir.y * wpn->projectile_speed_pxs },
-            .damage        = wpn->damage,
-            .aoe_radius    = wpn->aoe_radius,
-            .aoe_damage    = wpn->aoe_damage,
-            .aoe_impulse   = wpn->aoe_impulse,
-            .life          = wpn->projectile_life_sec,
-            .gravity_scale = wpn->projectile_grav_scale,
-            .drag          = wpn->projectile_drag,
-            .bouncy        = wpn->bouncy,
-        };
-        projectile_spawn(&g->world, ps);
+        /* M6 P12 — Bouncy projectiles (frag grenades today) are
+         * spawned by the snapshot stream so client/server sims stay
+         * in lockstep across the fuse window. Skipping the spawn
+         * here means the local player sees the muzzle flash + SFX
+         * immediately but the grenade itself appears ~INTERP_DELAY_MS
+         * later at the server's authoritative position. Acceptable
+         * cost for "grenade in the face → reliable damage." See
+         * documents/m6/12-projectile-snapshot-replication.md.
+         *
+         * Non-bouncy projectiles keep the FIRE_EVENT-driven spawn —
+         * their trajectory is deterministic (gravity + drag only) so
+         * the existing dedupe paths handle the small divergence. */
+        if (!wpn->bouncy) {
+            /* Spawn a visual-only projectile. w->authoritative is false
+             * on the client so projectile_step won't apply damage when
+             * it hits a mech; it just renders + leaves sparks at impact.
+             * Spawned for self too (predict didn't). */
+            int sm = (int)shooter;
+            ProjectileSpawn ps = {
+                .kind          = wpn->projectile_kind,
+                .weapon_id     = (int)weapon,
+                .owner_mech_id = sm,
+                .owner_team    = (sm < g->world.mech_count)
+                                  ? g->world.mechs[sm].team : 0,
+                .origin        = origin,
+                .velocity      = (Vec2){ dir.x * wpn->projectile_speed_pxs,
+                                         dir.y * wpn->projectile_speed_pxs },
+                .damage        = wpn->damage,
+                .aoe_radius    = wpn->aoe_radius,
+                .aoe_damage    = wpn->aoe_damage,
+                .aoe_impulse   = wpn->aoe_impulse,
+                .life          = wpn->projectile_life_sec,
+                .gravity_scale = wpn->projectile_grav_scale,
+                .drag          = wpn->projectile_drag,
+                .bouncy        = wpn->bouncy,
+            };
+            projectile_spawn(&g->world, ps);
+        }
         /* Short muzzle tracer — only redundant when the predict path
          * already drew the muzzle visual (self LMB on the active
          * slot). For self RMB-on-inactive, predict didn't run, so we
@@ -3030,8 +3044,22 @@ void net_poll(NetState *ns, Game *g, double dt_real) {
 void net_server_broadcast_snapshot(NetState *ns, World *w) {
     if (ns->role != NET_ROLE_SERVER || ns->peer_count == 0) return;
 
+    /* CAP — worst-case snapshot wire size:
+     *  - 1B  NET_MSG_SNAPSHOT tag (added before snapshot_encode writes)
+     *  - 24B SnapshotHeader
+     *  - 32 × (31 + 8 grapple suffix + 2 dirty mask) for mechs
+     *  - 2B  projectile count
+     *  - 64 × 14B for the M6 P12 ProjectileSnapshot array.
+     * In realistic play the projectile section adds <150B; the cap is
+     * a safety bound for adversarial bot-spam scenarios. The cap may
+     * exceed typical MTU (~1200B); ENet sends unreliable packets as a
+     * single datagram and large payloads may fragment with reduced
+     * delivery — revisit when bandwidth profiling shows pressure
+     * (see TRADE_OFFS.md hook for the spec doc). */
     enum { CAP = 4 + SNAPSHOT_HEADER_WIRE_BYTES +
-                  MAX_MECHS * (ENTITY_SNAPSHOT_WIRE_BYTES + 2) };
+                  MAX_MECHS * (ENTITY_SNAPSHOT_WIRE_BYTES
+                              + ENTITY_SNAPSHOT_GRAPPLE_BYTES + 2) +
+                  2 + SNAPSHOT_PROJECTILE_CAP * PROJECTILE_SNAPSHOT_WIRE_BYTES };
 
     for (int i = 0; i < NET_MAX_PEERS; ++i) {
         NetPeer *p = &ns->peers[i];

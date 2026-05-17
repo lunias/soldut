@@ -1,0 +1,89 @@
+# 2p_frag_sync — HOST (slot 0). M6 P12 — per-tick projectile snapshot
+# replication.
+#
+# Verifies that bouncy AOE projectiles (frag grenades) stay in lockstep
+# between the host's authoritative sim and the connecting client's
+# render. Pre-M6-P12 the client ran its own bouncy physics off the
+# FIRE_EVENT spawn and diverged from the server by hundreds of pixels
+# after a few bounces — the visible-grenade vs damage-center mismatch
+# documented in 12-projectile-snapshot-replication.md.
+#
+# Host stands on the flat central floor of Aurora (cols 50–73, y=2752
+# floor) at x=1600 and lobs three frag grenades toward the client at
+# x=2200. Long charge holds (60 ticks ≈ 1.0 s = max charge) make the
+# arcs reach across the gap; staggered launch times keep the wire
+# event timeline cleanly separable.
+#
+# Throw schedule (script ticks; MATCH starts ~world tick 60-120 after
+# lobby + countdown):
+#   t=200 → 260    Throw 1 (max charge)  — server detonate near client
+#   t=400 → 460    Throw 2 (max charge)
+#   t=600 → 660    Throw 3 (max charge)
+#
+# Fuse is 2.4 s = 144 ticks; the first throw's detonation should land
+# near t≈400, second near t≈600, third near t≈800.
+
+window 1600 900
+out build/shots/net/dedi/2p_frag_sync.host
+network connect 127.0.0.1:{{PORT}}
+name HostSync
+map aurora
+
+loadout - "Pulse Rifle" "Frag Grenades" Light Standard
+
+spawn_at 1600 2712
+peer_spawn 1 2300 2712
+
+# Aim just past the host — the grenade lobs forward + downward and
+# lands ~150-200 px in front of the host's feet, well short of the
+# client. Full-charge frag throws one-shot a Light-armor mech (60
+# direct + 100 AOE × Light's 40% absorb floor = 96 dmg → dead), and
+# killing the only other player ends the round early (round_end at
+# score_limit / time_limit), so we deliberately throw soft + short.
+aim 1800 2740
+
+# Swap to secondary so LMB triggers the throw mechanic.
+at 130 press swap
+at 138 release swap
+
+# Throw 1 — short tap; lands halfway between mechs and detonates on
+# fuse-expire (2.4 s) without reaching the client at all.
+at 200 press fire
+at 210 release fire
+
+# Throw 2 — same.
+at 380 press fire
+at 390 release fire
+
+# Throw 3 — same.
+at 560 press fire
+at 570 release fire
+
+# Captures keyed to the throw + detonate timeline so a reviewer can
+# scrub the arc both sides at the same world tick. Names are SHARED
+# with the client script so run_frag_sync.sh composes side-by-side
+# host/client frames. The grenades arc ~1.5 s, so booms land roughly
+# 100 ticks after release.
+at 150 shot t150_idle
+at 180 shot t180_post_swap
+
+at 205 shot t205_throw1_charging
+at 220 shot t220_throw1_launch
+at 280 shot t280_throw1_arc
+at 350 shot t350_throw1_boom
+
+at 385 shot t385_throw2_charging
+at 400 shot t400_throw2_launch
+at 460 shot t460_throw2_arc
+at 530 shot t530_throw2_boom
+
+at 565 shot t565_throw3_charging
+at 580 shot t580_throw3_launch
+at 640 shot t640_throw3_arc
+at 710 shot t710_throw3_boom
+
+at 780 shot t780_done
+
+contact_sheet host_sheet cols 4
+
+at 840 end

@@ -1575,6 +1575,35 @@ WAN polish. Net effect on the trade-off ledger:
 
 ## Networking
 
+### Snapshot bandwidth: no projectile delta encoding (M6 P12)
+
+- **What we did** — M6 P12 added a fixed-width 14-byte
+  `ProjectileSnapshot` array to every snapshot for bouncy AOE
+  projectiles (`u16 count + N × 14B`, cap 64). Each entry is written
+  in full each snapshot: id, kind, owner, pos, vel, flags,
+  fuse_ticks. No delta against the previous snapshot, no compression.
+  At a realistic peak of ~10 in-flight grenades × 60 Hz that's
+  ~8.4 KB/s of new traffic; with mechs at 31 B × 16 players × 60 Hz
+  (~30 KB/s) on top, total snapshot bandwidth approaches MTU on
+  busy frames and may rely on ENet's unreliable-fragmentation path
+  to deliver (which doesn't retransmit lost fragments — the next
+  snapshot just supersedes).
+- **Why** — Delta encoding for projectiles is awkward against the
+  variable-membership snapshot: a grenade joining the alive set
+  between frame N and N+1 has no baseline to delta against, so we'd
+  need a "first-frame full + subsequent delta" split per net_id.
+  Doable but more code; the bandwidth was tolerable enough at the
+  M6 P12 ship target (1v1–4v4 friends play) that the simple full
+  encoding was the right place to land. The fuse-expire predict
+  path keeps the visual continuous even if a fragment drops, so the
+  UDP loss case isn't a hard correctness issue — just a brief
+  visible jitter on the affected grenade.
+- **Revisit when** — F4 net overlay shows snapshot packets routinely
+  exceeding `NET_MAP_CHUNK_PAYLOAD` (1180 B) at 8v8 / 16-player
+  scale OR a public-server perf-baseline run shows fragment
+  retransmit pressure. Spec doc `documents/m6/12-projectile-
+  snapshot-replication.md` enumerates the bandwidth math.
+
 ### Map-shared assets resolve to client-local files (P08)
 
 - **What we did** — A custom `.lvl` streamed from a server (P08) is

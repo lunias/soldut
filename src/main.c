@@ -2996,6 +2996,13 @@ int main(int argc, char **argv) {
                         uint32_t rt_u32 = (rt > 0.0) ? (uint32_t)rt : 0u;
                         profile_zone_begin(PROF_SNAP_INTERP);
                         snapshot_interp_remotes(&game.world, rt_u32);
+                        /* M6 P12 — Lerp snapshot-replicated projectiles
+                         * to the server's authoritative pos. Must run
+                         * AFTER simulate_step (so projectile_step's
+                         * short-circuit reads stale pos and skips
+                         * physics) but BEFORE next tick's render so
+                         * the visible grenade tracks the server. */
+                        snapshot_interp_projectiles(&game.world, rt_u32);
                         profile_zone_end(PROF_SNAP_INTERP);
                     }
                     profile_zone_begin(PROF_RECONCILE);
