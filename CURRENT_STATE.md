@@ -5,11 +5,142 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-16** (M6 P12 — projectile snapshot
-replication for bouncy AOE). Frag grenade hold-to-charge throw +
-AOE buff from earlier today still applies underneath. Camera
-smoothness fix and tiered explosion shake further underneath. M6 P10
-underneath that.
+Last updated: **2026-05-16** (M6 P13 — bot AI refresh for the
+current weapon + atmospheric stack). M6 P12 projectile snapshot
+replication still applies underneath. Frag grenade hold-to-charge
+throw + AOE buff from earlier still applies. Camera smoothness fix,
+tiered explosion shake, M6 P10 further underneath.
+
+## M6 P13 — Bot AI refresh: WFIRE_THROW + atmospherics
+
+Pre-P13 the bot AI shipped before the M6 P11/P12 frag rework + M6 P09
+atmospheric zones were wired through to anyone who'd notice. The
+visible symptoms in a 1v1 / 4v4 bake:
+
+- **Frag grenades thrown at minimum charge.** The motor's hold
+  detection at `src/bot.c:2492` checked `wpn->charge_sec > 0.0f` to
+  decide "hold BTN_FIRE for charge" — true for Rail Cannon / Microgun
+  spin-up, FALSE for frag (release-edge throw, charge_sec=0). Bots
+  tapped the button through the 5-on/5-off duty cycle, accumulated
+  ≈0.08 s of `throw_charge`, and threw at 0.5× speed (350 px/s)
+  short lobs — 1/8 the M6 P11 max-charge range. Reads as "the bots
+  don't know how to throw."
+- **Bots stand in ACID zones taking 5 HP/s damage** with no concept
+  of routing around. ACID rects exist on Aurora / Crossfire and are
+  documented hazards in the editor; pre-P13 the nav graph ignored
+  them and the per-tick movement override never fired.
+
+**WFIRE_THROW handling** (`src/bot.c`). Three pieces:
+
+1. `bot_throw_slot()` finds the slot (0 = primary, 1 = secondary)
+   that holds the WFIRE_THROW weapon, or -1. `bot_throw_target_charge()`
+   maps (tier × distance) to a 0..1 charge factor — Recruit caps
+   at 0.45, Champion can go to 1.00 at long range; intra-tier the
+   target scales linearly across 200..2000 px of throw distance.
+   `bot_throw_arc_aim()` projects an above-target aim point that
+   compensates for the projectile's gravity drop minus the engine's
+   0.12 upward launch bias.
+
+2. **Active-slot throw**: `run_motor`'s fire dispatch detects active
+   `wpn->fire == WFIRE_THROW`, holds BTN_FIRE while `m->throw_charge
+   < target_sec`, releases otherwise. The release-edge in
+   `mech_try_fire` fires the throw at scaled velocity.
+
+3. **Off-hand throw**: when the bot's secondary is frag but its
+   active weapon is the primary (the default loadout shape for
+   Veteran+ tier index 0), the motor auto-derives `want_throw_offhand`
+   from `want_fire` + off-hand WFIRE_THROW + distance gate
+   (200..1900 px). Holds BTN_FIRE_SECONDARY for the charge cycle
+   AND suppresses BTN_FIRE the entire time so the throw's release-
+   edge isn't blocked by primary-fire cooldown (mech_try_fire's
+   throw gate requires `fire_cooldown <= 0`; even a 0.11 s Pulse
+   Rifle cooldown overlaps the release window).
+
+`tactic_engage`'s LOS-clear branch also sets the explicit throw
+intent + arc aim when ENGAGE wins, so the bot benefits both from
+the dedicated tactic path (when distance scoring lets ENGAGE beat
+PURSUE_ENEMY) and from the bot_step opportunistic-fire fallback
+(which sets `want_fire` whenever an LOS-clear enemy exists, even
+when the strategy goal is REPOSITION / PURSUE_PICKUP).
+
+**Atmospheric zone awareness** (`src/bot.c`).
+
+- Nav build's new `tag_ambient_zones()` walks `level.ambis[]` after
+  floor-snap and marks each node with `BOT_NODE_F_AMBI_ACID` /
+  `BOT_NODE_F_AMBI_ZERO_G` per the rect it falls inside. WIND and
+  FOG aren't tagged (WIND is a per-tick particle nudge we can't
+  pre-bake into static cost; FOG is render-only).
+- `build_reachabilities` applies a 4× cost penalty to any reach
+  whose DESTINATION is ACID-tagged. A* now routes around 5 HP/s
+  rects when alternatives exist; bots still grit through when ACID
+  is the only path (Crossfire's slime channels).
+- Per-tick motor override: `world_point_in_acid(pelvis)` triggers
+  an emergency-exit branch that picks the closer rect edge,
+  overrides LEFT/RIGHT, and forces a JET pulse (bypassing the
+  fuel-hysteresis lockout) so the bot climbs out of acid pits as
+  well as walking out of puddles.
+- ZERO_G motor handling: inside an AMBI_ZERO_G rect the jet
+  lockout entry drops to 4 % and the re-engage floor drops to 20 %
+  (vs the standard 10 / 40), so the bot burns fuel more freely
+  when gravity won't pull them down anyway.
+
+**Weapon engagement profile audit** (`src/bot.c`, `g_weapon_profiles`).
+Frag updated: optimal `350 → 900`, effective `700 → 1700`, strafe
+`350 → 700`. Reflects the M6 P11 max-charge 2800 px/s throw range
+(~2500 px ground carry). Other profiles unchanged — they were tuned
+in M6 P05 iter9 and the matrix-derived numbers held up.
+
+**Shotmode wiring** (`src/shotmode.c`). Paired-shot tests can now
+exercise bots end-to-end. Three additions to `networked_shot_bootstrap`
+and the MATCH simulate loop:
+
+- Honor `cfg.bots` + `cfg.bot_tier` at host bootstrap (mirrors
+  `main.c::bootstrap_host`). Without this the wire-side ADD_BOT
+  path is the only avenue and the server rejects non-host ADD_BOT
+  requests — paired tests with one host + one client previously
+  couldn't spawn bots at all.
+- Call `bot_system_reset_minds` + `bot_system_build_nav` +
+  `bot_attach` + `bot_assign_team_roles` after `lobby_spawn_round_mechs`
+  in the host's round-start path (server-only). Mirrors
+  `main.c::start_round`. Server-side state; clients render the bot
+  mech through the snapshot stream like any other peer.
+- Call `bot_step(&game.bots, &game.world, &game, TICK_DT)` before
+  `simulate_step` in the host's MATCH simulate branch. No-op when
+  no minds are attached.
+
+**Tests**. New `tests/shots/net/run_bot_frag_charge.sh` spawns a
+Champion-tier bot via cfg-fill, parks a client far enough away that
+the host is the bot's nearest enemy at ~1800 px, and asserts the
+host's SHOT_LOG records at least one `spawn_throw` event with
+`charge ≥ 0.90` plus at least one AOE detonation. Champion at 1800 px
+hits `bot_throw_target_charge ≈ 0.95`, throws at ~2555 px/s, lands
+within AOE radius of the host. Test consistently passes 5/5 in
+back-to-back runs.
+
+`tests/net/run_bot_playtest.sh` sweep on all 8 ship maps at Elite
+tier × 4 bots × Foundry TDM (default) — and rerun per-map via
+`MAP=<name>` — produces ≥ 1 mech_kill on every map:
+
+```
+aurora     8 kills   catwalk    7 kills
+citadel    7 kills   concourse  5 kills
+crossfire  3 kills   foundry    11 kills
+reactor    4 kills   slipstream 2 kills
+```
+
+Pre-P13 baseline had slipstream at 0 kills (5/8 of the previous
+non-P13-affected baselines still passed; slipstream was the gap).
+Post-P13 every map produces real combat.
+
+Existing regression suite green: `test-snapshot test-level-io
+test-pickups test-ctf test-spawn test-prefs test-map-share
+test-mech-ik test-pose-compute test-grapple-ceiling
+test-atmosphere-parity test-damage-numbers test-bot-nav`. Paired
+shots green: `run_frag_sync.sh run_frag_charge.sh run_frag_concourse.sh
+tests/net/run.sh`. The pre-existing `run_frag_grenade.sh`
+wire-event-delivery flake (documented at M6 P12 as 7–8/9) persists
+unchanged — confirmed by stashing all P13 changes and re-running:
+same 7–8/9 pattern, so the flake is upstream of P13.
 
 ## M6 P12 — Per-tick projectile snapshot replication
 
