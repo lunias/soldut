@@ -1,0 +1,37 @@
+# 2p_bot_frag_charge — CLIENT (bot-spawner + observer). M6 P13.
+# Pair to .host.shot — sends `add_bot 3` at lobby tick 30 so the host
+# spawns a Champion bot before the auto-start timer fires. Parks far
+# from the bot's spawn so the host stays the bot's nearest enemy.
+
+window 1600 900
+out build/shots/net/2p_bot_frag_charge_client
+network connect 127.0.0.1:24320
+name ClientB
+map aurora
+
+loadout - "Pulse Rifle" "Sidearm" Light Standard
+
+spawn_at 5500 2712
+aim 5600 2712
+
+# (Bot is added by the host via soldut.cfg `bots=1 bot_tier=champion`
+# in the test wrapper — see run_bot_frag_charge.sh. Pre-M6-P13 the
+# wire-side ADD_BOT path was the only avenue, but the server rejects
+# non-host ADD_BOT requests, so cfg-driven bootstrap is the right
+# mechanism for paired-shot tests.)
+
+# Shared-name captures so run_bot_frag_charge.sh can stack host (left)
+# and client (right) into composites.
+at 120 shot t120_match_start
+at 200 shot t200_charge_1
+at 260 shot t260_throw_1
+at 320 shot t320_impact_1
+at 380 shot t380_charge_2
+at 440 shot t440_throw_2
+at 500 shot t500_charge_3
+at 560 shot t560_throw_3
+at 620 shot t620_aftermath
+
+contact_sheet bot_frag_charge_client cols 5
+
+at 720 end

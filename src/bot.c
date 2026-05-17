@@ -351,6 +351,15 @@ typedef enum {
 #define BOT_NODE_F_PICKUP      (1u << 3)
 #define BOT_NODE_F_FLAG        (1u << 4)
 #define BOT_NODE_F_SLOPE_TOP   (1u << 5)
+/* M6 P13 — atmospheric-zone awareness. Set at nav-build time by
+ * tag_ambient_zones(). Pathing penalizes reaches that LEAD INTO an
+ * AMBI_ACID node so the planner routes around the 5 HP/s rect when
+ * an alternative exists; the tactical layer's emergency-exit branch
+ * fires when pelvis crosses INTO an acid rect mid-route. The ZERO_G
+ * flag relaxes jet hysteresis (gravity is zeroed, every jet pulse
+ * is full effective thrust). */
+#define BOT_NODE_F_AMBI_ACID   (1u << 6)
+#define BOT_NODE_F_AMBI_ZERO_G (1u << 7)
 
 typedef struct BotNavNode {
     Vec2     pos;
@@ -622,6 +631,56 @@ static void build_flag_nodes(struct BotNav *nv, const Level *L) {
         n->pickup_spawner_idx = -1;
         n->flag_team = (int8_t)f->team;
     }
+}
+
+/* M6 P13 — atmospheric-zone tagging. Walk every ambient rect and
+ * mark each nav node it contains with the matching BOT_NODE_F_AMBI_*
+ * bit. Builds AFTER nodes are placed and snapped to floor surfaces
+ * so the rect check sees the FINAL pos. Cheap O(nodes × ambi_count);
+ * shipped maps have ≤ 4 ambi rects. WIND / FOG aren't tagged: WIND
+ * is render-feel + a small per-tick particle nudge we can't usefully
+ * pre-bake into a static cost, FOG is render-only and bots see
+ * through it (no per-bot vision model). */
+static bool point_in_ambi_rect(const LvlAmbi *a, float x, float y) {
+    return x >= (float)a->rect_x && x <= (float)(a->rect_x + a->rect_w) &&
+           y >= (float)a->rect_y && y <= (float)(a->rect_y + a->rect_h);
+}
+
+static void tag_ambient_zones(struct BotNav *nv, const Level *L) {
+    if (!L || L->ambi_count <= 0) return;
+    for (int i = 0; i < nv->node_count; ++i) {
+        BotNavNode *n = &nv->nodes[i];
+        for (int z = 0; z < L->ambi_count; ++z) {
+            const LvlAmbi *a = &L->ambis[z];
+            if (a->kind != AMBI_ACID && a->kind != AMBI_ZERO_G) continue;
+            if (!point_in_ambi_rect(a, n->pos.x, n->pos.y)) continue;
+            if (a->kind == AMBI_ACID)   n->flags |= BOT_NODE_F_AMBI_ACID;
+            if (a->kind == AMBI_ZERO_G) n->flags |= BOT_NODE_F_AMBI_ZERO_G;
+        }
+    }
+}
+
+/* Is world point (x, y) currently inside any AMBI_ACID rect? Used by
+ * the motor's emergency-exit branch. O(ambi_count); shipped maps cap
+ * at 4 ambi rects so this is essentially free per tick. */
+static bool world_point_in_acid(const Level *L, float x, float y) {
+    if (!L || L->ambi_count <= 0) return false;
+    for (int z = 0; z < L->ambi_count; ++z) {
+        const LvlAmbi *a = &L->ambis[z];
+        if (a->kind != AMBI_ACID) continue;
+        if (point_in_ambi_rect(a, x, y)) return true;
+    }
+    return false;
+}
+
+static bool world_point_in_zero_g(const Level *L, float x, float y) {
+    if (!L || L->ambi_count <= 0) return false;
+    for (int z = 0; z < L->ambi_count; ++z) {
+        const LvlAmbi *a = &L->ambis[z];
+        if (a->kind != AMBI_ZERO_G) continue;
+        if (point_in_ambi_rect(a, x, y)) return true;
+    }
+    return false;
 }
 
 /* ---- Reachability tests --------------------------------------------- */
@@ -897,12 +956,25 @@ static void build_reachabilities(struct BotNav *nv, const Level *L) {
                       BOT_NAV_MAX_REACH);
                 return;
             }
+            /* M6 P13 — ACID destination penalty. A reach LANDING in
+             * an AMBI_ACID rect pays 4× its base cost so A* routes
+             * around when any non-acid alternative exists. We don't
+             * blacklist outright: sometimes the acid IS on the only
+             * path (Crossfire's slime channels), and a 4× penalty
+             * still lets the bot grit through if needed. Source-side
+             * tagging would double-charge when both ends are inside
+             * the same rect; destination-only is the right gate. */
+            uint16_t scaled_cost = cost_ms;
+            if (nv->nodes[j].flags & BOT_NODE_F_AMBI_ACID) {
+                uint32_t c4 = (uint32_t)scaled_cost * 4u;
+                scaled_cost = (c4 > 65535u) ? 65535u : (uint16_t)c4;
+            }
             BotNavReach *r = &nv->reaches[nv->reach_count++];
             r->from_node        = (uint16_t)i;
             r->to_node          = (uint16_t)j;
             r->kind             = (uint8_t)kind;
             r->required_fuel_q8 = fuel_q8;
-            r->cost_ms          = cost_ms ? cost_ms : 1;
+            r->cost_ms          = scaled_cost ? scaled_cost : 1;
             a->reach_count++;
         }
     }
@@ -1400,7 +1472,18 @@ static const WeaponEngagementProfile g_weapon_profiles[WEAPON_COUNT] = {
     [WEAPON_MICROGUN]      = {  500.0f, 1000.0f,  450.0f, 0 },
     [WEAPON_SIDEARM]       = {  400.0f,  900.0f,  400.0f, 0 },
     [WEAPON_BURST_SMG]     = {  350.0f,  700.0f,  350.0f, 0 },
-    [WEAPON_FRAG_GRENADES] = {  350.0f,  700.0f,  350.0f, 0 },
+    /* M6 P13 — frag profile rebuilt for the hold-to-charge throw.
+     * Pre-P13 the pressed-on-edge frag landed at ~350 px/s velocity
+     * (≤ 500 px range), so 350/700 optimal/effective was a sensible
+     * "stand close, lob short." Post-P13 with FRAG_THROW_SPEED_MAX_MUL
+     * = 4.0 → 2800 px/s max-charge, the engine's 0.12 upward bias,
+     * and a tier-driven charge target, max-charge throws cover
+     * ~2500 px on flat ground. The bot wants to ENGAGE at the band
+     * where charge ≈ 0.6-1.0 gives reliable arc landings (700-1700 px).
+     * Beyond 1900 px the off-hand path stops triggering (motor's
+     * dist gate), and inside 200 px the throw lands too close to
+     * splash the thrower. */
+    [WEAPON_FRAG_GRENADES] = {  900.0f, 1700.0f,  700.0f, 0 },
     [WEAPON_MICRO_ROCKETS] = {  500.0f, 1000.0f,  500.0f, 0 },
     [WEAPON_COMBAT_KNIFE]  = {   80.0f,  140.0f,   80.0f, 0 },
     [WEAPON_GRAPPLING_HOOK]= {    0.0f,    0.0f,    0.0f, 0 },
@@ -2010,6 +2093,17 @@ typedef struct {
     bool  want_use;
     bool  want_reload;
     bool  want_swap;
+    /* M6 P13 — WFIRE_THROW (frag grenade) hold-to-charge.
+     * `want_throw_active` charges the active-slot throw via BTN_FIRE;
+     * `want_throw_offhand` charges the off-hand throw via BTN_FIRE_SECONDARY
+     * (and suppresses primary BTN_FIRE for one tick around the release
+     * so fire_cooldown clears at release-edge — mech_try_fire's throw
+     * gate requires `fire_cooldown <= 0`). `throw_target_charge` is the
+     * charge factor (0..1) the motor holds the button for before
+     * releasing; tier × distance picks the value in tactic_engage. */
+    bool  want_throw_active;
+    bool  want_throw_offhand;
+    float throw_target_charge;
     uint8_t next_reach_kind;
 } BotWants;
 
@@ -2143,6 +2237,105 @@ static void tactic_path_follow(BotMind *mind, const struct BotNav *nv,
     }
 }
 
+/* M6 P13 — WFIRE_THROW (frag grenade) helpers --------------------------
+ *
+ * Frag is the only WFIRE_THROW weapon at v1. Bot needs to:
+ *
+ *   1. detect which slot has it (active vs off-hand → different button);
+ *   2. pick a target charge factor (tier × distance);
+ *   3. aim along a ballistic arc that lands near the enemy.
+ *
+ * The pre-M6-P13 motor used `wpn->charge_sec > 0.0f` to decide "hold the
+ * button" — that's true for Rail Cannon / Microgun (pre-fire charge-up)
+ * but FALSE for frag (release-edge throw). So bots tapped BTN_FIRE
+ * through the existing duty cycle, never accumulating charge past
+ * ~0.08 s, and threw 0.5× speed (350 px/s) lobs — short, weak, and
+ * never reaching the enemy. */
+
+/* Returns slot index (0 = primary, 1 = secondary) of a WFIRE_THROW
+ * weapon equipped on this mech, or -1 if none. Optionally returns the
+ * Weapon* via `out_wpn`. */
+static int bot_throw_slot(const World *w, int mid, const Weapon **out_wpn) {
+    const Mech *m = &w->mechs[mid];
+    const Weapon *prim = weapon_def(m->primary_id);
+    const Weapon *sec  = weapon_def(m->secondary_id);
+    if (prim && prim->fire == WFIRE_THROW) {
+        if (out_wpn) *out_wpn = prim;
+        return 0;
+    }
+    if (sec && sec->fire == WFIRE_THROW) {
+        if (out_wpn) *out_wpn = sec;
+        return 1;
+    }
+    if (out_wpn) *out_wpn = NULL;
+    return -1;
+}
+
+/* Target charge factor (0..1) for a WFIRE_THROW. Combines a per-tier
+ * ceiling with a distance fit — short throws don't need full charge,
+ * long throws need it. Recruits cap low (under-rotated, lob short);
+ * Champions can go to 1.0 when the throw distance demands it. */
+static float bot_throw_target_charge(const BotPersonality *pers,
+                                     float dist_px) {
+    float lo, hi;
+    switch (pers->tier) {
+        case BOT_TIER_RECRUIT:  lo = 0.20f; hi = 0.45f; break;
+        case BOT_TIER_VETERAN:  lo = 0.35f; hi = 0.75f; break;
+        case BOT_TIER_ELITE:    lo = 0.45f; hi = 0.92f; break;
+        case BOT_TIER_CHAMPION: lo = 0.55f; hi = 1.00f; break;
+        default:                lo = 0.35f; hi = 0.75f; break;
+    }
+    /* Frag at max-charge (FRAG_THROW_SPEED_MAX_MUL = 4.0 × baseline 700
+     * = 2800 px/s) covers ~2200 px ground range with the engine's
+     * lob bias. Map dist into [lo,hi] across 200..2000 px. */
+    float t = clampf((dist_px - 200.0f) / 1800.0f, 0.0f, 1.0f);
+    return lo + (hi - lo) * t;
+}
+
+/* Above-target aim point that compensates for gravity drop during
+ * time-of-flight. The engine's `weapons_spawn_throw_charged` adds a
+ * 0.12 upward bias before launch, which contributes additional lob —
+ * for close throws that bias alone is enough so we aim AT the target;
+ * for far throws we add an explicit drop compensation on top. */
+static Vec2 bot_throw_arc_aim(const World *w, int mid, Vec2 target,
+                              float charge_factor) {
+    const Weapon *frag = weapon_def(WEAPON_FRAG_GRENADES);
+    if (!frag) return target;
+
+    Vec2 hand = mech_hand_pos(w, mid);
+    float dx = target.x - hand.x;
+    float dy = target.y - hand.y;
+    float adx = fabsf(dx);
+    if (adx < 64.0f) return target;     /* point-blank — let the bias arc do it */
+
+    float speed_mul = FRAG_THROW_SPEED_MIN_MUL +
+                      (FRAG_THROW_SPEED_MAX_MUL - FRAG_THROW_SPEED_MIN_MUL) *
+                      charge_factor;
+    float v = frag->projectile_speed_pxs * speed_mul;
+    if (v < 1.0f) return target;
+
+    float g_eff = w->level.gravity.y * frag->projectile_grav_scale;
+    /* TOF approximation — bias rotates launch up by ~7° at horizontal
+     * aim so vx ≈ v · cos(7°) ≈ 0.99v; close enough at this level. */
+    float t = adx / v;
+    /* Gravity drop while in flight, ignoring drag (frag drag is small,
+     * 0.12/sec, ≈ 5 % loss across 0.5 s — within bot aim slop). */
+    float drop = 0.5f * g_eff * t * t;
+    /* Bias contribution to vertical travel: bias adds vy_bias ≈ 0.12 v.
+     * Over time t the bias lifts the trajectory by ~0.12 v t. Net
+     * required aim point above target: (drop - bias_lift). */
+    float bias_lift = 0.12f * v * t;
+    float aim_y_offset = drop - bias_lift;
+    /* Apply only if the offset is meaningfully upward — close throws
+     * have bias_lift dominating, which would push aim BELOW the target
+     * and waste the throw. */
+    if (aim_y_offset < 0.0f) aim_y_offset = 0.0f;
+    /* `dy < 0` means target is above us — add the height directly,
+     * already accounted for in aim_target.y - aim_y_offset. */
+    (void)dy;
+    return (Vec2){ target.x, target.y - aim_y_offset };
+}
+
 static void tactic_engage(BotMind *mind, const struct BotNav *nv,
                           const World *w, int mid, int enemy_id, BotWants *out)
 {
@@ -2175,6 +2368,35 @@ static void tactic_engage(BotMind *mind, const struct BotNav *nv,
          * LOS — we don't want to keep walking past the enemy once they
          * become visible. */
         mind->engagement_node = -1;
+
+        /* M6 P13 — WFIRE_THROW (frag grenade) intent. When the bot has
+         * frag in either slot AND wants to fire AND the enemy is in
+         * throw range (200..1800 px), pick a tier × distance charge
+         * target and route through the motor's charge-hold path. The
+         * active-slot case overrides the duty-cycle press; the
+         * off-hand case adds a charge on BTN_FIRE_SECONDARY and the
+         * motor suppresses BTN_FIRE for the release tick so the throw
+         * fire_cooldown gate clears. */
+        if (out->want_fire) {
+            const Weapon *throw_wpn = NULL;
+            int throw_slot = bot_throw_slot(w, mid, &throw_wpn);
+            if (throw_slot >= 0 && throw_wpn) {
+                float dx_t = ep.x - mp.x, dy_t = ep.y - mp.y;
+                float dist_t = sqrtf(dx_t*dx_t + dy_t*dy_t);
+                if (dist_t > 180.0f && dist_t < 1900.0f) {
+                    float tgt = bot_throw_target_charge(&mind->pers, dist_t);
+                    out->throw_target_charge = tgt;
+                    if (throw_slot == w->mechs[mid].active_slot) {
+                        out->want_throw_active = true;
+                    } else {
+                        out->want_throw_offhand = true;
+                    }
+                    /* Override aim with the ballistic arc so the throw
+                     * lands near the target, not at the bot's feet. */
+                    out->aim_target = bot_throw_arc_aim(w, mid, chest, tgt);
+                }
+            }
+        }
     } else {
         /* No LOS — Phase 2: walk to a position that DOES have LOS.
          * Cached per-mind; refresh every 2 s or on enemy change. */
@@ -2426,7 +2648,7 @@ static Vec2 slew_aim(Vec2 cur_origin, Vec2 cur, Vec2 target, float max_rad) {
 }
 
 static ClientInput run_motor(World *w, int mid, BotMind *mind,
-                             const BotWants *wants)
+                             BotWants *wants)
 {
     ClientInput in = {0};
     in.dt  = BOT_TICK_DT;
@@ -2470,15 +2692,66 @@ static ClientInput run_motor(World *w, int mid, BotMind *mind,
      * lock-out, the bot releases JET, lets the gauge regen while
      * grounded (chassis.fuel_regen), and re-engages at 40 %. The
      * 40 % retry floor keeps "press, fuel hits zero, release,
-     * regen one tick, press again" chatter out of the wire. */
+     * regen one tick, press again" chatter out of the wire.
+     *
+     * M6 P13 — ZERO_G hysteresis relax. In an AMBI_ZERO_G zone the
+     * sim zeros gravity for particles inside the rect (physics.c),
+     * so jet thrust is full-effective and the bot can afford to
+     * burn fuel below the standard 10 % floor — staying in the air
+     * IS the right move when gravity won't pull you down. Drop the
+     * lockout entry to 4 % and the re-engage floor to 20 % so the
+     * jet burns more freely while inside the zero-G volume. */
     float fuel_frac = (m->fuel_max > 0.0f) ? (m->fuel / m->fuel_max) : 0.0f;
+    Vec2 pelv_for_ambi = pelv;
+    bool in_zero_g = world_point_in_zero_g(&w->level, pelv_for_ambi.x,
+                                            pelv_for_ambi.y);
+    float lock_entry = in_zero_g ? 0.04f : 0.10f;
+    float lock_release = in_zero_g ? 0.20f : 0.40f;
     if (mind->jet_locked_out) {
-        if (fuel_frac >= 0.40f) mind->jet_locked_out = false;
-    } else if (fuel_frac < 0.10f) {
+        if (fuel_frac >= lock_release) mind->jet_locked_out = false;
+    } else if (fuel_frac < lock_entry) {
         mind->jet_locked_out = true;
     }
-    bool jet_ok = !mind->jet_locked_out && fuel_frac > 0.10f;
-    if (wants->want_jet && jet_ok) in.buttons |= BTN_JET;
+    bool jet_ok = !mind->jet_locked_out && fuel_frac > lock_entry;
+
+    /* M6 P13 — ACID emergency exit. When the bot's pelvis is inside
+     * an AMBI_ACID rect, the sim drains 5 HP/s. Standing/walking in
+     * the rect is unrecoverable HP loss — even brief contact bleeds
+     * the bot dry over a long round. Override movement to push out
+     * of the rect (toward whichever rect edge is closer), and force
+     * a jet pulse so we can climb out of acid pits as well as walk
+     * out of acid puddles. The override beats whatever the tactic
+     * layer picked: getting OUT of the acid is more urgent than
+     * any goal that put us in. */
+    bool in_acid_now = world_point_in_acid(&w->level, pelv_for_ambi.x,
+                                            pelv_for_ambi.y);
+    if (in_acid_now) {
+        const Level *L = &w->level;
+        float best_dx = 0.0f;
+        float best_dist = 1e9f;
+        for (int z = 0; z < L->ambi_count; ++z) {
+            const LvlAmbi *a = &L->ambis[z];
+            if (a->kind != AMBI_ACID) continue;
+            if (!point_in_ambi_rect(a, pelv_for_ambi.x, pelv_for_ambi.y))
+                continue;
+            float left_d  = pelv_for_ambi.x - (float)a->rect_x;
+            float right_d = (float)(a->rect_x + a->rect_w) - pelv_for_ambi.x;
+            float dx_out  = (left_d < right_d) ? -(left_d + 32.0f)
+                                                : (right_d + 32.0f);
+            float md = fabsf(dx_out);
+            if (md < best_dist) { best_dist = md; best_dx = dx_out; }
+        }
+        if (best_dx != 0.0f) {
+            in.buttons = (uint16_t)(in.buttons & ~(BTN_LEFT | BTN_RIGHT));
+            in.buttons |= (best_dx > 0) ? BTN_RIGHT : BTN_LEFT;
+        }
+        /* Jet out — bypasses the lockout because hp is the more
+         * urgent budget than fuel. Skip when totally dry to avoid
+         * fluttering on empty. */
+        if (fuel_frac > 0.02f) in.buttons |= BTN_JET;
+    } else if (wants->want_jet && jet_ok) {
+        in.buttons |= BTN_JET;
+    }
     if (wants->want_jump) {
         in.buttons |= BTN_JUMP;
         mind->last_jump_tick = w->tick;
@@ -2488,12 +2761,93 @@ static ClientInput run_motor(World *w, int mid, BotMind *mind,
      * Cannon, Microgun) we hold BTN_FIRE continuously so the charge
      * actually builds. For everything else we pulse with a duty cycle
      * so edge-triggered single-shots (Sidearm, Frag Grenade trigger)
-     * re-edge cleanly and auto weapons don't notice. */
+     * re-edge cleanly and auto weapons don't notice.
+     *
+     * M6 P13 — WFIRE_THROW (frag grenade) hold-to-charge. Frag has
+     * `charge_sec = 0` so the old pre-P13 test (`charge_sec > 0`)
+     * silently treated it as a press-fire weapon, and bots threw at
+     * minimum charge (350 px/s). The new path: when the active weapon
+     * is WFIRE_THROW AND want_fire is set, HOLD BTN_FIRE until
+     * `m->throw_charge` reaches the tier × distance target, then drop
+     * BTN_FIRE so mech_try_fire's release-edge actually fires at
+     * scaled velocity. */
+    const Weapon *active_wpn = weapon_def(m->weapon_id);
+    bool active_is_throw = (active_wpn && active_wpn->fire == WFIRE_THROW);
+
+    /* M6 P13 — auto-derive throw intent in the motor. tactic_engage's
+     * LOS-clear branch sets `want_throw_*` when it picks ENGAGE, but
+     * the bot_step opportunistic-fire path sets only `want_fire` —
+     * that path is what fires the primary at any LOS-clear enemy even
+     * when the strategy goal is REPOSITION / PURSUE_PICKUP. Without
+     * this block, a bot whose off-hand is frag never charges the
+     * throw when opportunistic-fire fires the primary. */
+    if (wants->want_fire && !active_is_throw && !wants->want_throw_offhand &&
+        !wants->want_grapple_fire)
+    {
+        const Weapon *off_wpn = NULL;
+        int off_slot = bot_throw_slot(w, mid, &off_wpn);
+        if (off_slot >= 0 && off_wpn && off_slot != m->active_slot) {
+            float dx_t = wants->aim_target.x - pelv.x;
+            float dy_t = wants->aim_target.y - pelv.y;
+            float dist_t = sqrtf(dx_t*dx_t + dy_t*dy_t);
+            if (dist_t > 180.0f && dist_t < 1900.0f) {
+                wants->throw_target_charge =
+                    bot_throw_target_charge(&mind->pers, dist_t);
+                wants->want_throw_offhand = true;
+            }
+        }
+    }
+
     if (wants->want_fire) {
-        const Weapon *wpn = weapon_def(m->weapon_id);
-        bool hold = (wpn && wpn->charge_sec > 0.0f);
-        if (hold || (w->tick % 10) < 5) {
-            in.buttons |= BTN_FIRE;
+        if (active_is_throw) {
+            float target_sec = wants->throw_target_charge * FRAG_CHARGE_MAX_SEC;
+            /* Floor at 0.10 s — without this, throw_target_charge=0
+             * (degenerate tactic state) would release immediately,
+             * the throw would lob at min mul, and we're back to the
+             * pre-P13 behavior. Also guards the edge where the bot
+             * just acquired LOS and target_charge hasn't been set
+             * for this tick yet. */
+            if (target_sec < 0.10f) target_sec = 0.10f;
+            if (target_sec > FRAG_CHARGE_MAX_SEC) target_sec = FRAG_CHARGE_MAX_SEC;
+            if (m->throw_charge < target_sec) {
+                in.buttons |= BTN_FIRE;
+            }
+            /* else: release-edge fires this tick via mech_try_fire */
+        } else {
+            bool hold = (active_wpn && active_wpn->charge_sec > 0.0f);
+            if (hold || (w->tick % 10) < 5) {
+                in.buttons |= BTN_FIRE;
+            }
+        }
+    }
+
+    /* M6 P13 — off-hand WFIRE_THROW (frag in secondary slot, primary
+     * still active for damage). Hold BTN_FIRE_SECONDARY to charge.
+     *
+     * Suppress BTN_FIRE for the ENTIRE charge cycle (not just release
+     * tick): mech_try_fire's throw gate requires `fire_cooldown <= 0`
+     * at the release edge, and even a 0.11 s Pulse Rifle cooldown
+     * leaves 6+ ticks of fire_cooldown overlapping into the release
+     * window. Skipping primary fire for the ~55 ticks of a Champion
+     * full-charge throw burns ~5 primary shots' worth of DPS — an
+     * acceptable trade since the throw delivers ~160 dmg per landing.
+     *
+     * Also: gate on grapple not being requested this tick — the two
+     * intents share BTN_FIRE_SECONDARY and grapple-fire wins. */
+    if (wants->want_throw_offhand && !wants->want_grapple_fire) {
+        const Weapon *off_wpn = NULL;
+        int off_slot = bot_throw_slot(w, mid, &off_wpn);
+        if (off_slot >= 0 && off_wpn && off_slot != m->active_slot) {
+            float target_sec = wants->throw_target_charge * FRAG_CHARGE_MAX_SEC;
+            if (target_sec < 0.10f) target_sec = 0.10f;
+            if (target_sec > FRAG_CHARGE_MAX_SEC) target_sec = FRAG_CHARGE_MAX_SEC;
+            /* Suppress primary fire while a throw is in progress. */
+            in.buttons = (uint16_t)(in.buttons & ~BTN_FIRE);
+            if (m->throw_charge < target_sec) {
+                in.buttons |= BTN_FIRE_SECONDARY;
+            }
+            /* else: release-edge — drop both buttons; mech_try_fire's
+             * release branch fires the throw on this tick. */
         }
     }
 
@@ -2658,6 +3012,11 @@ int bot_system_build_nav(BotSystem *bs, const Level *level, Arena *arena) {
     /* Rebuild the spatial hash. */
     nav_grid_clear();
     for (int i = 0; i < nv->node_count; ++i) nav_grid_add(nv, i);
+
+    /* M6 P13 — tag nodes that fall inside an AMBI_ACID / AMBI_ZERO_G
+     * rect. Must run AFTER floor-snap (which can shift node.y by up
+     * to 8 tiles), so the rect membership test sees final positions. */
+    tag_ambient_zones(nv, level);
 
     build_reachabilities(nv, level);
 
