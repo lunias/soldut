@@ -5,11 +5,86 @@ moves. The design documents in [documents/](documents/) describe the
 *intent*; this file describes the *current behavior* of the code that's
 sitting on disk right now.
 
-Last updated: **2026-05-16** (M6 P13 — bot AI refresh for the
-current weapon + atmospheric stack). M6 P12 projectile snapshot
-replication still applies underneath. Frag grenade hold-to-charge
-throw + AOE buff from earlier still applies. Camera smoothness fix,
-tiered explosion shake, M6 P10 further underneath.
+Last updated: **2026-05-16** (M6 — jet-pack FX polish on top of P13
+bot AI). M6 P12 projectile snapshot replication still applies
+underneath. Frag grenade hold-to-charge throw + AOE buff from
+earlier still applies. Camera smoothness fix, tiered explosion
+shake, M6 P10 further underneath.
+
+## M6 — Jet-pack FX polish (after P13)
+
+P02's `mech_jet_fx_step` had been spawning `FX_GROUND_DUST` since the
+phase landed, but the M6 P02-perf collapse to `fx_draw_particle`
+silently dropped the textured render: the dust atlas
+(`assets/sprites/jet_dust.png`, 16×16 RGBA radial gradient) loaded on
+boot, set `BILINEAR`, then was never sampled by any draw call. Every
+dust particle painted as the 8-segment octagon stand-in the perf fix
+introduced for `FX_JET_EXHAUST`. The plume atlas (`jet_plume.png`,
+32×96) was always sampled — only dust was orphaned.
+
+Three other defects rode along, exposed by the new SHOT_LOG asserts
+added for the regression runner:
+
+- **Ignition impingement silently missed by 3 px on Trooper.**
+  `JET_IMPINGE_MAX_DIST` was 48 px; a Trooper nozzle is 10 px above
+  pelvis and pelvis is ~36 px above feet, so the moment the mech
+  cleared the floor by ~0.6 px the nozzle was 50.6 px above ground
+  — past the cap. Every Trooper ignition silently swallowed: no
+  dust burst, no scorch decal, no `SFX_JET_IGNITION_*`. Bumped to
+  80 px (`src/mech_jet_fx.c`); cost is 20 raycasts per query vs 12,
+  in the noise.
+- **`MECH_JET_IGNITION_TICK` re-fired across the snapshot gap.** On
+  the client, `snapshot_apply` wrote the bit once at the takeoff-
+  edge snapshot, but the bit persisted in `m->jet_state_bits`
+  through the (typically 3) intermediate ticks before the next
+  apply. `mech_jet_fx_step` ran every tick and respawned the dust +
+  played `SFX_JET_IGNITION_*` on every one of those ticks — 30+
+  duplicate ignition events per second per nozzle until the next
+  snapshot landed with a fresh derivation. Fixed by consuming the
+  bit at the end of `mech_jet_fx_step` (`m->jet_state_bits &=
+  ~MECH_JET_IGNITION_TICK`); the owner side rebuilds the whole bit
+  field from scratch each tick in `mech_step_drive` so the consume
+  is a no-op there.
+- **Heat shimmer was unconditionally suppressed in shot mode.** The
+  uniform push at `render.c::renderer_draw_frame` was gated on
+  `!g_shot_mode` so every captured PNG missed the post-process
+  effect, defeating any visual regression test. Restored — shot
+  mode now seeds the shimmer's `jet_time` clock from `world.tick *
+  (1/60)` instead of `GetTime()`, preserving the shotmode "re-runs
+  byte-identical" guarantee. Networked shots are still not byte-
+  identical across runs (snapshot timing depends on OS scheduling),
+  but that's a pre-existing condition and the shimmer is no longer
+  contributing to it.
+
+Render shape, post-polish: dust pulls through a new
+`mech_jet_fx_draw_ground_dust(FxPool*, alpha)` called from
+`particle.c::fx_draw` between pass 1 (alpha-blend) and pass 2
+(additive). One texture binding for the entire pool sweep — raylib
+auto-batches every `DrawTexturePro` into one VBO flush. No
+`BeginBlendMode/EndBlendMode` pair (default blend is alpha), so the
+worst-case cost is one extra GPU flush per frame regardless of
+particle count. Per-particle draw radius is 3× `fp->size` so the
+gradient's transparent edge tapers visibly past the opaque core.
+
+Verification runners landed: `tests/shots/net/run_jet_fx.sh`
+(Burst host vs Standard client on Reactor, 13 asserts) and
+`run_jet_fx_glide.sh` (Glide host vs JumpJet client, 12 asserts).
+Both produce side-by-side `host ↔ client` composites in
+`build/shots/net/2p_jet_fx{,_glide}_combined/`. Asserts cover atlas
+load, single-tick ignition (≤10 events for the cross-snapshot-gap
+guard), per-peer dust spawn, and SFX_JET_BOOST.
+
+Out of scope, deferred:
+
+- **No exhaust-core sprite.** Spec §1.3 reads "FX_JET_EXHAUST
+  particles drawn additive after mechs" without prescribing a
+  texture. We now sample the two atlases that DO exist on disk; a
+  third asset (small radial-gradient core) would be authoring work
+  rather than restoration. The current additive octagon read in
+  pass 2 of `fx_draw` is unchanged.
+- **Per-decal scorch fade still O(1) per splat.** Spec §16 trade-
+  off — the decal RT has no per-splat age tracking. Painted scorch
+  marks fade only when the layer-wide alpha pass runs.
 
 ## M6 P13 — Bot AI refresh: WFIRE_THROW + atmospherics
 
